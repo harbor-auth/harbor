@@ -40,3 +40,10 @@ SPDX-License-Identifier = "MIT"
 path = "tools/**"
 SPDX-FileCopyrightText = "2026 The Harbor Authors"
 SPDX-License-Identifier = "MIT"
+
+# Reference deployment (Dockerfiles, generic Helm chart, K8s manifests) —
+# permissive so self-hosters can derive their own infra without AGPL constraint.
+[[annotations]]
+path = "deploy/**"
+SPDX-FileCopyrightText = "2026 The Harbor Authors"
+SPDX-License-Identifier = "Apache-2.0"

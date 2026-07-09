@@ -1,0 +1,14 @@
+SPDX-FileCopyrightText: 2026 The Harbor Authors
+SPDX-License-Identifier: Apache-2.0
+
+The contents of this directory (deploy/) contain reference deployment
+artifacts — Dockerfiles, a generic Helm chart, and example Kubernetes
+manifests — licensed under the Apache License 2.0, overriding the
+repository-wide AGPL-3.0-only default.
+
+This permissive license allows self-hosters to derive their own production
+infrastructure from these templates without AGPL obligations.
+
+    Copyright (C) 2026 The Harbor Authors
+
+Full license text: LICENSES/Apache-2.0.txt
