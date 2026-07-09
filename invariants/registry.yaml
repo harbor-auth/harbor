@@ -1,0 +1,71 @@
+# Harbor — Executable Invariants Registry (Foundation F1, the keystone).
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# Harbor's security/privacy invariants (§A.8, §11.7, §6.5.7) otherwise live as
+# prose in three places — DESIGN.md, code comments, and a reviewer's head — and
+# a reviewer-LLM can silently miss a regression. This registry makes each
+# invariant EXECUTABLE: every entry names the test(s) that enforce it, and the
+# meta-test (`invariants/registry_test.go`) FAILS the build if any invariant
+# lacks a live, tagged test. An invariant with no enforcing test is a bug.
+#
+# THE CONTRACT (enforced by registry_test.go)
+# -------------------------------------------
+#   1. Every entry has: id (^INV-[A-Z0-9-]+$), title, >=1 design_refs, >=1
+#      enforced_by.
+#   2. Every `enforced_by: [pkg:TestName]` names a REAL `func TestName(` under
+#      that package (a *_test.go in internal/<pkg>).
+#   3. Somewhere in the repo a `//harbor:invariant INV-XXX` comment tag physically
+#      references each invariant id (put it on the enforcing test function).
+#
+# FORMAT (kept deliberately regular so the meta-test parses it without a YAML
+# dependency): each list item is `- id:` followed by indented `title:`,
+# `design_refs: [..]` (inline), `description:` (single line), and
+# `enforced_by: [..]` (inline). Do not use folded/block scalars here.
+#
+# CHANGING AN INVARIANT is a security-relevant act: it must go through review
+# (see CODEOWNERS on this path, Foundation F5). Weakening or deleting an entry
+# without a corresponding DESIGN change is a red flag.
+
+invariants:
+  - id: INV-SIGN-ASYM-ONLY
+    title: "Asymmetric-only token signing (ES256/EdDSA); reject alg:none and HS/symmetric"
+    design_refs: [§A.8, §3.3, §7.3]
+    description: "Tokens are signed with asymmetric keys only; no symmetric/HS fallback and no alg:none. Until the HSM signer lands, the placeholder issuer must be an OBVIOUS unsigned scaffold, never mistakable for a real (or symmetric) token."
+    enforced_by: [internal/oidc:TestPlaceholderIssuerIsScaffoldNotReal]
+
+  - id: INV-PKCE-MANDATORY
+    title: "PKCE S256 mandatory for every client; plain rejected"
+    design_refs: [§A.8, §11.2, §11.7]
+    description: "Every client must use PKCE with method S256; the plain method (and any non-S256 value) is rejected, and SHA256(code_verifier) must equal the stored code_challenge."
+    enforced_by: [internal/oidc:TestValidateChallengeMethodRejectsNonS256, internal/oidc:TestVerifyChallengeMismatch]
+
+  - id: INV-REDIRECT-EXACT
+    title: "Exact redirect_uri match; never act on an unvalidated redirect"
+    design_refs: [§A.8, §11.7]
+    description: "The redirect_uri presented at /token must match the one bound to the authorization request EXACTLY (no prefix/substring/trailing-slash leniency); any mismatch collapses to invalid_grant."
+    enforced_by: [internal/oidc:TestExactRedirectURIMatch]
+
+  - id: INV-CODE-SINGLE-USE
+    title: "Authorization codes are single-use / time-bounded; reuse => invalid_grant"
+    design_refs: [§A.8, §3.5, §11.7]
+    description: "An authorization code is valid for exactly one exchange within a short TTL; an expired (or already-consumed) code is rejected as invalid_grant. This test locks the pure-layer rejection of a non-live code; store-level consume-once is exercised by the service tests."
+    enforced_by: [internal/oidc:TestAuthCodeSingleUse]
+
+  - id: INV-INVALID-GRANT-GENERIC
+    title: "Token failures collapse to invalid_grant; never leak which check failed"
+    design_refs: [§A.8, §11.7]
+    description: "Wrong client, wrong redirect_uri, expired code, and PKCE mismatch all return the SAME error code (invalid_grant), so the error channel never reveals which check failed (defeats enumeration)."
+    enforced_by: [internal/oidc:TestTokenExchangeFailuresAllInvalidGrant]
+
+  - id: INV-CONSTANT-TIME-COMPARE
+    title: "Constant-time comparison for PKCE challenges (and codes/secrets/tokens)"
+    design_refs: [§A.8, §11.7]
+    description: "Secret-dependent comparisons (PKCE challenge, codes, tokens) use constant-time equality so a timing side-channel cannot leak the expected value; a mismatch yields ErrPKCEMismatch."
+    enforced_by: [internal/oidc:TestVerifyChallengeUsesConstantTime]
+
+  - id: INV-PPID-PAIRWISE-SECRET
+    title: "Per-user pairwise secret; no global correlation secret; sectors are non-correlating"
+    design_refs: [§A.8, §3.2]
+    description: "The PPID (sub) is keyed by a PER-USER pairwise secret (not a global salt), and different RP sectors yield unrelated subs, so RPs cannot correlate a user across services and a single secret compromise deanonymizes only one user."
+    enforced_by: [internal/identity:TestDerivePPIDDifferentSectorsUnrelated]

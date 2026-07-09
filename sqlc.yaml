@@ -1,0 +1,16 @@
+# sqlc config (v2). SQL-as-contract: reads the schema from db/migrations and the
+# queries from db/queries, and GENERATES typed Go into internal/gen/db.
+# Invoked by `@codegen` / `@db-migrate` (`sqlc generate`). Never hand-edit output.
+version: "2"
+sql:
+  - engine: postgresql
+    schema: db/migrations
+    queries: db/queries
+    gen:
+      go:
+        package: db
+        out: internal/gen/db
+        sql_package: pgx/v5
+        emit_json_tags: true
+        emit_interface: true
+        emit_pointers_for_null_types: true

@@ -1,0 +1,44 @@
+# Harbor — Foundation F8: agent-runnable local e2e stack.
+#
+# Brings up the stateless hot path (harbor-hot) so e2e/flow_test.go can drive the
+# real authorize→token→JWKS flow, including the §11.7 negatives. This is the
+# stack the Makefile's conformance gate (§1.8 Stage 7) builds on.
+#
+# Run:
+#   docker compose -f e2e/docker-compose.yml up -d --wait
+#   HARBOR_E2E_BASE_URL=http://localhost:8080 go test -tags e2e ./e2e/...
+#   docker compose -f e2e/docker-compose.yml down
+#
+# The harbor-hot service defines a /healthz healthcheck, so `up -d --wait`
+# blocks until harbor-hot is actually READY (no external poll needed).
+#
+# harbor-hot's flow backends are in-memory scaffolds today (demo-client, stub
+# session, unsigned placeholder tokens), so the flow is exercisable with no DB.
+services:
+  harbor-hot:
+    image: golang:1.26
+    working_dir: /src
+    command: ["go", "run", "./cmd/harbor-hot"]
+    environment:
+      PORT: "8080"
+      ISSUER: "http://localhost:8080"
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount the repo read-only; go run compiles from source inside the pinned
+      # golang image so the e2e run needs no local Go toolchain.
+      - ..:/src:ro
+    # Assumptions for this in-container probe: (a) `curl` is present in the image
+    # (true for the Debian-based golang:1.26; if the base ever slims, switch to a
+    # wget/shell form); and (b) it probes `localhost` INSIDE the container, so it
+    # assumes harbor-hot binds all interfaces (`:8080`/`0.0.0.0`, not
+    # `127.0.0.1`) — otherwise the container can report healthy while the
+    # host-side `go test` (via the published port) still cannot connect.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      # go run compiles harbor-hot on a cold start; start_period keeps those
+      # early (pre-ready) failures from counting against `retries`.
+      start_period: 120s

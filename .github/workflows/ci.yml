@@ -1,0 +1,134 @@
+# Harbor — CI: the agent-readable outer loop (Foundation F7).
+#
+# This is the one loop an agent cannot skip. It runs the SAME command in the SAME
+# pinned toolchain as local development:
+#
+#     nix develop -c make agent-check      (F3 pinned env + F6 structured verdict)
+#
+# so the local and CI verdicts are identical by construction. It then runs the
+# anti-Goodhart guards (F5) against the real PR base and `make generate-check`
+# (codegen-drift) — both need git history, so they live here rather than inside
+# the git-history-free agent-check — and posts check-results.json as a sticky PR
+# comment so the outcome is legible at a glance.
+#
+# A separate, Docker-enabled `e2e` job runs the composed OIDC conformance harness
+# (Foundation F8) via `nix develop -c make conformance` — the same §1.8 Stage-7
+# gate as local — exercising authorize→token→JWKS + the §11.7 negatives against a
+# live harbor-hot on every PR.
+#
+# Branch protection: require BOTH the `agent-check` and `e2e` jobs on the default
+# branch. That is what gives the F5 tamper guards + CODEOWNERS their teeth — a red
+# check-results, a tamper finding, or a broken assembled flow blocks the merge.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  agent-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for tamper-check diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Actions are pinned to release tags (not @main) — bump deliberately.
+      - name: Install pinned Nix toolchain
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v8
+
+      # The single source of truth. continue-on-error so we still post the
+      # report on failure; the final gate step re-fails the job.
+      - name: Run agent-check (pinned env)
+        id: agentcheck
+        continue-on-error: true
+        run: nix develop -c make agent-check
+
+      - name: Anti-Goodhart tamper-check (vs PR base)
+        id: tamper
+        continue-on-error: true
+        run: nix develop -c make tamper-check BASE=origin/${{ github.base_ref || github.event.repository.default_branch }}
+
+      - name: Coverage ratchet
+        id: coverage
+        continue-on-error: true
+        run: nix develop -c make coverage-ratchet
+
+      - name: Codegen drift (generated code matches specs)
+        id: drift
+        continue-on-error: true
+        run: nix develop -c make generate-check
+
+      # Compose the full PR-comment body (outcome summary + the raw verdict) into
+      # a file, so the sticky comment can include check-results.json verbatim —
+      # Actions expressions can't read file contents inline.
+      - name: Build PR comment body
+        if: always()
+        run: |
+          {
+            echo '## Harbor `agent-check`'
+            echo ''
+            echo "- agent-check: **${{ steps.agentcheck.outcome }}**"
+            echo "- tamper-check (F5): **${{ steps.tamper.outcome }}**"
+            echo "- coverage-ratchet (F5): **${{ steps.coverage.outcome }}**"
+            echo "- codegen-drift (F7): **${{ steps.drift.outcome }}**"
+            echo ''
+            echo '<details><summary>check-results.json</summary>'
+            echo ''
+            echo '```json'
+            cat check-results.json 2>/dev/null || echo '{ "overall": "error", "note": "check-results.json not produced" }'
+            echo '```'
+            echo ''
+            echo '</details>'
+          } | tee comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post sticky PR comment
+        if: always() && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: harbor-agent-check
+          path: comment.md
+
+      - name: Gate — fail if any check failed
+        if: always()
+        run: |
+          if [ "${{ steps.agentcheck.outcome }}" != "success" ] \
+            || [ "${{ steps.tamper.outcome }}" != "success" ] \
+            || [ "${{ steps.coverage.outcome }}" != "success" ] \
+            || [ "${{ steps.drift.outcome }}" != "success" ]; then
+            echo "One or more checks failed (see the sticky comment / check-results.json)."
+            exit 1
+          fi
+
+  # e2e — Foundation F8: the composed OIDC conformance harness wired into the
+  # §1.8 Stage-7 gate. Runs `make conformance` in the pinned toolchain with
+  # Docker so authorize→token→JWKS + the §11.7 negatives are exercised against a
+  # live harbor-hot on every PR. No continue-on-error: a failing assembled flow
+  # fails the job directly (this IS the conformance gate).
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Actions are pinned to release tags (not @main) — bump deliberately.
+      - name: Install pinned Nix toolchain
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@v8
+
+      # Docker + docker compose are preinstalled on GitHub-hosted ubuntu runners.
+      # This runs the SAME Stage-7 command as local, which now includes the F8
+      # e2e harness (e2e/docker-compose.yml + `go test -tags=e2e ./e2e/...`).
+      - name: Run e2e OIDC conformance harness (F8)
+        run: nix develop -c make conformance

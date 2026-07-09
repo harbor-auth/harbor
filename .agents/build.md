@@ -1,0 +1,144 @@
+---
+name: build
+description: Work a plan's implementation checklist (docs/plans/<slug>.md) step-by-step — implement, validate, review, commit — then graduate it via @plan promote.
+---
+
+Build a feature by working straight through a Harbor **plan's Implementation checklist** — implementing each task, validating, reviewing, and committing at logical boundaries. Because we build **exclusively with agentic systems**, the plan authored by [`@plan`](./plan.md) is the executable brief: `@build` just works it end-to-end. **Do not stop until the specified scope is complete. Do not ask questions — take your best recommended option when there is ambiguity. After each chunk, immediately proceed to the next — do not pause for confirmation.**
+
+> **Update this skill:** if the plan layout, validation stack, review agent, or promotion hand-off below drift from how we actually work, fix this file as part of your change. A stale skill is a bug.
+
+## Principle
+
+A plan (`docs/plans/<slug>.md`) is future WHAT; its **Implementation checklist** is the ordered to-do list. `@build` turns that checklist into as-built code, ticking `- [x]` boxes as tasks land. It **does not** hand-write feature docs — when the checklist is done and the plan's *Definition of done* is met, it hands off to **`@plan promote <slug>`**, which creates the feature doc via `@docs new`, records bidirectional provenance, and moves the row from Plans to Features in [`docs/README.md`](../docs/README.md). Build → promote is the plan→doc lifecycle in motion.
+
+## Invocation
+
+```
+@build docs/plans/<slug>.md            # work the whole implementation checklist
+@build <slug>                          # resolve to docs/plans/<slug>.md
+@build docs/plans/<slug>.md <section>   # only a named part of the checklist
+```
+
+If no path is given, resolve the plan from the current branch name against `docs/plans/`.
+
+## Lifecycle integration
+
+`@build` operates on a plan whose `status` is **`approved`** (the agreed plan of record). On starting, flip it to **`in-progress`** (`@plan status <slug> in-progress` — update the frontmatter **and** the Plans row together). As checklist items land, **tick the `- [ ]` boxes** in the plan — that is the progress record (there is no separate TODO document). On completion, graduate with **`@plan promote <slug>`**; `@build` itself never writes `docs/features/*.md`.
+
+## Execution loop
+
+### 0. Recall (session start)
+
+Before working the checklist, **recall first** — run [`@hippo`](./hippo.md)'s recall (`hippo snapshot` / `hippo search`) to ground in prior sessions, and **batch-add any ad-hoc/live work items** not already in the plan's checklist to `hippo todo` so nothing is lost if context truncates. The plan's checklist is the durable *plan-of-record*; `hippo todo` holds the live/ad-hoc items and any friction alongside it.
+
+For each coherent **chunk** of the checklist (typically 1–3 related items):
+
+### 1. Implement
+
+- Read the checklist item(s) and the plan's *Proposed approach* + *Target code paths* for intent.
+- Gather codebase context — read referenced files, search for patterns, follow existing conventions.
+- Implement the item(s), keeping Harbor's **pure-core / thin-I/O** separation (§1.7) so logic stays unit-testable.
+
+### 2. Validate (Harbor's Go stack)
+
+- **[`@validate`](./validate.md)** — the fast inner loop on changed files: `gofmt`/`go vet`/`golangci-lint`, spec-lint (`spectral`/`buf lint`), and the **codegen-drift** check.
+- **[`@go-test`](./go-test.md)** — unit tests for the changed package(s); add **`-race`** for anything touching the hot path or shared caches (JWKS, revocation filter); integration (`-tags=integration`, real Postgres/Redis) where relevant.
+- **[`@go-build`](./go-build.md)** — `go build ./...` compile sanity; a build failure is a hard stop.
+- Fix every failure before proceeding — never `t.Skip`/pending to get green (per `go-test.md`).
+
+### 3. Review
+
+After each logical chunk, run **[`@harbor-reviewer`](./harbor-reviewer.ts)** — the graduated agent that bakes in Harbor's privacy/security/sovereignty/spec-first/testing checklist and delegates the general quality pass to `@deep-code-reviewer`.
+
+- Fix **Critical/High** findings immediately; **Medium** if the fix is quick (< 5 min), else note it; skip **Low** unless trivial.
+- Harbor is security-critical (OIDC/WebAuthn/PPID): the **negative/security tests** the checklist calls for must be green before the chunk is done.
+
+### 4. Commit & push
+
+Delegate to **`@github-flow`** with a Harbor-scoped conventional-commit message, e.g.:
+
+```
+feat(oidc): refresh-token rotation — mint+rotate+revoke
+```
+
+Mid-build settings: `skipCi: true` (we validate locally), `createPr: false` (PR is opened once, at the end or a milestone), `syncWithMaster: false` (avoid repeated mid-build merges). **`worktree`:** Harbor is a single Go repo — pass a sibling worktree path if you're building in one, else `worktree: "none"`.
+
+### 5. Update progress
+
+Tick the landed checklist items to `- [x]` in `docs/plans/<slug>.md`, and note any deviations/decisions inline in the plan.
+
+### 6. Repeat
+
+Move to the next chunk until the specified scope is complete.
+
+## Contract & codegen
+
+Any change to the `api/` contracts (OpenAPI/Protobuf) is **spec-first**: edit the spec, then regenerate with **[`@codegen`](./codegen.md)** and re-run **`@validate`** (its codegen-drift check must be clean). **Never hand-edit generated files** (Go stubs, TS client, `sqlc` queries) — regenerate them (§1.2–§1.5).
+
+## Milestone boundaries
+
+If the plan marks milestones, at each one run the fuller gate before committing: full **`@go-test`** + `-race` + integration, **`@validate`**, and **`@harbor-reviewer`** on the cumulative changes since the last milestone. Then commit via `@github-flow` with `createPr: true`, `skipCi: false`, `syncWithMaster: true`. If the plan has no milestones, skip this section.
+
+## Decision-making rules
+
+| Situation | Action |
+|---|---|
+| Multiple valid approaches | Match the pattern most consistent with existing code |
+| Missing context in the plan | Read the plan's *Problem*/*Proposed approach* + the cited DESIGN `§` |
+| Migration needed | Use **`@db-migrate`** (expand/contract); never hand-write migration files |
+| Contract change | Edit `api/` then **`@codegen`**; never hand-edit generated files |
+| Test fails unexpectedly | Debug & fix; never `t.Skip`/pending (per `go-test.md`) |
+| Review finding conflicts with the plan | Prefer the review finding (code quality > plan adherence) |
+| Plan task seems wrong/outdated | Implement what fits the current code; note the deviation in the plan |
+
+## Chunk sizing
+
+Group checklist items into review/commit chunks by coherence:
+
+- **A pure core function + its table-driven unit tests** → one chunk.
+- **A migration via `@db-migrate` + the model/query changes it enables** → one chunk.
+- **HTTP glue + its wire tests** → one chunk.
+- **Several small related items** in the same file/area → one chunk.
+
+Avoid chunks larger than ~300 lines of diff; split if needed.
+
+## Error recovery
+
+- **Capture friction the moment it appears:** on any build/test/lint failure or blocker, immediately record it as a `hippo todo` (command · error · file · hypothesis) so it survives truncation, then continue the main chunk — circle back and `hippo todo done <id>` once resolved. See [`@hippo`](./hippo.md).
+- **Build/vet/lint or test failures:** fix and re-run via the Go skills — non-negotiable, never skip.
+- **Codegen drift:** regenerate with `@codegen`, then confirm `@validate` is clean; never work around it.
+- **Review Critical findings:** fix before committing, then re-review to confirm.
+- **Git conflicts:** resolve using the branch's intent; prefer the newer code if unclear.
+
+## Completion
+
+When all in-scope checklist items are done:
+
+1. Confirm the plan's Implementation checklist is fully `- [x]` and its *Definition of done* is met.
+2. Final **`@validate`** + **`@go-test`** (full + `-race` + integration) pass.
+3. Final **`@harbor-reviewer`** pass on the full change set.
+4. **OpenSpec gate** — the paired OpenSpec change must pass **`openspec validate <slug> --strict`** (the formal spec gate) before promote; once shipped, **`@openspec archive <slug>`** merges its spec deltas into `openspec/specs/`.
+5. **`@plan promote <slug>`** — graduate the plan into a feature doc (`@docs new`), record provenance, and move its row to Features in `docs/README.md`.
+6. Report what was built, any deviations noted in the plan, and remaining items.
+
+## Relationship to other skills
+
+- **`@plan`** — provides the Implementation checklist `@build` works through, and receives the completed work via `@plan promote`.
+- **`@docs`** — the promotion target: `@plan promote` calls `@docs new` to write the feature doc; both maintain the single `docs/README.md` TOC.
+- **`@validate` / `@go-test` / `@go-build` / `@codegen`** — the validation stack every chunk runs through.
+- **[`@db-migrate`](./db-migrate.md)** — the only way to add schema migrations (expand/contract).
+- **`@harbor-reviewer`** — the review gate after each chunk and at completion.
+- **`@github-flow`** — stages, commits, and pushes each chunk.
+- **[`@openspec`](./openspec.md)** — the paired formal spec that must **verify** (`openspec validate <slug> --strict`) before promote, and be **archived** (`@openspec archive <slug>`) on ship.
+- **[`@hippo`](./hippo.md)** — cross-session agent memory: recall at start, drive live/ad-hoc items and captured friction through `hippo todo` while working the plan's checklist.
+
+## Checklist
+
+- [ ] **Recalled** at session start (`@hippo`) and any ad-hoc/live items + friction captured in `hippo todo`?
+- [ ] Building from a plan whose `status` is **approved**, flipped to **in-progress** on start?
+- [ ] Each chunk **implemented → validated (`@validate`/`@go-test`/`@go-build`) → reviewed (`@harbor-reviewer`) → committed (`@github-flow`)**?
+- [ ] Any `api/` change regenerated via **`@codegen`** with `@validate` drift clean (no hand-edited generated files)?
+- [ ] **Negative/security tests** from the checklist green before each chunk is done?
+- [ ] Checklist `- [x]` boxes ticked and deviations noted **in the plan** as work lands?
+- [ ] Paired **OpenSpec change verified** (`openspec validate <slug> --strict`) before promote, and **archived** (`@openspec archive <slug>`) on ship?
+- [ ] On completion: *Definition of done* met, then **`@plan promote <slug>`** graduates the plan into a feature doc and updates `docs/README.md`?

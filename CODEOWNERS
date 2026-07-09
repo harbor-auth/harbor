@@ -1,0 +1,35 @@
+# Harbor — CODEOWNERS (Foundation F5: Anti-Goodhart Tamper Guards).
+#
+# These paths define the guardrails an agent must not weaken to "go green":
+# the executable invariants, the check definitions, the pinned toolchain, the
+# CI outer loop, the frozen golden vectors, the PII allow-list, and the north
+# star. Requiring review on them means weakening a check is an EXPLICIT, human-
+# reviewed act — never a quiet side effect of making a build pass.
+#
+# NOTE: `@harbor/maintainers` is a placeholder — set it to the real owning
+# team/handles for this org before relying on branch protection.
+
+# The executable invariants registry (§A.8/§11.7 → tests).
+/invariants/                    @harbor/maintainers
+
+# The check definitions themselves (a weakened check is invisible if unreviewed).
+/Makefile                       @harbor/maintainers
+
+# The pinned, hermetic toolchain (F3) — changing pins changes every verdict.
+/flake.nix                      @harbor/maintainers
+/flake.lock                     @harbor/maintainers
+
+# The agent-readable outer loop (F7) — CI is the loop an agent can't skip.
+/.github/                       @harbor/maintainers
+
+# Check tooling + linters (agent-check, piifields, testweakening).
+/tools/                         @harbor/maintainers
+
+# Frozen crypto golden vectors (F2) — a change here is a crypto-output change.
+**/testdata/*vectors*.json      @harbor/maintainers
+
+# The deny-by-default PII allow-list (F10).
+/internal/telemetry/            @harbor/maintainers
+
+# The north star — a design change is explicit, never smuggled.
+/docs/DESIGN.md                 @harbor/maintainers

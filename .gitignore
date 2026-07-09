@@ -1,0 +1,23 @@
+# Build output
+/bin/
+agentcheck
+testweakening
+check-results.json
+
+# Test / coverage
+*.out
+*.test
+coverage.html
+
+# Go
+vendor/
+
+# OIDF conformance harness (cloned upstream suite + run artifacts / evidence)
+conformance/.suite/
+conformance/out/
+
+# Editor / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

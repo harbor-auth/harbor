@@ -1,0 +1,17 @@
+{
+  "_comment": "Harbor OP under test. Placeholders like {HARBOR_DISCOVERY_URL} are rendered by conformance/run-plan.sh. Harbor invariants asserted here: PAIRWISE subjects only (subject_type=pairwise, DESIGN §3.2) and ASYMMETRIC-ONLY signing (id_token_signed_response_alg=ES256; EdDSA also allowed; alg:none and HS* are rejected, DESIGN §7). This key is ignored by the OIDF suite.",
+  "alias": "harbor-hot",
+  "description": "Harbor hot-path OP under test — Authorization Code + PKCE (S256), pairwise subjects, asymmetric signing only (ES256/EdDSA). See conformance/README.md.",
+  "server": {
+    "discoveryUrl": "{HARBOR_DISCOVERY_URL}"
+  },
+  "client": {
+    "client_id": "demo-client",
+    "redirect_uri": "http://localhost:3000/callback",
+    "scope": "openid",
+    "subject_type": "pairwise",
+    "id_token_signed_response_alg": "ES256"
+  },
+  "consent": {},
+  "browser": []
+}
