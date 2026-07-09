@@ -1,0 +1,33 @@
+Harbor is a multi-license monorepo managed under the REUSE specification
+(https://reuse.software).
+
+Unless a file or subtree declares otherwise, all content in this repository is
+licensed under the GNU Affero General Public License v3.0 only
+(SPDX-License-Identifier: AGPL-3.0-only).
+
+    Copyright (C) 2026 The Harbor Authors
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License. This program is
+distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+PURPOSE. See the GNU Affero General Public License for more details
+(LICENSES/AGPL-3.0-only.txt).
+
+The full text of every license used anywhere in this repository lives in the
+LICENSES/ directory. Per-subtree license OVERRIDES are declared authoritatively
+(and machine-readably) in REUSE.toml, and mirrored by a LICENSE file inside each
+overridden subtree:
+
+    api/       Apache-2.0    public OpenAPI / Protobuf contracts
+    docs/      CC-BY-4.0     documentation & prose
+    .agents/   MIT           agent skills & workflow tooling
+    tools/     MIT           developer tooling
+
+The authoritative, machine-readable license map is REUSE.toml. Verify the whole
+tree with:
+
+    reuse lint
+
+Full default license text: LICENSES/AGPL-3.0-only.txt
