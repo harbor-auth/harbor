@@ -35,20 +35,26 @@
         # nixpkgs 25.05 ships that attribute; until then the fallback is go_1_24.
         goToolchain = pkgs.go_1_25 or pkgs.go_1_24 or pkgs.go;
 
-        # nixpkgs' `golangci-lint` is compiled with whatever `go` was the
-        # channel default at packaging time — currently go1.24, one minor
-        # behind go.mod's `go 1.25.0`. golangci-lint v2 refuses to analyze a
-        # module whose go directive exceeds its own compile-time Go version
-        # ("the Go language version go1.24 used to build golangci-lint is
-        # lower than the targeted Go version 1.25.0"), and there is no config
-        # workaround: forcing a lower `run.go` just moves the failure into a
-        # go/types crash instead (file versions still propagate from go.mod).
-        # Fix: rebuild golangci-lint from the SAME nixpkgs source against
-        # `goToolchain` via an overlay — `vendorHash` only hashes vendored Go
-        # source, so it is unaffected by the compiler version. Drop this
-        # override once nixpkgs' `golangci-lint` is itself built with go1.25+.
-        pkgsWithLintGo = pkgs.extend (_: _: { go = goToolchain; });
-        golangciLint = pkgsWithLintGo.golangci-lint;
+        # nixpkgs' `golangci-lint` package.nix (pkgs/by-name/go/golangci-lint)
+        # is built via `buildGo124Module` — a builder HARDCODED to go1.24 as a
+        # named function argument, NOT derived from the top-level `pkgs.go`.
+        # (Confirmed by reading the package.nix source: `{ buildGo124Module,
+        # fetchFromGitHub, lib, installShellFiles }: buildGo124Module rec { ... }`.)
+        # golangci-lint v2 refuses to analyze a module whose go directive
+        # exceeds its own compile-time Go version ("the Go language version
+        # go1.24 used to build golangci-lint is lower than the targeted Go
+        # version 1.25.0"), and there is no .golangci.yml workaround: forcing
+        # a lower `run.go` just moves the failure into a go/types crash
+        # instead (file versions still propagate from go.mod). A `pkgs.extend`
+        # overlay that replaces the global `go` attribute does NOT fix this —
+        # golangci-lint's build never references `pkgs.go`. Fix: override the
+        # specific `buildGo124Module` argument it takes with a go1.25-based
+        # module builder. `vendorHash` only hashes vendored Go source, so it
+        # is unaffected by the compiler swap. Drop this override once nixpkgs
+        # packages `golangci-lint` against go1.25+ itself.
+        golangciLint = pkgs.golangci-lint.override {
+          buildGo124Module = pkgs.buildGoModule.override { go = goToolchain; };
+        };
 
         # The pinned toolchain — one list, mirrored by the Makefile's install
         # hints. Every tool the fail-closed Makefile requires lives here.
