@@ -229,7 +229,7 @@ The product is not "another login button" — it's a **promise that is technical
 
 | Technique | What it guarantees |
 |---|---|
-| **Pairwise Pseudonymous Identifiers (PPID)** | Each RP gets a *different* `sub` for the same user. **RP-unlinkability is verifiable by construction** (two colluding RPs comparing `sub`s see unrelated HMAC outputs — provable from the code alone). **Operator non-correlation is attestation-dependent**: Harbor is technically constrained (per-user key, no global secret, no bulk-decrypt) but proving the *deployed binary* matches the published source requires reproducible builds + a transparency log (planned, §2.2 and §3.2.7). See §3.2.4 for the full honest framing. |
+| **Pairwise Pseudonymous Identifiers (PPID)** | Each RP gets a *different* `sub` for the same user. **RP-unlinkability is verifiable by construction** (two colluding RPs comparing `sub`s see unrelated HMAC outputs — provable from the code alone). **Operator non-correlation is attestation-dependent**: Harbor is technically constrained (per-user key, no global secret, no bulk-decrypt) but proving the *deployed binary* matches the published source requires reproducible builds + a transparency log (planned, §3.2.7). See §3.2.4 for the full honest framing. |
 | **Data minimization** | We store the minimum needed to authenticate. Claims released to an RP are per-grant and consented. |
 | **No behavioral logging** | The hot auth path emits only aggregate, non-identifying metrics. No per-user analytics, no ad SDKs, no third-party trackers. |
 | **User-owned audit log** | Every `AuthEvent` is visible to the user in their dashboard and exportable. |
@@ -335,7 +335,7 @@ ppid = Base64URL( HMAC-SHA256( key = user_pairwise_secret,
 
 **Why a *per-user* secret key instead of a single global salt:** this is the crucial design choice. With a global salt/pepper, that one secret's compromise would let an attacker recompute **every** user's `sub` at **every** RP and deanonymize the entire population in one shot. With a **per-user** secret, there is **no single global secret** whose compromise breaks everyone — correlating a user across RPs requires *that specific user's* secret, which lives encrypted in their region behind the KEK/HSM (§4.4). The blast radius of any key compromise is one user, not the world.
 
-> **KEK blast-radius footnote:** "one compromised key = one user" holds strictly **at the DEK layer** (the per-user pairwise secret is the DEK). The **regional KEK** that wraps every DEK in the region is a population-level single point: coercion or compromise of the KEK would allow bulk-unwrap of all per-user secrets in that region. The KEK must therefore be **HSM-bound, non-exportable, and incapable of bulk-unwrap in any API it exposes** (§7.3). This is a residual risk — see §A.7 (HSM vendor trust) and the explicit entry in §A.7 below.
+> **KEK blast-radius footnote:** "one compromised key = one user" holds strictly **at the DEK layer** (the per-user pairwise secret is the DEK). The **regional KEK** that wraps every DEK in the region is a population-level single point: coercion or compromise of the KEK would allow bulk-unwrap of all per-user secrets in that region. The KEK must therefore be **HSM-bound, non-exportable, and incapable of bulk-unwrap in any API it exposes** (§7.3). This is a residual risk — see the **KEK bulk-unwrap** entry in §A.7.
 
 #### 3.2.2 The `sector_identifier`
 
