@@ -41,7 +41,7 @@
           pkgs.sqlc                     # @codegen: sqlc generate
           pkgs.oapi-codegen             # @codegen: OpenAPI -> Go stubs
           pkgs.buf                      # @codegen/@validate: proto gen + lint
-          pkgs.golang-migrate           # @db-migrate: schema migrations (`migrate`)
+          pkgs.go-migrate               # @db-migrate: schema migrations (`migrate`) — nixpkgs renamed golang-migrate -> go-migrate
           pkgs.k6                       # @load-test: hot-path load tests
           pkgs.nodejs                   # web codegen runtime (also Node>=20.19 for openspec)
           pkgs.pnpm                     # @codegen: pnpm codegen (web client)
