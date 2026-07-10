@@ -66,6 +66,7 @@ var suite = []check{
 	{name: "test", argv: []string{"go", "test", "./..."}},
 	{name: "invariants", argv: []string{"go", "test", "./invariants/..."}},
 	{name: "piifields", argv: []string{"go", "run", "./tools/lint/piifields", "./..."}},
+	{name: "buildtags", argv: []string{"go", "run", "./tools/lint/buildtags"}},
 	{name: "golangci-lint", argv: []string{"golangci-lint", "run"}},
 	{name: "buf-lint", argv: []string{"buf", "lint"}},
 	// Docs integrity checks (python3, no git-history dependency — same as the

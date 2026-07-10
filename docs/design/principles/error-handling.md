@@ -85,7 +85,9 @@ The `errorlint` linter (§CI enforcement below) flags `==` comparisons against e
 
 ### A linter that can't see the code isn't enforcing anything
 
-A build-tagged file (`//go:build sometag`) is invisible to `golangci-lint run ./...` unless that tag is listed in `.golangci.yml`'s `run.build-tags`. An unlisted tag means the linter silently reports "0 issues" for a file it never analyzed — the same silent-failure shape this principle exists to prevent, just at the tooling layer instead of the code layer. When adding a new `//go:build <tag>` file, add `<tag>` to `run.build-tags` in the same change (see `e2e/flow_test.go` / the `e2e` tag for the precedent).
+A build-tagged file (`//go:build sometag`) is invisible to `golangci-lint run ./...` unless that tag is listed in `.golangci.yml`'s `run.build-tags`. An unlisted tag means the linter silently reports "0 issues" for a file it never analyzed — the same silent-failure shape this principle exists to prevent, just at the tooling layer instead of the code layer.
+
+**This coupling is enforced automatically.** `tools/lint/buildtags` (wired into `make agent-check`) scans every `*.go` preamble, extracts custom build tags, and fails if any are absent from `run.build-tags`. When adding a new `//go:build <tag>` file, add `<tag>` to `run.build-tags` in the same commit — the check will catch it if you forget (see `e2e/flow_test.go` / the `e2e` tag for the precedent, and `tools/lint/buildtags/README.md` for the excluded standard-tag set).
 
 ### Narrow exceptions: where `_ =` is acceptable
 
