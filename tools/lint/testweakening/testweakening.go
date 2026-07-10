@@ -135,6 +135,12 @@ func analyze(diff string) []finding {
 		switch {
 		case strings.HasPrefix(line, "+++ "):
 			curFile = stripDiffPath(strings.TrimPrefix(line, "+++ "))
+			// Exclude the linter's own source tree — it legitimately contains the
+			// exact patterns it detects (regex literals, doc comments) and should
+			// not be flagged as a weakening signal.
+			if strings.HasPrefix(curFile, "tools/lint/") || strings.HasPrefix(curFile, "tools/agentcheck/") {
+				curFile = ""
+			}
 			if curFile != "" && !seenFile[curFile] {
 				seenFile[curFile] = true
 				fileOrder = append(fileOrder, curFile)

@@ -28,10 +28,10 @@
       let
         pkgs = import nixpkgs { inherit system; };
 
-        # Go 1.26 is required by go.mod. Prefer the pinned attribute when the
+        # Go 1.24 is required by go.mod. Prefer the pinned attribute when the
         # channel provides it; otherwise fall back to the channel default `go`
         # (still pinned by flake.lock) — bump the channel if it lags go.mod.
-        goToolchain = pkgs.go_1_26 or pkgs.go;
+        goToolchain = pkgs.go_1_24 or pkgs.go;
 
         # The pinned toolchain — one list, mirrored by the Makefile's install
         # hints. Every tool the fail-closed Makefile requires lives here.
