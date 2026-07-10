@@ -35,11 +35,26 @@
         # nixpkgs 25.05 ships that attribute; until then the fallback is go_1_24.
         goToolchain = pkgs.go_1_25 or pkgs.go_1_24 or pkgs.go;
 
+        # nixpkgs' `golangci-lint` is compiled with whatever `go` was the
+        # channel default at packaging time — currently go1.24, one minor
+        # behind go.mod's `go 1.25.0`. golangci-lint v2 refuses to analyze a
+        # module whose go directive exceeds its own compile-time Go version
+        # ("the Go language version go1.24 used to build golangci-lint is
+        # lower than the targeted Go version 1.25.0"), and there is no config
+        # workaround: forcing a lower `run.go` just moves the failure into a
+        # go/types crash instead (file versions still propagate from go.mod).
+        # Fix: rebuild golangci-lint from the SAME nixpkgs source against
+        # `goToolchain` via an overlay — `vendorHash` only hashes vendored Go
+        # source, so it is unaffected by the compiler version. Drop this
+        # override once nixpkgs' `golangci-lint` is itself built with go1.25+.
+        pkgsWithLintGo = pkgs.extend (_: _: { go = goToolchain; });
+        golangciLint = pkgsWithLintGo.golangci-lint;
+
         # The pinned toolchain — one list, mirrored by the Makefile's install
         # hints. Every tool the fail-closed Makefile requires lives here.
         toolchain = [
           goToolchain
-          pkgs.golangci-lint            # @validate: lint
+          golangciLint                  # @validate: lint (rebuilt with goToolchain, see above)
           pkgs.sqlc                     # @codegen: sqlc generate
           pkgs.oapi-codegen             # @codegen: OpenAPI -> Go stubs
           pkgs.buf                      # @codegen/@validate: proto gen + lint
