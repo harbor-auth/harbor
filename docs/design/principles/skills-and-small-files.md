@@ -1,4 +1,4 @@
-> **DESIGN §1.9–1.10** · [↑ DESIGN index](../../DESIGN.md) · prev: [cicd](cicd.md)
+> **DESIGN §1.9–1.10** · [↑ DESIGN index](../../DESIGN.md) · prev: [cicd](cicd.md) · next: [error-handling](error-handling.md)
 
 # Skills, Agents & the Small-Files Principle
 

@@ -35,6 +35,7 @@ Per the **small-files principle (§1.10)**, the design is split into focused fil
 | §1.7 | [design/principles/testing.md](design/principles/testing.md) |
 | §1.8 | [design/principles/cicd.md](design/principles/cicd.md) |
 | §1.9–1.10 | [design/principles/skills-and-small-files.md](design/principles/skills-and-small-files.md) |
+| §1.11 | [design/principles/error-handling.md](design/principles/error-handling.md) |
 | §2.1–2.3 | [design/product/trust-model.md](design/product/trust-model.md) |
 | §2.4 | [design/product/privacy-positioning.md](design/product/privacy-positioning.md) |
 | §3.2.1–3.2.3 | [design/protocol/ppid.md](design/protocol/ppid.md) |

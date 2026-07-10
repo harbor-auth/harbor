@@ -28,7 +28,10 @@ func TestInMemoryStore_UserLifecycle(t *testing.T) {
 	if err := s.AddCredential(ctx, id, cred); err != nil {
 		t.Fatalf("AddCredential: %v", err)
 	}
-	u, _ := s.GetUser(ctx, id)
+	u, err := s.GetUser(ctx, id)
+	if err != nil {
+		t.Fatalf("GetUser after AddCredential: %v", err)
+	}
 	if len(u.WebAuthnCredentials()) != 1 {
 		t.Fatalf("want 1 credential, got %d", len(u.WebAuthnCredentials()))
 	}
@@ -38,7 +41,10 @@ func TestInMemoryStore_UserLifecycle(t *testing.T) {
 	if err := s.UpdateCredential(ctx, id, cred); err != nil {
 		t.Fatalf("UpdateCredential: %v", err)
 	}
-	u, _ = s.GetUser(ctx, id)
+	u, err = s.GetUser(ctx, id)
+	if err != nil {
+		t.Fatalf("GetUser after UpdateCredential: %v", err)
+	}
 	if got := u.WebAuthnCredentials()[0].Authenticator.SignCount; got != 5 {
 		t.Fatalf("sign count = %d, want 5", got)
 	}

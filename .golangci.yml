@@ -12,3 +12,33 @@ version: "2"
 
 run:
   modules-download-mode: mod
+
+linters:
+  # Explicitly enable the error-handling linters (§1.11).
+  # These are additive — golangci-lint v2 defaults remain active.
+  enable:
+    - nilerr      # catches `if err != nil { return nil }` (swallowing errors)
+    - errorlint   # catches `err == sentinel` instead of errors.Is; %v instead of %w
+
+  settings:
+    errcheck:
+      # Flag explicit `_ = f()` blank assignments, not just unchecked calls.
+      # This enforces §1.11: every error must be handled, returned, or fall
+      # into one of the two documented narrow exceptions below.
+      check-blank: true
+      # Narrow permitted discards (docs/design/principles/error-handling.md §1.11):
+      #   1. HTTP response body writes — if the connection is gone the error
+      #      cannot be delivered anywhere; the OS reclaims the socket.
+      #   2. Deferred Close() on a consumed body — close errors are benign;
+      #      the runtime's connection pool handles recycling.
+      # Any proposed addition here is a code-review trigger.
+      exclude-functions:
+        - (net/http.ResponseWriter).Write
+        - (*encoding/json.Encoder).Encode
+        - (io.ReadCloser).Close
+
+  exclusions:
+    # Skip linting auto-generated protobuf/gRPC stubs — they use `_ =
+    # protoimpl.EnforceVersion(...)` by design and are never edited by hand.
+    paths:
+      - internal/gen/

@@ -38,7 +38,13 @@ func main() {
 	// handle is read from a client-supplied `user_id` query param. It MUST stay
 	// false in production — otherwise any caller can drive ceremonies as any user
 	// (docs/DESIGN.md §9). Defaults to false; a parse error is treated as false.
-	allowInsecureUserID, _ := strconv.ParseBool(getenv("WEBAUTHN_ALLOW_INSECURE_USER_ID", "false"))
+	allowInsecureUserIDVal := getenv("WEBAUTHN_ALLOW_INSECURE_USER_ID", "false")
+	allowInsecureUserID, err := strconv.ParseBool(allowInsecureUserIDVal)
+	if err != nil {
+		logger.Error("invalid WEBAUTHN_ALLOW_INSECURE_USER_ID value, must be true or false; defaulting to false",
+			"value", allowInsecureUserIDVal, "error", err)
+		allowInsecureUserID = false
+	}
 	if allowInsecureUserID {
 		logger.Warn("WEBAUTHN_ALLOW_INSECURE_USER_ID is ENABLED — ceremonies trust a client-supplied user_id; DEV ONLY, never enable in production")
 	}

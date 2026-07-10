@@ -22,6 +22,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -143,7 +144,8 @@ func run(c check) checkResult {
 	}
 
 	// The tool could not be launched at all (missing binary, etc.).
-	if _, isExit := err.(*exec.ExitError); err != nil && !isExit {
+	var exitErr *exec.ExitError
+	if err != nil && !errors.As(err, &exitErr) {
 		res.Status = "error"
 		res.ExitCode = -1
 		return res
