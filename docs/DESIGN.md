@@ -220,7 +220,7 @@ This is **enforced in review**: the `@harbor-reviewer` agent flags files that mi
 The product is not "another login button" — it's a **promise that is technically enforced and independently verifiable**:
 
 - We **never** build a profile of you.
-- We **never** tell RP-A that you also use RP-B (no cross-RP correlation).
+- We **never** *persistently* tell RP-A that you also use RP-B (no stored cross-RP correlation). *(Honest footnote: during SSO Harbor must transiently resolve which user you are in order to issue the correct per-RP PPID — see §3.2.4 and §3.2.7 for what this means and doesn't mean.)*
 - We **never** sell, share, or mine your data.
 - We authenticate you **only** with RPs you have explicitly connected.
 - Your **audit log is yours** — you can see, export, and (subject to fraud/legal retention windows) delete every authentication event.
@@ -229,7 +229,7 @@ The product is not "another login button" — it's a **promise that is technical
 
 | Technique | What it guarantees |
 |---|---|
-| **Pairwise Pseudonymous Identifiers (PPID)** | Each RP gets a *different* `sub` for the same user. RPs literally cannot correlate a user across each other. |
+| **Pairwise Pseudonymous Identifiers (PPID)** | Each RP gets a *different* `sub` for the same user. **RP-unlinkability is verifiable by construction** (two colluding RPs comparing `sub`s see unrelated HMAC outputs — provable from the code alone). **Operator non-correlation is attestation-dependent**: Harbor is technically constrained (per-user key, no global secret, no bulk-decrypt) but proving the *deployed binary* matches the published source requires reproducible builds + a transparency log (planned, §2.2 and §3.2.7). See §3.2.4 for the full honest framing. |
 | **Data minimization** | We store the minimum needed to authenticate. Claims released to an RP are per-grant and consented. |
 | **No behavioral logging** | The hot auth path emits only aggregate, non-identifying metrics. No per-user analytics, no ad SDKs, no third-party trackers. |
 | **User-owned audit log** | Every `AuthEvent` is visible to the user in their dashboard and exportable. |
@@ -335,6 +335,8 @@ ppid = Base64URL( HMAC-SHA256( key = user_pairwise_secret,
 
 **Why a *per-user* secret key instead of a single global salt:** this is the crucial design choice. With a global salt/pepper, that one secret's compromise would let an attacker recompute **every** user's `sub` at **every** RP and deanonymize the entire population in one shot. With a **per-user** secret, there is **no single global secret** whose compromise breaks everyone — correlating a user across RPs requires *that specific user's* secret, which lives encrypted in their region behind the KEK/HSM (§4.4). The blast radius of any key compromise is one user, not the world.
 
+> **KEK blast-radius footnote:** "one compromised key = one user" holds strictly **at the DEK layer** (the per-user pairwise secret is the DEK). The **regional KEK** that wraps every DEK in the region is a population-level single point: coercion or compromise of the KEK would allow bulk-unwrap of all per-user secrets in that region. The KEK must therefore be **HSM-bound, non-exportable, and incapable of bulk-unwrap in any API it exposes** (§7.3). This is a residual risk disclosed in §A.7.
+
 #### 3.2.2 The `sector_identifier`
 
 Per the OIDC spec, the sector groups an RP's redirect URIs so a single logical RP with many domains still sees **one** stable `sub`:
@@ -342,6 +344,14 @@ Per the OIDC spec, the sector groups an RP's redirect URIs so a single logical R
 - By default the sector is derived from the host component of the RP's registered `redirect_uri`(s).
 - An RP with multiple redirect hosts declares a **`sector_identifier_uri`** (a JSON array of its redirect URIs); Harbor uses that host as the sector so all of the RP's domains map to the same `sub`.
 - **Two different RPs get different sectors**, hence **unrelated `sub`s** — they cannot join identities by comparing subjects.
+
+**Sector granularity is a named design decision with product consequences:**
+
+| Scenario | Consequence |
+|---|---|
+| `client_id` / `redirect_uri` rotation (RP rotates credentials) | As long as the `sector_identifier_uri` is stable, the `sub` is unchanged. RPs **must keep a stable sector**, not rotate it as they would a `client_secret`. |
+| RP re-registration under a new sector | The `sub` changes — the RP sees a new user. This is intentional (a new sector = a new privacy context) but must be communicated clearly; migrating accounts requires an explicit **account-linking step** (see §3.2.6). |
+| Vendor with many apps (multi-tenant RP) | Each app that registers as a separate RP with its own sector gets a different `sub`, blocking cross-app correlation even within one vendor — **tighter than Apple** (§2.4.5). A vendor that wants shared identity across its apps may share a `sector_identifier_uri`, but that is an explicit, deliberate opt-in. |
 
 #### 3.2.3 Storage model
 
@@ -357,7 +367,16 @@ This is a *strong-but-honest* guarantee, and it's worth being precise about it:
 - To join a single user across RPs, an operator would have to **decrypt that user's `pairwise_secret`** (KEK/HSM-gated, **audited**, with **no bulk-decrypt** capability) and recompute the HMAC per RP. That is **deliberately expensive, per-user, and auditable** — not a casual `SELECT`.
 - **Honest framing:** Harbor-as-operator *could* compute a correlation *with* key access for a *specific* user — we don't claim mathematical impossibility. What we claim (and design for) is that it is **non-casual, one-user-at-a-time, audited, and detectable**, with **no global secret** that unlocks everyone. Contrast a naïve global-salt scheme, where one leaked secret silently deanonymizes the entire user base.
 
-**Net result:** RPs **cannot** join user identities across services at all; Harbor can only do so per-user, behind audited key access — a boundary that our open-source + third-party-audit posture (§2.2) makes verifiable.
+**Additional correlation surfaces that PPID does not close (and how they're handled):**
+
+| Surface | Why it exists | How it's constrained |
+|---|---|---|
+| **SSO session (transient)** | Harbor *must* resolve browser session → real user in order to mint the right per-RP PPID. Transient cross-RP observation is structurally unavoidable for any SSO provider. | Hot-path **operational logs carry no per-user identifiers** (§6.5.3); session data is short-TTL and region-local; Harbor commits to not *persisting* or *building on* this transient signal. |
+| **Relay email (persistent index)** | `relay_alias → real_email → user` is a co-equal correlation surface — in some ways larger than `sub`, since it maps to a real-world identifier. | Treated with **identical protection to `pairwise_secret`**: random, unlinkable per `(user, RP)`, envelope-encrypted, region-local, never logged (§7.5.1–§7.5.5). |
+| **Grants reverse-index (deliberate capability)** | GDPR self-serve *requires* "show me all RPs I've connected" → a `user → all PPIDs` reverse lookup must exist. | This is a **controlled correlation point**: accessible only to the authenticated user themselves via the dashboard, and to audited admin ops. It is not a flaw; it is disclosed and access-controlled. |
+| **Passkey credential (internal join key)** | Harbor is the WebAuthn RP; one credential authenticates the user across all downstream RPs — not leaked to RPs, but a Harbor-internal per-user handle. | Never exposed outside Harbor; region-local; covered by the same DEK/KEK envelope. |
+
+**Net result:** RPs **cannot** join user identities across services at all; Harbor can only do so per-user, behind audited key access — a boundary that our open-source + third-party-audit posture (§2.2) makes verifiable. The residual surfaces above are disclosed, constrained, and access-controlled rather than absent. See §3.2.7 for the consolidated three-tier summary.
 
 #### 3.2.5 Comparison: Apple vs Google vs Harbor subject identifiers
 
@@ -366,6 +385,20 @@ This is a *strong-but-honest* guarantee, and it's worth being precise about it:
 | **Google** | Stable **per Google account**, paired with the real email | Trivial cross-app correlation (the real email is a universal key). |
 | **Apple** | Stable **per developer team** | Blocks cross-*company* correlation, **but a single company with many apps can correlate you across *all* of them** (they share one team `sub`). |
 | **Harbor (PPID)** | Stable **per RP registration / sector** | Tightest boundary: even two apps from the same company are separate RPs ⇒ **different `sub`s** (unless they deliberately share a `sector_identifier`). See §2.4 for positioning. |
+
+#### 3.2.7 Honest summary: three-tier privacy guarantee
+
+Harbor's privacy promise bundles three guarantees of **different strength**. Being explicit about which tier is which keeps the claim honest and avoids the overclaiming that would undermine trust.
+
+| Tier | Claim | Strength | How to verify |
+|---|---|---|---|
+| **1 — RP unlinkability** | Two colluding RPs comparing the `sub` they hold for the same user (identified out-of-band) see unrelated HMAC outputs — they cannot join identities by comparing subjects. | **Verifiable by construction.** Follows from the HMAC key being per-user and the sector being per-RP. Any third party can verify this from the source code alone. | Read `internal/identity/ppid.go`; run the non-correlation test vectors in `ppid_vectors_test.go`. |
+| **2 — Operator technical constraint** | Harbor is architecturally constrained from *casual* or *bulk* correlation: no global secret, no bulk-decrypt API, per-user DEK, grants reverse-index is access-controlled + audited. Correlating one user requires per-user key access behind audited HSM ops. | **Strong, but trust-the-operator** until reproducible builds + transparency log ship (Phase 3, §2.2). The published source code is clean; the deployed binary must be verified to match it. | Reproducible builds (planned); third-party audits (planned); transparency log of key ops (planned). |
+| **3 — Log / telemetry minimization** | Harbor commits to not persisting or building on the transient cross-RP signal it unavoidably touches during SSO. Hot-path logs carry no per-user identifiers; operational logs ≠ audit log; no behavioral profiling. | **Policy + design convention**, enforced by deny-by-default log field allow-listing (§6.5.3) and code review, but not cryptographically enforced. An insider could violate this without breaking the crypto. | Open-source audit; §6.5.7 privacy invariants for observability; `@harbor-reviewer` enforces in review. |
+
+**Restatement of the headline:** *Harbor's stored identity model is unlinkable across RPs by construction (Tier 1 — independently verifiable). Harbor is architecturally constrained from casual or bulk operator correlation (Tier 2 — strong, attestation-dependent). Harbor commits to not persisting the cross-RP signal it must transiently touch during SSO (Tier 3 — policy + design convention, open to audit).*
+
+This is stronger than Apple (Tier 1 is per-RP, not per-developer-team; §2.4.5) and stronger than any policy-only promise. It is honestly weaker than a claim of mathematical impossibility — which no SSO provider can make.
 
 #### 3.2.6 Edge cases
 
