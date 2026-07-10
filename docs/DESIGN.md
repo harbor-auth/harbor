@@ -335,7 +335,7 @@ ppid = Base64URL( HMAC-SHA256( key = user_pairwise_secret,
 
 **Why a *per-user* secret key instead of a single global salt:** this is the crucial design choice. With a global salt/pepper, that one secret's compromise would let an attacker recompute **every** user's `sub` at **every** RP and deanonymize the entire population in one shot. With a **per-user** secret, there is **no single global secret** whose compromise breaks everyone — correlating a user across RPs requires *that specific user's* secret, which lives encrypted in their region behind the KEK/HSM (§4.4). The blast radius of any key compromise is one user, not the world.
 
-> **KEK blast-radius footnote:** "one compromised key = one user" holds strictly **at the DEK layer** (the per-user pairwise secret is the DEK). The **regional KEK** that wraps every DEK in the region is a population-level single point: coercion or compromise of the KEK would allow bulk-unwrap of all per-user secrets in that region. The KEK must therefore be **HSM-bound, non-exportable, and incapable of bulk-unwrap in any API it exposes** (§7.3). This is a residual risk disclosed in §A.7.
+> **KEK blast-radius footnote:** "one compromised key = one user" holds strictly **at the DEK layer** (the per-user pairwise secret is the DEK). The **regional KEK** that wraps every DEK in the region is a population-level single point: coercion or compromise of the KEK would allow bulk-unwrap of all per-user secrets in that region. The KEK must therefore be **HSM-bound, non-exportable, and incapable of bulk-unwrap in any API it exposes** (§7.3). This is a residual risk — see §A.7 (HSM vendor trust) and the explicit entry in §A.7 below.
 
 #### 3.2.2 The `sector_identifier`
 
@@ -386,6 +386,12 @@ This is a *strong-but-honest* guarantee, and it's worth being precise about it:
 | **Apple** | Stable **per developer team** | Blocks cross-*company* correlation, **but a single company with many apps can correlate you across *all* of them** (they share one team `sub`). |
 | **Harbor (PPID)** | Stable **per RP registration / sector** | Tightest boundary: even two apps from the same company are separate RPs ⇒ **different `sub`s** (unless they deliberately share a `sector_identifier`). See §2.4 for positioning. |
 
+#### 3.2.6 Edge cases
+
+- **RP re-registration / sector change:** if an RP's `sector_identifier` changes (e.g., it re-registers under a new sector), the derived `sub` **changes**, which the RP will experience as a *new* user. This is the standard OIDC pairwise trade-off; RPs that need continuity must keep a **stable `sector_identifier_uri`**, and any intentional migration must be handled as an explicit **account-linking** step on the RP side.
+- **The `sub` on the wire:** the `pairwise_sub` derived here is precisely what is emitted as the ID-token `sub` claim in the §11.2 walkthrough — RPs key their local account off it.
+- **Result:** **RPs cannot join user identities across services**, and we deliberately keep no globally-joinable "one user id → all RPs" table exposed to RPs.
+
 #### 3.2.7 Honest summary: three-tier privacy guarantee
 
 Harbor's privacy promise bundles three guarantees of **different strength**. Being explicit about which tier is which keeps the claim honest and avoids the overclaiming that would undermine trust.
@@ -394,17 +400,11 @@ Harbor's privacy promise bundles three guarantees of **different strength**. Bei
 |---|---|---|---|
 | **1 — RP unlinkability** | Two colluding RPs comparing the `sub` they hold for the same user (identified out-of-band) see unrelated HMAC outputs — they cannot join identities by comparing subjects. | **Verifiable by construction.** Follows from the HMAC key being per-user and the sector being per-RP. Any third party can verify this from the source code alone. | Read `internal/identity/ppid.go`; run the non-correlation test vectors in `ppid_vectors_test.go`. |
 | **2 — Operator technical constraint** | Harbor is architecturally constrained from *casual* or *bulk* correlation: no global secret, no bulk-decrypt API, per-user DEK, grants reverse-index is access-controlled + audited. Correlating one user requires per-user key access behind audited HSM ops. | **Strong, but trust-the-operator** until reproducible builds + transparency log ship (Phase 3, §2.2). The published source code is clean; the deployed binary must be verified to match it. | Reproducible builds (planned); third-party audits (planned); transparency log of key ops (planned). |
-| **3 — Log / telemetry minimization** | Harbor commits to not persisting or building on the transient cross-RP signal it unavoidably touches during SSO. Hot-path logs carry no per-user identifiers; operational logs ≠ audit log; no behavioral profiling. | **Policy + design convention**, enforced by deny-by-default log field allow-listing (§6.5.3) and code review, but not cryptographically enforced. An insider could violate this without breaking the crypto. | Open-source audit; §6.5.7 privacy invariants for observability; `@harbor-reviewer` enforces in review. |
+| **3 — Log / telemetry minimization** | Harbor commits to not persisting or building on the transient cross-RP signal it unavoidably touches during SSO. Hot-path logs carry no per-user identifiers; operational logs ≠ audit log; no behavioral profiling. Traffic/timing correlation (IP, geo) is **out of scope** — Harbor is not Tor; mitigation is log minimization only. | **Policy + design convention**, enforced by deny-by-default log field allow-listing (§6.5.3) and code review, but not cryptographically enforced. An insider could violate this without breaking the crypto. | Open-source audit; §6.5.7 privacy invariants for observability; `@harbor-reviewer` enforces in review. |
 
 **Restatement of the headline:** *Harbor's stored identity model is unlinkable across RPs by construction (Tier 1 — independently verifiable). Harbor is architecturally constrained from casual or bulk operator correlation (Tier 2 — strong, attestation-dependent). Harbor commits to not persisting the cross-RP signal it must transiently touch during SSO (Tier 3 — policy + design convention, open to audit).*
 
 This is stronger than Apple (Tier 1 is per-RP, not per-developer-team; §2.4.5) and stronger than any policy-only promise. It is honestly weaker than a claim of mathematical impossibility — which no SSO provider can make.
-
-#### 3.2.6 Edge cases
-
-- **RP re-registration / sector change:** if an RP's `sector_identifier` changes (e.g., it re-registers under a new sector), the derived `sub` **changes**, which the RP will experience as a *new* user. This is the standard OIDC pairwise trade-off; RPs that need continuity must keep a **stable `sector_identifier_uri`**, and any intentional migration must be handled as an explicit **account-linking** step on the RP side.
-- **The `sub` on the wire:** the `pairwise_sub` derived here is precisely what is emitted as the ID-token `sub` claim in the §11.2 walkthrough — RPs key their local account off it.
-- **Result:** **RPs cannot join user identities across services**, and we deliberately keep no globally-joinable "one user id → all RPs" table exposed to RPs.
 
 ### 3.3 Token strategy — hybrid (this is the performance crux)
 
@@ -1372,6 +1372,7 @@ We analyze each trust-boundary component separately because their risk profiles 
 
 - **Operator-with-key-access correlation:** as stated honestly in §3.2.4, an operator holding a *specific* user's key *could* correlate that one user across RPs — but only **per-user, audited, non-bulk**. There is **no global secret** that deanonymizes everyone. This is a deliberate, disclosed residual.
 - **HSM vendor trust:** we assume the KMS/HSM boundary holds; a vendor-level compromise is out of our direct control (mitigated by per-region isolation and rotation).
+- **KEK bulk-unwrap (population-level risk):** the regional KEK wraps every per-user DEK in the region. While PPID's per-user secret limits blast radius at the DEK layer, the KEK itself is a population-level single point of failure. The KEK must be HSM-bound, non-exportable, and its API must expose **no bulk-unwrap operation** — only per-key unwrap with individual audited calls (§3.2.1, §7.3). Coercion of the KEK bypasses the per-user isolation guarantee.
 - **Supply chain:** malicious dependency or build tampering — mitigated by **reproducible builds** (§2.2) and **dependency/SAST/secret scanning** (§1.7, §1.8), but never fully eliminated.
 - **Recovery social-engineering:** the account-recovery flow is a classic attack surface — mitigated by requiring **≥2 pre-registered methods and no email backdoor** (§7.2), but human factors remain.
 - **Bearer-token theft window:** until **DPoP/token-binding** ships (§3.1, phase 2), a stolen access token is usable within its **short TTL** (§3.5). Short TTLs bound, but don't eliminate, this until binding lands.
