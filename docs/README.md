@@ -2,7 +2,7 @@
 
 The single entry point (TOC) for everything Harbor **does** and **plans to do**. This index exists so agents (and humans) can find the right doc fast, then reconcile it against the code. If you're building a feature, **start here**.
 
-> **New to Harbor?** Read [`ARCHITECTURE.md`](ARCHITECTURE.md) first — a one-page, high-level map (hot/cold path, regions, KMS, the PII-free global plane) that's a gentler on-ramp than the dense [`DESIGN.md`](DESIGN.md).
+> **New to Harbor?** Read [`ARCHITECTURE.md`](ARCHITECTURE.md) first — a one-page, high-level map (hot/cold path, regions, KMS, the PII-free global plane) that's a gentler on-ramp than the dense [`DESIGN.md`](DESIGN.md). Then see [`OIDC-LOGIN-FLOW.md`](OIDC-LOGIN-FLOW.md) for a step-by-step ASCII sequence diagram of the most complex sequence in the system (the Authorization Code + PKCE login flow, §11.2).
 
 > Managed by two skills: **[`@docs`](../.agents/docs.md)** (create / query / reconcile feature docs) and **[`@plan`](../.agents/plan.md)** (author future work and graduate it into feature docs).
 

@@ -65,6 +65,9 @@ per-region, so a user's data never leaves their jurisdiction.
 
 ## Where to go next
 
+- **OIDC login flow** — [`OIDC-LOGIN-FLOW.md`](OIDC-LOGIN-FLOW.md): step-by-step
+  ASCII sequence diagrams of the full Authorization Code + PKCE flow (the most
+  complex sequence in the design — §11.2 + §11.7 error paths).
 - **The full design** — [`DESIGN.md`](DESIGN.md): trust model (§2), protocol &
   tokens (§3), routing (§5), performance (§6), security (§7), data model (§10),
   the full OIDC login walkthrough (§11.2), and the STRIDE threat model
