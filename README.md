@@ -136,7 +136,9 @@ OIDC compliance (asymmetric-signed tokens, pairwise subjects) — details in
 
 ## Documentation
 
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — a one-page, high-level map (hot/cold path, regions, KMS) — start here.
 - **[docs/DESIGN.md](docs/DESIGN.md)** — full system design: trust model, protocols, multi-jurisdiction routing, performance engineering, security, data model, user flows, compliance, roadmap, and key trade-offs.
+- **[docs/README.md](docs/README.md)** — the feature/plan index (as-built capabilities and future work).
 
 ## Roadmap (summary)
 
