@@ -243,6 +243,13 @@ func loadDeclaredTags(path string) (map[string]bool, error) {
 				inBuildTags = false
 				continue
 			}
+			// Comment-only lines (trimmed starts with #) are part of the block
+			// and must be skipped — NOT treated as block terminators. Without
+			// this, a commented-out entry like `# - integration` causes the
+			// scanner to exit the block early, silently missing subsequent tags.
+			if strings.HasPrefix(trimmed, "#") {
+				continue
+			}
 			// Block list item: `    - e2e`
 			if strings.HasPrefix(trimmed, "- ") {
 				tag := strings.TrimSpace(strings.TrimPrefix(trimmed, "- "))
