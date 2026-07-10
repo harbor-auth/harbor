@@ -12,6 +12,15 @@ version: "2"
 
 run:
   modules-download-mode: mod
+  # e2e/flow_test.go carries a `//go:build e2e` constraint (it needs a live
+  # server, so it's excluded from the default `go test ./...`). Without this,
+  # golangci-lint silently never sees that file at all — a build-tagged file
+  # with 0 analyzed lines reports "0 issues" whether or not it has real
+  # problems (§1.11: a linter that can't see code is a silent-failure gap,
+  # not a pass). Adding the tag here makes `golangci-lint run ./...` (the
+  # command make validate/agent-check/CI all use) actually analyze it.
+  build-tags:
+    - e2e
 
 linters:
   # Explicitly enable the error-handling linters (§1.11).

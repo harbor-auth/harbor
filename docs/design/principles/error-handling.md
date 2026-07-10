@@ -83,6 +83,10 @@ if errors.Is(err, ErrUserNotFound) { ... }
 
 The `errorlint` linter (§CI enforcement below) flags `==` comparisons against error values.
 
+### A linter that can't see the code isn't enforcing anything
+
+A build-tagged file (`//go:build sometag`) is invisible to `golangci-lint run ./...` unless that tag is listed in `.golangci.yml`'s `run.build-tags`. An unlisted tag means the linter silently reports "0 issues" for a file it never analyzed — the same silent-failure shape this principle exists to prevent, just at the tooling layer instead of the code layer. When adding a new `//go:build <tag>` file, add `<tag>` to `run.build-tags` in the same change (see `e2e/flow_test.go` / the `e2e` tag for the precedent).
+
 ### Narrow exceptions: where `_ =` is acceptable
 
 Two patterns are explicitly permitted and need no further comment:
