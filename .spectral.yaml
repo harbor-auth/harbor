@@ -1,7 +1,7 @@
 # Harbor — Spectral OpenAPI linting config (@validate / spec-lint CI step).
 #
-# Auto-discovered by `spectral lint` when run from the repo root. The OAS
-# ruleset is loaded via CDN so `npx @stoplight/spectral-cli` needs no extra
-# npm packages installed alongside it.
+# Auto-discovered by `spectral lint` when run from the repo root. Uses the OAS
+# ruleset bundled with spectral-cli (`spectral:oas`), so no network access or
+# extra npm packages are needed.
 extends:
-  - "https://unpkg.com/@stoplight/spectral-oas@6.11.1/dist/ruleset.cjs"
+  - spectral:oas

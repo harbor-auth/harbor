@@ -15,7 +15,7 @@ func decodeDiscovery(t *testing.T, issuer string) map[string]any {
 	srv.GetOpenIDConfiguration(rec, req)
 
 	res := rec.Result()
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusOK)
 	}

@@ -13,7 +13,7 @@ import (
 func mintCode(t *testing.T, ts *httptest.Server) string {
 	t.Helper()
 	res := getAuthorize(t, ts, validAuthorizeQuery())
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusFound {
 		t.Fatalf("authorize status = %d, want 302", res.StatusCode)
 	}
@@ -73,7 +73,7 @@ func TestToken_HappyRoundTrip(t *testing.T) {
 	code := mintCode(t, ts)
 
 	res := postToken(t, ts, validTokenForm(code))
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", res.StatusCode)
@@ -107,13 +107,13 @@ func TestToken_CodeReuse_InvalidGrant(t *testing.T) {
 	code := mintCode(t, ts)
 
 	first := postToken(t, ts, validTokenForm(code))
-	first.Body.Close()
+	_ = first.Body.Close()
 	if first.StatusCode != http.StatusOK {
 		t.Fatalf("first exchange status = %d, want 200", first.StatusCode)
 	}
 
 	second := postToken(t, ts, validTokenForm(code))
-	defer second.Body.Close()
+	defer func() { _ = second.Body.Close() }()
 	if second.StatusCode != http.StatusBadRequest {
 		t.Fatalf("reuse status = %d, want 400", second.StatusCode)
 	}
@@ -132,7 +132,7 @@ func TestToken_UnsupportedGrantType(t *testing.T) {
 	form.Set("grant_type", "client_credentials")
 
 	res := postToken(t, ts, form)
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", res.StatusCode)
 	}
@@ -152,7 +152,7 @@ func TestToken_PKCEMismatch_InvalidGrant(t *testing.T) {
 	form.Set("code_verifier", "this-is-not-the-right-verifier")
 
 	res := postToken(t, ts, form)
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", res.StatusCode)
 	}

@@ -15,7 +15,7 @@ func TestHealthMux(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 
 	res := rec.Result()
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("GET /healthz status = %d, want %d", res.StatusCode, http.StatusOK)

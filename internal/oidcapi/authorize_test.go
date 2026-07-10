@@ -110,7 +110,7 @@ func TestAuthorize_UnknownClient_ErrorPageNoRedirect(t *testing.T) {
 	q.Set("client_id", "nope-not-registered")
 
 	res := getAuthorize(t, ts, q)
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", res.StatusCode)
@@ -131,7 +131,7 @@ func TestAuthorize_RedirectMismatch_ErrorPageNoRedirect(t *testing.T) {
 	q.Set("redirect_uri", "http://evil.example/callback")
 
 	res := getAuthorize(t, ts, q)
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", res.StatusCode)
@@ -149,7 +149,7 @@ func TestAuthorize_MissingOpenIDScope_RedirectsWithError(t *testing.T) {
 	q.Set("scope", "profile")
 
 	res := getAuthorize(t, ts, q)
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want 302", res.StatusCode)
@@ -173,7 +173,7 @@ func TestAuthorize_UnsupportedResponseType_RedirectsWithError(t *testing.T) {
 	q.Set("response_type", "token")
 
 	res := getAuthorize(t, ts, q)
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want 302", res.StatusCode)
@@ -192,7 +192,7 @@ func TestAuthorize_HappyPath_RedirectsWithCode(t *testing.T) {
 	ts := newFlowServer(t)
 
 	res := getAuthorize(t, ts, validAuthorizeQuery())
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 
 	if res.StatusCode != http.StatusFound {
 		t.Fatalf("status = %d, want 302", res.StatusCode)
