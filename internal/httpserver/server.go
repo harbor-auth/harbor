@@ -54,6 +54,10 @@ func Run(ctx context.Context, addr string, h http.Handler, logger *slog.Logger) 
 		case <-ctx.Done():
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
+			// logger.Error is the terminal handling here (not a swallow, §1.11):
+			// this goroutine has no caller to return the error to — Run has
+			// already sent its own result on serveErr and is blocked on
+			// shutdownDone, not waiting on this err.
 			if err := srv.Shutdown(shutdownCtx); err != nil {
 				logger.Error("graceful shutdown failed", "error", err)
 			}
