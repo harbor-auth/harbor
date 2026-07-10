@@ -28,10 +28,12 @@
       let
         pkgs = import nixpkgs { inherit system; };
 
-        # Go 1.24 is required by go.mod. Prefer the pinned attribute when the
-        # channel provides it; otherwise fall back to the channel default `go`
-        # (still pinned by flake.lock) — bump the channel if it lags go.mod.
-        goToolchain = pkgs.go_1_24 or pkgs.go;
+        # go.mod declares `go 1.25.0` (required by grpc v1.82+, webauthn v0.17+,
+        # pgx v5.10+, golang.org/x/* v0.52+). The nix shell provides go_1_24 as
+        # a bootstrap; GOTOOLCHAIN=auto (Go default since 1.21) auto-downloads
+        # go1.25.0 when the build or test commands need it. Prefer go_1_25 once
+        # nixpkgs 25.05 ships that attribute; until then the fallback is go_1_24.
+        goToolchain = pkgs.go_1_25 or pkgs.go_1_24 or pkgs.go;
 
         # The pinned toolchain — one list, mirrored by the Makefile's install
         # hints. Every tool the fail-closed Makefile requires lives here.
