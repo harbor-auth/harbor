@@ -11,17 +11,17 @@ option go_package = "github.com/harbor/harbor/internal/gen/proto/harbor/v1;harbo
 // HealthService reports whether an internal component is serving.
 service HealthService {
   // Check returns the current serving status of the component.
-  rpc Check(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc Check(CheckRequest) returns (CheckResponse);
 }
 
-// HealthCheckRequest asks for the status of a named component.
-message HealthCheckRequest {
+// CheckRequest asks for the status of a named component.
+message CheckRequest {
   // component is the logical name to check (empty means the whole process).
   string component = 1;
 }
 
-// HealthCheckResponse carries the serving status.
-message HealthCheckResponse {
+// CheckResponse carries the serving status.
+message CheckResponse {
   // ServingStatus enumerates the possible health states.
   enum ServingStatus {
     // SERVING_STATUS_UNSPECIFIED is the default, unset value.

@@ -28,6 +28,9 @@ buf lint                                # Protobuf
 #    (server stubs, TS client, sqlc, etc. must match the specs)
 <run codegen>   # e.g. buf generate && oapi-codegen ... && sqlc generate
 git diff --exit-code   # non-empty diff ⇒ drift ⇒ FAIL
+
+# 6. Docs integrity — only when any docs/ file is touched
+make docs-check    # design_refs resolve in DESIGN.md § → file map + no broken relative links
 ```
 
 ## Pass/fail criteria
@@ -39,6 +42,7 @@ git diff --exit-code   # non-empty diff ⇒ drift ⇒ FAIL
 | `golangci-lint` | exit 0, no findings |
 | `spectral` / `buf lint` | exit 0 |
 | **codegen-drift** | `git diff --exit-code` is clean after regenerating |
+| `docs-check` | exit 0, no broken refs or links |
 
 Any failure blocks the commit. This mirrors CI **Stage 1 (Static)** and **Stage 2 (Contract compat)** in §1.8 — catching it here means it never wastes a CI run.
 
@@ -46,3 +50,4 @@ Any failure blocks the commit. This mirrors CI **Stage 1 (Static)** and **Stage 
 
 - Prefer wiring these into a **pre-commit hook** on the staged file set.
 - The codegen-drift check is the key one: it guarantees the generated code (Go stubs, TS client, `sqlc` queries) always matches the `api/` contracts (§1.2–§1.5). **Regenerate; never hand-edit generated files.**
+- Run `make docs-check` whenever any file under `docs/` changes — before committing. It is fast (Python, no compilation) and wired into CI as a required gate.

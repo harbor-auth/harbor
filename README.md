@@ -32,7 +32,7 @@ Harbor is an OpenID Provider (OP) that authenticates people to the apps they've 
 ### Prerequisites
 
 Harbor pins its entire toolchain (Go 1.26, `sqlc`, `oapi-codegen`, `buf`,
-`golangci-lint`, `spectral`, `golang-migrate`, `k6`, Node/`pnpm`) with Nix so
+`golangci-lint`, `go-migrate`, `k6`, Node/`pnpm`) with Nix so
 local and CI runs are byte-identical. Enter the hermetic dev shell:
 
 ```bash

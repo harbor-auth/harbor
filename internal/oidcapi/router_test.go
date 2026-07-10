@@ -28,7 +28,7 @@ func TestHandlerFromMux(t *testing.T) {
 		if err != nil {
 			t.Fatalf("GET %s: %v", tc.path, err)
 		}
-		res.Body.Close()
+		_ = res.Body.Close()
 		if res.StatusCode != tc.wantStatus {
 			t.Fatalf("GET %s status = %d, want %d", tc.path, res.StatusCode, tc.wantStatus)
 		}

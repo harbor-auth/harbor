@@ -97,7 +97,10 @@ func TestDiscoveryDocument(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET %s = %d, want 200", discoveryPath, resp.StatusCode)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading discovery doc body: %v", err)
+	}
 	var doc map[string]any
 	if err := json.Unmarshal(body, &doc); err != nil {
 		t.Fatalf("discovery doc is not JSON: %v\n%s", err, body)
@@ -171,11 +174,17 @@ func TestAuthorizeTokenHappyPath(t *testing.T) {
 	tokenResp := postToken(t, code, verifier, demoRedirectURI)
 	defer tokenResp.Body.Close()
 	if tokenResp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(tokenResp.Body)
+		body, err := io.ReadAll(tokenResp.Body)
+		if err != nil {
+			t.Fatalf("POST %s = %d, want 200 (also failed reading body: %v)", tokenPath, tokenResp.StatusCode, err)
+		}
 		t.Fatalf("POST %s = %d, want 200\n%s", tokenPath, tokenResp.StatusCode, body)
 	}
 	var tok map[string]any
-	body, _ := io.ReadAll(tokenResp.Body)
+	body, err := io.ReadAll(tokenResp.Body)
+	if err != nil {
+		t.Fatalf("reading token response body: %v", err)
+	}
 	if err := json.Unmarshal(body, &tok); err != nil {
 		t.Fatalf("token response is not JSON: %v\n%s", err, body)
 	}
@@ -222,7 +231,10 @@ func TestTokenWrongVerifierIsInvalidGrant(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("wrong-verifier /token = %d, want 400", resp.StatusCode)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading wrong-verifier error body: %v", err)
+	}
 	var errBody map[string]any
 	if err := json.Unmarshal(body, &errBody); err == nil {
 		if ec, _ := errBody["error"].(string); ec != "invalid_grant" {

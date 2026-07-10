@@ -8,7 +8,7 @@
 make agent-check
 ```
 
-`make agent-check` is the **single source of truth** for "is it green?". It runs the full check suite (gofmt · build · vet · tests · invariants meta-test · PII-in-telemetry analyzer · golangci-lint · spectral · buf lint), **fails closed** on any missing tool, and emits a structured verdict to `check-results.json` (Foundation F6). The verdict is identical locally and in CI. Because it now runs the pinned linters, the verdict is authoritative only inside the pinned toolchain (`nix develop`); codegen-drift runs in CI, not here, because it needs git history.
+`make agent-check` is the **single source of truth** for "is it green?". It runs the full check suite (gofmt · build · vet · tests · invariants meta-test · PII-in-telemetry analyzer · golangci-lint · buf lint · docs-design-refs · docs-links), **fails closed** on any missing tool, and emits a structured verdict to `check-results.json` (Foundation F6). The verdict is identical locally and in CI. Because it now runs the pinned linters, the verdict is authoritative only inside the pinned toolchain (`nix develop`); codegen-drift runs in CI, not here, because it needs git history. Spectral (OpenAPI spec-lint) also runs as a separate CI-side step via pinned npx — nixpkgs removed the package, so it can no longer run inside the pinned shell.
 
 - **Never** trust ad-hoc partial checks ("the one test I ran passed"). Run `make agent-check`.
 - **Never** set `SOFT=1` — that is a *human-only* local escape hatch for a missing tool. Agents and CI must always fail closed.
@@ -17,15 +17,16 @@ make agent-check
 ## The knowledge hierarchy
 
 ```
-DESIGN.md   → WHY + system-level WHAT — the north star (§0–§15)
-   └─ docs/plans/     → future WHAT — intent not yet built
-        └─ docs/features/  → as-built WHAT + HOW — realized capabilities
-             └─ code       → the ground truth for as-built behavior
+DESIGN.md (index)  → WHY + system-level WHAT — navigable § → file map (§0–§15)
+   └─ docs/design/ → topic-focused design files (each ≤ ~2,000 words)
+docs/plans/        → future WHAT — intent not yet built
+   └─ docs/features/  → as-built WHAT + HOW — realized capabilities
+        └─ code       → the ground truth for as-built behavior
 ```
 
 - Start at [`docs/README.md`](../docs/README.md) (the feature & plan index) and [`.agents/README.md`](./README.md) (the skills & agents toolkit).
 - **For a feature doc, the code is reality** — on drift, reconcile the *doc* to the *code* (`@docs reconcile`).
-- **`DESIGN.md` is the north star.** A change to the design is **explicit** (edit `DESIGN.md`); it is never smuggled in via a plan, a feature doc, or code.
+- **`DESIGN.md` is the design index.** A change to the design is **explicit**: open `DESIGN.md`, find the `§` in the map, and edit the owning file in `docs/design/`. Never smuggle design changes in via a plan, feature doc, or code.
 
 ## Hard rules (non-negotiable)
 
@@ -75,5 +76,6 @@ Use **`@hippo`** for cross-session memory: **recall first** at session start, an
 - [ ] Invariants meta-test green — every invariant still has a live `//harbor:invariant`-tagged test.
 - [ ] No new PII fields in any log/metric/trace (`piifields` clean; log through `internal/telemetry`).
 - [ ] Docs reconciled — feature/plan index and affected `docs/features/*.md` match the code (`@docs reconcile`).
+- [ ] `make docs-check` is green — every `design_refs §` resolves in `DESIGN.md`'s map **and** no relative links are broken. Run this whenever any file under `docs/` changes.
 
 > **Update this file as the toolchain/workflow evolves — a stale entrypoint is a bug.**

@@ -2,17 +2,20 @@
 
 The single entry point (TOC) for everything Harbor **does** and **plans to do**. This index exists so agents (and humans) can find the right doc fast, then reconcile it against the code. If you're building a feature, **start here**.
 
-> **New to Harbor?** Read [`ARCHITECTURE.md`](ARCHITECTURE.md) first — a one-page, high-level map (hot/cold path, regions, KMS, the PII-free global plane) that's a gentler on-ramp than the dense [`DESIGN.md`](DESIGN.md). Then see [`OIDC-LOGIN-FLOW.md`](OIDC-LOGIN-FLOW.md) for a step-by-step ASCII sequence diagram of the most complex sequence in the system (the Authorization Code + PKCE login flow, §11.2).
+> **New to Harbor?** Read [`ARCHITECTURE.md`](ARCHITECTURE.md) first — a one-page, high-level map (hot/cold path, regions, KMS, the PII-free global plane) that's a gentler on-ramp than [`DESIGN.md`](DESIGN.md). [`DESIGN.md`](DESIGN.md) is now a **navigable index** into a tree of focused files under [`design/`](design/) (each ≤ ~2,000 words, per the small-files principle §1.10). Then see [`OIDC-LOGIN-FLOW.md`](OIDC-LOGIN-FLOW.md) for a step-by-step ASCII sequence diagram of the most complex sequence in the system (the Authorization Code + PKCE login flow, §11.2), backed by [`oidc-flow/`](oidc-flow/) sub-files.
 
 > Managed by two skills: **[`@docs`](../.agents/docs.md)** (create / query / reconcile feature docs) and **[`@plan`](../.agents/plan.md)** (author future work and graduate it into feature docs).
 
 ## The knowledge hierarchy
 
 ```
-DESIGN.md   → WHY + system-level WHAT — the north star (§0–§15)
-   └─ docs/plans/     → future WHAT — intent not yet built
-        └─ docs/features/  → as-built WHAT + HOW — realized capabilities
-             └─ code       → the ground truth for as-built behavior
+DESIGN.md          → WHY + system-level WHAT — the design index (§0–§15)
+   └─ design/       → topic-focused design files, each ≤ ~2,000 words
+        └─ principles/, product/, protocol/, architecture/,
+           security/, backend/, flows/, governance/, threat-model/
+docs/plans/         → future WHAT — intent not yet built
+   └─ docs/features/ → as-built WHAT + HOW — realized capabilities
+        └─ code      → the ground truth for as-built behavior
 ```
 
 **Source-of-truth rule:** for a **feature doc, the code is reality** — on drift, reconcile the *doc* to the *code* (`@docs reconcile`). Docs **never contradict `DESIGN.md`**; a genuine divergence from the design is a **DESIGN change**, surfaced explicitly (edit `DESIGN.md`, don't quietly document the deviation). This is the same anti-drift philosophy as `@validate`/`@codegen` (which keep *code ↔ spec* honest, §1.5) — one layer up, keeping *doc ↔ code* honest.

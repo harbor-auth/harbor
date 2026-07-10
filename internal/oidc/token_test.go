@@ -100,7 +100,9 @@ func TestValidateTokenExchange(t *testing.T) {
 func TestService_Token_ReuseRevokesCodeFamily(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	codes := NewInMemoryAuthCodeStore()
-	_ = codes.Save(t.Context(), validAuthCode(now))
+	if err := codes.Save(t.Context(), validAuthCode(now)); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
 	revocations := NewRecordingRevocationSink()
 
 	svc := NewService(ServiceConfig{
@@ -143,7 +145,9 @@ func TestService_Token_FailedExchangeDoesNotBurnCode(t *testing.T) {
 	// A fresh sink + code store per subcase keeps them fully isolated.
 	newSvc := func() (*Service, *RecordingRevocationSink) {
 		codes := NewInMemoryAuthCodeStore()
-		_ = codes.Save(t.Context(), validAuthCode(now))
+		if err := codes.Save(t.Context(), validAuthCode(now)); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
 		revocations := NewRecordingRevocationSink()
 		return NewService(ServiceConfig{
 			Issuer:      "https://eu.harbor.id",

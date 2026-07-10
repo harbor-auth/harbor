@@ -87,7 +87,12 @@ func main() {
 	fset := token.NewFileSet()
 	var findings []finding
 	for _, root := range dirs {
-		findings = append(findings, scanRoot(fset, root)...)
+		f, err := scanRoot(fset, root)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "piifields: error scanning %s: %v\n", root, err)
+			os.Exit(1)
+		}
+		findings = append(findings, f...)
 	}
 
 	if len(findings) == 0 {
@@ -125,11 +130,16 @@ func skipFile(path string) bool {
 	return false
 }
 
-func scanRoot(fset *token.FileSet, root string) []finding {
+func scanRoot(fset *token.FileSet, root string) ([]finding, error) {
 	var out []finding
-	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
+	if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			// Returning nil (not walkErr) is the filepath.WalkDir callback idiom
+			// for "skip this entry, keep walking". Per-file permission errors are
+			// intentionally non-fatal: one unreadable file should not abort the
+			// whole PII scan. nilerr is correct in general but does not apply to
+			// WalkDir callbacks where nil-on-error means "continue".
+			return nil //nolint:nilerr
 		}
 		if d.IsDir() {
 			if skipDir(d.Name()) {
@@ -142,8 +152,10 @@ func scanRoot(fset *token.FileSet, root string) []finding {
 		}
 		out = append(out, scanFile(fset, path)...)
 		return nil
-	})
-	return out
+	}); err != nil {
+		return nil, fmt.Errorf("walking %s: %w", root, err)
+	}
+	return out, nil
 }
 
 func scanFile(fset *token.FileSet, path string) []finding {

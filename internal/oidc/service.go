@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -78,6 +79,9 @@ const defaultCodeTTL = 60 * time.Second
 // ServiceConfig wires the Service's collaborators. Clients, Codes, Tokens, and
 // Sessions are required; Revocations, NewCode, Now, and CodeTTL default to
 // sensible values (the last three are seams for deterministic tests).
+// Logger defaults to slog.Default() — never nil, never a no-op discard
+// (a silent default would re-introduce the error-swallow the field is here
+// to prevent; see docs/design/principles/error-handling.md §1.11).
 type ServiceConfig struct {
 	Issuer      string
 	Clients     ClientRegistry
@@ -85,6 +89,7 @@ type ServiceConfig struct {
 	Tokens      TokenIssuer
 	Sessions    SessionResolver
 	Revocations RevocationSink
+	Logger      *slog.Logger
 	NewCode     func() (string, error)
 	Now         func() time.Time
 	CodeTTL     time.Duration
@@ -100,6 +105,7 @@ type Service struct {
 	tokens      TokenIssuer
 	sessions    SessionResolver
 	revocations RevocationSink
+	logger      *slog.Logger
 	newCode     func() (string, error)
 	now         func() time.Time
 	codeTTL     time.Duration
@@ -114,12 +120,16 @@ func NewService(cfg ServiceConfig) *Service {
 		tokens:      cfg.Tokens,
 		sessions:    cfg.Sessions,
 		revocations: cfg.Revocations,
+		logger:      cfg.Logger,
 		newCode:     cfg.NewCode,
 		now:         cfg.Now,
 		codeTTL:     cfg.CodeTTL,
 	}
 	if svc.revocations == nil {
 		svc.revocations = noopRevocationSink{}
+	}
+	if svc.logger == nil {
+		svc.logger = slog.Default()
 	}
 	if svc.newCode == nil {
 		svc.newCode = defaultNewCode
@@ -219,7 +229,7 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 	}
 	if consumed {
 		// Assume theft: revoke everything minted from this code.
-		_ = s.revocations.RevokeCodeFamily(ctx, stored)
+		s.signalCodeReuse(ctx, stored)
 		return nil, invalidGrant("authorization code has already been used")
 	}
 
@@ -238,7 +248,7 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 	case ConsumeNotFound:
 		return nil, invalidGrant("authorization code is invalid")
 	case ConsumeReused:
-		_ = s.revocations.RevokeCodeFamily(ctx, result.Code)
+		s.signalCodeReuse(ctx, result.Code)
 		return nil, invalidGrant("authorization code has already been used")
 	}
 
@@ -253,6 +263,27 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not issue tokens", Status: 500}
 	}
 	return &tokens, nil
+}
+
+// signalCodeReuse fires the theft signal when a code is presented twice: it
+// attempts to revoke every token minted from the code family and logs any
+// failure at ERROR level (docs/design/principles/error-handling.md §1.11,
+// docs/DESIGN.md §11.7). The caller always returns invalid_grant regardless of
+// whether revocation succeeds — the primary client response is independent of
+// the side-effect — but the failure is NOT silently discarded.
+//
+// PII constraint (§6.5.7): only client_id + the error value are logged.
+// Never log Subject (PPID), Code (a secret), or Nonce.
+//
+// TODO(security): route revocation through a durable outbox so a transient
+// failure is retried, not merely alerted (the in-process best-effort signal
+// is the correct interim handling, not the final design).
+func (s *Service) signalCodeReuse(ctx context.Context, code AuthCode) {
+	if err := s.revocations.RevokeCodeFamily(ctx, code); err != nil {
+		s.logger.ErrorContext(ctx, "code-family revocation failed after reuse detected",
+			slog.String("client_id", code.ClientID),
+			slog.Any("error", err))
+	}
 }
 
 // defaultNewCode returns a 256-bit random, URL-safe authorization code.

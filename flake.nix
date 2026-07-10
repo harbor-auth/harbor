@@ -28,24 +28,47 @@
       let
         pkgs = import nixpkgs { inherit system; };
 
-        # Go 1.26 is required by go.mod. Prefer the pinned attribute when the
-        # channel provides it; otherwise fall back to the channel default `go`
-        # (still pinned by flake.lock) — bump the channel if it lags go.mod.
-        goToolchain = pkgs.go_1_26 or pkgs.go;
+        # go.mod declares `go 1.25.0` (required by grpc v1.82+, webauthn v0.17+,
+        # pgx v5.10+, golang.org/x/* v0.52+). The nix shell provides go_1_24 as
+        # a bootstrap; GOTOOLCHAIN=auto (Go default since 1.21) auto-downloads
+        # go1.25.0 when the build or test commands need it. Prefer go_1_25 once
+        # nixpkgs 25.05 ships that attribute; until then the fallback is go_1_24.
+        goToolchain = pkgs.go_1_25 or pkgs.go_1_24 or pkgs.go;
+
+        # nixpkgs' `golangci-lint` package.nix (pkgs/by-name/go/golangci-lint)
+        # is built via `buildGo124Module` — a builder HARDCODED to go1.24 as a
+        # named function argument, NOT derived from the top-level `pkgs.go`.
+        # (Confirmed by reading the package.nix source: `{ buildGo124Module,
+        # fetchFromGitHub, lib, installShellFiles }: buildGo124Module rec { ... }`.)
+        # golangci-lint v2 refuses to analyze a module whose go directive
+        # exceeds its own compile-time Go version ("the Go language version
+        # go1.24 used to build golangci-lint is lower than the targeted Go
+        # version 1.25.0"), and there is no .golangci.yml workaround: forcing
+        # a lower `run.go` just moves the failure into a go/types crash
+        # instead (file versions still propagate from go.mod). A `pkgs.extend`
+        # overlay that replaces the global `go` attribute does NOT fix this —
+        # golangci-lint's build never references `pkgs.go`. Fix: override the
+        # specific `buildGo124Module` argument it takes with a go1.25-based
+        # module builder. `vendorHash` only hashes vendored Go source, so it
+        # is unaffected by the compiler swap. Drop this override once nixpkgs
+        # packages `golangci-lint` against go1.25+ itself.
+        golangciLint = pkgs.golangci-lint.override {
+          buildGo124Module = pkgs.buildGoModule.override { go = goToolchain; };
+        };
 
         # The pinned toolchain — one list, mirrored by the Makefile's install
         # hints. Every tool the fail-closed Makefile requires lives here.
         toolchain = [
           goToolchain
-          pkgs.golangci-lint            # @validate: lint
+          golangciLint                  # @validate: lint (rebuilt with goToolchain, see above)
           pkgs.sqlc                     # @codegen: sqlc generate
           pkgs.oapi-codegen             # @codegen: OpenAPI -> Go stubs
           pkgs.buf                      # @codegen/@validate: proto gen + lint
-          pkgs.golang-migrate           # @db-migrate: schema migrations (`migrate`)
+          pkgs.go-migrate               # @db-migrate: schema migrations (`migrate`) — nixpkgs renamed golang-migrate -> go-migrate
           pkgs.k6                       # @load-test: hot-path load tests
           pkgs.nodejs                   # web codegen runtime (also Node>=20.19 for openspec)
           pkgs.pnpm                     # @codegen: pnpm codegen (web client)
-          pkgs.spectral-cli             # @validate: spectral lint (OpenAPI) — provides `spectral`
+          pkgs.python3                  # @docs: docs-check scripts (check-design-refs / check-doc-links)
         ];
 
         # OPTIONAL, resilient tools — on PATH when the channel provides them,
@@ -55,17 +78,23 @@
         # `or null` fallback and filter it out when absent (see comment below).
         optionalTools = builtins.filter (p: p != null) [
           (pkgs.openspec or null)       # @openspec: spec-driven dev — provides `openspec` (validate --strict)
+          (pkgs.spectral-cli or null)   # spectral OpenAPI linter — REMOVED from nixpkgs; pinned via npx in CI (see below)
         ];
       in
       {
         devShells.default = pkgs.mkShell {
           buildInputs = toolchain ++ optionalTools;
 
-          # spectral (@stoplight/spectral-cli) is pinned via `pkgs.spectral-cli`
-          # above (it provides the `spectral` binary), so it is on PATH inside
-          # `nix develop` and the agent-check `spectral` step actually runs. If a
-          # future nixpkgs channel drops or renames `spectral-cli`, fix it there
-          # (the single place) — do not fall back to an on-demand npm install.
+          # spectral (@stoplight/spectral-cli) was REMOVED from nixpkgs (it is no
+          # longer available as a Nix package on any channel, incl. unstable), so
+          # it can no longer be pinned into this shell. It is now pinned OPTIONALLY
+          # via `(pkgs.spectral-cli or null)` in `optionalTools` above (present
+          # only if a future channel re-adds it), and the `spectral` binary is NOT
+          # guaranteed on PATH inside `nix develop`. Instead the OpenAPI spec-lint
+          # runs as a dedicated CI-side step via `npx @stoplight/spectral-cli@6.16.1`
+          # (see .github/workflows/ci.yml), and `make validate` uses the same
+          # version-pinned npx invocation locally — so the command is identical in
+          # both places even though it is no longer part of the pinned shell.
           #
           # openspec (@fission-ai/openspec) is pinned OPTIONALLY via
           # `(pkgs.openspec or null)` in `optionalTools` above — it may not exist
