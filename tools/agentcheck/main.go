@@ -46,11 +46,18 @@ type check struct {
 // suite is the ordered, exhaustive list of checks. Order is cheap→broad. The
 // invariants meta-test is listed explicitly even though `go test ./...` also
 // covers it — an agent reading the report should see it called out by name. The
-// lint checks (golangci-lint, spectral, buf lint) come before the docs checks;
-// they need the pinned toolchain (flake.nix, F3), and a missing tool is
-// classified as `error` by run() — never a silent pass (fail-closed; no SOFT
-// escape here). The docs integrity checks (docs-design-refs, docs-links) run
-// last; they are fast Python scripts with no git-history dependency.
+// lint checks (golangci-lint, buf lint) come before the docs checks; they need
+// the pinned toolchain (flake.nix, F3), and a missing tool is classified as
+// `error` by run() — never a silent pass (fail-closed; no SOFT escape here). The
+// docs integrity checks (docs-design-refs, docs-links) run last; they are fast
+// Python scripts with no git-history dependency.
+//
+// NOTE: spectral (OpenAPI spec-lint) is intentionally NOT in this suite. nixpkgs
+// removed the `spectral-cli` package, so it can no longer be guaranteed present
+// inside `nix develop`; leaving it here would make it a permanent `error` (a
+// missing tool is never a silent pass). It now runs as a dedicated CI-side step
+// via `npx @stoplight/spectral-cli@6.16.1` (see .github/workflows/ci.yml), the
+// same version-pinned command `make validate` uses locally.
 var suite = []check{
 	{name: "gofmt", argv: []string{"gofmt", "-l", "."}, special: true},
 	{name: "build", argv: []string{"go", "build", "./..."}},
@@ -59,7 +66,6 @@ var suite = []check{
 	{name: "invariants", argv: []string{"go", "test", "./invariants/..."}},
 	{name: "piifields", argv: []string{"go", "run", "./tools/lint/piifields", "./..."}},
 	{name: "golangci-lint", argv: []string{"golangci-lint", "run"}},
-	{name: "spectral", argv: []string{"spectral", "lint", "api/openapi/**/*.yaml"}},
 	{name: "buf-lint", argv: []string{"buf", "lint"}},
 	// Docs integrity checks (python3, no git-history dependency — same as the
 	// checks above). Two separate entries give granular pass|fail per concern.

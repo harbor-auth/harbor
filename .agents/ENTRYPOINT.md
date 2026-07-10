@@ -8,7 +8,7 @@
 make agent-check
 ```
 
-`make agent-check` is the **single source of truth** for "is it green?". It runs the full check suite (gofmt · build · vet · tests · invariants meta-test · PII-in-telemetry analyzer · golangci-lint · spectral · buf lint · docs-design-refs · docs-links), **fails closed** on any missing tool, and emits a structured verdict to `check-results.json` (Foundation F6). The verdict is identical locally and in CI. Because it now runs the pinned linters, the verdict is authoritative only inside the pinned toolchain (`nix develop`); codegen-drift runs in CI, not here, because it needs git history.
+`make agent-check` is the **single source of truth** for "is it green?". It runs the full check suite (gofmt · build · vet · tests · invariants meta-test · PII-in-telemetry analyzer · golangci-lint · buf lint · docs-design-refs · docs-links), **fails closed** on any missing tool, and emits a structured verdict to `check-results.json` (Foundation F6). The verdict is identical locally and in CI. Because it now runs the pinned linters, the verdict is authoritative only inside the pinned toolchain (`nix develop`); codegen-drift runs in CI, not here, because it needs git history. Spectral (OpenAPI spec-lint) also runs as a separate CI-side step via pinned npx — nixpkgs removed the package, so it can no longer run inside the pinned shell.
 
 - **Never** trust ad-hoc partial checks ("the one test I ran passed"). Run `make agent-check`.
 - **Never** set `SOFT=1` — that is a *human-only* local escape hatch for a missing tool. Agents and CI must always fail closed.

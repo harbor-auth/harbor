@@ -45,7 +45,6 @@
           pkgs.k6                       # @load-test: hot-path load tests
           pkgs.nodejs                   # web codegen runtime (also Node>=20.19 for openspec)
           pkgs.pnpm                     # @codegen: pnpm codegen (web client)
-          pkgs.spectral-cli             # @validate: spectral lint (OpenAPI) — provides `spectral`
           pkgs.python3                  # @docs: docs-check scripts (check-design-refs / check-doc-links)
         ];
 
@@ -56,17 +55,23 @@
         # `or null` fallback and filter it out when absent (see comment below).
         optionalTools = builtins.filter (p: p != null) [
           (pkgs.openspec or null)       # @openspec: spec-driven dev — provides `openspec` (validate --strict)
+          (pkgs.spectral-cli or null)   # spectral OpenAPI linter — REMOVED from nixpkgs; pinned via npx in CI (see below)
         ];
       in
       {
         devShells.default = pkgs.mkShell {
           buildInputs = toolchain ++ optionalTools;
 
-          # spectral (@stoplight/spectral-cli) is pinned via `pkgs.spectral-cli`
-          # above (it provides the `spectral` binary), so it is on PATH inside
-          # `nix develop` and the agent-check `spectral` step actually runs. If a
-          # future nixpkgs channel drops or renames `spectral-cli`, fix it there
-          # (the single place) — do not fall back to an on-demand npm install.
+          # spectral (@stoplight/spectral-cli) was REMOVED from nixpkgs (it is no
+          # longer available as a Nix package on any channel, incl. unstable), so
+          # it can no longer be pinned into this shell. It is now pinned OPTIONALLY
+          # via `(pkgs.spectral-cli or null)` in `optionalTools` above (present
+          # only if a future channel re-adds it), and the `spectral` binary is NOT
+          # guaranteed on PATH inside `nix develop`. Instead the OpenAPI spec-lint
+          # runs as a dedicated CI-side step via `npx @stoplight/spectral-cli@6.16.1`
+          # (see .github/workflows/ci.yml), and `make validate` uses the same
+          # version-pinned npx invocation locally — so the command is identical in
+          # both places even though it is no longer part of the pinned shell.
           #
           # openspec (@fission-ai/openspec) is pinned OPTIONALLY via
           # `(pkgs.openspec or null)` in `optionalTools` above — it may not exist

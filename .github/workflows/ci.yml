@@ -11,6 +11,13 @@
 # the git-history-free agent-check — and posts check-results.json as a sticky PR
 # comment so the outcome is legible at a glance.
 #
+# spectral (OpenAPI spec-lint) also runs as a dedicated CI-side step, but for a
+# different reason: nixpkgs REMOVED the `spectral-cli` package, so it can no
+# longer be pinned into the `nix develop` shell (and is therefore no longer in
+# the agent-check suite). CI runs it via `npx @stoplight/spectral-cli@6.16.1`
+# (exact-version-pinned, the runner's native Node); `make validate` uses the
+# identical command locally.
+#
 # The docs-integrity checks (docs-design-refs, docs-links) are part of the
 # agent-check suite itself (see tools/agentcheck/main.go) — they have no
 # git-history dependency — so they appear in check-results.json and need no
@@ -73,6 +80,15 @@ jobs:
         continue-on-error: true
         run: nix develop -c make generate-check
 
+      # spectral (OpenAPI spec-lint) runs here, OUTSIDE the pinned shell, because
+      # nixpkgs removed the `spectral-cli` package — it can no longer be pinned in
+      # flake.nix. Pinned to an exact version via npx (the runner's native Node)
+      # so it stays reproducible; `make validate` uses the identical command.
+      - name: Spec-lint OpenAPI (spectral)
+        id: spectral
+        continue-on-error: true
+        run: npx --yes @stoplight/spectral-cli@6.16.1 lint 'api/openapi/**/*.yaml'
+
       # Compose the full PR-comment body (outcome summary + the raw verdict) into
       # a file, so the sticky comment can include check-results.json verbatim —
       # Actions expressions can't read file contents inline.
@@ -86,6 +102,7 @@ jobs:
             echo "- tamper-check (F5): **${{ steps.tamper.outcome }}**"
             echo "- coverage-ratchet (F5): **${{ steps.coverage.outcome }}**"
             echo "- codegen-drift (F7): **${{ steps.drift.outcome }}**"
+            echo "- spec-lint/spectral: **${{ steps.spectral.outcome }}**"
             echo ''
             echo '<details><summary>check-results.json</summary>'
             echo ''
@@ -109,7 +126,8 @@ jobs:
           if [ "${{ steps.agentcheck.outcome }}" != "success" ] \
             || [ "${{ steps.tamper.outcome }}" != "success" ] \
             || [ "${{ steps.coverage.outcome }}" != "success" ] \
-            || [ "${{ steps.drift.outcome }}" != "success" ]; then
+            || [ "${{ steps.drift.outcome }}" != "success" ] \
+            || [ "${{ steps.spectral.outcome }}" != "success" ]; then
             echo "One or more checks failed (see the sticky comment / check-results.json)."
             exit 1
           fi

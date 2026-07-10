@@ -146,8 +146,10 @@ validate: ## Fast local checks: fmt, vet, lint, spec-lint, codegen-drift
 	@$(REQUIRE); if _require golangci-lint 'go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest (or: nix develop)'; then \
 		golangci-lint run; fi
 	@echo '==> validate: spec-lint'
-	@$(REQUIRE); if _require spectral 'npm i -g @stoplight/spectral-cli (or: nix develop)'; then \
-		spectral lint 'api/openapi/**/*.yaml'; fi
+	@# spectral-cli was removed from nixpkgs (can't be pinned in flake.nix), so we
+	@# run it via version-pinned npx — the SAME command CI uses (.github/workflows/ci.yml).
+	@$(REQUIRE); if _require npx 'https://nodejs.org (or: nix develop)'; then \
+		npx --yes @stoplight/spectral-cli@6.16.1 lint 'api/openapi/**/*.yaml'; fi
 	@$(REQUIRE); if _require buf 'go install github.com/bufbuild/buf/cmd/buf@latest (or: nix develop)'; then \
 		buf lint; fi
 	@echo '==> validate: codegen-drift'
