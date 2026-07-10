@@ -11,6 +11,11 @@
 # the git-history-free agent-check — and posts check-results.json as a sticky PR
 # comment so the outcome is legible at a glance.
 #
+# The docs-integrity checks (docs-design-refs, docs-links) are part of the
+# agent-check suite itself (see tools/agentcheck/main.go) — they have no
+# git-history dependency — so they appear in check-results.json and need no
+# separate CI step.
+#
 # A separate, Docker-enabled `e2e` job runs the composed OIDC conformance harness
 # (Foundation F8) via `nix develop -c make conformance` — the same §1.8 Stage-7
 # gate as local — exercising authorize→token→JWKS + the §11.7 negatives against a

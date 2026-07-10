@@ -46,6 +46,7 @@
           pkgs.nodejs                   # web codegen runtime (also Node>=20.19 for openspec)
           pkgs.pnpm                     # @codegen: pnpm codegen (web client)
           pkgs.spectral-cli             # @validate: spectral lint (OpenAPI) — provides `spectral`
+          pkgs.python3                  # @docs: docs-check scripts (check-design-refs / check-doc-links)
         ];
 
         # OPTIONAL, resilient tools — on PATH when the channel provides them,

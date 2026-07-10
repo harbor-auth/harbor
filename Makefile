@@ -7,6 +7,7 @@
 #   test / test-* .............. @go-test        (.agents/go-test.md)
 #   generate / generate-check .. @codegen        (.agents/codegen.md)
 #   validate ................... @validate       (.agents/validate.md)
+#   docs-check ................. @docs           (.agents/docs.md)
 #   migrate / migrate-* ........ @db-migrate     (.agents/db-migrate.md)
 #   conformance ................ @oidc-conformance (.agents/oidc-conformance.md)
 #   load-test .................. @load-test      (.agents/load-test.md)
@@ -64,7 +65,7 @@ COVERAGE_FLOOR ?= 75
 REQUIRE = _require() { if command -v "$$1" >/dev/null 2>&1; then return 0; fi; if [ -n "$(SOFT)" ]; then echo "  [SOFT] skipping $$1 (not installed — required)"; return 1; fi; echo "==> ERROR: $$1 not installed (required). Install: $$2. (human-only escape: SOFT=1 make <target>)"; exit 1; }
 
 .PHONY: help build build-static test test-race test-cover test-integration \
-        generate generate-check validate migrate migrate-down migrate-status \
+        generate generate-check validate docs-check migrate migrate-down migrate-status \
         conformance load-test agent-check tamper-check coverage-ratchet clean
 
 ## ---------------------------------------------------------------------------
@@ -151,6 +152,19 @@ validate: ## Fast local checks: fmt, vet, lint, spec-lint, codegen-drift
 		buf lint; fi
 	@echo '==> validate: codegen-drift'
 	@$(MAKE) generate-check
+
+## ---------------------------------------------------------------------------
+## Docs check (@docs reconcile) — design_refs integrity
+## ---------------------------------------------------------------------------
+
+docs-check: ## Validate docs integrity: design_refs resolve in DESIGN.md's § → file map + no broken relative links
+	@echo '==> docs-check: validating docs integrity (design_refs + relative links)'
+	@$(REQUIRE); if _require python3 'https://www.python.org/downloads/ (or: nix develop)'; then \
+		echo '  [1/2] design_refs resolve in DESIGN.md § → file map' && \
+		python3 tools/check-design-refs.py && \
+		echo '  [2/2] relative links resolve across the docs tree' && \
+		python3 tools/check-doc-links.py; \
+	fi
 
 ## ---------------------------------------------------------------------------
 ## Agent check (@validate + more) — the single trusted verdict (F6)

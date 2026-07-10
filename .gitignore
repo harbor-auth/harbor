@@ -1,7 +1,7 @@
 # Build output
 /bin/
-agentcheck
-testweakening
+/agentcheck
+/testweakening
 check-results.json
 
 # Test / coverage

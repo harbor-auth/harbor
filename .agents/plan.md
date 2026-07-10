@@ -25,10 +25,16 @@ Alongside each plan we author a **paired, formal OpenSpec change** (`openspec/ch
 
 ```
 docs/
+  README.md              # Plans table (index) lives here
+  DESIGN.md              # authoritative design — now an INDEX (§ → file map)
+  design/                # the design tree: focused files, each ≤ ~2,000 words
+    principles/  product/  protocol/  architecture/
+    security/  backend/  flows/  governance/  threat-model/
   plans/<slug>.md        # future-work plans
   _templates/plan.md
-  README.md              # Plans table (index) lives here
 ```
+
+**Resolving a DESIGN `§`:** DESIGN.md is an **index, not a monolith**. When a plan cites a `design_refs` like `§3.2`, open [`docs/DESIGN.md`](../docs/DESIGN.md), read the **`§ → file` map**, and navigate to the one file that owns that section (e.g. `§3.2` → `design/protocol/ppid.md`). Never assume the prose lives inline in `DESIGN.md`.
 
 ## Lifecycle
 
