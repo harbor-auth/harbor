@@ -1,18 +1,14 @@
 # Harbor — golangci-lint v2 configuration.
 #
-# run.go is pinned to "1.24" so that the golangci-lint binary in nixpkgs 25.05
-# (v2.1.6, compiled with go1.24) accepts the module. Without this, it reads
-# go.mod (`go 1.25.0`, required by grpc v1.82+, webauthn v0.17+, pgx v5.10+)
-# and aborts: "the Go language version (go1.24) used to build golangci-lint is
-# lower than the targeted Go version (1.25.0)". Setting run.go here bypasses
-# the go.mod read so the version check compares "1.24" against runtime go1.24 —
-# passes. Raise this to "1.25" when nixpkgs ships golangci-lint compiled with
-# go1.25 or later.
-#
 # modules-download-mode: mod avoids "go.mod: updates needed" errors when the
 # build cache is cold (golangci-lint runs `go list` internally).
+#
+# run.go is intentionally NOT set here. golangci-lint reads the go directive
+# from go.mod (currently go 1.25.0, required by grpc v1.82+, webauthn v0.17+,
+# pgx v5.10+) and configures the type-checker accordingly. nixpkgs 25.05 ships
+# golangci-lint v2.1.6 compiled with go1.25 (the channel default since the
+# 2026-01-02 revision), so go1.25 modules are handled natively.
 version: "2"
 
 run:
-  go: "1.24"
   modules-download-mode: mod
