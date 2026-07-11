@@ -32,9 +32,16 @@ func (s *Server) PostToken(w http.ResponseWriter, r *http.Request) {
 		RedirectURI:  r.PostFormValue("redirect_uri"),
 		ClientID:     r.PostFormValue("client_id"),
 		CodeVerifier: r.PostFormValue("code_verifier"),
+		RefreshToken: r.PostFormValue("refresh_token"),
 	}
 
-	tokens, terr := s.svc.Token(r.Context(), req)
+	var tokens *oidc.IssuedTokens
+	var terr *oidc.TokenError
+	if req.GrantType == "refresh_token" {
+		tokens, terr = s.svc.Refresh(r.Context(), req)
+	} else {
+		tokens, terr = s.svc.Token(r.Context(), req)
+	}
 	if terr != nil {
 		writeOAuthError(w, terr)
 		return
@@ -48,13 +55,19 @@ func writeTokenResponse(w http.ResponseWriter, t *oidc.IssuedTokens) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(openapi.TokenResponse{
+	resp := openapi.TokenResponse{
 		AccessToken: t.AccessToken,
 		TokenType:   t.TokenType,
 		ExpiresIn:   t.ExpiresIn,
 		IdToken:     t.IDToken,
 		Scope:       t.Scope,
-	})
+	}
+	if t.RefreshToken != "" {
+		resp.RefreshToken = &t.RefreshToken
+		v := t.RefreshExpiresIn
+		resp.RefreshExpiresIn = &v
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // writeOAuthError emits the OAuth error body at the error's HTTP status, with

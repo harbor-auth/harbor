@@ -18,6 +18,10 @@ type IssuedTokens struct {
 	TokenType   string
 	ExpiresIn   int // seconds
 	Scope       string
+
+	// RefreshToken is the opaque, rotating, one-time-use refresh token. It is
+	RefreshToken     string // populated only when offline_access is granted (DESIGN §3.5).
+	RefreshExpiresIn int    // refresh-token lifetime in seconds; 0 when no refresh token.
 }
 
 // TokenIssuer mints the access + ID tokens for a grant. Isolating it behind an

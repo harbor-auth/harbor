@@ -93,6 +93,9 @@ func main() {
 		// SCAFFOLD: in-memory grant store — swap for clients.NewDBGrantStore(db.New(pool))
 		// once DATABASE_URL wiring lands (docs/DESIGN.md §10, §11.3).
 		Grants: grantStore,
+		// SCAFFOLD: in-memory session store — swap for clients.NewDBSessionStore(db.New(pool))
+		// once DATABASE_URL wiring lands (docs/DESIGN.md §3.5, §10).
+		SessionStore: oidc.NewInMemorySessionStore(),
 	})
 
 	srv := oidcapi.New(oidcapi.Config{

@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,7 +20,7 @@ import (
 // the per-RP PPID (internal/identity). The stub below auto-approves a fixed demo
 // subject so /authorize is exercisable before that UI exists.
 type SessionResolver interface {
-	Resolve(ctx context.Context, client Client, scope string) (subject string, approved bool, err error)
+	Resolve(ctx context.Context, client Client, scope string) (subject, userID string, approved bool, err error)
 }
 
 // stubSessionResolver auto-approves a fixed subject. SCAFFOLD only.
@@ -30,8 +32,8 @@ func NewStubSessionResolver(subject string) SessionResolver {
 	return stubSessionResolver{subject: subject}
 }
 
-func (r stubSessionResolver) Resolve(_ context.Context, _ Client, _ string) (string, bool, error) {
-	return r.subject, true, nil
+func (r stubSessionResolver) Resolve(_ context.Context, _ Client, _ string) (string, string, bool, error) {
+	return r.subject, "", true, nil
 }
 
 // RevocationSink receives the theft signal when an authorization code is reused:
@@ -83,53 +85,59 @@ const defaultCodeTTL = 60 * time.Second
 // (a silent default would re-introduce the error-swallow the field is here
 // to prevent; see docs/design/principles/error-handling.md §1.11).
 type ServiceConfig struct {
-	Issuer      string
-	Clients     ClientRegistry
-	Codes       AuthCodeStore
-	Tokens      TokenIssuer
-	Sessions    SessionResolver
-	Grants      GrantStore // optional; defaults to noopGrantStore
-	Revocations RevocationSink
-	Logger      *slog.Logger
-	NewCode     func() (string, error)
-	Now         func() time.Time
-	CodeTTL     time.Duration
+	Issuer       string
+	Clients      ClientRegistry
+	Codes        AuthCodeStore
+	Tokens       TokenIssuer
+	Sessions     SessionResolver
+	SessionStore SessionStore // optional; defaults to noopSessionStore (no refresh tokens)
+	Grants       GrantStore   // optional; defaults to noopGrantStore
+	Revocations  RevocationSink
+	Logger       *slog.Logger
+	NewCode      func() (string, error)
+	Now          func() time.Time
+	CodeTTL      time.Duration
 }
 
 // Service coordinates the pure validators (authorize.go, token.go, pkce.go) with
 // the stores and issuer. It holds no per-request state and performs no HTTP —
 // the thin HTTP layer is internal/oidcapi.
 type Service struct {
-	issuer      string
-	clients     ClientRegistry
-	codes       AuthCodeStore
-	tokens      TokenIssuer
-	sessions    SessionResolver
-	grants      GrantStore
-	revocations RevocationSink
-	logger      *slog.Logger
-	newCode     func() (string, error)
-	now         func() time.Time
-	codeTTL     time.Duration
+	issuer       string
+	clients      ClientRegistry
+	codes        AuthCodeStore
+	tokens       TokenIssuer
+	sessions     SessionResolver
+	sessionStore SessionStore
+	grants       GrantStore
+	revocations  RevocationSink
+	logger       *slog.Logger
+	newCode      func() (string, error)
+	now          func() time.Time
+	codeTTL      time.Duration
 }
 
 // NewService builds a Service, applying defaults for the optional config fields.
 func NewService(cfg ServiceConfig) *Service {
 	svc := &Service{
-		issuer:      cfg.Issuer,
-		clients:     cfg.Clients,
-		codes:       cfg.Codes,
-		tokens:      cfg.Tokens,
-		sessions:    cfg.Sessions,
-		grants:      cfg.Grants,
-		revocations: cfg.Revocations,
-		logger:      cfg.Logger,
-		newCode:     cfg.NewCode,
-		now:         cfg.Now,
-		codeTTL:     cfg.CodeTTL,
+		issuer:       cfg.Issuer,
+		clients:      cfg.Clients,
+		codes:        cfg.Codes,
+		tokens:       cfg.Tokens,
+		sessions:     cfg.Sessions,
+		sessionStore: cfg.SessionStore,
+		grants:       cfg.Grants,
+		revocations:  cfg.Revocations,
+		logger:       cfg.Logger,
+		newCode:      cfg.NewCode,
+		now:          cfg.Now,
+		codeTTL:      cfg.CodeTTL,
 	}
 	if svc.grants == nil {
 		svc.grants = noopGrantStore{}
+	}
+	if svc.sessionStore == nil {
+		svc.sessionStore = noopSessionStore{}
 	}
 	if svc.revocations == nil {
 		svc.revocations = noopRevocationSink{}
@@ -174,7 +182,7 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (*Authori
 
 	// Login + consent (SCAFFOLD: auto-approves a demo subject). A real rejection
 	// here is access_denied, redirected back to the RP (docs/DESIGN.md §11.7).
-	subject, approved, err := s.sessions.Resolve(ctx, validated.Client, validated.Scope)
+	subject, userID, approved, err := s.sessions.Resolve(ctx, validated.Client, validated.Scope)
 	if err != nil {
 		return nil, redirectErr(ErrCodeServerError, "login could not be completed")
 	}
@@ -193,6 +201,7 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (*Authori
 		RedirectURI:         validated.RedirectURI,
 		Scope:               validated.Scope,
 		Subject:             subject,
+		UserID:              userID,
 		Nonce:               validated.Nonce,
 		CodeChallenge:       validated.CodeChallenge,
 		CodeChallengeMethod: validated.CodeChallengeMethod,
@@ -268,7 +277,152 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 	if err != nil {
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not issue tokens", Status: 500}
 	}
+
+	// Issue an opaque, rotating refresh token ONLY when offline_access was
+	// granted AND we captured a real user_id at consent time (docs/DESIGN.md
+	// §3.5). A refresh-token store or generation failure must NOT fail the token
+	// response — the access/ID tokens are already valid — but it is logged, never
+	// silently swallowed.
+	if scopeHasOfflineAccess(result.Code.Scope) && result.Code.UserID != "" {
+		s.issueRefreshToken(ctx, &tokens, result.Code)
+	}
 	return &tokens, nil
+}
+
+// issueRefreshToken mints an opaque refresh token, stores only its hash, and
+// (on success) attaches the plaintext + TTL to tokens. Best-effort: a failure is
+// logged and leaves tokens without a refresh token rather than failing the
+// whole exchange.
+func (s *Service) issueRefreshToken(ctx context.Context, tokens *IssuedTokens, code AuthCode) {
+	plaintext, hash, err := newOpaqueToken()
+	if err != nil {
+		s.logger.ErrorContext(ctx, "failed to generate refresh token", slog.Any("error", err))
+		return
+	}
+	sessionID, err := s.newCode()
+	if err != nil {
+		s.logger.ErrorContext(ctx, "failed to generate refresh session id", slog.Any("error", err))
+		return
+	}
+	rs := RefreshSession{
+		ID:        sessionID,
+		UserID:    code.UserID,
+		ClientID:  code.ClientID,
+		TokenHash: hash,
+		ExpiresAt: s.now().Add(defaultRefreshTTL),
+	}
+	if err := s.sessionStore.CreateSession(ctx, rs); err != nil {
+		s.logger.ErrorContext(ctx, "failed to store refresh session",
+			slog.String("client_id", code.ClientID),
+			slog.Any("error", err))
+		return
+	}
+	tokens.RefreshToken = encodeRefreshToken(plaintext)
+	tokens.RefreshExpiresIn = int(defaultRefreshTTL.Seconds())
+}
+
+// scopeHasOfflineAccess reports whether the space-delimited scope string
+// contains offline_access — the gate for issuing a refresh token (§3.5).
+func scopeHasOfflineAccess(scope string) bool {
+	for _, s := range strings.Fields(scope) {
+		if s == "offline_access" {
+			return true
+		}
+	}
+	return false
+}
+
+// Refresh rotates a refresh token (grant_type=refresh_token; docs/DESIGN.md
+// §3.5). The ordering mirrors the auth-code DoS/theft defense in Token():
+//
+//  1. Decode + hash the presented opaque token (never store/log the plaintext).
+//  2. Look it up. Unknown/expired -> invalid_grant. Already-revoked -> THEFT
+//     signal: revoke the whole (user, client) session family + invalid_grant.
+//  3. Validate client binding + expiry against the stored session.
+//  4. Rotate one-time: revoke old, create new (fresh opaque token), then mint a
+//     fresh access/ID token from the frozen grant.
+//
+// Reuse of a rotated token is caught in step 2 because RevokeSession tombstones
+// (rather than deletes) the old session.
+func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens, *TokenError) {
+	raw, err := decodeRefreshToken(req.RefreshToken)
+	if err != nil {
+		return nil, invalidGrant("refresh token is invalid")
+	}
+	hash := hashRefreshToken(raw)
+
+	session, err := s.sessionStore.GetSessionByTokenHash(ctx, hash)
+	if err != nil {
+		if errors.Is(err, ErrRefreshTokenRevoked) {
+			// A rotated (revoked) token was replayed: assume theft, revoke family.
+			s.signalRefreshReuse(ctx, session)
+		}
+		return nil, invalidGrant("refresh token is invalid")
+	}
+
+	if terr := ValidateRefreshParams(req, session, s.now()); terr != nil {
+		return nil, terr
+	}
+
+	// Rotate: revoke old + create new. In-memory best-effort; the DB store does
+	// this in one transaction (see docs/plans/refresh-token-rotation.md).
+	if err := s.sessionStore.RevokeSession(ctx, session.ID); err != nil {
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not rotate session", Status: 500}
+	}
+
+	newPlaintext, newHash, err := newOpaqueToken()
+	if err != nil {
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not generate refresh token", Status: 500}
+	}
+	newSessionID, err := s.newCode()
+	if err != nil {
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not generate session id", Status: 500}
+	}
+	newSession := RefreshSession{
+		ID:          newSessionID,
+		Region:      session.Region,
+		UserID:      session.UserID,
+		ClientID:    session.ClientID,
+		GrantID:     session.GrantID,
+		DeviceLabel: session.DeviceLabel,
+		TokenHash:   newHash,
+		ExpiresAt:   s.now().Add(defaultRefreshTTL),
+	}
+	if err := s.sessionStore.CreateSession(ctx, newSession); err != nil {
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not create new session", Status: 500}
+	}
+
+	// Recover the frozen PPID + scopes from the consent grant so the rotated
+	// tokens carry the same sub the RP already knows (§3.2).
+	grant, found, err := s.grants.FindGrant(ctx, session.UserID, session.ClientID)
+	if err != nil || !found {
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not recover grant for token issuance", Status: 500}
+	}
+
+	tokens, err := s.tokens.Issue(ctx, IssueParams{
+		Issuer:   s.issuer,
+		Subject:  grant.PairwiseSub,
+		ClientID: session.ClientID,
+		Scope:    strings.Join(grant.Scopes, " "),
+	})
+	if err != nil {
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not issue tokens", Status: 500}
+	}
+	tokens.RefreshToken = encodeRefreshToken(newPlaintext)
+	tokens.RefreshExpiresIn = int(defaultRefreshTTL.Seconds())
+	return &tokens, nil
+}
+
+// signalRefreshReuse fires the theft signal when a revoked refresh token is
+// replayed: it revokes every active session in the same (user, client) family
+// and logs the event. PII constraint (§6.5.7): only client_id + the error are
+// logged — never UserID, GrantID, or the token/hash.
+func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession) {
+	if err := s.sessionStore.RevokeSessionsByUserClient(ctx, session.UserID, session.ClientID); err != nil {
+		s.logger.ErrorContext(ctx, "refresh-family revocation failed after reuse detected",
+			slog.String("client_id", session.ClientID),
+			slog.Any("error", err))
+	}
 }
 
 // signalCodeReuse fires the theft signal when a code is presented twice: it

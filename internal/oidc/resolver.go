@@ -133,35 +133,35 @@ func NewPPIDSessionResolver(cfg PPIDSessionResolverConfig) *PPIDSessionResolver 
 //
 // The resolved sub flows unchanged through /authorize → code → /token into the
 // token's sub claim.
-func (r *PPIDSessionResolver) Resolve(ctx context.Context, client Client, scope string) (string, bool, error) {
+func (r *PPIDSessionResolver) Resolve(ctx context.Context, client Client, scope string) (string, string, bool, error) {
 	userID, err := r.auth.AuthenticatedUserID(ctx)
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 
 	us, err := r.loader.LoadUserSecret(ctx, userID)
 	if err != nil {
 		// Fail closed: never fall back to userID as the subject.
-		return "", false, err
+		return "", "", false, err
 	}
 
 	grant, found, err := r.grants.FindGrant(ctx, userID, client.ID)
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 	if found {
-		return grant.PairwiseSub, true, nil
+		return grant.PairwiseSub, userID, true, nil
 	}
 
 	// First consent: derive the PPID now. The sector_id groups the RP's redirect
 	// URIs for pairwise derivation (§3.2); without it we cannot produce a
 	// non-correlating sub, so we fail closed rather than guess.
 	if client.SectorID == "" {
-		return "", false, fmt.Errorf("session: client %q has no sector_id", client.ID)
+		return "", "", false, fmt.Errorf("session: client %q has no sector_id", client.ID)
 	}
 	sub, err := identity.DerivePPID(us.Secret, client.SectorID, userID)
 	if err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 
 	if _, err := r.grants.CreateGrant(ctx, NewGrant{
@@ -171,8 +171,8 @@ func (r *PPIDSessionResolver) Resolve(ctx context.Context, client Client, scope 
 		PairwiseSub: sub,
 		Scopes:      strings.Fields(scope),
 	}); err != nil {
-		return "", false, err
+		return "", "", false, err
 	}
 
-	return sub, true, nil
+	return sub, userID, true, nil
 }
