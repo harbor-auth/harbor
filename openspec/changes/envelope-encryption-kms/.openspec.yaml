@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-07-10
+goal: "Implement internal/crypto envelope encryption: DEK generation, KEK
+  wrapping via regional KMS, crypto-shred erasure primitive"

@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-07-10
+goal: Replace the insecure dev-only user_id path with a real enrollment flow per
+  DESIGN §11.1
