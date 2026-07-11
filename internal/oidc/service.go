@@ -88,6 +88,7 @@ type ServiceConfig struct {
 	Codes       AuthCodeStore
 	Tokens      TokenIssuer
 	Sessions    SessionResolver
+	Grants      GrantStore // optional; defaults to noopGrantStore
 	Revocations RevocationSink
 	Logger      *slog.Logger
 	NewCode     func() (string, error)
@@ -104,6 +105,7 @@ type Service struct {
 	codes       AuthCodeStore
 	tokens      TokenIssuer
 	sessions    SessionResolver
+	grants      GrantStore
 	revocations RevocationSink
 	logger      *slog.Logger
 	newCode     func() (string, error)
@@ -119,11 +121,15 @@ func NewService(cfg ServiceConfig) *Service {
 		codes:       cfg.Codes,
 		tokens:      cfg.Tokens,
 		sessions:    cfg.Sessions,
+		grants:      cfg.Grants,
 		revocations: cfg.Revocations,
 		logger:      cfg.Logger,
 		newCode:     cfg.NewCode,
 		now:         cfg.Now,
 		codeTTL:     cfg.CodeTTL,
+	}
+	if svc.grants == nil {
+		svc.grants = noopGrantStore{}
 	}
 	if svc.revocations == nil {
 		svc.revocations = noopRevocationSink{}

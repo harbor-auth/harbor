@@ -25,6 +25,7 @@ type Querier interface {
 	// cleanup, off the hot path.
 	DeleteExpiredSessions(ctx context.Context) error
 	DeleteMFAFactor(ctx context.Context, id pgtype.UUID) error
+	FindGrantByUserClient(ctx context.Context, arg FindGrantByUserClientParams) (Grant, error)
 	// GetActiveSession returns a session ONLY when it is still usable — not revoked
 	// and not expired. Auth flows (refresh-token rotation; DESIGN §3.5) MUST use
 	// this rather than GetSession, which returns revoked/expired rows for
@@ -41,6 +42,10 @@ type Querier interface {
 	// codes; DESIGN §10). The query IS the contract (DESIGN §1.3): `sqlc generate`
 	// (via @codegen) produces typed Go — never hand-write DB types.
 	GetMFAFactor(ctx context.Context, id pgtype.UUID) (MfaFactor, error)
+	// Queries for the relying_parties table (RP/client registry; DESIGN §10, §3.2).
+	// The query IS the contract (DESIGN §1.3): `sqlc generate` (via @codegen)
+	// produces typed Go — never hand-write DB types.
+	GetRelyingParty(ctx context.Context, clientID string) (RelyingParty, error)
 	// Queries for the sessions table (opaque, rotating, one-time-use refresh
 	// tokens; DESIGN §3.5, §10). The query IS the contract (DESIGN §1.3):
 	// `sqlc generate` (via @codegen) produces typed Go — never hand-write DB types.
@@ -51,6 +56,7 @@ type Querier interface {
 	ListCredentialsByUser(ctx context.Context, userID pgtype.UUID) ([]Credential, error)
 	ListGrantsByUser(ctx context.Context, userID pgtype.UUID) ([]Grant, error)
 	ListMFAFactorsByUser(ctx context.Context, userID pgtype.UUID) ([]MfaFactor, error)
+	ListRelyingParties(ctx context.Context) ([]RelyingParty, error)
 	ListSessionsByUser(ctx context.Context, userID pgtype.UUID) ([]Session, error)
 	// MarkMFAFactorUsed burns a one-time factor (e.g. a recovery code) so it can't
 	// be replayed. Only flips unused → used, so a double-spend is a no-op.
@@ -66,6 +72,7 @@ type Querier interface {
 	// update strictly increasing: an equal or regressed counter is a clone signal
 	// and is a no-op here (the caller treats zero rows affected as a failure).
 	UpdateCredentialSignCount(ctx context.Context, arg UpdateCredentialSignCountParams) error
+	UpsertRelyingParty(ctx context.Context, arg UpsertRelyingPartyParams) (RelyingParty, error)
 }
 
 var _ Querier = (*Queries)(nil)
