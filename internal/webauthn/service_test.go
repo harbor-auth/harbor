@@ -98,3 +98,90 @@ func TestService_FinishLogin_NoSession(t *testing.T) {
 		t.Fatalf("err = %v, want ErrSessionNotFound", err)
 	}
 }
+
+func TestService_FinishLogin_UnknownUser(t *testing.T) {
+	svc, _ := newTestService(t)
+	_, err := svc.FinishLogin(context.Background(), []byte("nobody"), "some-key", strings.NewReader("{}"))
+	if !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("err = %v, want ErrUserNotFound", err)
+	}
+}
+
+func TestService_FinishLogin_InvalidBody(t *testing.T) {
+	// Create a service with a user that has credentials.
+	store := NewInMemoryStore()
+	cred := gowebauthn.Credential{ID: []byte("cred-1"), PublicKey: []byte("pk")}
+	store.PutUser(NewUser([]byte("demo-user"), "demo@harbor.local", "Demo", []gowebauthn.Credential{cred}))
+	sessions := NewInMemorySessionStore()
+	svc, err := NewService(testConfig(), store, sessions)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	// Start a login ceremony to get a valid session.
+	_, sessionKey, err := svc.BeginLogin(context.Background(), []byte("demo-user"))
+	if err != nil {
+		t.Fatalf("BeginLogin: %v", err)
+	}
+
+	// Try to finish with invalid JSON body.
+	_, err = svc.FinishLogin(context.Background(), []byte("demo-user"), sessionKey, strings.NewReader("not-json"))
+	if err == nil {
+		t.Fatal("expected error for invalid body, got nil")
+	}
+}
+
+func TestService_FinishLogin_MalformedAssertion(t *testing.T) {
+	// Create a service with a user that has credentials.
+	store := NewInMemoryStore()
+	cred := gowebauthn.Credential{ID: []byte("cred-1"), PublicKey: []byte("pk")}
+	store.PutUser(NewUser([]byte("demo-user"), "demo@harbor.local", "Demo", []gowebauthn.Credential{cred}))
+	sessions := NewInMemorySessionStore()
+	svc, err := NewService(testConfig(), store, sessions)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	// Start a login ceremony to get a valid session.
+	_, sessionKey, err := svc.BeginLogin(context.Background(), []byte("demo-user"))
+	if err != nil {
+		t.Fatalf("BeginLogin: %v", err)
+	}
+
+	// Try to finish with valid JSON but incomplete/malformed assertion response.
+	// This should fail validation in the WebAuthn library.
+	_, err = svc.FinishLogin(context.Background(), []byte("demo-user"), sessionKey, strings.NewReader(`{"id":"bad","rawId":"bad","type":"public-key","response":{}}`))
+	if err == nil {
+		t.Fatal("expected error for malformed assertion, got nil")
+	}
+}
+
+func TestService_FinishRegistration_UnknownUser(t *testing.T) {
+	svc, _ := newTestService(t)
+	_, err := svc.FinishRegistration(context.Background(), []byte("nobody"), "some-key", strings.NewReader("{}"))
+	if !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("err = %v, want ErrUserNotFound", err)
+	}
+}
+
+func TestService_FinishRegistration_InvalidBody(t *testing.T) {
+	store := NewInMemoryStore()
+	store.PutUser(NewUser([]byte("demo-user"), "demo@harbor.local", "Demo", nil))
+	sessions := NewInMemorySessionStore()
+	svc, err := NewService(testConfig(), store, sessions)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	// Start a registration ceremony to get a valid session.
+	_, sessionKey, err := svc.BeginRegistration(context.Background(), []byte("demo-user"))
+	if err != nil {
+		t.Fatalf("BeginRegistration: %v", err)
+	}
+
+	// Try to finish with invalid JSON body.
+	_, err = svc.FinishRegistration(context.Background(), []byte("demo-user"), sessionKey, strings.NewReader("not-json"))
+	if err == nil {
+		t.Fatal("expected error for invalid body, got nil")
+	}
+}

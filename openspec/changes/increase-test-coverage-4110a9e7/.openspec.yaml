@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-07-11
+goal: Increase test coverage across all internal packages to 80%+ through targeted
+  error path and edge case tests

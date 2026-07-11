@@ -3,6 +3,7 @@ package crypto
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -189,6 +190,168 @@ func TestDecryptFailClosed(t *testing.T) {
 		got, err := c.Decrypt(dek, nil, aad)
 		assertFail(t, "nil ct", got, err)
 	})
+}
+
+// --- Corrupted ciphertext tests ---
+
+// TestDecryptCorruptedGCMTag verifies that corrupting ANY byte of the GCM tag
+// returns ErrDecryptFailed with nil plaintext (no partial output).
+//
+//harbor:invariant INV-DEK-FAIL-CLOSED
+func TestDecryptCorruptedGCMTag(t *testing.T) {
+	dek, err := GenerateDEK()
+	if err != nil {
+		t.Fatalf("GenerateDEK: %v", err)
+	}
+	c := NewCipher()
+	plaintext := []byte("sensitive data that must not leak")
+	aad := []byte("context")
+	ct, err := c.Encrypt(dek, plaintext, aad)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+
+	// GCM tag is the last 16 bytes of the ciphertext.
+	tagStart := len(ct) - 16
+
+	// Corrupt each byte of the GCM tag and verify decryption fails with nil plaintext.
+	for i := 0; i < 16; i++ {
+		t.Run(fmt.Sprintf("tag byte %d", i), func(t *testing.T) {
+			corrupted := append([]byte(nil), ct...)
+			corrupted[tagStart+i] ^= 0xff
+			got, err := c.Decrypt(dek, corrupted, aad)
+			if !errors.Is(err, ErrDecryptFailed) {
+				t.Errorf("corrupted tag byte %d: error = %v, want ErrDecryptFailed", i, err)
+			}
+			if got != nil {
+				t.Errorf("corrupted tag byte %d: plaintext must be nil, got %x", i, got)
+			}
+		})
+	}
+}
+
+// TestDecryptCorruptedCiphertextBody verifies that corrupting the ciphertext body
+// (between nonce and tag) returns ErrDecryptFailed with nil plaintext.
+//
+//harbor:invariant INV-DEK-FAIL-CLOSED
+func TestDecryptCorruptedCiphertextBody(t *testing.T) {
+	dek, err := GenerateDEK()
+	if err != nil {
+		t.Fatalf("GenerateDEK: %v", err)
+	}
+	c := NewCipher()
+	plaintext := []byte("this is longer plaintext to have a body to corrupt")
+	aad := []byte("aad")
+	ct, err := c.Encrypt(dek, plaintext, aad)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+
+	// Body is between nonce (first 12 bytes) and tag (last 16 bytes).
+	bodyStart := gcmNonceSize
+	bodyEnd := len(ct) - 16
+
+	// Corrupt a few bytes in the body.
+	for _, offset := range []int{0, (bodyEnd - bodyStart) / 2, bodyEnd - bodyStart - 1} {
+		t.Run(fmt.Sprintf("body offset %d", offset), func(t *testing.T) {
+			corrupted := append([]byte(nil), ct...)
+			corrupted[bodyStart+offset] ^= 0xff
+			got, err := c.Decrypt(dek, corrupted, aad)
+			if !errors.Is(err, ErrDecryptFailed) {
+				t.Errorf("corrupted body offset %d: error = %v, want ErrDecryptFailed", offset, err)
+			}
+			if got != nil {
+				t.Errorf("corrupted body offset %d: plaintext must be nil, got %x", offset, got)
+			}
+		})
+	}
+}
+
+// TestDecryptTruncatedCiphertext verifies that truncating the ciphertext at various
+// points returns ErrDecryptFailed with nil plaintext.
+//
+//harbor:invariant INV-DEK-FAIL-CLOSED
+func TestDecryptTruncatedCiphertext(t *testing.T) {
+	dek, err := GenerateDEK()
+	if err != nil {
+		t.Fatalf("GenerateDEK: %v", err)
+	}
+	c := NewCipher()
+	plaintext := []byte("truncation test data")
+	aad := []byte("aad")
+	ct, err := c.Encrypt(dek, plaintext, aad)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+
+	// Try various truncation lengths.
+	truncations := []int{0, 1, gcmNonceSize - 1, gcmNonceSize, minCipherLen - 1, len(ct) - 1}
+	for _, truncLen := range truncations {
+		if truncLen < 0 || truncLen >= len(ct) {
+			continue
+		}
+		t.Run(fmt.Sprintf("truncate to %d bytes", truncLen), func(t *testing.T) {
+			truncated := ct[:truncLen]
+			got, err := c.Decrypt(dek, truncated, aad)
+			if !errors.Is(err, ErrDecryptFailed) {
+				t.Errorf("truncated to %d: error = %v, want ErrDecryptFailed", truncLen, err)
+			}
+			if got != nil {
+				t.Errorf("truncated to %d: plaintext must be nil, got %x", truncLen, got)
+			}
+		})
+	}
+}
+
+// TestDecryptExtendedCiphertext verifies that appending garbage bytes to valid
+// ciphertext returns ErrDecryptFailed with nil plaintext (tag verification fails
+// because the extra bytes alter the authenticated data).
+//
+//harbor:invariant INV-DEK-FAIL-CLOSED
+func TestDecryptExtendedCiphertext(t *testing.T) {
+	dek, err := GenerateDEK()
+	if err != nil {
+		t.Fatalf("GenerateDEK: %v", err)
+	}
+	c := NewCipher()
+	plaintext := []byte("extend test")
+	aad := []byte("aad")
+	ct, err := c.Encrypt(dek, plaintext, aad)
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+
+	// Append garbage bytes.
+	extended := append(ct, 0x00, 0x01, 0x02, 0x03)
+	got, err := c.Decrypt(dek, extended, aad)
+	if !errors.Is(err, ErrDecryptFailed) {
+		t.Errorf("extended ciphertext: error = %v, want ErrDecryptFailed", err)
+	}
+	if got != nil {
+		t.Errorf("extended ciphertext: plaintext must be nil, got %x", got)
+	}
+}
+
+// TestDecryptAllZeroCiphertext verifies that an all-zero ciphertext (of valid length)
+// returns ErrDecryptFailed with nil plaintext.
+//
+//harbor:invariant INV-DEK-FAIL-CLOSED
+func TestDecryptAllZeroCiphertext(t *testing.T) {
+	dek, err := GenerateDEK()
+	if err != nil {
+		t.Fatalf("GenerateDEK: %v", err)
+	}
+	c := NewCipher()
+
+	// Create a ciphertext of valid length but all zeros.
+	allZeros := make([]byte, minCipherLen+10)
+	got, err := c.Decrypt(dek, allZeros, nil)
+	if !errors.Is(err, ErrDecryptFailed) {
+		t.Errorf("all-zero ciphertext: error = %v, want ErrDecryptFailed", err)
+	}
+	if got != nil {
+		t.Errorf("all-zero ciphertext: plaintext must be nil, got %x", got)
+	}
 }
 
 // TestDecryptGoldenVector verifies round-trip correctness with a deterministic
