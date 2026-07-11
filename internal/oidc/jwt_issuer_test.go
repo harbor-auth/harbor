@@ -67,7 +67,7 @@ type errorSigner struct{ err error }
 
 func (e errorSigner) Sign(_ []byte) ([]byte, error) { return nil, e.err }
 func (e errorSigner) KeyID() string                 { return "test-kid" }
-func (e errorSigner) PublicJWK() crypto.JWK          { return crypto.JWK{} }
+func (e errorSigner) PublicJWK() crypto.JWK         { return crypto.JWK{} }
 
 //harbor:invariant INV-JWT-SUB-IS-PPID
 func TestJWTIssuerSubIsPPID(t *testing.T) {
@@ -351,12 +351,12 @@ func fixedGoldenKey(t *testing.T, dHex string) *ecdsa.PrivateKey {
 }
 
 type jwtGoldenVectors struct {
-	FixedKeyDHex       string `json:"fixed_key_d_hex"`
-	ExpectedKid        string `json:"expected_kid"`
-	ExpectedX          string `json:"expected_x"`
-	ExpectedY          string `json:"expected_y"`
-	IDTokenHeaderB64   string `json:"id_token_header_b64"`
-	IDTokenPayloadB64  string `json:"id_token_payload_b64"`
+	FixedKeyDHex        string `json:"fixed_key_d_hex"`
+	ExpectedKid         string `json:"expected_kid"`
+	ExpectedX           string `json:"expected_x"`
+	ExpectedY           string `json:"expected_y"`
+	IDTokenHeaderB64    string `json:"id_token_header_b64"`
+	IDTokenPayloadB64   string `json:"id_token_payload_b64"`
 	FrozenSignedIDToken string `json:"frozen_signed_id_token"`
 }
 

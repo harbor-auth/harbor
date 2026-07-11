@@ -11,7 +11,7 @@ import (
 // stay free of I/O.
 type Client struct {
 	ID            string
-	SectorID      string   // groups redirect URIs for PPID derivation (DESIGN §3.2)
+	SectorID      string // groups redirect URIs for PPID derivation (DESIGN §3.2)
 	RedirectURIs  []string
 	ScopesAllowed []string
 }

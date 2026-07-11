@@ -119,7 +119,7 @@ type noopUserPersister struct {
 
 func (p *noopUserPersister) PersistUser(_ context.Context, r identity.UserRecord) error {
 	p.logger.Warn("enrollment scaffold: PersistUser is a no-op (DATABASE_URL not wired)",
-		"user_id", r.ID, "region", r.Region)
+		"region", r.Region)
 	return nil
 }
 
