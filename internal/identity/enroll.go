@@ -48,10 +48,12 @@ func NewEnroller(keys crypto.KeyProvider, cipher crypto.Encryptor, persist UserP
 	return &Enroller{keys: keys, cipher: cipher, persist: persist}
 }
 
-// pairwiseSecretAAD binds the encrypted pairwise secret to a specific user ID,
+// PairwiseSecretAAD binds the encrypted pairwise secret to a specific user ID,
 // so a blob created for user A cannot pass GCM authentication when opened as
-// user B (docs/DESIGN.md §4.4).
-func pairwiseSecretAAD(userID string) []byte {
+// user B (docs/DESIGN.md §4.4). It is exported so the decryption path
+// (internal/clients.DBSecretLoader) can reproduce the exact AAD used at
+// enrollment time.
+func PairwiseSecretAAD(userID string) []byte {
 	return []byte("harbor-pairwise-v1:" + userID)
 }
 
@@ -87,7 +89,7 @@ func (e *Enroller) Enroll(ctx context.Context, rawRegion string) (EnrollResult, 
 		return EnrollResult{}, fmt.Errorf("identity: wrap DEK: %w", err)
 	}
 
-	encPS, err := e.cipher.Encrypt(dek, rawPS, pairwiseSecretAAD(userID))
+	encPS, err := e.cipher.Encrypt(dek, rawPS, PairwiseSecretAAD(userID))
 	if err != nil {
 		return EnrollResult{}, fmt.Errorf("identity: encrypt pairwise secret: %w", err)
 	}
