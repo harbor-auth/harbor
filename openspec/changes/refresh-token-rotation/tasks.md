@@ -7,6 +7,8 @@
 
 ## Implementation
 
+- [ ] Add `GetSessionByTokenHash :one` to `db/queries/sessions.sql` (SELECT by `refresh_token_hash` where not revoked and not expired); run `make codegen` to regenerate sqlc types.
+- [ ] Add `client_id` column to `sessions` table via a new expand-only migration (`0003_sessions_client_id.up.sql` / `.down.sql`); regenerate sqlc types. (Required for the `Session.ClientID` field and future (user, client) scoped revocation.)
 - [ ] `internal/oidc/refresh.go`: refresh grant handling + rotation + reuse-detection; `SessionStore` interface.
 - [ ] `internal/clients/sessions.go`: sqlc-backed `SessionStore` over `sessions.sql`.
 - [ ] `api/openapi/harbor.yaml`: add `refresh_token` + `refresh_token_expires_in` to token response; add `grant_type=refresh_token` to token endpoint; regenerate `internal/gen/openapi`.

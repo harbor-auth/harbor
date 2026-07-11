@@ -35,11 +35,11 @@ docs/plans/         → future WHAT — intent not yet built
 | Plan | Status | DESIGN § | Promotes to |
 |---|---|---|---|
 | [envelope-encryption-kms](plans/envelope-encryption-kms.md) | draft | §4.4, §7.3, §10 | `internal/crypto/` |
-| [real-token-issuance](plans/real-token-issuance.md) | draft | §3.3, §3.4, §7.3 | `internal/crypto/`, `internal/oidc/` |
-| [client-grant-persistence](plans/client-grant-persistence.md) | draft | §3.2, §10 | `internal/oidc/`, `db/queries/` |
+| [real-token-issuance](plans/real-token-issuance.md) | draft | §3.3, §3.4, §7.3 | `internal/crypto/`, `internal/oidc/`, `api/openapi/harbor.yaml` |
+| [client-grant-persistence](plans/client-grant-persistence.md) | draft | §3.2, §10 | `internal/oidc/`, `internal/clients/`, `db/queries/` |
 | [user-enrollment](plans/user-enrollment.md) | draft | §11.1, §10, §4.4 | `internal/identity/`, `internal/webauthn/` |
 | [session-ppid-seam](plans/session-ppid-seam.md) | draft | §3.2, §11.2 | `internal/oidc/`, `internal/identity/` |
-| [refresh-token-rotation](plans/refresh-token-rotation.md) | draft | §3.5, §10 | `internal/oidc/`, `db/queries/` |
+| [refresh-token-rotation](plans/refresh-token-rotation.md) | draft | §3.5, §10 | `internal/oidc/`, `internal/clients/`, `db/queries/` |
 
 > A plan appears here until it's implemented, then **`@plan promote`** moves its row into the **Features** table above. Author the next one with **`@plan new <slug>`**.
 

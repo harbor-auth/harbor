@@ -69,6 +69,12 @@ Decryption MUST fail closed. Any GCM authentication-tag mismatch or malformed in
 **When** `Decrypt` is called  
 **Then** an error is returned (fail-closed) with no partial output
 
+#### Scenario: Tampered AAD is rejected
+
+**Given** a valid ciphertext encrypted with AAD value X  
+**When** `Decrypt` is called with a different AAD value Y (≠ X)  
+**Then** an error is returned and no plaintext is emitted (GCM authentication covers AAD)
+
 ### Requirement: REQ-003 KeyProvider wrap/unwrap boundary
 
 The system SHALL enforce the KeyProvider wrap/unwrap boundary.
@@ -102,6 +108,12 @@ type KeyProvider interface {
 **When** the DEK is stored  
 **Then** only `WrapDEK` output is written to `users.dek_wrapped` and no plaintext DEK persists
 
+#### Scenario: Crypto-shred via dek_wrapped deletion
+
+**Given** data encrypted under a DEK whose `dek_wrapped` is stored in `users.dek_wrapped`  
+**When** `dek_wrapped` is destroyed (§11.6 erasure)  
+**Then** all data encrypted under that DEK is permanently unrecoverable, because the KEK-unwrapped DEK cannot be recovered without `dek_wrapped`
+
 ### Requirement: REQ-004 Key provider implementations
 
 The system SHALL provide local and KMS key provider implementations.
@@ -116,9 +128,3 @@ The system MUST provide two implementations: `localKeyProvider` for dev/test and
 **Given** an empty environment secret  
 **When** `localKeyProvider` is constructed  
 **Then** construction fails loudly with an error
-
-#### Scenario: Crypto-shred renders data unrecoverable
-
-**Given** data encrypted under a DEK whose `dek_wrapped` is stored  
-**When** `dek_wrapped` is destroyed  
-**Then** all data encrypted under that DEK is permanently unrecoverable (§11.6)

@@ -20,16 +20,24 @@ reuse detection.
 **Alternatives considered:** Best-effort sequential revoke+create (partial
 failure modes, rejected).
 
-### Decision 3: Reuse signal = family revoke for that user<>RP
-**Chosen:** A revoked token being presented => `RevokeSessionsByUser` scoped to
-that (user, client) pairing.
-**Rationale:** Matches §3.5/§11.7 theft model: if the old token was replayed,
-either the client or a thief has it — revoke all sessions for that combination
-to force re-authentication. Mirrors the auth-code-reuse signal in `service.go`.
-**Alternatives considered:** Revoke all of the user's sessions (too broad;
-"log out everywhere" should be a deliberate user action, not an automatic
-response to any single RP's theft); no revoke (leaves the thief with an active
-session, rejected).
+### Decision 3: Reuse signal = full-user session revoke (not scoped to RP)
+**Chosen:** A revoked token being presented => `RevokeSessionsByUser(userID)` —
+revokes ALL sessions for the user, not just the current client.
+**Rationale:** §3.5/§11.7 theft model: if a refresh token is replayed, the
+user's credential set is considered compromised. Scoping revocation to a single
+(user, client) pair would require a `client_id` column on the sessions table
+(not present in the current schema). Full-user revocation is the safe,
+conservative choice that matches the "sign out everywhere" guarantee a user
+expects when their session is stolen. Mirrors the auth-code-reuse signal in
+`service.go`.
+**Trade-off accepted:** A theft signal from one RP revokes all sessions,
+including other RPs. This is intentional — in a theft scenario, we prefer
+disrupting the user over leaving the thief with active sessions. The user can
+immediately re-authenticate.
+**Alternatives considered:** (user, client) scoped revocation — requires adding
+`client_id` to the sessions table + a new `RevokeSessionsByUserAndClient` query;
+deferred as a follow-up if the UX trade-off is deemed too broad. No revoke
+(leaves the thief with an active session — rejected).
 
 ### Decision 4: `SessionStore` as a new seam over existing sqlc queries
 **Chosen:** Add `oidc.SessionStore` backed by `sessions.sql`; no new queries.

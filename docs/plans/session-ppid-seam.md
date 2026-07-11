@@ -12,8 +12,9 @@ created: 2026-07-10
 
 > **Dependency order:** depends on **`user-enrollment`** (needs a real user with
 > a `pairwise_secret`), **`client-grant-persistence`** (needs the RP's
-> `sector_id` + a place to record consent), and ideally **`real-token-issuance`**
-> (so the resolved PPID is signed into a real token). Build after those.
+> `sector_id` + a place to record consent), and **`real-token-issuance`**
+> (so the resolved PPID is signed into a real ES256 token — required, not
+> optional). Build after those.
 
 ## Problem
 
@@ -35,12 +36,16 @@ login + consent step and derives the pairwise subject:
    `crypto`/`envelope-encryption-kms`).
 3. **Look up the RP's `sector_id`** from the DB-backed client registry
    (`client-grant-persistence`).
-4. **Derive the PPID**:
-   `sub = DerivePPID(pairwise_secret, sector_id, user_id)` — i.e.
-   `B64URL(HMAC-SHA256(pairwise_secret, sector_id ‖ user_id))` (§3.2).
-5. **Consent**: find-or-create the grant (`GrantStore`) recording that
-   `pairwise_sub`; skip the consent screen when the requested scopes are already
-   granted, else record new consent.
+4. **Resolve the pairwise subject via `GrantStore`** — look up the existing
+   consent grant for `(user_id, client_id)` via `GrantStore.FindGrant`.
+   - **Returning user (grant found):** read `grant.PairwiseSub` directly — no
+     PPID re-derivation needed (§3.2.3: the materialized `pairwise_sub` is
+     persisted in the `grants` table for cheap hot-path lookup).
+   - **First consent (no grant):** derive the PPID now:
+     `sub = DerivePPID(pairwise_secret, sector_id, user_id)` (§3.2), then
+     record the new grant via `GrantStore.CreateGrant` (storing `pairwise_sub`).
+5. **Consent**: skip the consent screen when the requested scopes are already
+   granted, else record new consent on the grant.
 6. Return `(sub, approved)` — the resolved PPID flows through the *unchanged*
    `/authorize` → code → `/token` path into the token's `sub` claim.
 
@@ -65,7 +70,7 @@ never invoked. Does **not** change `DESIGN.md`.
 
 - [ ] Real `SessionResolver` implementation over webauthn login + PPID + `GrantStore`.
 - [ ] Decrypt `pairwise_secret` via the user's DEK; never log it (§6.5.7).
-- [ ] Derive `sub` via `identity.DerivePPID(pairwise_secret, sector_id, user_id)`.
+- [ ] Find-or-create grant: on existing grant, read `grant.PairwiseSub` directly (§3.2.3); on new grant, derive via `identity.DerivePPID(pairwise_secret, sector_id, user_id)` and persist as `pairwise_sub`.
 - [ ] Find-or-create grant; scope-superset check to skip redundant consent.
 - [ ] Wire into `cmd/harbor-hot/main.go`; keep the stub for tests only.
 - [ ] Tests: **same user + same RP ⇒ stable `sub`**; **same user + different RP (sector) ⇒ different `sub`** (unlinkability, §3.2); consent recorded once; rejection ⇒ `access_denied`; `pairwise_secret` never appears in logs/tokens.

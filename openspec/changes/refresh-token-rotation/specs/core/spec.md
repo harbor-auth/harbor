@@ -27,6 +27,10 @@ type Session struct {
 }
 ```
 
+> **Implementation note:** The existing `GetActiveSession :one` in `sessions.sql` queries by session `id`, not by `refresh_token_hash`. The sqlc-backed implementation MUST add a new query `GetSessionByTokenHash :one` (`SELECT * FROM sessions WHERE refresh_token_hash = $1 AND revoked_at IS NULL AND expires_at > now()`) to `db/queries/sessions.sql`. See tasks.md for the explicit migration step.
+
+> **Schema note:** `Session.ClientID` requires adding a `client_id` column to the `sessions` table (not present in the current `0002` migration). This is a new expand-only migration step — see tasks.md.
+
 #### Scenario: Create and look up an active session
 
 **Given** a session created with a refresh-token hash  

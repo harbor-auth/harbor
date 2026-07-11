@@ -63,6 +63,7 @@ token claims minimal per §3.3's privacy note. Does **not** change `DESIGN.md`.
 - [ ] `JWTIssuer` implements `TokenIssuer`; minimal claims; `kid` in header; short TTLs (§3.5).
 - [ ] JWKS document builder from public key(s); stable `kid`.
 - [ ] Add `GET /jwks.json` to `api/openapi/harbor.yaml`; regenerate; implement handler in `internal/oidcapi`.
+- [ ] Update `/.well-known/openid-configuration` to set `"jwks_uri": "<issuer>/jwks.json"` so RPs using auto-discovery find the JWKS endpoint (§3.4).
 - [ ] Wire `JWTIssuer` into `cmd/harbor-hot/main.go` (replace `NewPlaceholderIssuer`).
 - [ ] Tests: sign→verify round-trip; issued JWT verifies against the served JWKS; `kid` matches; expired/tampered tokens rejected; no PII in claims (only consented + PPID `sub`).
 - [ ] Frozen golden vectors for a fixed key (byte-equality; never regenerated).

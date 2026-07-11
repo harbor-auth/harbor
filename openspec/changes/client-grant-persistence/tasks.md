@@ -6,6 +6,7 @@
 
 ## Implementation
 
+- [ ] Add `SectorID string` to `oidc.Client` in `internal/oidc/store.go`; update all `registry.Put(...)` construction sites (currently `cmd/harbor-hot/main.go`).
 - [ ] Confirm the `relying_parties` table exists (check `0001`/`0002`); add expand-only `0003` migration if missing.
 - [ ] `db/queries/relying_parties.sql` (Get/List/Upsert); regenerate `internal/gen/db`.
 - [ ] `internal/clients/registry.go`: sqlc-backed `ClientRegistry`; map row → `oidc.Client` (incl. `sector_id`).

@@ -27,6 +27,8 @@ type Client struct {
 
 SQL: `GetRelyingParty :one`, `ListRelyingParties :many`, `UpsertRelyingParty :one` over the `relying_parties` table.
 
+> **Migration note:** The existing `oidc.Client` struct in `internal/oidc/store.go` lacks `SectorID`. Adding it is part of this change. Update `internal/oidc/store.go` (add `SectorID string` field) and all construction sites (currently only `cmd/harbor-hot/main.go`'s `registry.Put(...)` calls).
+
 #### Scenario: Known client resolves
 
 **Given** a `client_id` present in `relying_parties`  
@@ -95,3 +97,9 @@ type Grant struct {
 **Given** a grant ID that does not exist  
 **When** `RevokeGrant` is called  
 **Then** the operation is a no-op and returns no error
+
+#### Scenario: ListGrantsByUser excludes revoked grants
+
+**Given** a user with two grants, one of which has been revoked  
+**When** `ListGrantsByUser` is called  
+**Then** only the active (non-revoked) grant is returned

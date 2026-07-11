@@ -92,3 +92,21 @@ Duplicate enrollment attempts MUST be either rejected or handled idempotently, n
 **Given** a user that is already enrolled  
 **When** enrollment is attempted again  
 **Then** the request is rejected or returns the existing user idempotently
+
+### Requirement: REQ-005 Recovery setup requirement
+
+The system SHALL record the need for recovery methods at enrollment.
+
+Enrollment MUST record that the user requires ≥2 recovery methods per §7.2. In v1 this records the intent — the full social/code recovery flow is a follow-up. No enrollment is considered complete without this record.
+
+#### Scenario: Recovery requirement recorded at enrollment
+
+**Given** a successful new user enrollment  
+**When** the enrollment transaction commits  
+**Then** a record exists indicating the user must set up ≥2 recovery methods (§7.2)
+
+#### Scenario: Missing recovery flag is surfaced on next login
+
+**Given** an enrolled user with no recovery methods set up  
+**When** the user subsequently authenticates  
+**Then** the system surfaces the recovery setup requirement before granting access
