@@ -13,11 +13,11 @@ import (
 
 const createCredential = `-- name: CreateCredential :one
 INSERT INTO credentials (
-    id, region, user_id, type, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash
+    id, region, user_id, type, webauthn_cred_id, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8
+    $1, $2, $3, $4, $5, $6, $7, $8, $9
 )
-RETURNING id, region, user_id, type, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash, created_at
+RETURNING id, region, user_id, type, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash, created_at, webauthn_cred_id
 `
 
 type CreateCredentialParams struct {
@@ -25,18 +25,23 @@ type CreateCredentialParams struct {
 	Region         string      `json:"region"`
 	UserID         pgtype.UUID `json:"user_id"`
 	Type           string      `json:"type"`
+	WebauthnCredID []byte      `json:"webauthn_cred_id"`
 	WebauthnPubkey []byte      `json:"webauthn_pubkey"`
 	WebauthnAaguid []byte      `json:"webauthn_aaguid"`
 	SignCount      int64       `json:"sign_count"`
 	PasswordHash   []byte      `json:"password_hash"`
 }
 
+// CreateCredential persists a newly-registered passkey. webauthn_cred_id is the
+// opaque rawID from the authenticator (DESIGN §3.1); webauthn_pubkey is the COSE
+// public key; webauthn_aaguid identifies the authenticator model.
 func (q *Queries) CreateCredential(ctx context.Context, arg CreateCredentialParams) (Credential, error) {
 	row := q.db.QueryRow(ctx, createCredential,
 		arg.ID,
 		arg.Region,
 		arg.UserID,
 		arg.Type,
+		arg.WebauthnCredID,
 		arg.WebauthnPubkey,
 		arg.WebauthnAaguid,
 		arg.SignCount,
@@ -53,6 +58,7 @@ func (q *Queries) CreateCredential(ctx context.Context, arg CreateCredentialPara
 		&i.SignCount,
 		&i.PasswordHash,
 		&i.CreatedAt,
+		&i.WebauthnCredID,
 	)
 	return i, err
 }
@@ -69,7 +75,7 @@ func (q *Queries) DeleteCredential(ctx context.Context, id pgtype.UUID) error {
 
 const getCredential = `-- name: GetCredential :one
 
-SELECT id, region, user_id, type, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash, created_at FROM credentials
+SELECT id, region, user_id, type, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash, created_at, webauthn_cred_id FROM credentials
 WHERE id = $1
 `
 
@@ -89,12 +95,39 @@ func (q *Queries) GetCredential(ctx context.Context, id pgtype.UUID) (Credential
 		&i.SignCount,
 		&i.PasswordHash,
 		&i.CreatedAt,
+		&i.WebauthnCredID,
+	)
+	return i, err
+}
+
+const getCredentialByWebAuthnCredID = `-- name: GetCredentialByWebAuthnCredID :one
+SELECT id, region, user_id, type, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash, created_at, webauthn_cred_id FROM credentials
+WHERE webauthn_cred_id = $1
+`
+
+// GetCredentialByWebAuthnCredID resolves a credential by the WebAuthn credential
+// ID (rawID) returned by the authenticator during assertion. Required by the
+// login ceremony to locate which stored passkey is being used (DESIGN §3.1).
+func (q *Queries) GetCredentialByWebAuthnCredID(ctx context.Context, webauthnCredID []byte) (Credential, error) {
+	row := q.db.QueryRow(ctx, getCredentialByWebAuthnCredID, webauthnCredID)
+	var i Credential
+	err := row.Scan(
+		&i.ID,
+		&i.Region,
+		&i.UserID,
+		&i.Type,
+		&i.WebauthnPubkey,
+		&i.WebauthnAaguid,
+		&i.SignCount,
+		&i.PasswordHash,
+		&i.CreatedAt,
+		&i.WebauthnCredID,
 	)
 	return i, err
 }
 
 const listCredentialsByUser = `-- name: ListCredentialsByUser :many
-SELECT id, region, user_id, type, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash, created_at FROM credentials
+SELECT id, region, user_id, type, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash, created_at, webauthn_cred_id FROM credentials
 WHERE user_id = $1
 ORDER BY created_at DESC
 `
@@ -118,6 +151,7 @@ func (q *Queries) ListCredentialsByUser(ctx context.Context, userID pgtype.UUID)
 			&i.SignCount,
 			&i.PasswordHash,
 			&i.CreatedAt,
+			&i.WebauthnCredID,
 		); err != nil {
 			return nil, err
 		}

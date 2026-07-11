@@ -16,10 +16,18 @@ type Querier interface {
 	// tamper-evident history. The query IS the contract (DESIGN §1.3): `sqlc
 	// generate` (via @codegen) produces typed Go — never hand-write DB types.
 	CreateAuditEvent(ctx context.Context, arg CreateAuditEventParams) (AuditEvent, error)
+	// CreateCredential persists a newly-registered passkey. webauthn_cred_id is the
+	// opaque rawID from the authenticator (DESIGN §3.1); webauthn_pubkey is the COSE
+	// public key; webauthn_aaguid identifies the authenticator model.
 	CreateCredential(ctx context.Context, arg CreateCredentialParams) (Credential, error)
 	CreateGrant(ctx context.Context, arg CreateGrantParams) (Grant, error)
 	CreateMFAFactor(ctx context.Context, arg CreateMFAFactorParams) (MfaFactor, error)
 	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
+	// Queries for the users table (DESIGN §10). The query IS the contract (DESIGN
+	// §1.3): `sqlc generate` (via @codegen) produces typed Go — never hand-write DB
+	// types. All secrets (dek_wrapped, pairwise_secret) are stored as envelope-
+	// encrypted bytea — never plaintext (DESIGN §4.4, §10).
+	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	DeleteCredential(ctx context.Context, id pgtype.UUID) error
 	// DeleteExpiredSessions reaps rows whose refresh token has expired — background
 	// cleanup, off the hot path.
@@ -35,6 +43,10 @@ type Querier interface {
 	// §3.1). The query IS the contract (DESIGN §1.3): `sqlc generate` (via @codegen)
 	// produces typed Go — never hand-write DB types.
 	GetCredential(ctx context.Context, id pgtype.UUID) (Credential, error)
+	// GetCredentialByWebAuthnCredID resolves a credential by the WebAuthn credential
+	// ID (rawID) returned by the authenticator during assertion. Required by the
+	// login ceremony to locate which stored passkey is being used (DESIGN §3.1).
+	GetCredentialByWebAuthnCredID(ctx context.Context, webauthnCredID []byte) (Credential, error)
 	// Queries for the grants table. The query IS the contract (DESIGN §1.3):
 	// `sqlc generate` (via @codegen) produces typed Go — never hand-write DB types.
 	GetGrant(ctx context.Context, id pgtype.UUID) (Grant, error)
@@ -50,6 +62,7 @@ type Querier interface {
 	// tokens; DESIGN §3.5, §10). The query IS the contract (DESIGN §1.3):
 	// `sqlc generate` (via @codegen) produces typed Go — never hand-write DB types.
 	GetSession(ctx context.Context, id pgtype.UUID) (Session, error)
+	GetUser(ctx context.Context, id pgtype.UUID) (User, error)
 	// ListAuditEventsByUser powers the dashboard audit-log viewer (DESIGN §9).
 	// Newest-first with limit/offset paging, served by idx_audit_events_user_time.
 	ListAuditEventsByUser(ctx context.Context, arg ListAuditEventsByUserParams) ([]AuditEvent, error)
@@ -66,6 +79,7 @@ type Querier interface {
 	// RevokeSessionsByUser revokes every active session for a user (e.g. "sign out
 	// everywhere", or a forced logout on credential change; DESIGN §9).
 	RevokeSessionsByUser(ctx context.Context, userID pgtype.UUID) error
+	SetUserStatus(ctx context.Context, arg SetUserStatusParams) error
 	// UpdateCredentialSignCount advances a passkey's signature counter after an
 	// assertion — a monotonically increasing counter is how WebAuthn detects a
 	// cloned authenticator (DESIGN §3.1). The `sign_count < $2` guard makes the
