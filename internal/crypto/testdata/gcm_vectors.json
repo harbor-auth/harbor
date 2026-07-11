@@ -1,0 +1,29 @@
+{
+  "_comment": "Foundation F2 — FROZEN golden vectors for AES-256-GCM (internal/crypto). want_hex = hex(nonce || gcm_ciphertext || gcm_tag). dek_hex is 64 hex chars (32 bytes). nonce_hex is 24 hex chars (12 bytes). VECTOR-CHANGE POLICY: frozen values MUST NOT be auto-regenerated. A value of \"<FILL>\" is not yet frozen: the test FAILS loudly and prints the computed value so a human can independently verify and freeze it.",
+  "vectors": [
+    {
+      "name": "basic-round-trip",
+      "dek_hex": "0101010101010101010101010101010101010101010101010101010101010101",
+      "nonce_hex": "020202020202020202020202",
+      "plaintext_hex": "68656c6c6f2c20686172626f72",
+      "aad_hex": "746573742d616164",
+      "want_hex": "0202020202020202020202026fb3a525257be195b2bedea72ec1c9ce574cb7682bfd017d4f6e523f65"
+    },
+    {
+      "name": "empty-plaintext",
+      "dek_hex": "0303030303030303030303030303030303030303030303030303030303030303",
+      "nonce_hex": "040404040404040404040404",
+      "plaintext_hex": "",
+      "aad_hex": "68617262",
+      "want_hex": "0404040404040404040404040900b48bba879b3685eb0386248b779a"
+    },
+    {
+      "name": "no-aad",
+      "dek_hex": "0505050505050505050505050505050505050505050505050505050505050505",
+      "nonce_hex": "060606060606060606060606",
+      "plaintext_hex": "736563726574",
+      "aad_hex": "",
+      "want_hex": "060606060606060606060606e9de19033cfd2e2a6373c89f15d7e3d4f1b4ab3cfaa4"
+    }
+  ]
+}
