@@ -1,6 +1,6 @@
 ---
 title: Envelope encryption & KMS (per-user DEK / regional KEK)
-status: draft
+status: in-progress
 design_refs: [§4.4, §7.3, §10]
 targets: [internal/crypto/]
 promoted_to: null

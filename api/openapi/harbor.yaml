@@ -192,6 +192,34 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OAuthError"
+  /jwks.json:
+    get:
+      operationId: getJwks
+      summary: JSON Web Key Set
+      description: >-
+        Public signing keys for offline token verification (RFC 7517). Relying
+        parties cache this document and verify tokens locally without a callback
+        to the issuer (DESIGN §3.3, §7.3). Cache-Control is set to allow
+        edge-caching; rotate keys with overlap (publish new kid, keep old keys
+        until all old tokens expire — DESIGN §7.3).
+      responses:
+        "200":
+          description: JWKS document.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: public, max-age=300
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JWKSet"
+        default:
+          description: Unexpected error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
 components:
   schemas:
     OpenIDProviderMetadata:
@@ -303,6 +331,55 @@ components:
         error_description:
           type: string
           description: Generic, PII-free description.
+    JWK:
+      type: object
+      description: >-
+        JSON Web Key (RFC 7517) for an EC signing key. Harbor publishes
+        only EC keys (P-256, ES256); no RSA or symmetric keys.
+      required:
+        - kty
+        - crv
+        - kid
+        - x
+        - y
+        - use
+        - alg
+      properties:
+        kty:
+          type: string
+          description: Key type. Always "EC" for Harbor.
+          example: EC
+        crv:
+          type: string
+          description: Curve. Always "P-256" for ES256 keys.
+          example: P-256
+        kid:
+          type: string
+          description: Key ID (RFC 7638 thumbprint).
+        x:
+          type: string
+          description: Base64url-encoded x coordinate (big-endian, 32 bytes).
+        "y":
+          type: string
+          description: Base64url-encoded y coordinate (big-endian, 32 bytes).
+        use:
+          type: string
+          description: Key use. Always "sig" (signing only).
+          example: sig
+        alg:
+          type: string
+          description: Algorithm. Always "ES256".
+          example: ES256
+    JWKSet:
+      type: object
+      description: JSON Web Key Set (RFC 7517 §5).
+      required:
+        - keys
+      properties:
+        keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/JWK"
     Error:
       type: object
       description: Standard error envelope.

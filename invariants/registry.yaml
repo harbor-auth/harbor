@@ -31,8 +31,8 @@ invariants:
   - id: INV-SIGN-ASYM-ONLY
     title: "Asymmetric-only token signing (ES256/EdDSA); reject alg:none and HS/symmetric"
     design_refs: [§A.8, §3.3, §7.3]
-    description: "Tokens are signed with asymmetric keys only; no symmetric/HS fallback and no alg:none. Until the HSM signer lands, the placeholder issuer must be an OBVIOUS unsigned scaffold, never mistakable for a real (or symmetric) token."
-    enforced_by: [internal/oidc:TestPlaceholderIssuerIsScaffoldNotReal]
+    description: "Tokens are signed with asymmetric keys only; no symmetric/HS fallback and no alg:none. The real issuer mints ES256 JWTs that verify with the EC public key; while the placeholder scaffold still exists it must be an OBVIOUS unsigned scaffold, never mistakable for a real (or symmetric) token."
+    enforced_by: [internal/oidc:TestPlaceholderIssuerIsScaffoldNotReal, internal/oidc:TestJWTIssuerIsAsymmetric]
 
   - id: INV-PKCE-MANDATORY
     title: "PKCE S256 mandatory for every client; plain rejected"
@@ -69,3 +69,39 @@ invariants:
     design_refs: [§A.8, §3.2]
     description: "The PPID (sub) is keyed by a PER-USER pairwise secret (not a global salt), and different RP sectors yield unrelated subs, so RPs cannot correlate a user across services and a single secret compromise deanonymizes only one user."
     enforced_by: [internal/identity:TestDerivePPIDDifferentSectorsUnrelated]
+
+  - id: INV-DEK-FAIL-CLOSED
+    title: "AES-256-GCM decryption fails closed; never returns partial plaintext on any failure"
+    design_refs: [§A.8, §4.4]
+    description: "Any GCM tag mismatch, short ciphertext, wrong AAD, or wrong key returns ErrDecryptFailed with nil plaintext. No partial output is ever emitted, defeating ciphertext-oracle attacks."
+    enforced_by: [internal/crypto:TestDecryptFailClosed]
+
+  - id: INV-DEK-REGION-ISOLATED
+    title: "Per-region DEK wrapping: a DEK wrapped for region A cannot be unwrapped as region B"
+    design_refs: [§4.4, §5.4]
+    description: "The region string is bound as GCM AAD in WrapDEK/UnwrapDEK; a cross-region unwrap triggers GCM authentication failure and returns ErrDecryptFailed with a zero DEK."
+    enforced_by: [internal/crypto:TestLocalKeyProviderRegionIsolation]
+
+  - id: INV-DEK-CSPRNG
+    title: "DEK generation and encryption use CSPRNG; GenerateDEK never returns the all-zero key"
+    design_refs: [§4.4]
+    description: "GenerateDEK reads from crypto/rand and rejects the all-zero output as defense-in-depth. Each Encrypt call draws a unique nonce so two encryptions of identical plaintext always differ."
+    enforced_by: [internal/crypto:TestGenerateDEKNeverZero, internal/crypto:TestEncryptUniqueNonces]
+
+  - id: INV-JWT-SUB-IS-PPID
+    title: "JWT sub claim is always the PPID; never the raw user_id"
+    design_refs: [§3.2, §3.3]
+    description: "The sub claim in every issued JWT (ID token and access token) equals IssueParams.Subject (the PPID), never a raw database user_id, so an RP can never correlate the subject back to a global identity."
+    enforced_by: [internal/oidc:TestJWTIssuerSubIsPPID]
+
+  - id: INV-JWKS-KID-MATCH
+    title: "Issued token kid resolves to exactly one JWKS key that verifies the token"
+    design_refs: [§7.3, §3.3]
+    description: "The kid header of an issued token matches exactly one key in the published JWKS, and that key verifies the token's ES256 signature — the offline-verifiability contract RPs depend on."
+    enforced_by: [internal/oidc:TestJWTIssuerKidMatchesJWKS, internal/oidc:TestJWTGoldenVectors]
+
+  - id: INV-JWT-NO-PII
+    title: "JWT claim set contains no PII beyond consented scopes; no email/name without consent"
+    design_refs: [§3.2, §6.5]
+    description: "Issued JWT payloads contain only allowed claims (iss, sub, aud, exp, iat, nonce, scope, jti). No email, name, or other profile field appears without consent, upholding the data-minimization thesis."
+    enforced_by: [internal/oidc:TestJWTIssuerNoPII]

@@ -11,14 +11,16 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/harbor/harbor/internal/crypto"
 	"github.com/harbor/harbor/internal/gen/openapi"
 	"github.com/harbor/harbor/internal/oidc"
 )
 
 // Server implements openapi.ServerInterface for the harbor-hot binary.
 type Server struct {
-	issuer string
-	svc    *oidc.Service
+	issuer    string
+	svc       *oidc.Service
+	jwksBytes []byte
 }
 
 // Config holds the settings needed to serve the OIDC surface.
@@ -29,11 +31,22 @@ type Config struct {
 	// Service runs the /authorize + /token flow logic. May be nil for the
 	// discovery-only tests, which never exercise those endpoints.
 	Service *oidc.Service
+	// Signers are the public signing keys published at /jwks.json. The first is
+	// the active signer; additional entries support rotation overlap (§7.3).
+	// May be empty for discovery-only tests (served as {"keys":[]}).
+	Signers []crypto.Signer
 }
 
-// New returns a Server that serves the generated OpenAPI contract.
+// New returns a Server that serves the generated OpenAPI contract. The JWKS
+// document is precomputed here because it changes only on key rotation.
 func New(cfg Config) *Server {
-	return &Server{issuer: cfg.Issuer, svc: cfg.Service}
+	jwksBytes, err := json.Marshal(oidc.BuildJWKS(cfg.Signers))
+	if err != nil {
+		// Pure struct → JSON cannot fail in practice; serve an empty-keys JWKS
+		// rather than panic or 500 if it somehow does.
+		jwksBytes = []byte(`{"keys":[]}`)
+	}
+	return &Server{issuer: cfg.Issuer, svc: cfg.Service, jwksBytes: jwksBytes}
 }
 
 // Compile-time proof that Server satisfies the generated contract. If the spec

@@ -19,6 +19,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/harbor/harbor/internal/crypto"
 	"github.com/harbor/harbor/internal/gen/openapi"
 	"github.com/harbor/harbor/internal/httpserver"
 	"github.com/harbor/harbor/internal/oidc"
@@ -51,15 +52,30 @@ func main() {
 		RedirectURIs:  []string{"http://localhost:3000/callback"},
 		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
 	})
+
+	// DEV-ONLY signing key. SCAFFOLD: the private key is generated in-process and
+	// is NOT backed by the regional HSM (docs/DESIGN.md §7.3). Tokens do not
+	// survive a restart. Swap crypto.NewLocalSigner for the HSM-backed signer to
+	// go to production.
+	signer, err := crypto.NewLocalSigner()
+	if err != nil {
+		logger.Error("failed to create local signer", "error", err)
+		os.Exit(1)
+	}
+
 	svc := oidc.NewService(oidc.ServiceConfig{
 		Issuer:   issuer,
 		Clients:  clients,
 		Codes:    oidc.NewInMemoryAuthCodeStore(),
-		Tokens:   oidc.NewPlaceholderIssuer(),
+		Tokens:   oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
 	})
 
-	srv := oidcapi.New(oidcapi.Config{Issuer: issuer, Service: svc})
+	srv := oidcapi.New(oidcapi.Config{
+		Issuer:  issuer,
+		Service: svc,
+		Signers: []crypto.Signer{signer},
+	})
 	handler := openapi.HandlerFromMux(srv, http.NewServeMux())
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
