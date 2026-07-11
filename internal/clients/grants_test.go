@@ -279,3 +279,106 @@ func TestDBGrantStoreInvalidUUID(t *testing.T) {
 func TestDBGrantStoreImplementsInterface(t *testing.T) {
 	var _ oidc.GrantStore = (*DBGrantStore)(nil)
 }
+
+// --- Additional edge case tests ---
+
+func TestDBGrantStoreCreateGrantDBError(t *testing.T) {
+	q := &fakeGrantQuerier{rows: make(map[string]*db.Grant), dbErr: errors.New("db insert failed")}
+	s := NewDBGrantStore(q)
+	_, err := s.CreateGrant(context.Background(), oidc.NewGrant{
+		UserID:   testUserID,
+		ClientID: "rp-1",
+	})
+	if err == nil {
+		t.Error("expected error propagation from DB error")
+	}
+}
+
+func TestDBGrantStoreCreateGrantInvalidUUID(t *testing.T) {
+	s := NewDBGrantStore(newFakeGrantQuerier())
+	_, err := s.CreateGrant(context.Background(), oidc.NewGrant{
+		UserID:   "not-a-valid-uuid",
+		ClientID: "rp-1",
+	})
+	if err == nil {
+		t.Error("expected error for invalid UUID")
+	}
+}
+
+func TestDBGrantStoreRevokeGrantDBError(t *testing.T) {
+	q := &fakeGrantQuerier{rows: make(map[string]*db.Grant), dbErr: errors.New("db revoke failed")}
+	s := NewDBGrantStore(q)
+	err := s.RevokeGrant(context.Background(), "b0000000-0000-0000-0000-000000000002")
+	if err == nil {
+		t.Error("expected error propagation from DB error")
+	}
+}
+
+func TestDBGrantStoreRevokeGrantInvalidUUID(t *testing.T) {
+	s := NewDBGrantStore(newFakeGrantQuerier())
+	err := s.RevokeGrant(context.Background(), "not-a-valid-uuid")
+	if err == nil {
+		t.Error("expected error for invalid UUID")
+	}
+}
+
+func TestDBGrantStoreListGrantsByUserDBError(t *testing.T) {
+	q := &fakeGrantQuerier{rows: make(map[string]*db.Grant), dbErr: errors.New("db list failed")}
+	s := NewDBGrantStore(q)
+	_, err := s.ListGrantsByUser(context.Background(), testUserID)
+	if err == nil {
+		t.Error("expected error propagation from DB error")
+	}
+}
+
+func TestDBGrantStoreListGrantsByUserInvalidUUID(t *testing.T) {
+	s := NewDBGrantStore(newFakeGrantQuerier())
+	_, err := s.ListGrantsByUser(context.Background(), "not-a-valid-uuid")
+	if err == nil {
+		t.Error("expected error for invalid UUID")
+	}
+}
+
+func TestDBGrantStoreListGrantsByUserEmpty(t *testing.T) {
+	s := NewDBGrantStore(newFakeGrantQuerier())
+	grants, err := s.ListGrantsByUser(context.Background(), testUserID)
+	if err != nil {
+		t.Fatalf("ListGrantsByUser: %v", err)
+	}
+	if len(grants) != 0 {
+		t.Errorf("expected empty list, got %d grants", len(grants))
+	}
+}
+
+func TestDBGrantStoreRevokeNonexistentGrant(t *testing.T) {
+	s := NewDBGrantStore(newFakeGrantQuerier())
+	// Should not error when revoking a grant that doesn't exist.
+	err := s.RevokeGrant(context.Background(), "b0000000-0000-0000-0000-000000000099")
+	if err != nil {
+		t.Errorf("RevokeGrant on nonexistent: %v", err)
+	}
+}
+
+func TestRowToGrantWithNilScopes(t *testing.T) {
+	row := db.Grant{
+		ID:        pgUUID("d0000000-0000-0000-0000-000000000004"),
+		UserID:    pgUUID(testUserID),
+		ClientID:  "rp-nil-scopes",
+		Scopes:    nil, // nil slice
+		CreatedAt: pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	}
+	g := rowToGrant(row)
+	// nil scopes is acceptable; verify no panic and length is 0.
+	if len(g.Scopes) != 0 {
+		t.Errorf("expected empty scopes, got %d", len(g.Scopes))
+	}
+}
+
+func TestUUIDToStringInvalid(t *testing.T) {
+	// An invalid (zero) pgtype.UUID should return the zero UUID string.
+	var invalid pgtype.UUID // Valid = false by default
+	result := uuidToString(invalid)
+	if result != "00000000-0000-0000-0000-000000000000" {
+		t.Errorf("expected zero UUID string, got %q", result)
+	}
+}

@@ -8,6 +8,29 @@ import (
 	"github.com/harbor/harbor/internal/crypto"
 )
 
+// errKeyProvider returns a fixed error from WrapDEK.
+type errKeyProvider struct {
+	wrapErr   error
+	unwrapErr error
+}
+
+func (e errKeyProvider) WrapDEK(_ context.Context, _ string, _ crypto.DEK) ([]byte, error) {
+	return nil, e.wrapErr
+}
+
+func (e errKeyProvider) UnwrapDEK(_ context.Context, _ string, _ []byte) (crypto.DEK, error) {
+	return crypto.DEK{}, e.unwrapErr
+}
+
+// errCipher returns a fixed error from Encrypt.
+type errCipher struct {
+	encryptErr error
+}
+
+func (e errCipher) Encrypt(_ crypto.DEK, _, _ []byte) ([]byte, error) {
+	return nil, e.encryptErr
+}
+
 // fakePersister captures what was passed to PersistUser for assertions.
 type fakePersister struct {
 	records []UserRecord
@@ -151,5 +174,43 @@ func TestEnrollRegionBound(t *testing.T) {
 	// Correct-region unwrap must succeed.
 	if _, err := kp.UnwrapDEK(context.Background(), "EU", r.DekWrapped); err != nil {
 		t.Fatalf("same-region DEK unwrap failed: %v", err)
+	}
+}
+
+// --- Additional error path tests ---
+
+func TestEnrollWrapDEKError(t *testing.T) {
+	sentinel := errors.New("HSM unavailable")
+	p := &fakePersister{}
+	e := NewEnroller(errKeyProvider{wrapErr: sentinel}, crypto.NewCipher(), p)
+	_, err := e.Enroll(context.Background(), "EU")
+	if err == nil {
+		t.Fatal("expected error when WrapDEK fails")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected wrapped sentinel error, got %v", err)
+	}
+	if len(p.records) != 0 {
+		t.Fatal("no DB write should occur when WrapDEK fails")
+	}
+}
+
+func TestEnrollEncryptError(t *testing.T) {
+	sentinel := errors.New("cipher failure")
+	p := &fakePersister{}
+	kp, err := crypto.NewLocalKeyProvider("test-secret-32-bytes-for-testing!")
+	if err != nil {
+		t.Fatalf("NewLocalKeyProvider: %v", err)
+	}
+	e := NewEnroller(kp, errCipher{encryptErr: sentinel}, p)
+	_, err = e.Enroll(context.Background(), "EU")
+	if err == nil {
+		t.Fatal("expected error when Encrypt fails")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected wrapped sentinel error, got %v", err)
+	}
+	if len(p.records) != 0 {
+		t.Fatal("no DB write should occur when Encrypt fails")
 	}
 }

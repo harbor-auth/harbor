@@ -214,3 +214,125 @@ func TestPPIDSessionResolverSubIsNotUserID(t *testing.T) {
 		t.Fatalf("sub must be a PPID, not the raw user_id (%q)", userID)
 	}
 }
+
+// --- Additional error path tests ---
+
+// errGrantStore returns fixed errors from FindGrant and CreateGrant.
+type errGrantStore struct {
+	findErr   error
+	createErr error
+}
+
+func (s errGrantStore) FindGrant(_ context.Context, _, _ string) (Grant, bool, error) {
+	if s.findErr != nil {
+		return Grant{}, false, s.findErr
+	}
+	return Grant{}, false, nil
+}
+
+func (s errGrantStore) CreateGrant(_ context.Context, _ NewGrant) (Grant, error) {
+	return Grant{}, s.createErr
+}
+
+func (s errGrantStore) RevokeGrant(_ context.Context, _ string) error {
+	return nil
+}
+
+func (s errGrantStore) ListGrantsByUser(_ context.Context, _ string) ([]Grant, error) {
+	return nil, nil
+}
+
+func TestPPIDSessionResolverFindGrantError(t *testing.T) {
+	const userID = "00000000-0000-0000-0000-000000000001"
+	loader := NewInMemorySecretLoader()
+	loader.Put(userID, UserSecret{Region: "us", Secret: testSecret()})
+
+	r := NewPPIDSessionResolver(PPIDSessionResolverConfig{
+		Auth:   NewFixedAuthSource(userID),
+		Loader: loader,
+		Grants: errGrantStore{findErr: errors.New("database connection lost")},
+	})
+
+	sub, approved, err := r.Resolve(context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid")
+	if err == nil {
+		t.Fatal("expected error on FindGrant failure")
+	}
+	if sub != "" || approved {
+		t.Fatalf("expected empty non-approved subject, got sub=%q approved=%v", sub, approved)
+	}
+}
+
+func TestPPIDSessionResolverCreateGrantError(t *testing.T) {
+	const userID = "00000000-0000-0000-0000-000000000001"
+	loader := NewInMemorySecretLoader()
+	loader.Put(userID, UserSecret{Region: "us", Secret: testSecret()})
+
+	// findErr=nil so FindGrant returns (Grant{}, false, nil) — no existing grant.
+	// createErr is set so CreateGrant fails.
+	r := NewPPIDSessionResolver(PPIDSessionResolverConfig{
+		Auth:   NewFixedAuthSource(userID),
+		Loader: loader,
+		Grants: errGrantStore{createErr: errors.New("constraint violation")},
+	})
+
+	sub, approved, err := r.Resolve(context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid")
+	if err == nil {
+		t.Fatal("expected error on CreateGrant failure")
+	}
+	if sub != "" || approved {
+		t.Fatalf("expected empty non-approved subject, got sub=%q approved=%v", sub, approved)
+	}
+}
+
+func TestPPIDSessionResolverEmptySecretError(t *testing.T) {
+	const userID = "00000000-0000-0000-0000-000000000001"
+	loader := NewInMemorySecretLoader()
+	// Put an empty secret — DerivePPID should fail.
+	loader.Put(userID, UserSecret{Region: "us", Secret: []byte{}})
+
+	r := NewPPIDSessionResolver(PPIDSessionResolverConfig{
+		Auth:   NewFixedAuthSource(userID),
+		Loader: loader,
+		Grants: NewInMemoryGrantStore(),
+	})
+
+	sub, approved, err := r.Resolve(context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid")
+	if err == nil {
+		t.Fatal("expected error on empty secret")
+	}
+	if sub != "" || approved {
+		t.Fatalf("expected empty non-approved subject, got sub=%q approved=%v", sub, approved)
+	}
+}
+
+// errSecretLoader returns a fixed error from LoadUserSecret.
+type errSecretLoader struct {
+	err error
+}
+
+func (l errSecretLoader) LoadUserSecret(_ context.Context, _ string) (UserSecret, error) {
+	return UserSecret{}, l.err
+}
+
+func TestPPIDSessionResolverSecretLoaderGenericError(t *testing.T) {
+	const userID = "00000000-0000-0000-0000-000000000001"
+
+	// Test with a generic error (not ErrUserSecretNotFound).
+	r := NewPPIDSessionResolver(PPIDSessionResolverConfig{
+		Auth:   NewFixedAuthSource(userID),
+		Loader: errSecretLoader{err: errors.New("decryption failed")},
+		Grants: NewInMemoryGrantStore(),
+	})
+
+	sub, approved, err := r.Resolve(context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid")
+	if err == nil {
+		t.Fatal("expected error on secret loader failure")
+	}
+	// The raw user_id must NOT leak as the subject.
+	if sub == userID {
+		t.Fatalf("raw user_id leaked as subject: %q", sub)
+	}
+	if sub != "" || approved {
+		t.Fatalf("expected empty non-approved subject, got sub=%q approved=%v", sub, approved)
+	}
+}

@@ -67,7 +67,25 @@ type errorSigner struct{ err error }
 
 func (e errorSigner) Sign(_ []byte) ([]byte, error) { return nil, e.err }
 func (e errorSigner) KeyID() string                 { return "test-kid" }
-func (e errorSigner) PublicJWK() crypto.JWK          { return crypto.JWK{} }
+func (e errorSigner) PublicJWK() crypto.JWK         { return crypto.JWK{} }
+
+// countingSigner fails after N successful calls, to exercise partial-issue paths.
+type countingSigner struct {
+	real      crypto.Signer
+	failAfter int
+	count     int
+	err       error
+}
+
+func (c *countingSigner) Sign(data []byte) ([]byte, error) {
+	c.count++
+	if c.count > c.failAfter {
+		return nil, c.err
+	}
+	return c.real.Sign(data)
+}
+func (c *countingSigner) KeyID() string       { return c.real.KeyID() }
+func (c *countingSigner) PublicJWK() crypto.JWK { return c.real.PublicJWK() }
 
 //harbor:invariant INV-JWT-SUB-IS-PPID
 func TestJWTIssuerSubIsPPID(t *testing.T) {
@@ -301,6 +319,42 @@ func TestJWTIssuerSignerError(t *testing.T) {
 	}
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("expected wrapped sentinel error, got %v", err)
+	}
+}
+
+// TestJWTIssuerAccessTokenSignerError verifies that if the ID token is signed
+// successfully but the access token signing fails, Issue returns an error.
+func TestJWTIssuerAccessTokenSignerError(t *testing.T) {
+	sentinel := errors.New("access token signer boom")
+	realSigner := newTestSigner(t)
+	counting := &countingSigner{
+		real:      realSigner,
+		failAfter: 1, // ID token succeeds (1 sign), access token fails (2nd sign)
+		err:       sentinel,
+	}
+	iss := NewJWTIssuer(JWTIssuerConfig{Signer: counting, Now: fixedNow})
+	_, err := iss.Issue(context.Background(), testIssueParams())
+	if err == nil {
+		t.Fatal("expected Issue to fail when access token signer errors")
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("expected wrapped sentinel error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "access token") {
+		t.Fatalf("error should mention 'access token', got: %v", err)
+	}
+}
+
+// TestJWTIssuerIDTokenSignerError verifies error message mentions ID token.
+func TestJWTIssuerIDTokenSignerError(t *testing.T) {
+	sentinel := errors.New("id token signer boom")
+	iss := NewJWTIssuer(JWTIssuerConfig{Signer: errorSigner{err: sentinel}, Now: fixedNow})
+	_, err := iss.Issue(context.Background(), testIssueParams())
+	if err == nil {
+		t.Fatal("expected Issue to fail when ID token signer errors")
+	}
+	if !strings.Contains(err.Error(), "ID token") {
+		t.Fatalf("error should mention 'ID token', got: %v", err)
 	}
 }
 
