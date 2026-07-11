@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-07-10
+goal: Persist relying_parties and grants tables behind ClientRegistry and a new
+  GrantStore interface

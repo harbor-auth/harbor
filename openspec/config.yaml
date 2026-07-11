@@ -1,0 +1,41 @@
+schema: spec-driven
+
+# Project context: shown to AI when creating artifacts.
+context: |
+  Tech stack: Go (stdlib only), PostgreSQL (sqlc), OpenAPI 3.1, WebAuthn/passkeys.
+  Repository: harbor-auth/harbor — a privacy-first OIDC provider (AGPL-3.0).
+
+  Security invariants (MUST appear in every spec touching auth/crypto):
+    - Asymmetric-only tokens: ES256 or EdDSA. Never HMAC/symmetric for JWTs.
+    - PPID as sub: token subject is ALWAYS a pairwise identifier derived via
+      identity.DerivePPID. NEVER the raw user_id. Fail closed on any error.
+    - Hash-at-rest for refresh tokens: store SHA-256(token), never plaintext.
+    - No plaintext secrets at rest: pairwise_secret, DEK always encrypted.
+    - Fail-closed decrypt: any GCM tag mismatch returns error, NEVER partial plaintext.
+    - Exact redirect-URI match: no prefix/substring matching (§7.4).
+    - PPID re-derivation: only on first consent. Repeat logins read grants.pairwise_sub.
+
+  Conventions:
+    - Contract-first (§1.2): OpenAPI spec before handler code; sqlc queries before Go.
+    - Use ADDED/CHANGED/REMOVED Requirements delta headers in specs.
+    - Use SHALL/MUST/NEVER language for requirements.
+    - Each requirement needs ≥1 Given/When/Then scenario.
+    - Include Go interface stubs as fenced code blocks where relevant.
+    - Tasks must include `make codegen` after schema/spec changes.
+    - Tasks must include `openspec validate <slug> --strict` in Validation section.
+
+# Per-artifact rules
+rules:
+  proposal:
+    - Keep under 400 words
+    - Include a Non-goals section for scope control
+  spec:
+    - ADDED Requirements format with SHALL/MUST/NEVER language
+    - Minimum one Given/When/Then scenario per requirement
+    - Include Go interface stubs for new interfaces
+    - Length-prefix note required for any HMAC derivation formula
+  tasks:
+    - Break into Implementation / Tests / Validation sections
+    - Validation section MUST include 'openspec validate <slug> --strict'
+    - List Prerequisites explicitly
+    - Call out DB migrations as explicit tasks with filename
