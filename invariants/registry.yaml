@@ -118,6 +118,24 @@ invariants:
     description: "The pairwise_sub stored in a consent grant is the PPID computed at the moment of consent and is immutable — reads always return the exact value supplied at CreateGrant time. This ensures RP tokens stay stable even if the PPID derivation inputs change."
     enforced_by: [internal/clients:TestDBGrantStorePPIDBound]
 
+  - id: INV-SESSION-PPID-STABLE
+    title: "Per-RP PPID is stable across multiple Resolve calls for the same (user, client) pair"
+    design_refs: [§3.2, §11.2]
+    description: "After the first consent the grant's frozen pairwise_sub is returned on every subsequent Resolve — re-deriving DerivePPID with a mutated secret would break existing sessions. Proven by resolving twice and asserting sub1 == sub2."
+    enforced_by: [internal/oidc:TestPPIDSessionResolverStableSubject]
+
+  - id: INV-SESSION-PPID-UNLINKABLE
+    title: "Different sector_ids produce different PPIDs for the same user; cross-RP correlation is impossible"
+    design_refs: [§3.2, §6.5]
+    description: "DerivePPID(secret, sector_id, user_id) is injective in sector_id: subA (sector rp-a.example.com) != subB (sector rp-b.example.com) for the same user. An RP cannot correlate a user across tenants."
+    enforced_by: [internal/oidc:TestPPIDSessionResolverUnlinkability]
+
+  - id: INV-SESSION-PPID-NO-RAW-UID
+    title: "Raw user_id is never returned as the subject on any error path; resolver fails closed"
+    design_refs: [§3.2, §11.7]
+    description: "If auth, secret-load, or derivation fails, Resolve returns an empty subject and a non-nil error — never the internal user_id as sub. Leaking user_id as sub would collapse cross-RP unlinkability for any RP that receives the error response."
+    enforced_by: [internal/oidc:TestPPIDSessionResolverFailClosed]
+
   - id: INV-ENROLL-DEK-FRESH
     title: "Each enrollment generates a fresh DEK; keys are never reused across users"
     design_refs: [§4.4, §10]

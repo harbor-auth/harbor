@@ -51,6 +51,7 @@ func main() {
 	clients := oidc.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
 		ID:            "demo-client",
+		SectorID:      "localhost", // groups redirect URIs for PPID derivation (§3.2)
 		RedirectURIs:  []string{"http://localhost:3000/callback"},
 		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
 	})
@@ -65,15 +66,33 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Demo user for PPIDSessionResolver. SCAFFOLD: the demo user ID is fixed and
+	// the pairwise secret is deterministic — NOT for production. Swap the
+	// FixedAuthSource for a real BFF-session-backed AuthSource and the
+	// InMemorySecretLoader for clients.NewDBSecretLoader once DATABASE_URL lands.
+	demoUserID := "00000000-0000-0000-0000-000000000001"
+	demoSecret := make([]byte, 32)
+	for i := range demoSecret {
+		demoSecret[i] = byte(i + 1)
+	}
+	secretLoader := oidc.NewInMemorySecretLoader()
+	secretLoader.Put(demoUserID, oidc.UserSecret{Region: "us", Secret: demoSecret})
+
+	grantStore := oidc.NewInMemoryGrantStore()
+
 	svc := oidc.NewService(oidc.ServiceConfig{
-		Issuer:   issuer,
-		Clients:  clients,
-		Codes:    oidc.NewInMemoryAuthCodeStore(),
-		Tokens:   oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
-		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
+		Issuer:  issuer,
+		Clients: clients,
+		Codes:   oidc.NewInMemoryAuthCodeStore(),
+		Tokens:  oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
+		Sessions: oidc.NewPPIDSessionResolver(oidc.PPIDSessionResolverConfig{
+			Auth:   oidc.NewFixedAuthSource(demoUserID),
+			Loader: secretLoader,
+			Grants: grantStore,
+		}),
 		// SCAFFOLD: in-memory grant store — swap for clients.NewDBGrantStore(db.New(pool))
 		// once DATABASE_URL wiring lands (docs/DESIGN.md §10, §11.3).
-		Grants: oidc.NewInMemoryGrantStore(),
+		Grants: grantStore,
 	})
 
 	srv := oidcapi.New(oidcapi.Config{

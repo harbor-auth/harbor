@@ -18,7 +18,7 @@ import (
 // the per-RP PPID (internal/identity). The stub below auto-approves a fixed demo
 // subject so /authorize is exercisable before that UI exists.
 type SessionResolver interface {
-	Resolve(ctx context.Context, client Client) (subject string, approved bool, err error)
+	Resolve(ctx context.Context, client Client, scope string) (subject string, approved bool, err error)
 }
 
 // stubSessionResolver auto-approves a fixed subject. SCAFFOLD only.
@@ -30,7 +30,7 @@ func NewStubSessionResolver(subject string) SessionResolver {
 	return stubSessionResolver{subject: subject}
 }
 
-func (r stubSessionResolver) Resolve(_ context.Context, _ Client) (string, bool, error) {
+func (r stubSessionResolver) Resolve(_ context.Context, _ Client, _ string) (string, bool, error) {
 	return r.subject, true, nil
 }
 
@@ -174,7 +174,7 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (*Authori
 
 	// Login + consent (SCAFFOLD: auto-approves a demo subject). A real rejection
 	// here is access_denied, redirected back to the RP (docs/DESIGN.md §11.7).
-	subject, approved, err := s.sessions.Resolve(ctx, validated.Client)
+	subject, approved, err := s.sessions.Resolve(ctx, validated.Client, validated.Scope)
 	if err != nil {
 		return nil, redirectErr(ErrCodeServerError, "login could not be completed")
 	}
