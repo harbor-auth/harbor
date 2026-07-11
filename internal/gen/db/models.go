@@ -27,6 +27,7 @@ type Credential struct {
 	SignCount      int64              `json:"sign_count"`
 	PasswordHash   []byte             `json:"password_hash"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	WebauthnCredID []byte             `json:"webauthn_cred_id"`
 }
 
 type Grant struct {

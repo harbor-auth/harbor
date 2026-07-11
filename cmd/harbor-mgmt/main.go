@@ -2,23 +2,27 @@
 // (docs/DESIGN.md §4.1, §8). It serves the dashboard/BFF, enrollment, consent,
 // audit and admin surfaces.
 //
-// Today it exposes the liveness probe plus the passkey (WebAuthn) registration
-// and assertion ceremonies (docs/DESIGN.md §3.1), served from internal/webauthn.
-// The credential and ceremony-session stores are in-memory for now; the
-// sqlc-backed stores (db/queries) plug in behind the same interfaces later.
+// Today it exposes the liveness probe, the passkey (WebAuthn) registration and
+// assertion ceremonies, and the user-enrollment endpoint (docs/DESIGN.md §11.1).
+// The ceremony store and session store are in-memory scaffolds; the sqlc-backed
+// stores plug in behind the same interfaces once DATABASE_URL is wired.
 package main
 
 import (
 	"context"
-	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 
+	"github.com/harbor/harbor/internal/crypto"
 	"github.com/harbor/harbor/internal/httpserver"
+	"github.com/harbor/harbor/internal/identity"
+	"github.com/harbor/harbor/internal/region"
 	"github.com/harbor/harbor/internal/webauthn"
 )
 
@@ -34,32 +38,10 @@ func main() {
 	rpDisplayName := getenv("WEBAUTHN_RP_DISPLAY_NAME", "Harbor")
 	rpOrigins := splitAndTrim(getenv("WEBAUTHN_RP_ORIGINS", "http://localhost:"+port))
 
-	// WEBAUTHN_ALLOW_INSECURE_USER_ID enables the DEV-ONLY path where the user
-	// handle is read from a client-supplied `user_id` query param. It MUST stay
-	// false in production — otherwise any caller can drive ceremonies as any user
-	// (docs/DESIGN.md §9). Defaults to false; a parse error is treated as false.
-	allowInsecureUserIDVal := getenv("WEBAUTHN_ALLOW_INSECURE_USER_ID", "false")
-	allowInsecureUserID, err := strconv.ParseBool(allowInsecureUserIDVal)
-	if err != nil {
-		logger.Error("invalid WEBAUTHN_ALLOW_INSECURE_USER_ID value, must be true or false; defaulting to false",
-			"value", allowInsecureUserIDVal, "error", err)
-		allowInsecureUserID = false
-	}
-	if allowInsecureUserID {
-		logger.Warn("WEBAUTHN_ALLOW_INSECURE_USER_ID is ENABLED — ceremonies trust a client-supplied user_id; DEV ONLY, never enable in production")
-	}
-
-	// Dev stores (in-memory). Replace with sqlc-backed implementations for prod.
+	// Dev ceremony stores (in-memory). Replace with sqlc-backed implementations
+	// once DATABASE_URL is wired (see docs/plans/user-enrollment.md).
 	store := webauthn.NewInMemoryStore()
 	sessions := webauthn.NewInMemorySessionStore()
-
-	// Seed a demo user so the ceremony endpoints are exercisable in dev. Only
-	// when the insecure path is enabled — prod wiring stays clean. Real accounts
-	// are provisioned by the enrollment flow (docs/DESIGN.md §11.1).
-	demoUserID := []byte("demo-user")
-	if allowInsecureUserID {
-		store.PutUser(webauthn.NewUser(demoUserID, "demo@harbor.local", "Demo User", nil))
-	}
 
 	svc, err := webauthn.NewService(webauthn.Config{
 		RPID:          rpID,
@@ -71,22 +53,94 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Key provider for enrollment. Production wiring replaces localKeyProvider
+	// with an HSM-backed KeyProvider (docs/DESIGN.md §7.3).
+	kmsSecret := getenv("HARBOR_KMS_SECRET", "")
+	if kmsSecret == "" {
+		logger.Warn("HARBOR_KMS_SECRET not set — using insecure dev default; NEVER use in production")
+		kmsSecret = "harbor-dev-kms-secret-DO-NOT-USE-IN-PROD"
+	}
+	kp, err := crypto.NewLocalKeyProvider(kmsSecret)
+	if err != nil {
+		logger.Error("failed to create key provider", "error", err)
+		os.Exit(1)
+	}
+
+	// SCAFFOLD: noopUserPersister drops enrollments silently. Wire a real
+	// sqlc-backed UserPersister once DATABASE_URL is configured.
+	enroller := identity.NewEnroller(kp, crypto.NewCipher(), &noopUserPersister{logger: logger})
+
 	mux := httpserver.NewHealthMux()
-	webauthn.RegisterRoutes(mux, svc, allowInsecureUserID)
+	// Passkey ceremony endpoints. userIDFromRequest returns 501 until the BFF
+	// session middleware lands (docs/DESIGN.md §9) — production-safe default.
+	webauthn.RegisterRoutes(mux, svc, false)
+	mux.HandleFunc("POST /users/enroll", enrollHandler(enroller, logger))
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	logger.Info("starting harbor-mgmt",
-		"port", port,
-		"rp_id", rpID,
-		"demo_user_id", base64.RawURLEncoding.EncodeToString(demoUserID),
-	)
+	logger.Info("starting harbor-mgmt", "port", port, "rp_id", rpID)
 	if err := httpserver.Run(ctx, ":"+port, mux, logger); err != nil {
 		logger.Error("harbor-mgmt exited with error", "error", err)
 		os.Exit(1)
 	}
 }
+
+// enrollHandler returns a handler for POST /users/enroll. It reads a JSON body
+// with a `region` field, calls the Enroller, and returns the new user ID.
+func enrollHandler(e *identity.Enroller, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Region string `json:"region"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Region == "" {
+			writeErrorJSON(w, http.StatusBadRequest, "invalid_request", "region is required")
+			return
+		}
+		res, err := e.Enroll(r.Context(), req.Region)
+		if err != nil {
+			if errors.Is(err, region.ErrUnknownRegion) {
+				writeErrorJSON(w, http.StatusBadRequest, "invalid_region", "unknown region")
+				return
+			}
+			logger.Error("enrollment failed", "error", err)
+			writeErrorJSON(w, http.StatusInternalServerError, "enrollment_failed", "enrollment failed")
+			return
+		}
+		writeJSON(w, http.StatusCreated, res)
+	}
+}
+
+// noopUserPersister drops enrollments. Replace with a sqlc-backed
+// implementation once DATABASE_URL is wired (docs/plans/user-enrollment.md).
+type noopUserPersister struct {
+	logger *slog.Logger
+}
+
+func (p *noopUserPersister) PersistUser(_ context.Context, r identity.UserRecord) error {
+	p.logger.Warn("enrollment scaffold: PersistUser is a no-op (DATABASE_URL not wired)",
+		"user_id", r.ID, "region", r.Region)
+	return nil
+}
+
+// --- JSON helpers -----------------------------------------------------------
+
+type jsonError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeErrorJSON(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, jsonError{Code: code, Message: message})
+}
+
+// --- env helpers ------------------------------------------------------------
 
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {

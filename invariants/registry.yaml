@@ -117,3 +117,21 @@ invariants:
     design_refs: [§3.2, §10, §11.3]
     description: "The pairwise_sub stored in a consent grant is the PPID computed at the moment of consent and is immutable — reads always return the exact value supplied at CreateGrant time. This ensures RP tokens stay stable even if the PPID derivation inputs change."
     enforced_by: [internal/clients:TestDBGrantStorePPIDBound]
+
+  - id: INV-ENROLL-DEK-FRESH
+    title: "Each enrollment generates a fresh DEK; keys are never reused across users"
+    design_refs: [§4.4, §10]
+    description: "Two consecutive enrollments yield distinct wrapped DEKs and distinct encrypted pairwise secrets. A DEK collision would mean two users share a decryption key — a catastrophic privacy failure."
+    enforced_by: [internal/identity:TestEnrollDifferentUsers]
+
+  - id: INV-ENROLL-PAIRWISE-SECRET-ENCRYPTED
+    title: "Pairwise secret stored envelope-encrypted with user DEK; never stored as plaintext"
+    design_refs: [§4.4, §10]
+    description: "The pairwise_secret persisted to users.pairwise_secret is AES-256-GCM ciphertext (nonce+ct+tag ≥60 bytes for a 32-byte input). A stored value of exactly 32 bytes would indicate a plaintext leak."
+    enforced_by: [internal/identity:TestEnrollPairwiseSecretEncrypted]
+
+  - id: INV-ENROLL-REGION-BOUND
+    title: "DEK wrapped for enrollment region; cross-region unwrap is rejected by GCM"
+    design_refs: [§4.4, §5.4, §10]
+    description: "A DEK generated at enrollment is wrapped under the regional KEK with region-bound GCM AAD. Unwrapping the same wrapped blob with a different region returns ErrDecryptFailed — the GCM tag cannot authenticate."
+    enforced_by: [internal/identity:TestEnrollRegionBound]
