@@ -105,3 +105,15 @@ invariants:
     design_refs: [§3.2, §6.5]
     description: "Issued JWT payloads contain only allowed claims (iss, sub, aud, exp, iat, nonce, scope, jti). No email, name, or other profile field appears without consent, upholding the data-minimization thesis."
     enforced_by: [internal/oidc:TestJWTIssuerNoPII]
+
+  - id: INV-GRANT-ACTIVE-ONLY
+    title: "FindGrant returns only active (non-revoked) grants; revoked grants are invisible"
+    design_refs: [§10, §11.3]
+    description: "A revoked consent grant must never be returned by FindGrant. The UNIQUE index on (user_id, client_id) means revoking and re-consenting issues a new grant; the old revoked row stays for audit but is excluded from the active lookup."
+    enforced_by: [internal/clients:TestDBGrantStoreActiveOnlyAfterRevoke]
+
+  - id: INV-GRANT-PPID-BOUND
+    title: "Grant pairwise_sub is the PPID frozen at consent time; never mutated after creation"
+    design_refs: [§3.2, §10, §11.3]
+    description: "The pairwise_sub stored in a consent grant is the PPID computed at the moment of consent and is immutable — reads always return the exact value supplied at CreateGrant time. This ensures RP tokens stay stable even if the PPID derivation inputs change."
+    enforced_by: [internal/clients:TestDBGrantStorePPIDBound]

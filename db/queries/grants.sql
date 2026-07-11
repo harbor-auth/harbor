@@ -24,3 +24,9 @@ UPDATE grants
 SET revoked_at = now()
 WHERE id = $1
   AND revoked_at IS NULL;
+
+-- name: FindGrantByUserClient :one
+SELECT * FROM grants
+WHERE user_id = $1
+  AND client_id = $2
+  AND revoked_at IS NULL;

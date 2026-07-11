@@ -6,9 +6,11 @@
 // (api/openapi/harbor.yaml → internal/gen/openapi), implemented in
 // internal/oidcapi. Today that is /healthz, the OIDC discovery document, and the
 // Authorization Code + PKCE flow (/authorize + /token). The flow's client
-// registry, code store, token signer, and login/consent are in-memory / stubbed
-// scaffolds for now (see internal/oidc); more endpoints and real backends are
-// added by growing the spec and swapping the interface implementations.
+// registry, code store, token signer, grant store, and login/consent are
+// in-memory / stubbed scaffolds for now (see internal/oidc); more endpoints and
+// real backends are added by growing the spec and swapping the interface
+// implementations. The DB-backed registry + grant store live in internal/clients
+// and are wired here when DATABASE_URL is configured (DESIGN §10).
 package main
 
 import (
@@ -69,6 +71,9 @@ func main() {
 		Codes:    oidc.NewInMemoryAuthCodeStore(),
 		Tokens:   oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
+		// SCAFFOLD: in-memory grant store — swap for clients.NewDBGrantStore(db.New(pool))
+		// once DATABASE_URL wiring lands (docs/DESIGN.md §10, §11.3).
+		Grants: oidc.NewInMemoryGrantStore(),
 	})
 
 	srv := oidcapi.New(oidcapi.Config{

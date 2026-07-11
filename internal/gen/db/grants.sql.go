@@ -52,6 +52,34 @@ func (q *Queries) CreateGrant(ctx context.Context, arg CreateGrantParams) (Grant
 	return i, err
 }
 
+const findGrantByUserClient = `-- name: FindGrantByUserClient :one
+SELECT id, region, user_id, client_id, pairwise_sub, scopes, created_at, revoked_at FROM grants
+WHERE user_id = $1
+  AND client_id = $2
+  AND revoked_at IS NULL
+`
+
+type FindGrantByUserClientParams struct {
+	UserID   pgtype.UUID `json:"user_id"`
+	ClientID string      `json:"client_id"`
+}
+
+func (q *Queries) FindGrantByUserClient(ctx context.Context, arg FindGrantByUserClientParams) (Grant, error) {
+	row := q.db.QueryRow(ctx, findGrantByUserClient, arg.UserID, arg.ClientID)
+	var i Grant
+	err := row.Scan(
+		&i.ID,
+		&i.Region,
+		&i.UserID,
+		&i.ClientID,
+		&i.PairwiseSub,
+		&i.Scopes,
+		&i.CreatedAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
 const getGrant = `-- name: GetGrant :one
 
 SELECT id, region, user_id, client_id, pairwise_sub, scopes, created_at, revoked_at FROM grants
