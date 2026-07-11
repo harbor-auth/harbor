@@ -63,7 +63,11 @@ Each domain maps to a DESIGN § and the invariants/tests that enforce it. Per-pa
 Skills and agents are the living toolkit — see [`.agents/README.md`](./README.md). The spine:
 
 ```
-@plan (+ @openspec spec) → @build → @validate → @harbor-reviewer → @codegen → @github-flow
+@plan (+ @openspec spec) → @build:
+  per chunk: @deep-thinker → implement → @validate/@go-test/@go-build
+             → loop{ @harbor-reviewer + @deep-code-reviewer → fix Critical/High } until only nits
+             → @github-flow
+→ @codegen (on contract changes) → PR
 ```
 
 Every plan is paired with a formal OpenSpec change (`openspec/changes/<slug>/`) that must pass `openspec validate --strict` before build — see [`@openspec`](./openspec.md).
