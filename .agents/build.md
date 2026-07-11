@@ -33,27 +33,51 @@ Before working the checklist, **recall first** — run [`@hippo`](./hippo.md)'s 
 
 For each coherent **chunk** of the checklist (typically 1–3 related items):
 
-### 1. Implement
+### 1. Think
+
+Before writing any code, run **`@deep-thinker`** on the chunk's scope:
+
+- Feed it the checklist item(s), the plan's *Proposed approach*, relevant DESIGN `§` refs, and any existing code that will be touched.
+- Ask it to surface: the best interface shape, edge cases and failure modes, security invariants to uphold, and whether a simpler approach exists.
+- Use the output to settle the design before implementation starts — **do not skip this step for non-trivial chunks**. For trivial changes (< ~20 lines, pure mechanical, no security surface), this step may be omitted.
+
+### 2. Implement
 
 - Read the checklist item(s) and the plan's *Proposed approach* + *Target code paths* for intent.
 - Gather codebase context — read referenced files, search for patterns, follow existing conventions.
 - Implement the item(s), keeping Harbor's **pure-core / thin-I/O** separation (§1.7) so logic stays unit-testable.
 
-### 2. Validate (Harbor's Go stack)
+### 3. Validate (Harbor's Go stack)
 
 - **[`@validate`](./validate.md)** — the fast inner loop on changed files: `gofmt`/`go vet`/`golangci-lint`, spec-lint (`spectral`/`buf lint`), and the **codegen-drift** check.
 - **[`@go-test`](./go-test.md)** — unit tests for the changed package(s); add **`-race`** for anything touching the hot path or shared caches (JWKS, revocation filter); integration (`-tags=integration`, real Postgres/Redis) where relevant.
 - **[`@go-build`](./go-build.md)** — `go build ./...` compile sanity; a build failure is a hard stop.
 - Fix every failure before proceeding — never `t.Skip`/pending to get green (per `go-test.md`).
 
-### 3. Review
+### 4. Review (iterate until only nits remain)
 
-After each logical chunk, run **[`@harbor-reviewer`](./harbor-reviewer.ts)** — the graduated agent that bakes in Harbor's privacy/security/sovereignty/spec-first/testing checklist and delegates the general quality pass to `@deep-code-reviewer`.
+After static analysis is green, run the two-layer review **in a loop** until no Critical/High/Medium findings remain:
 
-- Fix **Critical/High** findings immediately; **Medium** if the fix is quick (< 5 min), else note it; skip **Low** unless trivial.
+**Layer 1 — Harbor-specific:** Run **[`@harbor-reviewer`](./harbor-reviewer.ts)** on the chunk. It checks privacy/security/sovereignty/spec-first/testing invariants and calls through to `@deep-code-reviewer` for general quality.
+
+**Layer 2 — Deep code quality:** Run **`@deep-code-reviewer`** explicitly on the diff. This is the authoritative quality gate for correctness, error handling, naming, test coverage, and DESIGN compliance.
+
+**Iteration rule:**
+
+```
+loop:
+  run @harbor-reviewer + @deep-code-reviewer (in parallel)
+  fix all Critical findings          # security/correctness — blocking
+  fix all High findings              # serious bugs/gaps — blocking
+  fix Medium findings if < 5 min     # else note in plan and proceed
+  if any new Critical/High surfaced → restart loop from top
+  if only Low/Nit findings remain → exit loop
+```
+
+- **Never commit with an open Critical or High finding** — fix first, re-review, then commit.
 - Harbor is security-critical (OIDC/WebAuthn/PPID): the **negative/security tests** the checklist calls for must be green before the chunk is done.
 
-### 4. Commit & push
+### 5. Commit & push
 
 Delegate to **`@github-flow`** with a Harbor-scoped conventional-commit message, e.g.:
 
@@ -63,11 +87,11 @@ feat(oidc): refresh-token rotation — mint+rotate+revoke
 
 Mid-build settings: `skipCi: true` (we validate locally), `createPr: false` (PR is opened once, at the end or a milestone), `syncWithMaster: false` (avoid repeated mid-build merges). **`worktree`:** Harbor is a single Go repo — pass a sibling worktree path if you're building in one, else `worktree: "none"`.
 
-### 5. Update progress
+### 6. Update progress
 
 Tick the landed checklist items to `- [x]` in `docs/plans/<slug>.md`, and note any deviations/decisions inline in the plan.
 
-### 6. Repeat
+### 7. Repeat
 
 Move to the next chunk until the specified scope is complete.
 
@@ -77,7 +101,7 @@ Any change to the `api/` contracts (OpenAPI/Protobuf) is **spec-first**: edit th
 
 ## Milestone boundaries
 
-If the plan marks milestones, at each one run the fuller gate before committing: full **`@go-test`** + `-race` + integration, **`@validate`**, and **`@harbor-reviewer`** on the cumulative changes since the last milestone. Then commit via `@github-flow` with `createPr: true`, `skipCi: false`, `syncWithMaster: true`. If the plan has no milestones, skip this section.
+If the plan marks milestones, at each one run the fuller gate before committing: full **`@go-test`** + `-race` + integration, **`@validate`**, and the **review loop** (`@harbor-reviewer` + `@deep-code-reviewer` until only nits — same rule as step 4) on the cumulative changes since the last milestone. Then commit via `@github-flow` with `createPr: true`, `skipCi: false`, `syncWithMaster: true`. If the plan has no milestones, skip this section.
 
 ## Decision-making rules
 
@@ -116,7 +140,7 @@ When all in-scope checklist items are done:
 
 1. Confirm the plan's Implementation checklist is fully `- [x]` and its *Definition of done* is met.
 2. Final **`@validate`** + **`@go-test`** (full + `-race` + integration) pass.
-3. Final **`@harbor-reviewer`** pass on the full change set.
+3. Final review loop — **`@harbor-reviewer`** + **`@deep-code-reviewer`** (in parallel, same iterate-until-nits rule as step 4) on the full change set.
 4. **OpenSpec gate** — the paired OpenSpec change must pass **`openspec validate <slug> --strict`** (the formal spec gate) before promote; once shipped, **`@openspec archive <slug>`** merges its spec deltas into `openspec/specs/`.
 5. **`@plan promote <slug>`** — graduate the plan into a feature doc (`@docs new`), record provenance, and move its row to Features in `docs/README.md`.
 6. Report what was built, any deviations noted in the plan, and remaining items.
@@ -136,7 +160,7 @@ When all in-scope checklist items are done:
 
 - [ ] **Recalled** at session start (`@hippo`) and any ad-hoc/live items + friction captured in `hippo todo`?
 - [ ] Building from a plan whose `status` is **approved**, flipped to **in-progress** on start?
-- [ ] Each chunk **implemented → validated (`@validate`/`@go-test`/`@go-build`) → reviewed (`@harbor-reviewer`) → committed (`@github-flow`)**?
+- [ ] Each chunk **thought through (`@deep-thinker`) → implemented → validated (`@validate`/`@go-test`/`@go-build`) → reviewed iteratively (`@harbor-reviewer` + `@deep-code-reviewer` until only nits) → committed (`@github-flow`)**?
 - [ ] Any `api/` change regenerated via **`@codegen`** with `@validate` drift clean (no hand-edited generated files)?
 - [ ] **Negative/security tests** from the checklist green before each chunk is done?
 - [ ] Checklist `- [x]` boxes ticked and deviations noted **in the plan** as work lands?
