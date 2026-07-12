@@ -319,3 +319,40 @@ func TestDBSessionStoreGetByTokenHash(t *testing.T) {
 		t.Fatalf("expired hash: expected ErrRefreshTokenNotFound, got %v", err)
 	}
 }
+
+// TestDBSessionStoreRotateSession verifies that RotateSession (sequential
+// fallback path — no pgxpool wired) atomically revokes the old token and
+// creates the new one. The old token must come back as ErrRefreshTokenRevoked
+// (not just not-found) so the theft signal can still fire if it is replayed.
+func TestDBSessionStoreRotateSession(t *testing.T) {
+	q := newFakeSessionQuerier()
+	store := NewDBSessionStore(q)
+	ctx := context.Background()
+
+	hash1 := []byte("sha256-old-hash-32-bytes---------")
+	rs1 := buildTestSession(t, "00000000-0000-0000-0000-000000000401", sessTestUserID, hash1, 14*24*time.Hour)
+	if err := store.CreateSession(ctx, rs1); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	hash2 := []byte("sha256-new-hash-32-bytes---------")
+	rs2 := buildTestSession(t, "00000000-0000-0000-0000-000000000402", sessTestUserID, hash2, 14*24*time.Hour)
+	if err := store.RotateSession(ctx, rs1.ID, rs2); err != nil {
+		t.Fatalf("RotateSession: %v", err)
+	}
+
+	// Old token → revoked (not just not-found) so theft signal can still fire.
+	_, err := store.GetSessionByTokenHash(ctx, hash1)
+	if !errors.Is(err, oidc.ErrRefreshTokenRevoked) {
+		t.Fatalf("old token after rotation: expected ErrRefreshTokenRevoked, got %v", err)
+	}
+
+	// New token → active and returns the correct session.
+	got, err := store.GetSessionByTokenHash(ctx, hash2)
+	if err != nil {
+		t.Fatalf("new token after rotation: %v", err)
+	}
+	if got.ID != rs2.ID {
+		t.Fatalf("expected new session ID %q, got %q", rs2.ID, got.ID)
+	}
+}

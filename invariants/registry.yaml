@@ -142,11 +142,23 @@ invariants:
     description: "The hash returned by hashRefreshToken(plaintext) differs from the plaintext in both content and length. A database compromise leaks only the hash — the attacker cannot reconstruct the presentable token without inverting SHA-256."
     enforced_by: [internal/oidc:TestRefreshHashAtRest]
 
+  - id: INV-REFRESH-HASH-LOOKUP
+    title: "Token lookup uses SHA-256(plaintext); presenting the stored hash as a token returns invalid_grant"
+    design_refs: [§3.5, §7.4]
+    description: "The store is keyed on sha256(plaintext). An attacker with only DB read access holds base64url(hash) — presenting it as the token causes the service to compute sha256(hash) ≠ original hash, so the lookup misses and returns invalid_grant. DB compromise does not enable token replay."
+    enforced_by: [internal/oidc:TestRefreshHashLookup]
+
+  - id: INV-REFRESH-EXPIRY-ENFORCED
+    title: "Expired refresh tokens are rejected as invalid_grant; TTL is hard-enforced"
+    design_refs: [§3.5, §11.7]
+    description: "A refresh token whose ExpiresAt is in the past is rejected with invalid_grant at both the service layer (GetSessionByTokenHash returns ErrRefreshTokenNotFound) and the HTTP /token layer. A NULL expires_at also fails closed per the DB store — it is never treated as non-expiring."
+    enforced_by: [internal/oidc:TestRefreshExpiredTokenRejected, internal/oidcapi:TestToken_RefreshExpiredTokenRejected, internal/clients:TestDBSessionStoreGetByTokenHash]
+
   - id: INV-REFRESH-ROTATION-INVALIDATES-OLD
     title: "A rotated refresh token is immediately invalidated; the old token cannot be reused"
     design_refs: [§3.5, §11.7]
     description: "After a successful Refresh(), the old session is tombstoned (revoked_at set). Presenting the old token again returns invalid_grant — the hash lookup still finds the row but the revoked check fires, preventing replay."
-    enforced_by: [internal/oidc:TestRefreshRotationInvalidatesOldToken]
+    enforced_by: [internal/oidc:TestRefreshRotationInvalidatesOldToken, internal/oidcapi:TestToken_RefreshInvalidatesOldToken]
 
   - id: INV-REFRESH-ROTATION-SINGLE-USE
     title: "Refresh token is single-use at the HTTP layer; replaying a rotated token returns invalid_grant"

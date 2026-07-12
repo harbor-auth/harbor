@@ -27,7 +27,7 @@ type RefreshSession struct {
 	ID          string // UUID string
 	Region      string // user's home jurisdiction (§5)
 	UserID      string // internal user UUID
-	GrantID     string // associated consent grant UUID
+	GrantID     string // associated consent grant UUID — carried in-memory only; not persisted to the sessions table (no DB column exists yet)
 	ClientID    string // the RP this session belongs to
 	DeviceLabel string // optional: UA string / device name
 	TokenHash   []byte // SHA-256 of the opaque plaintext — NEVER the plaintext
@@ -60,6 +60,12 @@ type SessionStore interface {
 
 	// RevokeSession soft-deletes a session by ID.
 	RevokeSession(ctx context.Context, id string) error
+
+	// RotateSession atomically revokes oldID and stores newSession in a single
+	// operation. This prevents the crash window between a separate RevokeSession
+	// and CreateSession where a user could be permanently locked out
+	// (docs/DESIGN.md §3.5, §11.7).
+	RotateSession(ctx context.Context, oldID string, newSession RefreshSession) error
 
 	// RevokeSessionsByUserClient revokes every active session for a
 	// (userID, clientID) pairing — the theft-signal family revoke (§3.5, §11.7).
@@ -127,6 +133,23 @@ func (s *InMemorySessionStore) RevokeSession(_ context.Context, id string) error
 	return nil
 }
 
+// RotateSession implements SessionStore. Revoke + create happen under a single
+// lock acquisition, so there is no crash window between them.
+func (s *InMemorySessionStore) RotateSession(_ context.Context, oldID string, newSession RefreshSession) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Revoke old — under the lock, so no crash window between revoke and create.
+	if e, ok := s.byID[oldID]; ok {
+		e.revoked = true
+		e.s.RevokedAt = time.Now()
+	}
+	// Create new.
+	entry := &sessionEntry{s: newSession}
+	s.byID[newSession.ID] = entry
+	s.byHash[base64.RawURLEncoding.EncodeToString(newSession.TokenHash)] = entry
+	return nil
+}
+
 // RevokeSessionsByUserClient implements SessionStore (theft signal family revoke).
 func (s *InMemorySessionStore) RevokeSessionsByUserClient(_ context.Context, userID, clientID string) error {
 	s.mu.Lock()
@@ -138,6 +161,20 @@ func (s *InMemorySessionStore) RevokeSessionsByUserClient(_ context.Context, use
 		}
 	}
 	return nil
+}
+
+// ForceExpireAllForTest immediately back-dates every active session's ExpiresAt
+// to one second in the past, simulating TTL expiry without sleeping.
+// This is a test-only helper; never call it from production code.
+func (s *InMemorySessionStore) ForceExpireAllForTest() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	past := time.Now().Add(-time.Second)
+	for _, e := range s.byID {
+		if !e.revoked {
+			e.s.ExpiresAt = past
+		}
+	}
 }
 
 // hashRefreshToken returns the SHA-256 digest of plaintext. Only the digest is
@@ -182,6 +219,7 @@ func (noopSessionStore) GetSessionByTokenHash(context.Context, []byte) (RefreshS
 	return RefreshSession{}, ErrRefreshTokenNotFound
 }
 func (noopSessionStore) RevokeSession(context.Context, string) error { return nil }
+func (noopSessionStore) RotateSession(context.Context, string, RefreshSession) error { return nil }
 func (noopSessionStore) RevokeSessionsByUserClient(context.Context, string, string) error {
 	return nil
 }

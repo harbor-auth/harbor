@@ -12,14 +12,9 @@ import (
 	"github.com/harbor/harbor/internal/oidc"
 )
 
-// newRefreshFlowServer builds a Server wired for the full refresh-token rotation
-// cycle. Unlike newFlowServer it adds:
-//   - offline_access in ScopesAllowed so the token endpoint issues a refresh token
-//   - SectorID on the client (required by PPIDSessionResolver for PPID derivation)
-//   - InMemorySessionStore so refresh sessions are persisted across requests
-//   - InMemoryGrantStore + PPIDSessionResolver so Refresh() can recover the frozen
-//     PPID and scopes from the consent grant
-func newRefreshFlowServer(t *testing.T) *httptest.Server {
+// newRefreshFlowServerWithStore is like newRefreshFlowServer but also returns
+// the InMemorySessionStore so tests can manipulate it (e.g. force-expire sessions).
+func newRefreshFlowServerWithStore(t *testing.T) (*httptest.Server, *oidc.InMemorySessionStore) {
 	t.Helper()
 	const userID = "00000000-0000-0000-0000-000000000042"
 
@@ -45,13 +40,15 @@ func newRefreshFlowServer(t *testing.T) *httptest.Server {
 		Grants: grants,
 	})
 
+	sessions := oidc.NewInMemorySessionStore()
+
 	svc := oidc.NewService(oidc.ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
 		Codes:        oidc.NewInMemoryAuthCodeStore(),
 		Tokens:       oidc.NewPlaceholderIssuer(),
 		Sessions:     resolver,
-		SessionStore: oidc.NewInMemorySessionStore(),
+		SessionStore: sessions,
 		Grants:       grants, // shared with resolver so FindGrant succeeds in Refresh()
 	})
 
@@ -59,6 +56,19 @@ func newRefreshFlowServer(t *testing.T) *httptest.Server {
 	h := openapi.HandlerFromMux(srv, http.NewServeMux())
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
+	return ts, sessions
+}
+
+// newRefreshFlowServer builds a Server wired for the full refresh-token rotation
+// cycle. Unlike newFlowServer it adds:
+//   - offline_access in ScopesAllowed so the token endpoint issues a refresh token
+//   - SectorID on the client (required by PPIDSessionResolver for PPID derivation)
+//   - InMemorySessionStore so refresh sessions are persisted across requests
+//   - InMemoryGrantStore + PPIDSessionResolver so Refresh() can recover the frozen
+//     PPID and scopes from the consent grant
+func newRefreshFlowServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	ts, _ := newRefreshFlowServerWithStore(t)
 	return ts
 }
 
@@ -180,6 +190,73 @@ func TestToken_RefreshRotation(t *testing.T) {
 	}
 }
 
+// TestToken_RefreshInvalidatesOldToken verifies INV-REFRESH-ROTATION-INVALIDATES-OLD at
+// the HTTP layer: the old session is immediately tombstoned the moment it is rotated,
+// and any subsequent presentation of the old token yields invalid_grant.
+//
+// Distinction from related tests:
+//   - TestToken_RefreshRotation (INV-REFRESH-ROTATION-SINGLE-USE): focuses on
+//     single-use HTTP enforcement and verifies the new token differs from the old.
+//   - TestToken_RefreshTheftSignal_RevokesFamily (INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE):
+//     focuses on family-wide revocation triggered by presenting a revoked token.
+//
+// This test isolates the single invariant — old token → invalid_grant immediately
+// — without asserting on the successor token or the family-revocation side effect.
+//
+//harbor:invariant INV-REFRESH-ROTATION-INVALIDATES-OLD
+func TestToken_RefreshInvalidatesOldToken(t *testing.T) {
+	ts := newRefreshFlowServer(t)
+	refreshToken1 := mintRefreshToken(t, ts)
+
+	// Rotate: token1 → token2. This must succeed and tombstone token1 in the store.
+	res1 := postRefresh(t, ts, refreshToken1)
+	if res1.StatusCode != http.StatusOK {
+		_ = res1.Body.Close()
+		t.Fatalf("initial rotation status = %d, want 200", res1.StatusCode)
+	}
+	_ = res1.Body.Close()
+
+	// token1 is now tombstoned (revoked_at set). Presenting it must immediately
+	// yield invalid_grant — the revoked check fires before any theft-signal logic.
+	res2 := postRefresh(t, ts, refreshToken1)
+	defer func() { _ = res2.Body.Close() }()
+
+	if res2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("tombstoned token status = %d, want 400", res2.StatusCode)
+	}
+	assertNoStore(t, res2)
+	if code := decodeOAuthErrorCode(t, res2); code != "invalid_grant" {
+		t.Fatalf("tombstoned token error = %q, want invalid_grant", code)
+	}
+}
+
+// TestToken_RefreshExpiredTokenRejected verifies INV-REFRESH-EXPIRY-ENFORCED at
+// the HTTP layer: a refresh token whose TTL has elapsed is rejected with
+// invalid_grant, and the TTL is hard-enforced (not advisory).
+//
+// The test simulates TTL expiry by force-expiring all sessions in the store
+// without sleeping — deterministic and instant.
+//
+//harbor:invariant INV-REFRESH-EXPIRY-ENFORCED
+func TestToken_RefreshExpiredTokenRejected(t *testing.T) {
+	ts, sessions := newRefreshFlowServerWithStore(t)
+	refreshToken := mintRefreshToken(t, ts)
+
+	// Simulate TTL expiry: back-date every active session by 1 second.
+	sessions.ForceExpireAllForTest()
+
+	res := postRefresh(t, ts, refreshToken)
+	defer func() { _ = res.Body.Close() }()
+
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expired token status = %d, want 400", res.StatusCode)
+	}
+	assertNoStore(t, res)
+	if code := decodeOAuthErrorCode(t, res); code != "invalid_grant" {
+		t.Fatalf("expired token error = %q, want invalid_grant", code)
+	}
+}
+
 // TestToken_RefreshTheftSignal_RevokesFamily verifies the theft-detection path
 // (docs/DESIGN.md §3.5, INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE):
 //
@@ -215,6 +292,7 @@ func TestToken_RefreshTheftSignal_RevokesFamily(t *testing.T) {
 	if res2.StatusCode != http.StatusBadRequest {
 		t.Fatalf("theft detection status = %d, want 400", res2.StatusCode)
 	}
+	assertNoStore(t, res2)
 	if code := decodeOAuthErrorCode(t, res2); code != "invalid_grant" {
 		t.Fatalf("theft signal error = %q, want invalid_grant", code)
 	}
@@ -226,6 +304,7 @@ func TestToken_RefreshTheftSignal_RevokesFamily(t *testing.T) {
 	if res3.StatusCode != http.StatusBadRequest {
 		t.Fatalf("post-theft token2 status = %d, want 400", res3.StatusCode)
 	}
+	assertNoStore(t, res3)
 	if code := decodeOAuthErrorCode(t, res3); code != "invalid_grant" {
 		t.Fatalf("post-theft token2 error = %q, want invalid_grant", code)
 	}

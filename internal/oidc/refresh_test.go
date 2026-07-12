@@ -126,6 +126,7 @@ func TestRefreshReuseFiresTheftSignal(t *testing.T) {
 	}
 }
 
+//harbor:invariant INV-REFRESH-EXPIRY-ENFORCED
 func TestRefreshExpiredTokenRejected(t *testing.T) {
 	svc, sessionStore, grantStore := newTestServiceWithSessions(t)
 
@@ -154,6 +155,45 @@ func TestRefreshExpiredTokenRejected(t *testing.T) {
 	})
 	if terr == nil || terr.Code != ErrCodeInvalidGrant {
 		t.Fatalf("expected invalid_grant for expired token, got %v", terr)
+	}
+}
+
+//harbor:invariant INV-REFRESH-HASH-LOOKUP
+func TestRefreshHashLookup(t *testing.T) {
+	// Verify that the store is keyed on SHA-256(plaintext), not the plaintext
+	// itself. An attacker with only DB read access holds base64url(hash) — they
+	// cannot use that as a token because the service hashes again before lookup:
+	// sha256(hash) ≠ hash (with overwhelming probability), so the lookup misses.
+	svc, sessionStore, grantStore := newTestServiceWithSessions(t)
+	realToken := seedSession(t, sessionStore, grantStore, "ppid-hash-lookup")
+
+	// Decode the plaintext so we can construct the DB-attacker's token.
+	plaintext, err := decodeRefreshToken(realToken)
+	if err != nil {
+		t.Fatalf("decodeRefreshToken: %v", err)
+	}
+	hash := hashRefreshToken(plaintext)
+
+	// Present base64url(hash) as the token — the attacker's best guess from the DB.
+	// The service will compute sha256(hash) ≠ original hash → lookup miss → invalid_grant.
+	hashAsToken := encodeRefreshToken(hash)
+	_, terr := svc.Refresh(context.Background(), TokenRequest{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: hashAsToken,
+		ClientID:     testRefreshClientID,
+	})
+	if terr == nil || terr.Code != ErrCodeInvalidGrant {
+		t.Fatalf("expected invalid_grant when presenting hash-as-token, got %v", terr)
+	}
+
+	// Sanity check: the real plaintext token is unaffected by the failed attempt.
+	_, terr2 := svc.Refresh(context.Background(), TokenRequest{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: realToken,
+		ClientID:     testRefreshClientID,
+	})
+	if terr2 != nil {
+		t.Fatalf("expected real plaintext token to work, got %v", terr2)
 	}
 }
 

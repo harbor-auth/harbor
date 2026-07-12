@@ -356,20 +356,24 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 		if errors.Is(err, ErrRefreshTokenRevoked) {
 			// A rotated (revoked) token was replayed: assume theft, revoke family.
 			s.signalRefreshReuse(ctx, session)
+			return nil, invalidGrant("refresh token is invalid")
 		}
-		return nil, invalidGrant("refresh token is invalid")
+		if errors.Is(err, ErrRefreshTokenNotFound) {
+			return nil, invalidGrant("refresh token is invalid")
+		}
+		// Transient DB error — propagate as 5xx, not invalid_grant.
+		// Masking a DB outage as invalid_grant would silently reject valid
+		// tokens during an outage and trigger a mass-logout (docs/DESIGN.md §10).
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not look up session", Status: 500}
 	}
 
 	if terr := ValidateRefreshParams(req, session, s.now()); terr != nil {
 		return nil, terr
 	}
 
-	// Rotate: revoke old + create new. In-memory best-effort; the DB store does
-	// this in one transaction (see docs/plans/refresh-token-rotation.md).
-	if err := s.sessionStore.RevokeSession(ctx, session.ID); err != nil {
-		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not rotate session", Status: 500}
-	}
-
+	// Generate new token material BEFORE calling RotateSession so both the
+	// revoke and create happen in a single atomic transaction when a real DB
+	// pool is wired (docs/DESIGN.md §3.5 — no crash window between the two).
 	newPlaintext, newHash, err := newOpaqueToken()
 	if err != nil {
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not generate refresh token", Status: 500}
@@ -388,8 +392,11 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 		TokenHash:   newHash,
 		ExpiresAt:   s.now().Add(defaultRefreshTTL),
 	}
-	if err := s.sessionStore.CreateSession(ctx, newSession); err != nil {
-		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not create new session", Status: 500}
+	// RotateSession atomically revokes the old session and creates the new one.
+	// With a pool-wired DBSessionStore this is a single transaction; with
+	// InMemorySessionStore it is atomic under the store's mutex.
+	if err := s.sessionStore.RotateSession(ctx, session.ID, newSession); err != nil {
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not rotate session", Status: 500}
 	}
 
 	// Recover the frozen PPID + scopes from the consent grant so the rotated
