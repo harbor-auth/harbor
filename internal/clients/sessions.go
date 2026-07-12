@@ -29,17 +29,32 @@ type sessionQuerier interface {
 	RevokeSessionsByUserClient(ctx context.Context, arg db.RevokeSessionsByUserClientParams) error
 }
 
+// txBeginner is satisfied by *pgxpool.Pool and enables atomic rotation via
+// a real DB transaction. Nil disables the transaction path (test/dev fallback).
+type txBeginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
 // DBSessionStore implements oidc.SessionStore over the sessions table
 // (docs/DESIGN.md §3.5, §10). Each method converts domain types to/from sqlc
 // types; only the token HASH is ever handled here — the plaintext refresh token
 // never enters this package (§7.4).
 type DBSessionStore struct {
-	q sessionQuerier
+	q  sessionQuerier
+	tx txBeginner // nil → sequential fallback in RotateSession
 }
 
 // NewDBSessionStore wraps a sqlc Queries (or any sessionQuerier).
 func NewDBSessionStore(q sessionQuerier) *DBSessionStore {
 	return &DBSessionStore{q: q}
+}
+
+// WithPool enables atomic single-transaction rotation via the given pool.
+// Call this when wiring DBSessionStore in production (harbor-mgmt or session
+// service); omitting it falls back to the sequential revoke+create path.
+func (s *DBSessionStore) WithPool(p txBeginner) *DBSessionStore {
+	s.tx = p
+	return s
 }
 
 // Compile-time proof that DBSessionStore implements oidc.SessionStore.
@@ -114,6 +129,67 @@ func (s *DBSessionStore) RevokeSession(ctx context.Context, id string) error {
 		return fmt.Errorf("sessions: parse session ID %q: %w", id, err)
 	}
 	return s.q.RevokeSession(ctx, uid)
+}
+
+// RotateSession implements oidc.SessionStore. It atomically revokes oldID and
+// creates newSession. When a pool is wired (WithPool), both operations execute
+// inside a single transaction so a crash between them cannot leave the user
+// locked out. Without a pool (test/dev), it falls back to sequential
+// revoke+create (same behaviour as before this change).
+func (s *DBSessionStore) RotateSession(ctx context.Context, oldID string, newSession oidc.RefreshSession) error {
+	if s.tx == nil {
+		// No transactor: sequential best-effort (tests, dev without a pool).
+		if err := s.RevokeSession(ctx, oldID); err != nil {
+			return fmt.Errorf("sessions: rotate (revoke): %w", err)
+		}
+		return s.CreateSession(ctx, newSession)
+	}
+	txn, err := s.tx.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("sessions: begin rotation tx: %w", err)
+	}
+	defer txn.Rollback(ctx) //nolint:errcheck // Rollback after Commit is a no-op (returns pgx.ErrTxClosed); unrecoverable from a deferred call.
+
+	qtx := db.New(txn)
+
+	var oldUID pgtype.UUID
+	if err := oldUID.Scan(oldID); err != nil {
+		return fmt.Errorf("sessions: parse old session ID %q: %w", oldID, err)
+	}
+	if err := qtx.RevokeSession(ctx, oldUID); err != nil {
+		return fmt.Errorf("sessions: rotate (revoke in tx): %w", err)
+	}
+
+	var newID pgtype.UUID
+	if err := newID.Scan(newSession.ID); err != nil {
+		return fmt.Errorf("sessions: parse new session ID %q: %w", newSession.ID, err)
+	}
+	var userID pgtype.UUID
+	if err := userID.Scan(newSession.UserID); err != nil {
+		return fmt.Errorf("sessions: parse user ID %q: %w", newSession.UserID, err)
+	}
+	var deviceLabel *string
+	if newSession.DeviceLabel != "" {
+		label := newSession.DeviceLabel
+		deviceLabel = &label
+	}
+	var expiresAt pgtype.Timestamptz
+	if err := expiresAt.Scan(newSession.ExpiresAt); err != nil {
+		return fmt.Errorf("sessions: parse expires_at: %w", err)
+	}
+	if _, err := qtx.CreateSession(ctx, db.CreateSessionParams{
+		ID:               newID,
+		Region:           newSession.Region,
+		UserID:           userID,
+		ClientID:         newSession.ClientID,
+		DeviceLabel:      deviceLabel,
+		RefreshTokenHash: newSession.TokenHash,
+		ExpiresAt:        expiresAt,
+	}); err != nil {
+		return fmt.Errorf("sessions: rotate (create in tx): %w", err)
+	}
+
+	return txn.Commit(ctx)
 }
 
 // RevokeSessionsByUserClient implements oidc.SessionStore (theft-signal family
