@@ -140,6 +140,8 @@ func postRefresh(t *testing.T, ts *httptest.Server, refreshToken string) *http.R
 //  2. POST refresh_token grant → get new access + id + refresh tokens
 //  3. The OLD refresh token is now single-use/rotated and must be rejected with
 //     invalid_grant (docs/DESIGN.md §3.5, INV-REFRESH-ROTATION-SINGLE-USE).
+//
+//harbor:invariant INV-REFRESH-ROTATION-SINGLE-USE
 func TestToken_RefreshRotation(t *testing.T) {
 	ts := newRefreshFlowServer(t)
 	refreshToken1 := mintRefreshToken(t, ts)
@@ -185,6 +187,8 @@ func TestToken_RefreshRotation(t *testing.T) {
 //  2. Replay token1 (revoked) → theft signal fires → entire (user, client)
 //     session family is revoked.
 //  3. token2 must also be rejected because it was in the same family.
+//
+//harbor:invariant INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE
 func TestToken_RefreshTheftSignal_RevokesFamily(t *testing.T) {
 	ts := newRefreshFlowServer(t)
 	refreshToken1 := mintRefreshToken(t, ts)

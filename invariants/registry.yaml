@@ -148,11 +148,17 @@ invariants:
     description: "After a successful Refresh(), the old session is tombstoned (revoked_at set). Presenting the old token again returns invalid_grant — the hash lookup still finds the row but the revoked check fires, preventing replay."
     enforced_by: [internal/oidc:TestRefreshRotationInvalidatesOldToken]
 
+  - id: INV-REFRESH-ROTATION-SINGLE-USE
+    title: "Refresh token is single-use at the HTTP layer; replaying a rotated token returns invalid_grant"
+    design_refs: [§3.5, §11.7]
+    description: "End-to-end conformance at the /token HTTP layer: after a successful refresh_token grant the old token is rotated and any subsequent use of the same token returns invalid_grant. Complements INV-REFRESH-ROTATION-INVALIDATES-OLD (pure-layer) with a full authorize → code exchange → refresh → replay cycle."
+    enforced_by: [internal/oidcapi:TestToken_RefreshRotation]
+
   - id: INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE
     title: "Replay of a rotated token fires theft signal that revokes the entire (user, client) session family"
     design_refs: [§3.5, §11.7]
     description: "When a revoked refresh token is presented, ErrRefreshTokenRevoked is detected and RevokeSessionsByUserClient is called, invalidating every active session for that (user, client) pair — including the legitimately rotated successor token. This detects token theft and forces re-authentication."
-    enforced_by: [internal/oidc:TestRefreshReuseFiresTheftSignal]
+    enforced_by: [internal/oidc:TestRefreshReuseFiresTheftSignal, internal/oidcapi:TestToken_RefreshTheftSignal_RevokesFamily]
 
   - id: INV-ENROLL-DEK-FRESH
     title: "Each enrollment generates a fresh DEK; keys are never reused across users"
