@@ -151,14 +151,11 @@ paths:
               type: object
               required:
                 - grant_type
-                - code
-                - redirect_uri
                 - client_id
-                - code_verifier
               properties:
                 grant_type:
                   type: string
-                  enum: ["authorization_code"]
+                  enum: ["authorization_code", "refresh_token"]
                 code:
                   type: string
                 redirect_uri:
@@ -168,6 +165,11 @@ paths:
                   type: string
                 code_verifier:
                   type: string
+                refresh_token:
+                  type: string
+                  description: >-
+                    Opaque rotating refresh token, required when
+                    grant_type=refresh_token (DESIGN §3.5).
       responses:
         "200":
           description: Issued tokens.
@@ -315,6 +317,14 @@ components:
         scope:
           type: string
           description: Space-delimited granted scopes.
+        refresh_token:
+          type: string
+          description: >-
+            Opaque rotating refresh token. Only present when the offline_access
+            scope was granted (DESIGN §3.5).
+        refresh_expires_in:
+          type: integer
+          description: Refresh-token lifetime in seconds.
     OAuthError:
       type: object
       description: >-

@@ -136,6 +136,24 @@ invariants:
     description: "If auth, secret-load, or derivation fails, Resolve returns an empty subject and a non-nil error — never the internal user_id as sub. Leaking user_id as sub would collapse cross-RP unlinkability for any RP that receives the error response."
     enforced_by: [internal/oidc:TestPPIDSessionResolverFailClosed]
 
+  - id: INV-REFRESH-HASH-AT-REST
+    title: "Refresh token stored only as SHA-256 hash; plaintext is never persisted"
+    design_refs: [§3.5, §7.4]
+    description: "The hash returned by hashRefreshToken(plaintext) differs from the plaintext in both content and length. A database compromise leaks only the hash — the attacker cannot reconstruct the presentable token without inverting SHA-256."
+    enforced_by: [internal/oidc:TestRefreshHashAtRest]
+
+  - id: INV-REFRESH-ROTATION-INVALIDATES-OLD
+    title: "A rotated refresh token is immediately invalidated; the old token cannot be reused"
+    design_refs: [§3.5, §11.7]
+    description: "After a successful Refresh(), the old session is tombstoned (revoked_at set). Presenting the old token again returns invalid_grant — the hash lookup still finds the row but the revoked check fires, preventing replay."
+    enforced_by: [internal/oidc:TestRefreshRotationInvalidatesOldToken]
+
+  - id: INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE
+    title: "Replay of a rotated token fires theft signal that revokes the entire (user, client) session family"
+    design_refs: [§3.5, §11.7]
+    description: "When a revoked refresh token is presented, ErrRefreshTokenRevoked is detected and RevokeSessionsByUserClient is called, invalidating every active session for that (user, client) pair — including the legitimately rotated successor token. This detects token theft and forces re-authentication."
+    enforced_by: [internal/oidc:TestRefreshReuseFiresTheftSignal]
+
   - id: INV-ENROLL-DEK-FRESH
     title: "Each enrollment generates a fresh DEK; keys are never reused across users"
     design_refs: [§4.4, §10]

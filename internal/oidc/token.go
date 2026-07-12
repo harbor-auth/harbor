@@ -5,9 +5,12 @@ import (
 	"time"
 )
 
-// grantTypeAuthorizationCode is the only grant Harbor supports at /token today
-// (refresh_token is a documented next step; docs/DESIGN.md §3.1).
+// grantTypeAuthorizationCode is the code-exchange grant (docs/DESIGN.md §3.1).
 const grantTypeAuthorizationCode = "authorization_code"
+
+// grantTypeRefreshToken is the grant type for opaque, rotating, one-time-use
+// refresh-token rotation (docs/DESIGN.md §3.5).
+const grantTypeRefreshToken = "refresh_token"
 
 // TokenRequest is the raw, untrusted form input to /token.
 type TokenRequest struct {
@@ -16,25 +19,51 @@ type TokenRequest struct {
 	RedirectURI  string
 	ClientID     string
 	CodeVerifier string
+	RefreshToken string
 }
 
 // ValidateTokenParams checks the grant_type and required-parameter presence
 // BEFORE the authorization code is consumed, so a malformed request never burns
 // a valid one-time code. Pure (docs/DESIGN.md §1.7).
 func ValidateTokenParams(req TokenRequest) *TokenError {
-	if req.GrantType != grantTypeAuthorizationCode {
+	switch req.GrantType {
+	case grantTypeAuthorizationCode:
+		if req.Code == "" || req.RedirectURI == "" || req.ClientID == "" || req.CodeVerifier == "" {
+			return &TokenError{
+				Code:        ErrCodeInvalidRequest,
+				Description: "missing required parameter",
+				Status:      http.StatusBadRequest,
+			}
+		}
+	case grantTypeRefreshToken:
+		if req.RefreshToken == "" || req.ClientID == "" {
+			return &TokenError{
+				Code:        ErrCodeInvalidRequest,
+				Description: "missing required parameter",
+				Status:      http.StatusBadRequest,
+			}
+		}
+	default:
 		return &TokenError{
 			Code:        ErrCodeUnsupportedGrantType,
-			Description: "only grant_type=authorization_code is supported",
+			Description: "only grant_type=authorization_code or refresh_token is supported",
 			Status:      http.StatusBadRequest,
 		}
 	}
-	if req.Code == "" || req.RedirectURI == "" || req.ClientID == "" || req.CodeVerifier == "" {
-		return &TokenError{
-			Code:        ErrCodeInvalidRequest,
-			Description: "missing required parameter",
-			Status:      http.StatusBadRequest,
-		}
+	return nil
+}
+
+// ValidateRefreshParams performs stateless validation of a refresh_token
+// exchange against the looked-up session BEFORE the old token is rotated, so a
+// malformed/mismatched request never burns a valid session. Every failure is
+// invalid_grant (RFC 6749 §5.2) — we do not distinguish "wrong client" from
+// "expired" in the wire error (docs/DESIGN.md §11.7).
+func ValidateRefreshParams(req TokenRequest, session RefreshSession, now time.Time) *TokenError {
+	if session.ClientID != req.ClientID {
+		return invalidGrant("refresh token was not issued to this client")
+	}
+	if now.After(session.ExpiresAt) {
+		return invalidGrant("refresh token has expired")
 	}
 	return nil
 }
