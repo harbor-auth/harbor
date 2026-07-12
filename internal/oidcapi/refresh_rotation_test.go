@@ -180,6 +180,46 @@ func TestToken_RefreshRotation(t *testing.T) {
 	}
 }
 
+// TestToken_RefreshInvalidatesOldToken verifies INV-REFRESH-ROTATION-INVALIDATES-OLD at
+// the HTTP layer: the old session is immediately tombstoned the moment it is rotated,
+// and any subsequent presentation of the old token yields invalid_grant.
+//
+// Distinction from related tests:
+//   - TestToken_RefreshRotation (INV-REFRESH-ROTATION-SINGLE-USE): focuses on
+//     single-use HTTP enforcement and verifies the new token differs from the old.
+//   - TestToken_RefreshTheftSignal_RevokesFamily (INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE):
+//     focuses on family-wide revocation triggered by presenting a revoked token.
+//
+// This test isolates the single invariant — old token → invalid_grant immediately
+// — without asserting on the successor token or the family-revocation side effect.
+//
+//harbor:invariant INV-REFRESH-ROTATION-INVALIDATES-OLD
+func TestToken_RefreshInvalidatesOldToken(t *testing.T) {
+	ts := newRefreshFlowServer(t)
+	refreshToken1 := mintRefreshToken(t, ts)
+
+	// Rotate: token1 → token2. This must succeed and tombstone token1 in the store.
+	res1 := postRefresh(t, ts, refreshToken1)
+	if res1.StatusCode != http.StatusOK {
+		_ = res1.Body.Close()
+		t.Fatalf("initial rotation status = %d, want 200", res1.StatusCode)
+	}
+	_ = res1.Body.Close()
+
+	// token1 is now tombstoned (revoked_at set). Presenting it must immediately
+	// yield invalid_grant — the revoked check fires before any theft-signal logic.
+	res2 := postRefresh(t, ts, refreshToken1)
+	defer func() { _ = res2.Body.Close() }()
+
+	if res2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("tombstoned token status = %d, want 400", res2.StatusCode)
+	}
+	assertNoStore(t, res2)
+	if code := decodeOAuthErrorCode(t, res2); code != "invalid_grant" {
+		t.Fatalf("tombstoned token error = %q, want invalid_grant", code)
+	}
+}
+
 // TestToken_RefreshTheftSignal_RevokesFamily verifies the theft-detection path
 // (docs/DESIGN.md §3.5, INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE):
 //
