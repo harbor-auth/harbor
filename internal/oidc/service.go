@@ -356,8 +356,15 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 		if errors.Is(err, ErrRefreshTokenRevoked) {
 			// A rotated (revoked) token was replayed: assume theft, revoke family.
 			s.signalRefreshReuse(ctx, session)
+			return nil, invalidGrant("refresh token is invalid")
 		}
-		return nil, invalidGrant("refresh token is invalid")
+		if errors.Is(err, ErrRefreshTokenNotFound) {
+			return nil, invalidGrant("refresh token is invalid")
+		}
+		// Transient DB error — propagate as 5xx, not invalid_grant.
+		// Masking a DB outage as invalid_grant would silently reject valid
+		// tokens during an outage and trigger a mass-logout (docs/DESIGN.md §10).
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not look up session", Status: 500}
 	}
 
 	if terr := ValidateRefreshParams(req, session, s.now()); terr != nil {

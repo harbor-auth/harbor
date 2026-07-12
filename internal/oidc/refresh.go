@@ -27,7 +27,7 @@ type RefreshSession struct {
 	ID          string // UUID string
 	Region      string // user's home jurisdiction (§5)
 	UserID      string // internal user UUID
-	GrantID     string // associated consent grant UUID
+	GrantID     string // associated consent grant UUID — carried in-memory only; not persisted to the sessions table (no DB column exists yet)
 	ClientID    string // the RP this session belongs to
 	DeviceLabel string // optional: UA string / device name
 	TokenHash   []byte // SHA-256 of the opaque plaintext — NEVER the plaintext

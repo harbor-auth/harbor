@@ -292,6 +292,7 @@ func TestToken_RefreshTheftSignal_RevokesFamily(t *testing.T) {
 	if res2.StatusCode != http.StatusBadRequest {
 		t.Fatalf("theft detection status = %d, want 400", res2.StatusCode)
 	}
+	assertNoStore(t, res2)
 	if code := decodeOAuthErrorCode(t, res2); code != "invalid_grant" {
 		t.Fatalf("theft signal error = %q, want invalid_grant", code)
 	}
@@ -303,6 +304,7 @@ func TestToken_RefreshTheftSignal_RevokesFamily(t *testing.T) {
 	if res3.StatusCode != http.StatusBadRequest {
 		t.Fatalf("post-theft token2 status = %d, want 400", res3.StatusCode)
 	}
+	assertNoStore(t, res3)
 	if code := decodeOAuthErrorCode(t, res3); code != "invalid_grant" {
 		t.Fatalf("post-theft token2 error = %q, want invalid_grant", code)
 	}
