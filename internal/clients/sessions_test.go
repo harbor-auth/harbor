@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	db "github.com/harbor/harbor/internal/gen/db"
@@ -83,7 +84,9 @@ func (f *fakeSessionQuerier) GetSessionByHash(_ context.Context, hash []byte) (d
 			return row, nil
 		}
 	}
-	return db.Session{}, fmt.Errorf("session not found")
+	// Return pgx.ErrNoRows so DBSessionStore.GetSessionByTokenHash maps this
+	// correctly to ErrRefreshTokenNotFound (matching real pgx behaviour).
+	return db.Session{}, pgx.ErrNoRows
 }
 
 func (f *fakeSessionQuerier) ListSessionsByUser(_ context.Context, userID pgtype.UUID) ([]db.Session, error) {
@@ -190,8 +193,6 @@ func TestDBSessionStoreCreateAndRevoke(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	// GetSessionByTokenHash is SCAFFOLD (fails closed) — verified below via the
-	// fake querier directly.
 	row, err := q.GetActiveSession(context.Background(), mustUUID(t, rs.ID))
 	if err != nil {
 		t.Fatalf("GetActiveSession after create: %v", err)

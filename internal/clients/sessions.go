@@ -2,9 +2,11 @@ package clients
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	db "github.com/harbor/harbor/internal/gen/db"
@@ -82,8 +84,13 @@ func (s *DBSessionStore) CreateSession(ctx context.Context, rs oidc.RefreshSessi
 func (s *DBSessionStore) GetSessionByTokenHash(ctx context.Context, hash []byte) (oidc.RefreshSession, error) {
 	row, err := s.q.GetSessionByHash(ctx, hash)
 	if err != nil {
-		// pgx returns pgx.ErrNoRows when no row matches; treat as not-found.
-		return oidc.RefreshSession{}, oidc.ErrRefreshTokenNotFound
+		if errors.Is(err, pgx.ErrNoRows) {
+			return oidc.RefreshSession{}, oidc.ErrRefreshTokenNotFound
+		}
+		// Propagate transient DB errors so the caller returns a 5xx, not a
+		// misleading invalid_grant. Masking DB failures as "token not found"
+		// would silently reject valid tokens during outages.
+		return oidc.RefreshSession{}, fmt.Errorf("sessions: get by hash: %w", err)
 	}
 	sess := rowToRefreshSession(row)
 	// Revoked: return the populated session so the caller can fire the
@@ -91,8 +98,10 @@ func (s *DBSessionStore) GetSessionByTokenHash(ctx context.Context, hash []byte)
 	if isRevoked(row) {
 		return sess, oidc.ErrRefreshTokenRevoked
 	}
-	// Expired: indistinguishable from unknown to the caller — fail closed.
-	if row.ExpiresAt.Valid && time.Now().After(row.ExpiresAt.Time) {
+	// Expired (or missing expiry — fail closed): indistinguishable from
+	// unknown to the caller. A NULL expires_at is treated as already-expired
+	// so a misconfigured row doesn't become a permanent session.
+	if !row.ExpiresAt.Valid || time.Now().After(row.ExpiresAt.Time) {
 		return oidc.RefreshSession{}, oidc.ErrRefreshTokenNotFound
 	}
 	return sess, nil
@@ -150,5 +159,5 @@ func rowToRefreshSession(row db.Session) oidc.RefreshSession {
 
 // isRevoked reports whether a db.Session row has been revoked.
 func isRevoked(row db.Session) bool {
-	return row.RevokedAt.Valid && !row.RevokedAt.Time.IsZero()
+	return row.RevokedAt.Valid
 }

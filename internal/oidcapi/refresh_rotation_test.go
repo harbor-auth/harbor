@@ -191,6 +191,10 @@ func TestToken_RefreshTheftSignal_RevokesFamily(t *testing.T) {
 
 	// Rotate once: token1 → token2.
 	res1 := postRefresh(t, ts, refreshToken1)
+	if res1.StatusCode != http.StatusOK {
+		_ = res1.Body.Close()
+		t.Fatalf("first rotation status = %d, want 200", res1.StatusCode)
+	}
 	var body1 tokenBody
 	if err := json.NewDecoder(res1.Body).Decode(&body1); err != nil {
 		t.Fatalf("decode rotation response: %v", err)
