@@ -115,8 +115,8 @@ func TestService_Authorize_ValidationErrors(t *testing.T) {
 // errSessionResolver returns a fixed error from Resolve.
 type errSessionResolver struct{ err error }
 
-func (r errSessionResolver) Resolve(_ context.Context, _ Client, _ string) (string, bool, error) {
-	return "", false, r.err
+func (r errSessionResolver) Resolve(_ context.Context, _ Client, _ string) (string, string, bool, error) {
+	return "", "", false, r.err
 }
 
 func TestService_Authorize_SessionResolutionError(t *testing.T) {
@@ -147,8 +147,8 @@ func TestService_Authorize_SessionResolutionError(t *testing.T) {
 // denyingSessionResolver always denies consent.
 type denyingSessionResolver struct{}
 
-func (r denyingSessionResolver) Resolve(_ context.Context, _ Client, _ string) (string, bool, error) {
-	return "", false, nil
+func (r denyingSessionResolver) Resolve(_ context.Context, _ Client, _ string) (string, string, bool, error) {
+	return "", "", false, nil
 }
 
 func TestService_Authorize_ConsentDenied(t *testing.T) {
@@ -560,7 +560,10 @@ func TestService_signalCodeReuse_LogDoesNotContainPII(t *testing.T) {
 	})
 
 	// Trigger the code reuse path.
-	_, _ = svc.Token(context.Background(), validTokenReq())
+	_, terr := svc.Token(context.Background(), validTokenReq())
+	if terr == nil || terr.Code != ErrCodeInvalidGrant {
+		t.Fatalf("Token = %v, want invalid_grant", terr)
+	}
 
 	// Verify PII is NOT logged (docs/DESIGN.md §6.5.7).
 	logOutput := logBuf.String()

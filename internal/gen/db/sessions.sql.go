@@ -116,6 +116,31 @@ func (q *Queries) GetSession(ctx context.Context, id pgtype.UUID) (Session, erro
 	return i, err
 }
 
+const getSessionByHash = `-- name: GetSessionByHash :one
+SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at FROM sessions
+WHERE refresh_token_hash = $1
+`
+
+// GetSessionByHash looks up a session by its refresh_token_hash regardless of
+// revocation or expiry status — the caller (oidc.Service.Refresh) distinguishes
+// theft (revoked row found) from expiry from a fully-valid row. The UNIQUE index
+// added in migration 0004 guarantees at most one row per hash value.
+func (q *Queries) GetSessionByHash(ctx context.Context, refreshTokenHash []byte) (Session, error) {
+	row := q.db.QueryRow(ctx, getSessionByHash, refreshTokenHash)
+	var i Session
+	err := row.Scan(
+		&i.ID,
+		&i.Region,
+		&i.UserID,
+		&i.DeviceLabel,
+		&i.RefreshTokenHash,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+	)
+	return i, err
+}
+
 const listSessionsByUser = `-- name: ListSessionsByUser :many
 SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at FROM sessions
 WHERE user_id = $1

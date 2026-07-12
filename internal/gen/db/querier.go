@@ -62,6 +62,11 @@ type Querier interface {
 	// tokens; DESIGN §3.5, §10). The query IS the contract (DESIGN §1.3):
 	// `sqlc generate` (via @codegen) produces typed Go — never hand-write DB types.
 	GetSession(ctx context.Context, id pgtype.UUID) (Session, error)
+	// GetSessionByHash looks up a session by its refresh_token_hash regardless of
+	// revocation or expiry status — the caller (oidc.Service.Refresh) distinguishes
+	// theft (revoked row found) from expiry from a fully-valid row. The UNIQUE index
+	// added in migration 0004 guarantees at most one row per hash value.
+	GetSessionByHash(ctx context.Context, refreshTokenHash []byte) (Session, error)
 	GetUser(ctx context.Context, id pgtype.UUID) (User, error)
 	// ListAuditEventsByUser powers the dashboard audit-log viewer (DESIGN §9).
 	// Newest-first with limit/offset paging, served by idx_audit_events_user_time.

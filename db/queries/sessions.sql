@@ -49,3 +49,11 @@ WHERE user_id = $1
 -- name: DeleteExpiredSessions :exec
 DELETE FROM sessions
 WHERE expires_at < now();
+
+-- GetSessionByHash looks up a session by its refresh_token_hash regardless of
+-- revocation or expiry status — the caller (oidc.Service.Refresh) distinguishes
+-- theft (revoked row found) from expiry from a fully-valid row. The UNIQUE index
+-- added in migration 0004 guarantees at most one row per hash value.
+-- name: GetSessionByHash :one
+SELECT * FROM sessions
+WHERE refresh_token_hash = $1;

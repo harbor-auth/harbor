@@ -1,6 +1,7 @@
 package clients
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -71,6 +72,17 @@ func (f *fakeSessionQuerier) GetActiveSession(_ context.Context, id pgtype.UUID)
 		return db.Session{}, fmt.Errorf("session expired")
 	}
 	return row, nil
+}
+
+func (f *fakeSessionQuerier) GetSessionByHash(_ context.Context, hash []byte) (db.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, row := range f.byID {
+		if bytes.Equal(row.RefreshTokenHash, hash) {
+			return row, nil
+		}
+	}
+	return db.Session{}, fmt.Errorf("session not found")
 }
 
 func (f *fakeSessionQuerier) ListSessionsByUser(_ context.Context, userID pgtype.UUID) ([]db.Session, error) {
@@ -212,15 +224,54 @@ func TestDBSessionStoreRevokesByUser(t *testing.T) {
 	}
 }
 
-// TestDBSessionStoreGetByHashScaffold confirms the SCAFFOLD implementation of
-// GetSessionByTokenHash fails closed (returns ErrRefreshTokenNotFound) so the
-// DB path never silently accepts tokens before the hash-index query is added.
-func TestDBSessionStoreGetByHashScaffold(t *testing.T) {
+// TestDBSessionStoreGetByTokenHash exercises the real by-hash lookup backed by
+// the GetSessionByHash query (migration 0004): unknown → not-found, valid →
+// session, revoked → revoked (with the row returned for the theft signal),
+// expired → not-found (fail closed).
+func TestDBSessionStoreGetByTokenHash(t *testing.T) {
 	q := newFakeSessionQuerier()
 	store := NewDBSessionStore(q)
+	ctx := context.Background()
 
-	_, err := store.GetSessionByTokenHash(context.Background(), []byte("any-hash"))
-	if !errors.Is(err, oidc.ErrRefreshTokenNotFound) {
-		t.Fatalf("expected ErrRefreshTokenNotFound (scaffold), got %v", err)
+	// Unknown hash → not-found.
+	if _, err := store.GetSessionByTokenHash(ctx, []byte("no-such-hash")); !errors.Is(err, oidc.ErrRefreshTokenNotFound) {
+		t.Fatalf("unknown hash: expected ErrRefreshTokenNotFound, got %v", err)
+	}
+
+	// Valid hash → returns the session.
+	hash := []byte("sha256-valid-hash-32-bytes-------")
+	rs := buildTestSession(t, "00000000-0000-0000-0000-000000000301", sessTestUserID, hash, 14*24*time.Hour)
+	if err := store.CreateSession(ctx, rs); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	got, err := store.GetSessionByTokenHash(ctx, hash)
+	if err != nil {
+		t.Fatalf("GetSessionByTokenHash valid: %v", err)
+	}
+	if got.ID != rs.ID {
+		t.Fatalf("expected session ID %q, got %q", rs.ID, got.ID)
+	}
+
+	// Revoked session → ErrRefreshTokenRevoked, and the revoked row is returned
+	// so the caller can fire the theft-signal family revoke.
+	if err := store.RevokeSession(ctx, rs.ID); err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+	revoked, err := store.GetSessionByTokenHash(ctx, hash)
+	if !errors.Is(err, oidc.ErrRefreshTokenRevoked) {
+		t.Fatalf("revoked hash: expected ErrRefreshTokenRevoked, got %v", err)
+	}
+	if revoked.ID != rs.ID {
+		t.Fatalf("revoked session must be returned; expected ID %q, got %q", rs.ID, revoked.ID)
+	}
+
+	// Expired session → not-found (fail closed).
+	expHash := []byte("sha256-expired-hash-32-bytes-----")
+	exp := buildTestSession(t, "00000000-0000-0000-0000-000000000302", sessTestUserID, expHash, -time.Hour)
+	if err := store.CreateSession(ctx, exp); err != nil {
+		t.Fatalf("CreateSession expired: %v", err)
+	}
+	if _, err := store.GetSessionByTokenHash(ctx, expHash); !errors.Is(err, oidc.ErrRefreshTokenNotFound) {
+		t.Fatalf("expired hash: expected ErrRefreshTokenNotFound, got %v", err)
 	}
 }

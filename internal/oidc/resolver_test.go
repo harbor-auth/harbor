@@ -2,6 +2,7 @@ package oidc
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -185,7 +186,7 @@ func (s errGrantStore) ListGrantsByUser(_ context.Context, _ string) ([]Grant, e
 func TestPPIDSessionResolverFindGrantError(t *testing.T) {
 	const userID = "00000000-0000-0000-0000-000000000001"
 	loader := NewInMemorySecretLoader()
-	loader.Put(userID, UserSecret{Region: "us", Secret: testSecret()})
+	loader.Put(userID, UserSecret{Region: "us", Secret: resolverTestSecret()})
 
 	r := NewPPIDSessionResolver(PPIDSessionResolverConfig{
 		Auth:   NewFixedAuthSource(userID),
@@ -193,7 +194,7 @@ func TestPPIDSessionResolverFindGrantError(t *testing.T) {
 		Grants: errGrantStore{findErr: errors.New("database connection lost")},
 	})
 
-	sub, approved, err := r.Resolve(context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid")
+	sub, _, approved, err := r.Resolve(context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid")
 	if err == nil {
 		t.Fatal("expected error on FindGrant failure")
 	}
@@ -205,7 +206,7 @@ func TestPPIDSessionResolverFindGrantError(t *testing.T) {
 func TestPPIDSessionResolverCreateGrantError(t *testing.T) {
 	const userID = "00000000-0000-0000-0000-000000000001"
 	loader := NewInMemorySecretLoader()
-	loader.Put(userID, UserSecret{Region: "us", Secret: testSecret()})
+	loader.Put(userID, UserSecret{Region: "us", Secret: resolverTestSecret()})
 
 	// findErr=nil so FindGrant returns (Grant{}, false, nil) — no existing grant.
 	// createErr is set so CreateGrant fails.
@@ -215,7 +216,7 @@ func TestPPIDSessionResolverCreateGrantError(t *testing.T) {
 		Grants: errGrantStore{createErr: errors.New("constraint violation")},
 	})
 
-	sub, approved, err := r.Resolve(context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid")
+	sub, _, approved, err := r.Resolve(context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid")
 	if err == nil {
 		t.Fatal("expected error on CreateGrant failure")
 	}
@@ -236,7 +237,7 @@ func TestPPIDSessionResolverEmptySecretError(t *testing.T) {
 		Grants: NewInMemoryGrantStore(),
 	})
 
-	sub, approved, err := r.Resolve(context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid")
+	sub, _, approved, err := r.Resolve(context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid")
 	if err == nil {
 		t.Fatal("expected error on empty secret")
 	}
@@ -264,7 +265,7 @@ func TestPPIDSessionResolverSecretLoaderGenericError(t *testing.T) {
 		Grants: NewInMemoryGrantStore(),
 	})
 
-	sub, approved, err := r.Resolve(context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid")
+	sub, _, approved, err := r.Resolve(context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid")
 	if err == nil {
 		t.Fatal("expected error on secret loader failure")
 	}
@@ -276,3 +277,4 @@ func TestPPIDSessionResolverSecretLoaderGenericError(t *testing.T) {
 		t.Fatalf("expected empty non-approved subject, got sub=%q approved=%v", sub, approved)
 	}
 }
+

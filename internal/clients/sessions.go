@@ -3,6 +3,7 @@ package clients
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 
@@ -17,6 +18,7 @@ type sessionQuerier interface {
 	CreateSession(ctx context.Context, arg db.CreateSessionParams) (db.Session, error)
 	GetSession(ctx context.Context, id pgtype.UUID) (db.Session, error)
 	GetActiveSession(ctx context.Context, id pgtype.UUID) (db.Session, error)
+	GetSessionByHash(ctx context.Context, refreshTokenHash []byte) (db.Session, error)
 	ListSessionsByUser(ctx context.Context, userID pgtype.UUID) ([]db.Session, error)
 	RevokeSession(ctx context.Context, id pgtype.UUID) error
 	RevokeSessionsByUser(ctx context.Context, userID pgtype.UUID) error
@@ -68,16 +70,28 @@ func (s *DBSessionStore) CreateSession(ctx context.Context, rs oidc.RefreshSessi
 	return err
 }
 
-// GetSessionByTokenHash implements oidc.SessionStore.
-//
-// SCAFFOLD: the sessions table is currently indexed by id (UUID), not by
-// refresh_token_hash, so there is no by-hash lookup query yet. A real deployment
-// MUST add a UNIQUE index on refresh_token_hash and a GetSessionByHash sqlc
-// query (see docs/plans/refresh-token-rotation.md "Risks"). Until then this
-// returns not-found so the DB path fails closed rather than silently accepting
-// tokens it cannot verify.
-func (s *DBSessionStore) GetSessionByTokenHash(_ context.Context, _ []byte) (oidc.RefreshSession, error) {
-	return oidc.RefreshSession{}, oidc.ErrRefreshTokenNotFound
+// GetSessionByTokenHash implements oidc.SessionStore. It returns the session
+// row regardless of revocation / expiry status — the caller (oidc.Service.Refresh)
+// needs to see revoked rows to fire the theft-signal family-revoke path
+// (INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE). The UNIQUE index added in migration
+// 0004 makes this lookup O(log n) and enforces one-token-per-session.
+func (s *DBSessionStore) GetSessionByTokenHash(ctx context.Context, hash []byte) (oidc.RefreshSession, error) {
+	row, err := s.q.GetSessionByHash(ctx, hash)
+	if err != nil {
+		// pgx returns pgx.ErrNoRows when no row matches; treat as not-found.
+		return oidc.RefreshSession{}, oidc.ErrRefreshTokenNotFound
+	}
+	sess := rowToRefreshSession(row)
+	// Revoked: return the populated session so the caller can fire the
+	// theft-signal family revoke (INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE).
+	if isRevoked(row) {
+		return sess, oidc.ErrRefreshTokenRevoked
+	}
+	// Expired: indistinguishable from unknown to the caller — fail closed.
+	if row.ExpiresAt.Valid && time.Now().After(row.ExpiresAt.Time) {
+		return oidc.RefreshSession{}, oidc.ErrRefreshTokenNotFound
+	}
+	return sess, nil
 }
 
 // RevokeSession implements oidc.SessionStore.
@@ -100,6 +114,34 @@ func (s *DBSessionStore) RevokeSessionsByUserClient(ctx context.Context, userID,
 		return fmt.Errorf("sessions: parse user ID %q: %w", userID, err)
 	}
 	return s.q.RevokeSessionsByUser(ctx, uid)
+}
+
+// rowToRefreshSession converts a sqlc Session row to the domain type.
+// ClientID is not a column on the sessions table (scoped revocation is a future
+// migration), so it is left empty — the caller's RevokeSessionsByUserClient
+// falls back to revoking all user sessions, which is the safe conservative
+// superset.
+func rowToRefreshSession(row db.Session) oidc.RefreshSession {
+	var label string
+	if row.DeviceLabel != nil {
+		label = *row.DeviceLabel
+	}
+	var expiresAt, revokedAt time.Time
+	if row.ExpiresAt.Valid {
+		expiresAt = row.ExpiresAt.Time
+	}
+	if row.RevokedAt.Valid {
+		revokedAt = row.RevokedAt.Time
+	}
+	return oidc.RefreshSession{
+		ID:          row.ID.String(),
+		Region:      row.Region,
+		UserID:      row.UserID.String(),
+		DeviceLabel: label,
+		TokenHash:   row.RefreshTokenHash,
+		ExpiresAt:   expiresAt,
+		RevokedAt:   revokedAt,
+	}
 }
 
 // isRevoked reports whether a db.Session row has been revoked.
