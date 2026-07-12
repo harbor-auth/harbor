@@ -24,9 +24,9 @@ ORDER BY created_at DESC;
 
 -- name: CreateSession :one
 INSERT INTO sessions (
-    id, region, user_id, device_label, refresh_token_hash, expires_at
+    id, region, user_id, client_id, device_label, refresh_token_hash, expires_at
 ) VALUES (
-    $1, $2, $3, $4, $5, $6
+    $1, $2, $3, $4, $5, $6, $7
 )
 RETURNING *;
 
@@ -42,6 +42,17 @@ WHERE id = $1
 UPDATE sessions
 SET revoked_at = now()
 WHERE user_id = $1
+  AND revoked_at IS NULL;
+
+-- RevokeSessionsByUserClient revokes every active session for a (user, client)
+-- pairing — the theft-signal family revoke (DESIGN §3.5, §11.7). Scoped to a
+-- single RP so a compromised token at one RP does not force re-auth at others.
+-- The partial index idx_sessions_user_client (migration 0005) makes this fast.
+-- name: RevokeSessionsByUserClient :exec
+UPDATE sessions
+SET revoked_at = now()
+WHERE user_id = $1
+  AND client_id = $2
   AND revoked_at IS NULL;
 
 -- DeleteExpiredSessions reaps rows whose refresh token has expired — background

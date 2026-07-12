@@ -37,6 +37,7 @@ func (f *fakeSessionQuerier) CreateSession(_ context.Context, arg db.CreateSessi
 		ID:               arg.ID,
 		Region:           arg.Region,
 		UserID:           arg.UserID,
+		ClientID:         arg.ClientID,
 		DeviceLabel:      arg.DeviceLabel,
 		RefreshTokenHash: arg.RefreshTokenHash,
 		ExpiresAt:        arg.ExpiresAt,
@@ -130,6 +131,24 @@ func (f *fakeSessionQuerier) RevokeSessionsByUser(_ context.Context, userID pgty
 	return nil
 }
 
+func (f *fakeSessionQuerier) RevokeSessionsByUserClient(_ context.Context, arg db.RevokeSessionsByUserClientParams) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, sid := range f.byUserID[arg.UserID.String()] {
+		row := f.byID[sid]
+		if row.ClientID != arg.ClientID {
+			continue
+		}
+		var revokedAt pgtype.Timestamptz
+		if err := revokedAt.Scan(time.Now()); err != nil {
+			return err
+		}
+		row.RevokedAt = revokedAt
+		f.byID[sid] = row
+	}
+	return nil
+}
+
 // helpers
 
 func mustUUID(t *testing.T, s string) pgtype.UUID {
@@ -191,36 +210,60 @@ func TestDBSessionStoreCreateAndRevoke(t *testing.T) {
 	}
 }
 
-// TestDBSessionStoreRevokesByUser verifies that RevokeSessionsByUserClient
-// revokes every active session for the user (conservative superset; see the
-// scaffold comment in sessions.go).
-func TestDBSessionStoreRevokesByUser(t *testing.T) {
+// TestDBSessionStoreScopedRevoke verifies that RevokeSessionsByUserClient
+// revokes ONLY the (user, client) family and leaves sessions for OTHER clients
+// untouched (DESIGN §3.5, §11.7; INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE).
+func TestDBSessionStoreScopedRevoke(t *testing.T) {
 	q := newFakeSessionQuerier()
 	store := NewDBSessionStore(q)
+	ctx := context.Background()
 
-	sessIDs := []string{
+	const otherClientID = "other-rp"
+
+	// Three sessions for sessTestClientID ("test-rp") + one for a different RP.
+	targetIDs := []string{
 		"00000000-0000-0000-0000-000000000201",
 		"00000000-0000-0000-0000-000000000202",
 		"00000000-0000-0000-0000-000000000203",
 	}
-	for i, id := range sessIDs {
+	for i, id := range targetIDs {
 		rs := buildTestSession(t, id, sessTestUserID, []byte{byte(i)}, 14*24*time.Hour)
-		if err := store.CreateSession(context.Background(), rs); err != nil {
+		if err := store.CreateSession(ctx, rs); err != nil {
 			t.Fatalf("CreateSession %s: %v", id, err)
 		}
 	}
 
-	// clientID is ignored (scaffold) — all user sessions are revoked.
-	if err := store.RevokeSessionsByUserClient(context.Background(), sessTestUserID, sessTestClientID); err != nil {
+	// One session for a DIFFERENT client — must survive the revoke.
+	otherSess := oidc.RefreshSession{
+		ID:        "00000000-0000-0000-0000-000000000204",
+		Region:    sessTestRegion,
+		UserID:    sessTestUserID,
+		ClientID:  otherClientID,
+		TokenHash: []byte{0xff},
+		ExpiresAt: time.Now().Add(14 * 24 * time.Hour),
+	}
+	if err := store.CreateSession(ctx, otherSess); err != nil {
+		t.Fatalf("CreateSession other-rp: %v", err)
+	}
+
+	// Revoke (user, test-rp) family only.
+	if err := store.RevokeSessionsByUserClient(ctx, sessTestUserID, sessTestClientID); err != nil {
 		t.Fatalf("RevokeSessionsByUserClient: %v", err)
 	}
 
-	active, err := q.ListSessionsByUser(context.Background(), mustUUID(t, sessTestUserID))
-	if err != nil {
-		t.Fatalf("ListSessionsByUser: %v", err)
+	// All test-rp sessions must be revoked.
+	for _, id := range targetIDs {
+		row := q.byID[id]
+		if !isRevoked(row) {
+			t.Errorf("session %s (client %q) should be revoked but is not", id, sessTestClientID)
+		}
 	}
-	if len(active) != 0 {
-		t.Fatalf("expected 0 active sessions after family revoke, got %d", len(active))
+
+	// The other-rp session must still be active.
+	otherRow := q.byID[otherSess.ID]
+	if isRevoked(otherRow) {
+		t.Errorf("session %s (client %q) must NOT be revoked by a %q family revoke",
+			otherSess.ID, otherClientID, sessTestClientID)
 	}
 }
 

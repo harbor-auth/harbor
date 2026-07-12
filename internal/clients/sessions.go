@@ -21,7 +21,10 @@ type sessionQuerier interface {
 	GetSessionByHash(ctx context.Context, refreshTokenHash []byte) (db.Session, error)
 	ListSessionsByUser(ctx context.Context, userID pgtype.UUID) ([]db.Session, error)
 	RevokeSession(ctx context.Context, id pgtype.UUID) error
+	// RevokeSessionsByUser is retained for the future "sign out everywhere"
+	// (global user logout) path; the hot-path theft-signal uses RevokeSessionsByUserClient.
 	RevokeSessionsByUser(ctx context.Context, userID pgtype.UUID) error
+	RevokeSessionsByUserClient(ctx context.Context, arg db.RevokeSessionsByUserClientParams) error
 }
 
 // DBSessionStore implements oidc.SessionStore over the sessions table
@@ -63,6 +66,7 @@ func (s *DBSessionStore) CreateSession(ctx context.Context, rs oidc.RefreshSessi
 		ID:               id,
 		Region:           rs.Region,
 		UserID:           userID,
+		ClientID:         rs.ClientID,
 		DeviceLabel:      deviceLabel,
 		RefreshTokenHash: rs.TokenHash,
 		ExpiresAt:        expiresAt,
@@ -103,24 +107,23 @@ func (s *DBSessionStore) RevokeSession(ctx context.Context, id string) error {
 	return s.q.RevokeSession(ctx, uid)
 }
 
-// RevokeSessionsByUserClient implements oidc.SessionStore (theft signal family
-// revoke). The sessions table has no client_id column yet, so we revoke ALL of
-// the user's active sessions — a conservative superset of the (user, client)
-// family, equivalent to "sign out everywhere" for that user. A future migration
-// can add client_id for finer-grained revocation.
-func (s *DBSessionStore) RevokeSessionsByUserClient(ctx context.Context, userID, _ string) error {
+// RevokeSessionsByUserClient implements oidc.SessionStore (theft-signal family
+// revoke; DESIGN §3.5, §11.7). Revokes only the active sessions belonging to
+// the (userID, clientID) pair — a compromised token at one RP no longer forces
+// re-authentication at every other RP the user has sessions with.
+// The partial index idx_sessions_user_client (migration 0005) makes this O(log n).
+func (s *DBSessionStore) RevokeSessionsByUserClient(ctx context.Context, userID, clientID string) error {
 	var uid pgtype.UUID
 	if err := uid.Scan(userID); err != nil {
 		return fmt.Errorf("sessions: parse user ID %q: %w", userID, err)
 	}
-	return s.q.RevokeSessionsByUser(ctx, uid)
+	return s.q.RevokeSessionsByUserClient(ctx, db.RevokeSessionsByUserClientParams{
+		UserID:   uid,
+		ClientID: clientID,
+	})
 }
 
 // rowToRefreshSession converts a sqlc Session row to the domain type.
-// ClientID is not a column on the sessions table (scoped revocation is a future
-// migration), so it is left empty — the caller's RevokeSessionsByUserClient
-// falls back to revoking all user sessions, which is the safe conservative
-// superset.
 func rowToRefreshSession(row db.Session) oidc.RefreshSession {
 	var label string
 	if row.DeviceLabel != nil {
@@ -137,6 +140,7 @@ func rowToRefreshSession(row db.Session) oidc.RefreshSession {
 		ID:          row.ID.String(),
 		Region:      row.Region,
 		UserID:      row.UserID.String(),
+		ClientID:    row.ClientID,
 		DeviceLabel: label,
 		TokenHash:   row.RefreshTokenHash,
 		ExpiresAt:   expiresAt,

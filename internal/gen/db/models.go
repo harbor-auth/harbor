@@ -70,6 +70,7 @@ type Session struct {
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 	ExpiresAt        pgtype.Timestamptz `json:"expires_at"`
 	RevokedAt        pgtype.Timestamptz `json:"revoked_at"`
+	ClientID         string             `json:"client_id"`
 }
 
 type User struct {

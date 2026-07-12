@@ -84,6 +84,11 @@ type Querier interface {
 	// RevokeSessionsByUser revokes every active session for a user (e.g. "sign out
 	// everywhere", or a forced logout on credential change; DESIGN §9).
 	RevokeSessionsByUser(ctx context.Context, userID pgtype.UUID) error
+	// RevokeSessionsByUserClient revokes every active session for a (user, client)
+	// pairing — the theft-signal family revoke (DESIGN §3.5, §11.7). Scoped to a
+	// single RP so a compromised token at one RP does not force re-auth at others.
+	// The partial index idx_sessions_user_client (migration 0005) makes this fast.
+	RevokeSessionsByUserClient(ctx context.Context, arg RevokeSessionsByUserClientParams) error
 	SetUserStatus(ctx context.Context, arg SetUserStatusParams) error
 	// UpdateCredentialSignCount advances a passkey's signature counter after an
 	// assertion — a monotonically increasing counter is how WebAuthn detects a
