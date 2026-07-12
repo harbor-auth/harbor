@@ -1,6 +1,7 @@
 package clients
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	db "github.com/harbor/harbor/internal/gen/db"
@@ -36,6 +38,7 @@ func (f *fakeSessionQuerier) CreateSession(_ context.Context, arg db.CreateSessi
 		ID:               arg.ID,
 		Region:           arg.Region,
 		UserID:           arg.UserID,
+		ClientID:         arg.ClientID,
 		DeviceLabel:      arg.DeviceLabel,
 		RefreshTokenHash: arg.RefreshTokenHash,
 		ExpiresAt:        arg.ExpiresAt,
@@ -73,6 +76,19 @@ func (f *fakeSessionQuerier) GetActiveSession(_ context.Context, id pgtype.UUID)
 	return row, nil
 }
 
+func (f *fakeSessionQuerier) GetSessionByHash(_ context.Context, hash []byte) (db.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, row := range f.byID {
+		if bytes.Equal(row.RefreshTokenHash, hash) {
+			return row, nil
+		}
+	}
+	// Return pgx.ErrNoRows so DBSessionStore.GetSessionByTokenHash maps this
+	// correctly to ErrRefreshTokenNotFound (matching real pgx behaviour).
+	return db.Session{}, pgx.ErrNoRows
+}
+
 func (f *fakeSessionQuerier) ListSessionsByUser(_ context.Context, userID pgtype.UUID) ([]db.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -108,6 +124,24 @@ func (f *fakeSessionQuerier) RevokeSessionsByUser(_ context.Context, userID pgty
 	defer f.mu.Unlock()
 	for _, sid := range f.byUserID[userID.String()] {
 		row := f.byID[sid]
+		var revokedAt pgtype.Timestamptz
+		if err := revokedAt.Scan(time.Now()); err != nil {
+			return err
+		}
+		row.RevokedAt = revokedAt
+		f.byID[sid] = row
+	}
+	return nil
+}
+
+func (f *fakeSessionQuerier) RevokeSessionsByUserClient(_ context.Context, arg db.RevokeSessionsByUserClientParams) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, sid := range f.byUserID[arg.UserID.String()] {
+		row := f.byID[sid]
+		if row.ClientID != arg.ClientID {
+			continue
+		}
 		var revokedAt pgtype.Timestamptz
 		if err := revokedAt.Scan(time.Now()); err != nil {
 			return err
@@ -159,8 +193,6 @@ func TestDBSessionStoreCreateAndRevoke(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	// GetSessionByTokenHash is SCAFFOLD (fails closed) — verified below via the
-	// fake querier directly.
 	row, err := q.GetActiveSession(context.Background(), mustUUID(t, rs.ID))
 	if err != nil {
 		t.Fatalf("GetActiveSession after create: %v", err)
@@ -179,48 +211,111 @@ func TestDBSessionStoreCreateAndRevoke(t *testing.T) {
 	}
 }
 
-// TestDBSessionStoreRevokesByUser verifies that RevokeSessionsByUserClient
-// revokes every active session for the user (conservative superset; see the
-// scaffold comment in sessions.go).
-func TestDBSessionStoreRevokesByUser(t *testing.T) {
+// TestDBSessionStoreScopedRevoke verifies that RevokeSessionsByUserClient
+// revokes ONLY the (user, client) family and leaves sessions for OTHER clients
+// untouched (DESIGN §3.5, §11.7; INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE).
+func TestDBSessionStoreScopedRevoke(t *testing.T) {
 	q := newFakeSessionQuerier()
 	store := NewDBSessionStore(q)
+	ctx := context.Background()
 
-	sessIDs := []string{
+	const otherClientID = "other-rp"
+
+	// Three sessions for sessTestClientID ("test-rp") + one for a different RP.
+	targetIDs := []string{
 		"00000000-0000-0000-0000-000000000201",
 		"00000000-0000-0000-0000-000000000202",
 		"00000000-0000-0000-0000-000000000203",
 	}
-	for i, id := range sessIDs {
+	for i, id := range targetIDs {
 		rs := buildTestSession(t, id, sessTestUserID, []byte{byte(i)}, 14*24*time.Hour)
-		if err := store.CreateSession(context.Background(), rs); err != nil {
+		if err := store.CreateSession(ctx, rs); err != nil {
 			t.Fatalf("CreateSession %s: %v", id, err)
 		}
 	}
 
-	// clientID is ignored (scaffold) — all user sessions are revoked.
-	if err := store.RevokeSessionsByUserClient(context.Background(), sessTestUserID, sessTestClientID); err != nil {
+	// One session for a DIFFERENT client — must survive the revoke.
+	otherSess := oidc.RefreshSession{
+		ID:        "00000000-0000-0000-0000-000000000204",
+		Region:    sessTestRegion,
+		UserID:    sessTestUserID,
+		ClientID:  otherClientID,
+		TokenHash: []byte{0xff},
+		ExpiresAt: time.Now().Add(14 * 24 * time.Hour),
+	}
+	if err := store.CreateSession(ctx, otherSess); err != nil {
+		t.Fatalf("CreateSession other-rp: %v", err)
+	}
+
+	// Revoke (user, test-rp) family only.
+	if err := store.RevokeSessionsByUserClient(ctx, sessTestUserID, sessTestClientID); err != nil {
 		t.Fatalf("RevokeSessionsByUserClient: %v", err)
 	}
 
-	active, err := q.ListSessionsByUser(context.Background(), mustUUID(t, sessTestUserID))
-	if err != nil {
-		t.Fatalf("ListSessionsByUser: %v", err)
+	// All test-rp sessions must be revoked.
+	for _, id := range targetIDs {
+		row := q.byID[id]
+		if !isRevoked(row) {
+			t.Errorf("session %s (client %q) should be revoked but is not", id, sessTestClientID)
+		}
 	}
-	if len(active) != 0 {
-		t.Fatalf("expected 0 active sessions after family revoke, got %d", len(active))
+
+	// The other-rp session must still be active.
+	otherRow := q.byID[otherSess.ID]
+	if isRevoked(otherRow) {
+		t.Errorf("session %s (client %q) must NOT be revoked by a %q family revoke",
+			otherSess.ID, otherClientID, sessTestClientID)
 	}
 }
 
-// TestDBSessionStoreGetByHashScaffold confirms the SCAFFOLD implementation of
-// GetSessionByTokenHash fails closed (returns ErrRefreshTokenNotFound) so the
-// DB path never silently accepts tokens before the hash-index query is added.
-func TestDBSessionStoreGetByHashScaffold(t *testing.T) {
+// TestDBSessionStoreGetByTokenHash exercises the real by-hash lookup backed by
+// the GetSessionByHash query (migration 0004): unknown → not-found, valid →
+// session, revoked → revoked (with the row returned for the theft signal),
+// expired → not-found (fail closed).
+func TestDBSessionStoreGetByTokenHash(t *testing.T) {
 	q := newFakeSessionQuerier()
 	store := NewDBSessionStore(q)
+	ctx := context.Background()
 
-	_, err := store.GetSessionByTokenHash(context.Background(), []byte("any-hash"))
-	if !errors.Is(err, oidc.ErrRefreshTokenNotFound) {
-		t.Fatalf("expected ErrRefreshTokenNotFound (scaffold), got %v", err)
+	// Unknown hash → not-found.
+	if _, err := store.GetSessionByTokenHash(ctx, []byte("no-such-hash")); !errors.Is(err, oidc.ErrRefreshTokenNotFound) {
+		t.Fatalf("unknown hash: expected ErrRefreshTokenNotFound, got %v", err)
+	}
+
+	// Valid hash → returns the session.
+	hash := []byte("sha256-valid-hash-32-bytes-------")
+	rs := buildTestSession(t, "00000000-0000-0000-0000-000000000301", sessTestUserID, hash, 14*24*time.Hour)
+	if err := store.CreateSession(ctx, rs); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	got, err := store.GetSessionByTokenHash(ctx, hash)
+	if err != nil {
+		t.Fatalf("GetSessionByTokenHash valid: %v", err)
+	}
+	if got.ID != rs.ID {
+		t.Fatalf("expected session ID %q, got %q", rs.ID, got.ID)
+	}
+
+	// Revoked session → ErrRefreshTokenRevoked, and the revoked row is returned
+	// so the caller can fire the theft-signal family revoke.
+	if err := store.RevokeSession(ctx, rs.ID); err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+	revoked, err := store.GetSessionByTokenHash(ctx, hash)
+	if !errors.Is(err, oidc.ErrRefreshTokenRevoked) {
+		t.Fatalf("revoked hash: expected ErrRefreshTokenRevoked, got %v", err)
+	}
+	if revoked.ID != rs.ID {
+		t.Fatalf("revoked session must be returned; expected ID %q, got %q", rs.ID, revoked.ID)
+	}
+
+	// Expired session → not-found (fail closed).
+	expHash := []byte("sha256-expired-hash-32-bytes-----")
+	exp := buildTestSession(t, "00000000-0000-0000-0000-000000000302", sessTestUserID, expHash, -time.Hour)
+	if err := store.CreateSession(ctx, exp); err != nil {
+		t.Fatalf("CreateSession expired: %v", err)
+	}
+	if _, err := store.GetSessionByTokenHash(ctx, expHash); !errors.Is(err, oidc.ErrRefreshTokenNotFound) {
+		t.Fatalf("expired hash: expected ErrRefreshTokenNotFound, got %v", err)
 	}
 }

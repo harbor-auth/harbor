@@ -32,6 +32,7 @@ type RefreshSession struct {
 	DeviceLabel string // optional: UA string / device name
 	TokenHash   []byte // SHA-256 of the opaque plaintext — NEVER the plaintext
 	ExpiresAt   time.Time
+	RevokedAt   time.Time // zero when active; non-zero once the session is revoked
 }
 
 // ErrRefreshTokenNotFound is returned by SessionStore when no active session
@@ -121,6 +122,7 @@ func (s *InMemorySessionStore) RevokeSession(_ context.Context, id string) error
 	defer s.mu.Unlock()
 	if e, ok := s.byID[id]; ok {
 		e.revoked = true
+		e.s.RevokedAt = time.Now()
 	}
 	return nil
 }
@@ -132,6 +134,7 @@ func (s *InMemorySessionStore) RevokeSessionsByUserClient(_ context.Context, use
 	for _, e := range s.byID {
 		if e.s.UserID == userID && e.s.ClientID == clientID {
 			e.revoked = true
+			e.s.RevokedAt = time.Now()
 		}
 	}
 	return nil

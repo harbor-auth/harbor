@@ -13,17 +13,18 @@ import (
 
 const createSession = `-- name: CreateSession :one
 INSERT INTO sessions (
-    id, region, user_id, device_label, refresh_token_hash, expires_at
+    id, region, user_id, client_id, device_label, refresh_token_hash, expires_at
 ) VALUES (
-    $1, $2, $3, $4, $5, $6
+    $1, $2, $3, $4, $5, $6, $7
 )
-RETURNING id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at
+RETURNING id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id
 `
 
 type CreateSessionParams struct {
 	ID               pgtype.UUID        `json:"id"`
 	Region           string             `json:"region"`
 	UserID           pgtype.UUID        `json:"user_id"`
+	ClientID         string             `json:"client_id"`
 	DeviceLabel      *string            `json:"device_label"`
 	RefreshTokenHash []byte             `json:"refresh_token_hash"`
 	ExpiresAt        pgtype.Timestamptz `json:"expires_at"`
@@ -34,6 +35,7 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		arg.ID,
 		arg.Region,
 		arg.UserID,
+		arg.ClientID,
 		arg.DeviceLabel,
 		arg.RefreshTokenHash,
 		arg.ExpiresAt,
@@ -48,6 +50,7 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.RevokedAt,
+		&i.ClientID,
 	)
 	return i, err
 }
@@ -65,7 +68,7 @@ func (q *Queries) DeleteExpiredSessions(ctx context.Context) error {
 }
 
 const getActiveSession = `-- name: GetActiveSession :one
-SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at FROM sessions
+SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id FROM sessions
 WHERE id = $1
   AND revoked_at IS NULL
   AND expires_at > now()
@@ -87,13 +90,14 @@ func (q *Queries) GetActiveSession(ctx context.Context, id pgtype.UUID) (Session
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.RevokedAt,
+		&i.ClientID,
 	)
 	return i, err
 }
 
 const getSession = `-- name: GetSession :one
 
-SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at FROM sessions
+SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id FROM sessions
 WHERE id = $1
 `
 
@@ -112,12 +116,39 @@ func (q *Queries) GetSession(ctx context.Context, id pgtype.UUID) (Session, erro
 		&i.CreatedAt,
 		&i.ExpiresAt,
 		&i.RevokedAt,
+		&i.ClientID,
+	)
+	return i, err
+}
+
+const getSessionByHash = `-- name: GetSessionByHash :one
+SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id FROM sessions
+WHERE refresh_token_hash = $1
+`
+
+// GetSessionByHash looks up a session by its refresh_token_hash regardless of
+// revocation or expiry status — the caller (oidc.Service.Refresh) distinguishes
+// theft (revoked row found) from expiry from a fully-valid row. The UNIQUE index
+// added in migration 0004 guarantees at most one row per hash value.
+func (q *Queries) GetSessionByHash(ctx context.Context, refreshTokenHash []byte) (Session, error) {
+	row := q.db.QueryRow(ctx, getSessionByHash, refreshTokenHash)
+	var i Session
+	err := row.Scan(
+		&i.ID,
+		&i.Region,
+		&i.UserID,
+		&i.DeviceLabel,
+		&i.RefreshTokenHash,
+		&i.CreatedAt,
+		&i.ExpiresAt,
+		&i.RevokedAt,
+		&i.ClientID,
 	)
 	return i, err
 }
 
 const listSessionsByUser = `-- name: ListSessionsByUser :many
-SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at FROM sessions
+SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id FROM sessions
 WHERE user_id = $1
   AND revoked_at IS NULL
 ORDER BY created_at DESC
@@ -141,6 +172,7 @@ func (q *Queries) ListSessionsByUser(ctx context.Context, userID pgtype.UUID) ([
 			&i.CreatedAt,
 			&i.ExpiresAt,
 			&i.RevokedAt,
+			&i.ClientID,
 		); err != nil {
 			return nil, err
 		}
@@ -175,5 +207,27 @@ WHERE user_id = $1
 // everywhere", or a forced logout on credential change; DESIGN §9).
 func (q *Queries) RevokeSessionsByUser(ctx context.Context, userID pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, revokeSessionsByUser, userID)
+	return err
+}
+
+const revokeSessionsByUserClient = `-- name: RevokeSessionsByUserClient :exec
+UPDATE sessions
+SET revoked_at = now()
+WHERE user_id = $1
+  AND client_id = $2
+  AND revoked_at IS NULL
+`
+
+type RevokeSessionsByUserClientParams struct {
+	UserID   pgtype.UUID `json:"user_id"`
+	ClientID string      `json:"client_id"`
+}
+
+// RevokeSessionsByUserClient revokes every active session for a (user, client)
+// pairing — the theft-signal family revoke (DESIGN §3.5, §11.7). Scoped to a
+// single RP so a compromised token at one RP does not force re-auth at others.
+// The partial index idx_sessions_user_client (migration 0005) makes this fast.
+func (q *Queries) RevokeSessionsByUserClient(ctx context.Context, arg RevokeSessionsByUserClientParams) error {
+	_, err := q.db.Exec(ctx, revokeSessionsByUserClient, arg.UserID, arg.ClientID)
 	return err
 }

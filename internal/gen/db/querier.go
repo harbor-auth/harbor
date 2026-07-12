@@ -62,6 +62,11 @@ type Querier interface {
 	// tokens; DESIGN §3.5, §10). The query IS the contract (DESIGN §1.3):
 	// `sqlc generate` (via @codegen) produces typed Go — never hand-write DB types.
 	GetSession(ctx context.Context, id pgtype.UUID) (Session, error)
+	// GetSessionByHash looks up a session by its refresh_token_hash regardless of
+	// revocation or expiry status — the caller (oidc.Service.Refresh) distinguishes
+	// theft (revoked row found) from expiry from a fully-valid row. The UNIQUE index
+	// added in migration 0004 guarantees at most one row per hash value.
+	GetSessionByHash(ctx context.Context, refreshTokenHash []byte) (Session, error)
 	GetUser(ctx context.Context, id pgtype.UUID) (User, error)
 	// ListAuditEventsByUser powers the dashboard audit-log viewer (DESIGN §9).
 	// Newest-first with limit/offset paging, served by idx_audit_events_user_time.
@@ -79,6 +84,11 @@ type Querier interface {
 	// RevokeSessionsByUser revokes every active session for a user (e.g. "sign out
 	// everywhere", or a forced logout on credential change; DESIGN §9).
 	RevokeSessionsByUser(ctx context.Context, userID pgtype.UUID) error
+	// RevokeSessionsByUserClient revokes every active session for a (user, client)
+	// pairing — the theft-signal family revoke (DESIGN §3.5, §11.7). Scoped to a
+	// single RP so a compromised token at one RP does not force re-auth at others.
+	// The partial index idx_sessions_user_client (migration 0005) makes this fast.
+	RevokeSessionsByUserClient(ctx context.Context, arg RevokeSessionsByUserClientParams) error
 	SetUserStatus(ctx context.Context, arg SetUserStatusParams) error
 	// UpdateCredentialSignCount advances a passkey's signature counter after an
 	// assertion — a monotonically increasing counter is how WebAuthn detects a
