@@ -12,14 +12,9 @@ import (
 	"github.com/harbor/harbor/internal/oidc"
 )
 
-// newRefreshFlowServer builds a Server wired for the full refresh-token rotation
-// cycle. Unlike newFlowServer it adds:
-//   - offline_access in ScopesAllowed so the token endpoint issues a refresh token
-//   - SectorID on the client (required by PPIDSessionResolver for PPID derivation)
-//   - InMemorySessionStore so refresh sessions are persisted across requests
-//   - InMemoryGrantStore + PPIDSessionResolver so Refresh() can recover the frozen
-//     PPID and scopes from the consent grant
-func newRefreshFlowServer(t *testing.T) *httptest.Server {
+// newRefreshFlowServerWithStore is like newRefreshFlowServer but also returns
+// the InMemorySessionStore so tests can manipulate it (e.g. force-expire sessions).
+func newRefreshFlowServerWithStore(t *testing.T) (*httptest.Server, *oidc.InMemorySessionStore) {
 	t.Helper()
 	const userID = "00000000-0000-0000-0000-000000000042"
 
@@ -45,13 +40,15 @@ func newRefreshFlowServer(t *testing.T) *httptest.Server {
 		Grants: grants,
 	})
 
+	sessions := oidc.NewInMemorySessionStore()
+
 	svc := oidc.NewService(oidc.ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
 		Codes:        oidc.NewInMemoryAuthCodeStore(),
 		Tokens:       oidc.NewPlaceholderIssuer(),
 		Sessions:     resolver,
-		SessionStore: oidc.NewInMemorySessionStore(),
+		SessionStore: sessions,
 		Grants:       grants, // shared with resolver so FindGrant succeeds in Refresh()
 	})
 
@@ -59,6 +56,19 @@ func newRefreshFlowServer(t *testing.T) *httptest.Server {
 	h := openapi.HandlerFromMux(srv, http.NewServeMux())
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
+	return ts, sessions
+}
+
+// newRefreshFlowServer builds a Server wired for the full refresh-token rotation
+// cycle. Unlike newFlowServer it adds:
+//   - offline_access in ScopesAllowed so the token endpoint issues a refresh token
+//   - SectorID on the client (required by PPIDSessionResolver for PPID derivation)
+//   - InMemorySessionStore so refresh sessions are persisted across requests
+//   - InMemoryGrantStore + PPIDSessionResolver so Refresh() can recover the frozen
+//     PPID and scopes from the consent grant
+func newRefreshFlowServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	ts, _ := newRefreshFlowServerWithStore(t)
 	return ts
 }
 
@@ -217,6 +227,33 @@ func TestToken_RefreshInvalidatesOldToken(t *testing.T) {
 	assertNoStore(t, res2)
 	if code := decodeOAuthErrorCode(t, res2); code != "invalid_grant" {
 		t.Fatalf("tombstoned token error = %q, want invalid_grant", code)
+	}
+}
+
+// TestToken_RefreshExpiredTokenRejected verifies INV-REFRESH-EXPIRY-ENFORCED at
+// the HTTP layer: a refresh token whose TTL has elapsed is rejected with
+// invalid_grant, and the TTL is hard-enforced (not advisory).
+//
+// The test simulates TTL expiry by force-expiring all sessions in the store
+// without sleeping — deterministic and instant.
+//
+//harbor:invariant INV-REFRESH-EXPIRY-ENFORCED
+func TestToken_RefreshExpiredTokenRejected(t *testing.T) {
+	ts, sessions := newRefreshFlowServerWithStore(t)
+	refreshToken := mintRefreshToken(t, ts)
+
+	// Simulate TTL expiry: back-date every active session by 1 second.
+	sessions.ForceExpireAllForTest()
+
+	res := postRefresh(t, ts, refreshToken)
+	defer func() { _ = res.Body.Close() }()
+
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expired token status = %d, want 400", res.StatusCode)
+	}
+	assertNoStore(t, res)
+	if code := decodeOAuthErrorCode(t, res); code != "invalid_grant" {
+		t.Fatalf("expired token error = %q, want invalid_grant", code)
 	}
 }
 

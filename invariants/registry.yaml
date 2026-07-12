@@ -142,6 +142,12 @@ invariants:
     description: "The hash returned by hashRefreshToken(plaintext) differs from the plaintext in both content and length. A database compromise leaks only the hash — the attacker cannot reconstruct the presentable token without inverting SHA-256."
     enforced_by: [internal/oidc:TestRefreshHashAtRest]
 
+  - id: INV-REFRESH-EXPIRY-ENFORCED
+    title: "Expired refresh tokens are rejected as invalid_grant; TTL is hard-enforced"
+    design_refs: [§3.5, §11.7]
+    description: "A refresh token whose ExpiresAt is in the past is rejected with invalid_grant at both the service layer (GetSessionByTokenHash returns ErrRefreshTokenNotFound) and the HTTP /token layer. A NULL expires_at also fails closed per the DB store — it is never treated as non-expiring."
+    enforced_by: [internal/oidc:TestRefreshExpiredTokenRejected, internal/oidcapi:TestToken_RefreshExpiredTokenRejected]
+
   - id: INV-REFRESH-ROTATION-INVALIDATES-OLD
     title: "A rotated refresh token is immediately invalidated; the old token cannot be reused"
     design_refs: [§3.5, §11.7]

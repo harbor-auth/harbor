@@ -126,6 +126,7 @@ func TestRefreshReuseFiresTheftSignal(t *testing.T) {
 	}
 }
 
+//harbor:invariant INV-REFRESH-EXPIRY-ENFORCED
 func TestRefreshExpiredTokenRejected(t *testing.T) {
 	svc, sessionStore, grantStore := newTestServiceWithSessions(t)
 

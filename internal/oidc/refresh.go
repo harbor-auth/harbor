@@ -163,6 +163,20 @@ func (s *InMemorySessionStore) RevokeSessionsByUserClient(_ context.Context, use
 	return nil
 }
 
+// ForceExpireAllForTest immediately back-dates every active session's ExpiresAt
+// to one second in the past, simulating TTL expiry without sleeping.
+// This is a test-only helper; never call it from production code.
+func (s *InMemorySessionStore) ForceExpireAllForTest() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	past := time.Now().Add(-time.Second)
+	for _, e := range s.byID {
+		if !e.revoked {
+			e.s.ExpiresAt = past
+		}
+	}
+}
+
 // hashRefreshToken returns the SHA-256 digest of plaintext. Only the digest is
 // persisted — the plaintext is ephemeral (docs/DESIGN.md §7.4).
 func hashRefreshToken(plaintext []byte) []byte {
