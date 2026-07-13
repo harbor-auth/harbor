@@ -288,6 +288,8 @@ func TestTokenWrongVerifierIsInvalidGrant(t *testing.T) {
 // The test skips gracefully if auto-approval is not wired (non-302 from /authorize)
 // or if the server does not return a refresh_token (server scaffold may not yet
 // support offline_access).
+//
+// Exercises: INV-REFRESH-ROTATION-SINGLE-USE, INV-REFRESH-OFFLINE-ACCESS-GATE
 func TestAuthorizeTokenRefreshFlow(t *testing.T) {
 	verifier, challenge := pkcePair(t)
 
@@ -396,6 +398,8 @@ func TestAuthorizeTokenRefreshFlow(t *testing.T) {
 // TestRefreshInvalidTokenIsInvalidGrant verifies that presenting a well-formed
 // but unrecognised refresh token is rejected with 400 invalid_grant — the server
 // must not leak whether the token was expired, revoked, or simply unknown.
+//
+// Exercises: INV-REFRESH-ROTATION-INVALIDATES-OLD (negative path)
 func TestRefreshInvalidTokenIsInvalidGrant(t *testing.T) {
 	const bogus = "not-a-real-refresh-token"
 	resp := postRefreshToken(t, bogus)

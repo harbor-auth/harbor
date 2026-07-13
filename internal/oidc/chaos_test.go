@@ -22,6 +22,8 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
 )
 
 // ─── chaos fake stores ───────────────────────────────────────────────────────
@@ -319,7 +321,7 @@ func TestChaos_Refresh_FamilyRevokeFails_StillInvalidGrant(t *testing.T) {
 }
 
 // TestChaos_Refresh_NewSessionIDFails_PreRotation verifies that a failure when
-// generating the new session ID (Step C — newCode()) returns server_error WITHOUT
+// generating the new session ID (Step C — newSessionID()) returns server_error WITHOUT
 // revoking the old session. Step C is before RotateSession (Step D), so the
 // client can retry with the same refresh token once the RNG recovers.
 //
@@ -331,17 +333,16 @@ func TestChaos_Refresh_NewSessionIDFails_PreRotation(t *testing.T) {
 
 	svc := newChaosService(sessionStore, grantStore)
 
-	// Inject fault: fail the first (and only) newCode call in Refresh — Step C
-	// generates the new session ID and is the only newCode call on the refresh
-	// path. 'called' ensures the fault fires exactly once so Step 2's recovery
-	// (svc.newCode = defaultNewCode) is unambiguous.
+	// Inject fault: fail the newSessionID call in Refresh — Step C generates
+	// the new session ID via newSessionID(). 'called' ensures the fault fires
+	// exactly once so Step 2's recovery (svc.newSessionID = ...) is unambiguous.
 	called := false
-	svc.newCode = func() (string, error) {
+	svc.newSessionID = func() (string, error) {
 		if !called {
 			called = true
 			return "", errors.New("entropy source temporarily exhausted")
 		}
-		return defaultNewCode()
+		return uuid.NewString(), nil
 	}
 
 	req := refreshReq(oldToken)
@@ -356,8 +357,8 @@ func TestChaos_Refresh_NewSessionIDFails_PreRotation(t *testing.T) {
 	}
 
 	// Step 2 — OLD token is still valid (RotateSession was never reached).
-	// Repair: restore a working newCode.
-	svc.newCode = defaultNewCode
+	// Repair: restore a working newSessionID.
+	svc.newSessionID = func() (string, error) { return uuid.NewString(), nil }
 	tokens, terr2 := svc.Refresh(context.Background(), req)
 	if terr2 != nil {
 		t.Fatalf("old token must survive a Step C session-id generation failure; got %v", terr2)

@@ -220,8 +220,14 @@ invariants:
     description: "A code exchange without offline_access in the consented scope must not issue a refresh token, regardless of whether a UserID is present. The gate is checked in Token() via scopeHasOfflineAccess() before issueRefreshToken is called — both conditions (offline_access AND non-empty UserID) must be true."
     enforced_by: [internal/oidc:TestRefreshOfflineAccessGate]
 
-- id: INV-REFRESH-CLIENT-BINDING
-  title: "Refresh token only redeemable by the client it was issued to"
-  design_refs: [§3.5, §11.7]
-  description: "A refresh token presented by a different client_id than the one recorded at issuance returns invalid_grant. Prevents a compromised RP from using another RP's refresh tokens (ValidateRefreshParams client-binding check)."
-  enforced_by: [internal/oidc:TestRefreshWrongClientRejected]
+  - id: INV-REFRESH-CLIENT-BINDING
+    title: "Refresh token only redeemable by the client it was issued to"
+    design_refs: [§3.5, §11.7]
+    description: "A refresh token presented by a different client_id than the one recorded at issuance returns invalid_grant. Prevents a compromised RP from using another RP's refresh tokens (ValidateRefreshParams client-binding check)."
+    enforced_by: [internal/oidc:TestRefreshWrongClientRejected]
+
+  - id: INV-REFRESH-REGION-PROPAGATED
+    title: "Refresh session carries the user's home region; rotation preserves it"
+    design_refs: [§10, §3.5]
+    description: "The RefreshSession created at code exchange carries the user's home region (recovered from the consent grant via FindGrant). RotateSession copies session.Region to the new session unchanged. An empty Region would violate the user-owned-row contract (DESIGN §10) and propagate forever through every rotation."
+    enforced_by: [internal/oidc:TestRefreshTokenRegionPropagated]

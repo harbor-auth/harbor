@@ -224,11 +224,11 @@ func TestRefreshConsentRevoked(t *testing.T) {
 
 // TestRefreshTokenRegionPropagated verifies that the RefreshSession created
 // by issueRefreshToken (called from Token during code exchange) carries the
-// user's home region from the consent grant, satisfying the user-owned-row
-// contract (docs/DESIGN.md §10). An unregioned session would propagate the
-// empty region forever through RotateSession's newSession.Region copy.
+// user's home region from the consent grant, and that RotateSession preserves
+// it through rotation — satisfying the user-owned-row contract
+// (docs/DESIGN.md §10). An empty Region would propagate forever.
 //
-//harbor:invariant INV-REFRESH-LOCKOUT-PREVENTION
+//harbor:invariant INV-REFRESH-REGION-PROPAGATED
 func TestRefreshTokenRegionPropagated(t *testing.T) {
 	const wantRegion = "eu-west-1"
 
@@ -308,6 +308,31 @@ func TestRefreshTokenRegionPropagated(t *testing.T) {
 	}
 	if session.Region != wantRegion {
 		t.Fatalf("session.Region = %q, want %q — issueRefreshToken did not propagate region from grant", session.Region, wantRegion)
+	}
+
+	// Step 4: Rotate the refresh token and verify region is preserved by RotateSession.
+	tokens2, terr2 := svc.Refresh(context.Background(), TokenRequest{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: tokens.RefreshToken,
+		ClientID:     testRefreshClientID,
+	})
+	if terr2 != nil {
+		t.Fatalf("Refresh (rotation): %v", terr2)
+	}
+	if tokens2.RefreshToken == "" {
+		t.Fatal("expected a new refresh token after rotation")
+	}
+	plaintext2, err2 := decodeRefreshToken(tokens2.RefreshToken)
+	if err2 != nil {
+		t.Fatalf("decodeRefreshToken (rotated): %v", err2)
+	}
+	hash2 := hashRefreshToken(plaintext2)
+	session2, err2 := sessionStore.GetSessionByTokenHash(context.Background(), hash2)
+	if err2 != nil {
+		t.Fatalf("GetSessionByTokenHash (rotated): %v", err2)
+	}
+	if session2.Region != wantRegion {
+		t.Fatalf("rotated session.Region = %q, want %q — RotateSession did not preserve region", session2.Region, wantRegion)
 	}
 }
 

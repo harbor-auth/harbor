@@ -350,7 +350,7 @@ func (s *Service) issueRefreshToken(ctx context.Context, tokens *IssuedTokens, c
 		s.logger.ErrorContext(ctx, "failed to generate refresh token", slog.Any("error", err))
 		return
 	}
-	sessionID, err := s.newCode()
+	sessionID, err := s.newSessionID()
 	if err != nil {
 		s.logger.ErrorContext(ctx, "failed to generate refresh session id", slog.Any("error", err))
 		return
@@ -458,7 +458,7 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	if err != nil {
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not generate refresh token", Status: 500}
 	}
-	newSessionID, err := s.newCode()
+	newSessionID, err := s.newSessionID()
 	if err != nil {
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not generate session id", Status: 500}
 	}
