@@ -169,8 +169,8 @@ invariants:
   - id: INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE
     title: "Replay of a rotated token fires theft signal that revokes the entire (user, client) session family"
     design_refs: [§3.5, §11.7]
-    description: "When a revoked refresh token is presented, ErrRefreshTokenRevoked is detected and RevokeSessionsByUserClient is called, invalidating every active session for that (user, client) pair — including the legitimately rotated successor token. This detects token theft and forces re-authentication."
-    enforced_by: [internal/oidc:TestRefreshReuseFiresTheftSignal, internal/oidcapi:TestToken_RefreshTheftSignal_RevokesFamily, internal/clients:TestDBSessionStoreGetByTokenHash_RevokedAndExpired]
+    description: "When a revoked refresh token is presented, ErrRefreshTokenRevoked is detected and RevokeSessionsByUserClient is called, invalidating every active session for that (user, client) pair — including the legitimately rotated successor token. This detects token theft and forces re-authentication. A revoke-side DB failure must NOT become a 5xx or allow the replayed token to succeed."
+    enforced_by: [internal/oidc:TestRefreshReuseFiresTheftSignal, internal/oidcapi:TestToken_RefreshTheftSignal_RevokesFamily, internal/clients:TestDBSessionStoreGetByTokenHash_RevokedAndExpired, internal/oidc:TestChaos_Refresh_FamilyRevokeFails_StillInvalidGrant]
 
   - id: INV-ENROLL-DEK-FRESH
     title: "Each enrollment generates a fresh DEK; keys are never reused across users"
@@ -196,8 +196,14 @@ invariants:
     description: "A transient DB error (connection reset, timeout, etc.) on a session lookup must propagate to the caller so the HTTP layer returns server_error, not silently collapse to invalid_grant / ErrRefreshTokenNotFound. Masking a DB outage as a client error would reject valid refresh tokens and trigger a mass logout for the duration of the outage."
     enforced_by: [internal/clients:TestDBSessionStoreGetByTokenHash_DBError, internal/oidc:TestChaos_Refresh_SessionLookupDBError]
 
+  - id: INV-REFRESH-CONSENT-REVOKED
+    title: "Refresh after consent revocation returns invalid_grant (not server_error)"
+    design_refs: [§3.5, §10, §11.7]
+    description: "When FindGrant returns (Grant{}, false, nil) the authorization has been permanently revoked by the user. This must return invalid_grant (RFC 6749 §5.2) so well-behaved clients re-initiate consent rather than retrying indefinitely. Returning server_error for a permanently-gone grant would cause infinite retries and the user could never re-authenticate."
+    enforced_by: [internal/oidc:TestRefreshConsentRevoked]
+
   - id: INV-REFRESH-LOCKOUT-PREVENTION
     title: "Pre-rotation failures leave the old refresh token valid; no lock-out hazard"
     design_refs: [§3.5, §11.7]
-    description: "FindGrant (Step A) and tokens.Issue (Step B) are called BEFORE RotateSession (Step D — the single commit point). A failure in A or B returns server_error without revoking the existing session, so the client can retry with the same refresh token once the dependency recovers. After RotateSession no fallible operations remain."
-    enforced_by: [internal/oidc:TestChaos_Refresh_GrantLookupFails_PreRotation, internal/oidc:TestChaos_Refresh_TokenSigningFails_PreRotation]
+    description: "FindGrant (Step A), tokens.Issue (Step B), and new-session-ID generation (Step C) are all called BEFORE RotateSession (Step D — the single commit point). A failure in A, B, or C returns server_error without revoking the existing session, so the client can retry with the same refresh token once the dependency recovers. After RotateSession no fallible operations remain."
+    enforced_by: [internal/oidc:TestChaos_Refresh_GrantLookupFails_PreRotation, internal/oidc:TestChaos_Refresh_TokenSigningFails_PreRotation, internal/oidc:TestChaos_Refresh_RotationFails, internal/oidc:TestChaos_Refresh_NewSessionIDFails_PreRotation]

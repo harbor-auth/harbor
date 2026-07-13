@@ -227,6 +227,8 @@ func TestChaos_Refresh_TokenSigningFails_PreRotation(t *testing.T) {
 // TestChaos_Refresh_RotationFails verifies that a failure in RotateSession
 // (Step D — the atomic commit point) returns server_error and leaves the old
 // session intact so the client can retry.
+//
+//harbor:invariant INV-REFRESH-LOCKOUT-PREVENTION
 func TestChaos_Refresh_RotationFails(t *testing.T) {
 	innerStore := NewInMemorySessionStore()
 	grantStore := NewInMemoryGrantStore()
@@ -271,6 +273,8 @@ func TestChaos_Refresh_RotationFails(t *testing.T) {
 // A revocation failure must NEVER become a 5xx or allow the replayed token to
 // succeed — the client response is independent of the side-effect.
 // (docs/DESIGN.md §11.7; docs/design/principles/error-handling.md §1.11)
+//
+//harbor:invariant INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE
 func TestChaos_Refresh_FamilyRevokeFails_StillInvalidGrant(t *testing.T) {
 	// Seed a session, rotate it legitimately so the original token is revoked.
 	innerStore := NewInMemorySessionStore()
@@ -320,5 +324,54 @@ func TestChaos_Refresh_FamilyRevokeFails_StillInvalidGrant(t *testing.T) {
 	// PII constraint (docs/DESIGN.md §6.5.7): user_id must not appear in logs.
 	if strings.Contains(logOutput, testRefreshUserID) {
 		t.Fatalf("log must not contain user_id (PII); got: %s", logOutput)
+	}
+}
+
+// TestChaos_Refresh_NewSessionIDFails_PreRotation verifies that a failure when
+// generating the new session ID (Step C — newCode()) returns server_error WITHOUT
+// revoking the old session. Step C is before RotateSession (Step D), so the
+// client can retry with the same refresh token once the RNG recovers.
+//
+//harbor:invariant INV-REFRESH-LOCKOUT-PREVENTION
+func TestChaos_Refresh_NewSessionIDFails_PreRotation(t *testing.T) {
+	sessionStore := NewInMemorySessionStore()
+	grantStore := NewInMemoryGrantStore()
+	oldToken := seedSession(t, sessionStore, grantStore, "ppid-chaos-newid")
+
+	svc := newChaosService(sessionStore, grantStore)
+
+	// Inject fault: Refresh calls newCode exactly once (Step C — the new
+	// session ID). Fail that call unconditionally; the counter guards against
+	// a future refactor that adds extra newCode calls before Step C, which
+	// would change the test's intent without a compilation error.
+	callCount := 0
+	svc.newCode = func() (string, error) {
+		callCount++
+		if callCount == 1 {
+			return "", errors.New("entropy source temporarily exhausted")
+		}
+		return defaultNewCode()
+	}
+
+	req := refreshReq(oldToken)
+
+	// Step 1 — Refresh fails at Step C (session ID generation).
+	_, terr := svc.Refresh(context.Background(), req)
+	if terr == nil || terr.Code != ErrCodeServerError {
+		t.Fatalf("session-id generation failure: want server_error, got %v", terr)
+	}
+	if terr.Status != 500 {
+		t.Fatalf("Status = %d, want 500", terr.Status)
+	}
+
+	// Step 2 — OLD token is still valid (RotateSession was never reached).
+	// Repair: restore a working newCode.
+	svc.newCode = defaultNewCode
+	tokens, terr2 := svc.Refresh(context.Background(), req)
+	if terr2 != nil {
+		t.Fatalf("old token must survive a Step C session-id generation failure; got %v", terr2)
+	}
+	if tokens.RefreshToken == "" {
+		t.Fatal("expected a new refresh token after recovery")
 	}
 }

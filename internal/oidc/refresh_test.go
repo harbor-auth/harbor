@@ -219,6 +219,41 @@ func TestRefreshHashAtRest(t *testing.T) {
 	}
 }
 
+// TestRefreshConsentRevoked verifies that when a user revokes consent after a
+// refresh token was issued, the next Refresh() returns invalid_grant (not
+// server_error). A server_error would cause well-behaved OAuth clients to retry
+// indefinitely, never prompting re-authentication; invalid_grant causes them to
+// re-initiate the authorization flow (§RFC 6749 §5.2).
+//
+//harbor:invariant INV-REFRESH-CONSENT-REVOKED
+func TestRefreshConsentRevoked(t *testing.T) {
+	svc, sessionStore, grantStore := newTestServiceWithSessions(t)
+	oldToken := seedSession(t, sessionStore, grantStore, "ppid-revoked-consent")
+
+	// Revoke the consent grant — simulates user clicking "revoke access".
+	grants, err := grantStore.ListGrantsByUser(context.Background(), testRefreshUserID)
+	if err != nil {
+		t.Fatalf("ListGrantsByUser: %v", err)
+	}
+	for _, g := range grants {
+		if err := grantStore.RevokeGrant(context.Background(), g.ID); err != nil {
+			t.Fatalf("RevokeGrant: %v", err)
+		}
+	}
+
+	_, terr := svc.Refresh(context.Background(), TokenRequest{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: oldToken,
+		ClientID:     testRefreshClientID,
+	})
+	if terr == nil {
+		t.Fatal("expected error when grant has been revoked")
+	}
+	if terr.Code != ErrCodeInvalidGrant {
+		t.Fatalf("revoked grant must return invalid_grant (not %q); a server_error here would cause clients to retry indefinitely instead of re-consenting", terr.Code)
+	}
+}
+
 func TestRefreshOfflineAccessGate(t *testing.T) {
 	// A code exchange WITHOUT offline_access must NOT produce a refresh token.
 	svc, _, _ := newTestServiceWithSessions(t)

@@ -42,6 +42,7 @@ func main() {
 	pool, err := connectDB(ctx, logger)
 	if err != nil {
 		logger.Error("database connection failed", "error", err)
+		stop()
 		os.Exit(1)
 	}
 	if pool != nil {
@@ -69,8 +70,8 @@ func main() {
 	}, store, sessions)
 	if err != nil {
 		logger.Error("failed to configure webauthn service", "error", err)
-		// os.Exit skips deferred functions, so release the pool explicitly if
-		// it was opened (pool is nil in dev mode without DATABASE_URL).
+		// os.Exit skips deferred functions, so release resources explicitly.
+		stop()
 		if pool != nil {
 			pool.Close()
 		}
@@ -87,6 +88,7 @@ func main() {
 		// secret, so it is fatal (mirrors the harbor-hot KEK_SECRET guard).
 		if pool != nil {
 			logger.Error("HARBOR_KMS_SECRET must be set when DATABASE_URL is configured — refusing to enroll with a dev key against a real DB")
+			stop()
 			pool.Close()
 			os.Exit(1)
 		}
@@ -96,8 +98,8 @@ func main() {
 	kp, err := crypto.NewLocalKeyProvider(kmsSecret)
 	if err != nil {
 		logger.Error("failed to create key provider", "error", err)
-		// os.Exit skips deferred functions, so release the pool explicitly if
-		// it was opened (pool is nil in dev mode without DATABASE_URL).
+		// os.Exit skips deferred functions, so release resources explicitly.
+		stop()
 		if pool != nil {
 			pool.Close()
 		}
@@ -125,7 +127,8 @@ func main() {
 	logger.Info("starting harbor-mgmt", "port", port, "rp_id", rpID)
 	if err := httpserver.Run(ctx, ":"+port, mux, logger); err != nil {
 		logger.Error("harbor-mgmt exited with error", "error", err)
-		// os.Exit skips deferred functions, so release the pool explicitly.
+		// os.Exit skips deferred functions, so release resources explicitly.
+		stop()
 		if pool != nil {
 			pool.Close()
 		}
@@ -203,6 +206,9 @@ func connectDB(ctx context.Context, logger *slog.Logger) (*pgxpool.Pool, error) 
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("db ping: interrupted by shutdown signal during startup: %w", err)
+		}
 		return nil, fmt.Errorf("db ping: %w", err)
 	}
 	logger.Info("connected to database")

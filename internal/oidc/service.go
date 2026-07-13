@@ -452,6 +452,10 @@ func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession
 	// signal. The empty-string case catches in-memory store bugs; the zero-UUID
 	// case ("00000000-...") catches a NULL pgtype.UUID that survived rowToRefreshSession
 	// via uuidToString. Both signal a latent store bug — surface loudly.
+	//
+	// Asymmetry note: ClientID is a string (not a pgtype.UUID), so it is never
+	// routed through uuidToString and can never become the zero-UUID sentinel.
+	// The empty-string check is therefore sufficient for ClientID.
 	if session.UserID == "" || session.UserID == zeroUUID ||
 		session.ClientID == "" {
 		s.logger.ErrorContext(ctx, "refresh-reuse signal: session has empty/invalid UserID or ClientID — family revoke skipped (latent store bug)",
