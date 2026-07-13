@@ -454,6 +454,7 @@ func TestRefreshOfflineAccessGate(t *testing.T) {
 // so the client is not locked out.
 //
 //harbor:invariant INV-REFRESH-ROTATION-REQUIRES-OFFLINE-ACCESS
+//harbor:invariant INV-REFRESH-SCOPE-REFLECTS-GRANT
 func TestRefreshRotationRequiresOfflineAccess(t *testing.T) {
 	svc, sessionStore, grantStore := newTestServiceWithSessions(t)
 
@@ -499,12 +500,55 @@ func TestRefreshRotationRequiresOfflineAccess(t *testing.T) {
 	if tokens.RefreshToken != "" {
 		t.Fatal("expected no refresh token when grant scopes no longer contain offline_access")
 	}
+	// The access token scope must reflect the CURRENT (downgraded) grant scopes,
+	// not some stale scope string — locking in the INV-REFRESH-SCOPE-REFLECTS-GRANT contract.
+	if tokens.Scope != "openid" {
+		t.Fatalf("access token scope = %q, want \"openid\" (the downgraded grant scope)", tokens.Scope)
+	}
 
 	// The old session must NOT have been revoked — client is not locked out
 	// and can retry once the scope issue is resolved (or simply use access token).
 	_, err = sessionStore.GetSessionByTokenHash(context.Background(), hash)
 	if err != nil {
 		t.Fatalf("old session must still be valid (not revoked) after offline_access guard fires: %v", err)
+	}
+}
+
+// TestDecodeRefreshTokenTrimSpace verifies that decodeRefreshToken trims leading
+// and trailing whitespace before base64 decoding. Some clients (notably
+// certain HTTP form parsers) append a trailing newline to form values; trimming
+// prevents a spurious invalid_grant for a token that is otherwise valid.
+// This is not a security boundary — a token with interior whitespace is still
+// rejected by the base64 decoder.
+func TestDecodeRefreshTokenTrimSpace(t *testing.T) {
+	plaintext, _, err := newOpaqueToken()
+	if err != nil {
+		t.Fatalf("newOpaqueToken: %v", err)
+	}
+	encoded := encodeRefreshToken(plaintext)
+
+	// Trailing newline (common from HTTP form parsers).
+	decoded, err := decodeRefreshToken(encoded + "\n")
+	if err != nil {
+		t.Fatalf("trailing newline: decodeRefreshToken failed: %v", err)
+	}
+	if string(decoded) != string(plaintext) {
+		t.Fatal("trailing newline: decoded bytes do not match plaintext")
+	}
+
+	// Leading space.
+	decoded2, err := decodeRefreshToken(" " + encoded)
+	if err != nil {
+		t.Fatalf("leading space: decodeRefreshToken failed: %v", err)
+	}
+	if string(decoded2) != string(plaintext) {
+		t.Fatal("leading space: decoded bytes do not match plaintext")
+	}
+
+	// Interior whitespace is NOT trimmed — still rejected.
+	_, err = decodeRefreshToken(encoded[:10] + " " + encoded[10:])
+	if err == nil {
+		t.Fatal("interior whitespace: expected decode error, got nil")
 	}
 }
 

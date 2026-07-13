@@ -65,6 +65,8 @@ var _ oidc.SessionStore = (*DBSessionStore)(nil)
 // label. Shared by CreateSession and RotateSession so the two write paths
 // cannot silently diverge.
 func buildCreateSessionParams(rs oidc.RefreshSession) (db.CreateSessionParams, error) {
+	// TODO(grant-fk): when the sessions table gains a grant_id FK column,
+	// parse rs.GrantID here (it is always "" today — see RefreshSession.GrantID).
 	var id pgtype.UUID
 	if err := id.Scan(rs.ID); err != nil {
 		return db.CreateSessionParams{}, fmt.Errorf("sessions: parse session ID %q: %w", rs.ID, err)
@@ -158,6 +160,11 @@ func (s *DBSessionStore) RevokeSession(ctx context.Context, id string) error {
 func (s *DBSessionStore) RotateSession(ctx context.Context, oldID string, newSession oidc.RefreshSession) error {
 	if s.tx == nil {
 		// No transactor: sequential best-effort (tests, dev without a pool).
+		// PRODUCTION REQUIREMENT: cmd/harbor-hot/main.go MUST call WithPool()
+		// when a DB pool is available. Without a pool, a CreateSession failure
+		// after a successful RevokeSession permanently locks the user out (old
+		// token gone, new token not persisted). The production wiring in main.go
+		// always passes WithPool(pool) — this branch exists only for dev/test.
 		if err := s.RevokeSession(ctx, oldID); err != nil {
 			return fmt.Errorf("sessions: rotate (revoke): %w", err)
 		}

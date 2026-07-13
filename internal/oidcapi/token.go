@@ -82,8 +82,13 @@ func writeOAuthError(w http.ResponseWriter, e *oidc.TokenError) {
 	// fails to authenticate using HTTP Basic auth (invalid_client). Currently
 	// no code path returns ErrCodeInvalidClient (Harbor uses PKCE public-client
 	// flow, not client_secret_basic). This branch is retained as a placeholder
-	// for future client authentication support — remove the comment when a real
-	// caller exists.
+	// for future client authentication support.
+	// NOTE: RFC 6750 §3 and RFC 7235 require the realm parameter
+	// (e.g. `Basic realm="Harbor"`) for a strictly conformant response, and
+	// RFC 6749 §5.2 requires error= and error_description= parameters. The
+	// bare `Basic` header emitted here is acceptable only while this branch is
+	// dead (no real caller). Add realm + error params when wiring real
+	// client_secret_basic support.
 	if e.Code == oidc.ErrCodeInvalidClient {
 		w.Header().Set("WWW-Authenticate", "Basic")
 	}

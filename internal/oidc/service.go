@@ -459,12 +459,24 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	// Step B: mint the new access/ID tokens — depends only on grant + session,
 	// NOT on the new refresh session that RotateSession will create. Doing this
 	// before rotation means that if signing fails the old token is still live.
+	//
+	// Scope-narrowing (RFC 6749 §6): TokenRequest has no Scope field, so a
+	// client requesting a narrower scope on a refresh_token grant is currently
+	// silently ignored — the full frozen grant scopes are always returned. This
+	// is a known intentional omission: scope narrowing is NEVER broader than the
+	// original grant (so it is not a security violation), and the DESIGN.md §3.5
+	// does not require it. If scope-narrowing support is added in a future PR,
+	// parse req.Scope here and intersect it against grant.Scopes, returning
+	// invalid_scope on any requested scope not in the grant.
 	scopeStr := strings.Join(grant.Scopes, " ")
 	tokens, err := s.tokens.Issue(ctx, IssueParams{
 		Issuer:   s.issuer,
 		Subject:  grant.PairwiseSub,
 		ClientID: session.ClientID,
 		Scope:    scopeStr,
+		// Nonce is intentionally omitted: OIDC Core §12.2 specifies that the
+		// nonce claim is only required in the initial ID token (from /authorize)
+		// and MUST NOT be included in tokens issued via refresh_token grant.
 	})
 	if err != nil {
 		s.logger.ErrorContext(ctx, "refresh: token signing failed",

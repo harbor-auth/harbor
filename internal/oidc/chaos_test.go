@@ -417,3 +417,72 @@ func TestChaos_Refresh_ValidateTokenParams_GatesStoreAccess(t *testing.T) {
 		t.Fatalf("wrong grant_type: want unsupported_grant_type or invalid_request, got %q", terr3.Code)
 	}
 }
+
+// TestChaos_Refresh_SignalRefreshReuse_ZeroUUID verifies the defensive guard in
+// signalRefreshReuse: when GetSessionByTokenHash returns ErrRefreshTokenRevoked
+// with a session whose UserID is empty or the zero UUID sentinel, the family
+// revoke is skipped (RevokeSessionsByUserClient is NOT called) and an ERROR is
+// logged. Without the guard, RevokeSessionsByUserClient("",...) would silently
+// match zero rows and suppress the theft signal — masking a store bug as a no-op.
+//
+// The correct client response is still invalid_grant (not 5xx) so the attacker
+// learns nothing from the guard firing.
+func TestChaos_Refresh_SignalRefreshReuse_ZeroUUID(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		userID string
+	}{
+		{name: "empty", userID: ""},
+		{name: "zero_uuid", userID: zeroUUID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Chaos store: GetSessionByTokenHash returns Revoked with a bad UserID.
+			chaosStore := &badUserIDSessionStore{userID: tc.userID}
+
+			var logBuf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+			svc := NewService(ServiceConfig{
+				Issuer:       "https://chaos.harbor.example",
+				Clients:      NewInMemoryClientRegistry(),
+				Codes:        NewInMemoryAuthCodeStore(),
+				Tokens:       NewPlaceholderIssuer(),
+				Sessions:     NewStubSessionResolver("ppid-chaos"),
+				SessionStore: chaosStore,
+				Grants:       NewInMemoryGrantStore(),
+				Logger:       logger,
+			})
+
+			plaintext, _, err := newOpaqueToken()
+			if err != nil {
+				t.Fatalf("newOpaqueToken: %v", err)
+			}
+
+			// Must return invalid_grant — not 5xx.
+			_, terr := svc.Refresh(context.Background(), refreshReq(encodeRefreshToken(plaintext)))
+			if terr == nil {
+				t.Fatal("expected error; got nil")
+			}
+			if terr.Code != ErrCodeInvalidGrant {
+				t.Fatalf("zero-UUID guard: want invalid_grant, got %q", terr.Code)
+			}
+
+			// The ERROR log must fire.
+			if !strings.Contains(logBuf.String(), "empty/invalid UserID") {
+				t.Fatalf("expected ERROR log for zero-UUID guard; got: %s", logBuf.String())
+			}
+		})
+	}
+}
+
+// badUserIDSessionStore always returns ErrRefreshTokenRevoked with a session
+// whose UserID is set to the configured (bad) value — simulates a DBSessionStore
+// bug where rowToRefreshSession emits a zero UUID instead of the stored value.
+type badUserIDSessionStore struct {
+	noopSessionStore
+	userID string
+}
+
+func (s *badUserIDSessionStore) GetSessionByTokenHash(_ context.Context, _ []byte) (RefreshSession, error) {
+	return RefreshSession{UserID: s.userID, ClientID: "some-client"}, ErrRefreshTokenRevoked
+}

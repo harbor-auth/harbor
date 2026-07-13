@@ -232,6 +232,12 @@ invariants:
     description: "The RefreshSession created at code exchange carries the user's home region (recovered from the consent grant via FindGrant). RotateSession copies session.Region to the new session unchanged. An empty Region would violate the user-owned-row contract (DESIGN §10) and propagate forever through every rotation."
     enforced_by: [internal/oidc:TestRefreshTokenRegionPropagated]
 
+  - id: INV-REFRESH-SCOPE-REFLECTS-GRANT
+    title: "Access token scope on refresh reflects the CURRENT grant scopes, not a stale value"
+    design_refs: [§3.5, §11.7]
+    description: "When Refresh() issues new access/ID tokens via tokens.Issue, the Scope parameter is always computed from the current frozen grant scopes (strings.Join(grant.Scopes)). A grant scope downgrade must be reflected in the returned access token scope — not silently using a cached or stale scope string. Tested by asserting tokens.Scope equals the downgraded grant scope after a scope-downgrade scenario."
+    enforced_by: [internal/oidc:TestRefreshRotationRequiresOfflineAccess]
+
   - id: INV-REFRESH-ROTATION-REQUIRES-OFFLINE-ACCESS
     title: "Refresh rotation only occurs when grant still contains offline_access scope"
     design_refs: [§3.5, §11.7]

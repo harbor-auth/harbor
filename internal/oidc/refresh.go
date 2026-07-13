@@ -80,6 +80,11 @@ type sessionEntry struct {
 
 // InMemorySessionStore is a dev/test SessionStore. NOT for production — a real
 // store persists sessions durably (internal/clients.DBSessionStore).
+//
+// Time: expiry checks use time.Now() directly (wall-clock), not an injectable
+// clock. Use ForceExpireAllForTest() to fast-forward expiry in tests rather
+// than sleeping. A future refactor could inject a clock via the constructor, but
+// the current test-helper approach is sufficient for the existing test surface.
 type InMemorySessionStore struct {
 	mu     sync.Mutex
 	byID   map[string]*sessionEntry
@@ -153,6 +158,13 @@ func (s *InMemorySessionStore) RotateSession(_ context.Context, oldID string, ne
 // ForceExpireAllForTest immediately back-dates every active session's ExpiresAt
 // to one second in the past, simulating TTL expiry without sleeping.
 // For use in tests only — not called from production code paths.
+//
+// NOTE: This method intentionally lives in non-test code (not export_test.go)
+// because internal/oidcapi tests call it cross-package on a *InMemorySessionStore
+// value imported from internal/oidc. Moving it to export_test.go would make it
+// invisible to external test packages (Go test exports are intra-package only)
+// without introducing a separate testutil package. Accept as a test-helper
+// with a sufficiently obvious name to prevent accidental production use.
 func (s *InMemorySessionStore) ForceExpireAllForTest() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
