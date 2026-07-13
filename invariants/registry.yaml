@@ -213,3 +213,9 @@ invariants:
     design_refs: [§11.7, §7.4]
     description: "When DBClientRegistry.Lookup encounters a non-ErrNoRows DB error it returns (Client{}, false) so the HTTP layer surfaces server_error rather than redirecting to an unverified redirect_uri. Redirecting before the client_id is proven valid is a classic open-redirect attack vector — a DB outage must never be exploitable as a redirect hijack."
     enforced_by: [internal/clients:TestDBClientRegistryLookupDBError]
+
+  - id: INV-REFRESH-OFFLINE-ACCESS-GATE
+    title: "Refresh tokens only issued when offline_access scope was consented"
+    design_refs: [§3.5, §11.7]
+    description: "A code exchange without offline_access in the consented scope must not issue a refresh token, regardless of whether a UserID is present. The gate is checked in Token() via scopeHasOfflineAccess() before issueRefreshToken is called — both conditions (offline_access AND non-empty UserID) must be true."
+    enforced_by: [internal/oidc:TestRefreshOfflineAccessGate]

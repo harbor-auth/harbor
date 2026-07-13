@@ -81,7 +81,7 @@ func main() {
 	if err != nil {
 		logger.Error("failed to create local signer", "error", err)
 		stop()
-		os.Exit(1)
+		os.Exit(1) // pool is not yet created at this point — no pool.Close() needed
 	}
 
 	pool, err := connectDB(ctx, logger)

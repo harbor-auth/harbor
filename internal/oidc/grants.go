@@ -114,6 +114,10 @@ func (s *InMemoryGrantStore) CreateGrant(_ context.Context, ng NewGrant) (Grant,
 		now := time.Now()
 		existing.RevokedAt = &now
 	}
+	// id is a monotonically-increasing sequence. It is safe here because byID
+	// never shrinks: RevokeGrant tombstones entries in byID (sets RevokedAt)
+	// but never removes them. If a Delete method is ever added, switch to an
+	// explicit atomic counter to prevent ID collisions.
 	id := fmt.Sprintf("grant-%d", len(s.byID)+1)
 	g := &Grant{
 		ID:          id,

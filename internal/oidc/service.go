@@ -314,7 +314,10 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 // The H9-2 panic guard ensures that in production (real SessionStore) a real
 // GrantStore is always wired, so the not-found path is a genuine edge case.
 func (s *Service) issueRefreshToken(ctx context.Context, tokens *IssuedTokens, code AuthCode) {
-	// Step 0: recover the region from the consent grant. Fail-closed.
+	// Recover the region from the consent grant. Fail-closed: if the grant is
+	// gone (consent revoked between /authorize and /token, or noopGrantStore
+	// dev wiring), skip the refresh token rather than creating an unregioned
+	// session that propagates the empty region forever via RotateSession.
 	grant, found, err := s.grants.FindGrant(ctx, code.UserID, code.ClientID)
 	if err != nil {
 		s.logger.ErrorContext(ctx, "failed to recover grant region for refresh session — skipping refresh token",
@@ -453,7 +456,7 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 		Region:      session.Region,
 		UserID:      session.UserID,
 		ClientID:    session.ClientID,
-		GrantID:     session.GrantID,
+		GrantID:     session.GrantID, // always "" until a DB column exists; placeholder for future FK carry-through
 		DeviceLabel: session.DeviceLabel,
 		TokenHash:   newHash,
 		ExpiresAt:   s.now().Add(defaultRefreshTTL),
@@ -491,9 +494,10 @@ func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession
 	// case ("00000000-...") catches a NULL pgtype.UUID that survived rowToRefreshSession
 	// via uuidToString. Both signal a latent store bug — surface loudly.
 	//
-	// Asymmetry note: ClientID is a string (not a pgtype.UUID), so it is never
-	// routed through uuidToString and can never become the zero-UUID sentinel.
-	// The empty-string check is therefore sufficient for ClientID.
+	// Asymmetry note: the zero-UUID sentinel ("00000000-...") specifically
+	// guards against a NULL pgtype.UUID surviving DBSessionStore.rowToRefreshSession
+	// → uuidToString. ClientID is a plain VARCHAR column and is never routed
+	// through uuidToString, so the empty-string check is sufficient for it.
 	if session.UserID == "" || session.UserID == zeroUUID ||
 		session.ClientID == "" {
 		s.logger.ErrorContext(ctx, "refresh-reuse signal: session has empty/invalid UserID or ClientID — family revoke skipped (latent store bug)",

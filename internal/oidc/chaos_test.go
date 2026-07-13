@@ -93,15 +93,6 @@ func newChaosService(sessionStore SessionStore, grantStore GrantStore) *Service 
 	})
 }
 
-// refreshReq builds a minimal refresh_token TokenRequest for testRefreshClientID.
-func refreshReq(token string) TokenRequest {
-	return TokenRequest{
-		GrantType:    grantTypeRefreshToken,
-		RefreshToken: token,
-		ClientID:     testRefreshClientID,
-	}
-}
-
 // ─── chaos tests ─────────────────────────────────────────────────────────────
 
 // TestChaos_Refresh_SessionLookupDBError verifies that a transient DB error on
