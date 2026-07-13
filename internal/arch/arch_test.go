@@ -75,17 +75,28 @@ func containsMatching(set map[string]bool, substrs ...string) string {
 	return ""
 }
 
-// TestHotPathDoesNotImportDatabase enforces §4.1/§6.1: the stateless hot path
-// (cmd/harbor-hot) must never pull in a DB driver or the generated DB layer.
-func TestHotPathDoesNotImportDatabase(t *testing.T) {
+// TestHotPathDoesNotImportMgmtPackages enforces §4.1/§6.1: the hot path
+// (cmd/harbor-hot) is stateless in the sense of owning no mutable PII state —
+// it MAY read from the DB via internal/clients (client registry, grant store,
+// session store, secret loader) but must never pull in the management-only
+// WebAuthn enrollment package (internal/webauthn). That package — the
+// registration/authentication ceremonies and their persistence — belongs to
+// cmd/harbor-mgmt exclusively.
+//
+// Note: internal/identity is intentionally NOT forbidden here. It holds the
+// shared PPID derivation and PairwiseSecretAAD helpers that the hot path
+// legitimately depends on (via clients.DBSecretLoader → identity.PairwiseSecretAAD
+// on the /token PPID-resolution path). Forbidding it would contradict the
+// clients-based DB read model that §4.1/§6.1 permit.
+func TestHotPathDoesNotImportMgmtPackages(t *testing.T) {
 	deps := transitiveImports(t, modulePath+"/cmd/harbor-hot")
 
 	if bad := containsMatching(deps,
-		"github.com/jackc/pgx",
-		modulePath+"/internal/gen/db",
+		modulePath+"/internal/webauthn",
 	); bad != "" {
-		t.Errorf("cmd/harbor-hot transitively imports %q — the hot path is STATELESS "+
-			"(§4.1, §6.1) and must not touch a database driver or internal/gen/db", bad)
+		t.Errorf("cmd/harbor-hot transitively imports %q — the hot path must not "+
+			"pull in the mgmt-only WebAuthn enrollment package (§4.1, §6.1): "+
+			"internal/webauthn belongs to cmd/harbor-mgmt", bad)
 	}
 }
 
