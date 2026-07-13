@@ -33,6 +33,12 @@ func (s *Server) PostToken(w http.ResponseWriter, r *http.Request) {
 		ClientID:     r.PostFormValue("client_id"),
 		CodeVerifier: r.PostFormValue("code_verifier"),
 		RefreshToken: r.PostFormValue("refresh_token"),
+		// NOTE: RFC 6749 §6 allows a client to request a narrower scope on a
+		// refresh_token grant via the `scope` form parameter. Harbor currently
+		// does not parse this field — TokenRequest has no Scope field — so any
+		// client-supplied scope on a refresh request is silently ignored and the
+		// full frozen grant scopes are always returned. This is a known
+		// intentional omission documented in service.go Refresh() Step B.
 	}
 
 	var tokens *oidc.IssuedTokens

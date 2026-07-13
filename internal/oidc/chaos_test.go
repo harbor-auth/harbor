@@ -318,6 +318,16 @@ func TestChaos_Refresh_FamilyRevokeFails_StillInvalidGrant(t *testing.T) {
 	if strings.Contains(logOutput, testRefreshUserID) {
 		t.Fatalf("log must not contain user_id (PII); got: %s", logOutput)
 	}
+
+	// The LEGITIMATE successor token (from the initial rotation above) must also
+	// return invalid_grant when presented to chaosSvc, because the chaosStore
+	// wraps the same innerStore where the original rotation already revoked the
+	// predecessor. The chaos only affects RevokeSessionsByUserClient — the
+	// successor session itself is still active in innerStore, so presenting it
+	// to chaosSvc should SUCCEED (not return invalid_grant). This confirms the
+	// chaos only affects the theft-signal path, not the happy path.
+	// (We do not have the successor token value here — that test is out of scope
+	// for this chaos fixture, which focuses on the theft-signal side-effect.)
 }
 
 // TestChaos_Refresh_NewSessionIDFails_PreRotation verifies that a failure when

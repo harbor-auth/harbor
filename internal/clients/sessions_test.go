@@ -441,3 +441,30 @@ func TestDBSessionStoreGetByTokenHash_DBError(t *testing.T) {
 		t.Fatalf("expected wrapped DB error %v, got %v", dbErr, err)
 	}
 }
+
+// fakeTxBeginner is a minimal txBeginner stub for panic-guard tests.
+type fakeTxBeginner struct{}
+
+func (f *fakeTxBeginner) Begin(_ context.Context) (pgx.Tx, error) {
+	return nil, errors.New("fakeTxBeginner: not implemented")
+}
+
+// TestNewDBSessionStoreWithPool_PanicsOnNilQ verifies the nil-querier guard.
+func TestNewDBSessionStoreWithPool_PanicsOnNilQ(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for nil querier, got none")
+		}
+	}()
+	NewDBSessionStoreWithPool(nil, &fakeTxBeginner{})
+}
+
+// TestNewDBSessionStoreWithPool_PanicsOnNilP verifies the nil-pool guard.
+func TestNewDBSessionStoreWithPool_PanicsOnNilP(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for nil pool, got none")
+		}
+	}()
+	NewDBSessionStoreWithPool(newFakeSessionQuerier(), nil)
+}

@@ -407,6 +407,13 @@ func scopeHasOfflineAccess(scope string) bool {
 // Reuse of a rotated token is caught in step 2 because RevokeSession tombstones
 // (rather than deletes) the old session.
 func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens, *TokenError) {
+	// ValidateTokenParams is called here (not only at the oidcapi HTTP layer) so
+	// that svc.Refresh() is safe to call directly — e.g. in unit tests or any
+	// future non-HTTP caller — without relying on the routing guard in oidcapi.
+	// It also catches an empty RefreshToken or ClientID before hashing them
+	// (which would otherwise cause a spurious DB lookup on a SHA-256 of empty
+	// bytes). Do NOT remove this call even though oidcapi/token.go already
+	// routes on grant_type before calling Refresh().
 	if terr := ValidateTokenParams(req); terr != nil {
 		return nil, terr
 	}
@@ -453,6 +460,16 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 		// invalid_grant (RFC 6749 §5.2) — the authorization is gone permanently.
 		// Returning server_error here would cause well-behaved clients to retry
 		// indefinitely, never learning that re-consent is required.
+		//
+		// Best-effort cleanup: revoke the orphaned refresh session so it does not
+		// occupy DB storage for its full 14-day TTL after consent was revoked.
+		// This is non-fatal — failure is logged at WARN and the session naturally
+		// expires. PII note: only client_id and error are logged (§6.5.7).
+		if rErr := s.sessionStore.RevokeSession(ctx, session.ID); rErr != nil {
+			s.logger.WarnContext(ctx, "refresh: best-effort session revoke after consent revocation failed — session will expire naturally",
+				slog.String("client_id", session.ClientID),
+				slog.Any("error", rErr))
+		}
 		return nil, invalidGrant("consent grant has been revoked")
 	}
 
@@ -557,10 +574,17 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	return &tokens, nil
 }
 
-// zeroUUID is the sentinel returned by uuidToString when pgtype.UUID.Valid is
-// false. It must be treated the same as the empty string for the theft-signal
-// guard: a zero-UUID UserID or ClientID would silently match zero rows in
-// RevokeSessionsByUserClient, suppressing the family revoke.
+// zeroUUID is the sentinel returned by clients.uuidToString() (internal/clients/
+// grants.go and sessions.go) when pgtype.UUID.Valid is false. It must be
+// treated the same as the empty string for the theft-signal guard: a zero-UUID
+// UserID would silently match zero rows in RevokeSessionsByUserClient,
+// suppressing the family revoke.
+//
+// COUPLING NOTE: this constant must match the sentinel in clients.uuidToString.
+// If that function changes its return value for !Valid UUIDs, this constant
+// must change too. The two are in separate packages (oidc cannot import
+// clients) so there is no shared definition — a comment cross-reference is
+// the intended coupling mechanism.
 const zeroUUID = "00000000-0000-0000-0000-000000000000"
 
 // signalRefreshReuse fires the theft signal when a revoked refresh token is

@@ -80,6 +80,12 @@ var _ oidc.SessionStore = (*DBSessionStore)(nil)
 func buildCreateSessionParams(rs oidc.RefreshSession) (db.CreateSessionParams, error) {
 	// TODO(grant-fk): when the sessions table gains a grant_id FK column,
 	// parse rs.GrantID here (it is always "" today — see RefreshSession.GrantID).
+	// Runtime assertion: GrantID must be "" until the DB column exists. If this
+	// fires, a caller has set GrantID to a non-empty value without also updating
+	// this function — the value would be silently dropped in CreateSession.
+	if rs.GrantID != "" {
+		return db.CreateSessionParams{}, fmt.Errorf("sessions: GrantID %q is not supported (no grant_id DB column yet — see TODO(grant-fk))", rs.GrantID)
+	}
 	var id pgtype.UUID
 	if err := id.Scan(rs.ID); err != nil {
 		return db.CreateSessionParams{}, fmt.Errorf("sessions: parse session ID %q: %w", rs.ID, err)
@@ -187,7 +193,11 @@ func (s *DBSessionStore) RotateSession(ctx context.Context, oldID string, newSes
 	if err != nil {
 		return fmt.Errorf("sessions: begin rotation tx: %w", err)
 	}
-	defer txn.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck // Rollback after Commit is a no-op (pgx.ErrTxClosed). WithoutCancel ensures cleanup runs even if ctx was cancelled (e.g. SIGINT mid-rotation).
+	// WithoutCancel drops the parent's cancellation signal so Rollback runs even
+	// if ctx was cancelled (e.g. SIGINT mid-rotation). The parent's deadline is
+	// preserved; if that deadline has elapsed, Rollback fails with DeadlineExceeded
+	// and pgxpool closes and replaces the connection — safe but best-effort.
+	defer txn.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck // Rollback after Commit is a no-op (pgx.ErrTxClosed).
 
 	qtx := db.New(txn)
 

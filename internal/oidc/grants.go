@@ -74,9 +74,10 @@ func (noopGrantStore) ListGrantsByUser(_ context.Context, _ string) ([]Grant, er
 // InMemoryGrantStore is a dev/test GrantStore. NOT for production — a real store
 // persists grants durably so they survive restarts (internal/clients.DBGrantStore).
 type InMemoryGrantStore struct {
-	mu     sync.Mutex
-	byID   map[string]*Grant
-	byPair map[string]*Grant // key: userID+":"+clientID
+	mu      sync.Mutex
+	byID    map[string]*Grant
+	byPair  map[string]*Grant // key: userID+":"+clientID
+	counter int               // monotonically increasing; never decrements so IDs stay unique even if grants were deleted
 }
 
 // NewInMemoryGrantStore returns an empty in-memory grant store.
@@ -115,11 +116,13 @@ func (s *InMemoryGrantStore) CreateGrant(_ context.Context, ng NewGrant) (Grant,
 		now := time.Now()
 		existing.RevokedAt = &now
 	}
-	// id is a monotonically-increasing sequence. It is safe here because byID
-	// never shrinks: RevokeGrant tombstones entries in byID (sets RevokedAt)
-	// but never removes them. If a Delete method is ever added, switch to an
-	// explicit atomic counter to prevent ID collisions.
-	id := fmt.Sprintf("grant-%d", len(s.byID)+1)
+	// id is a zero-padded monotonically-increasing sequence. Zero-padding
+	// (8 digits) ensures lexicographic sort order matches numeric order for up
+	// to 99_999_999 grants — required for the ListGrantsByUser ID tiebreaker.
+	// Using a dedicated counter (not len(byID)) means IDs stay unique even if a
+	// Delete method is ever added.
+	s.counter++
+	id := fmt.Sprintf("grant-%08d", s.counter)
 	g := &Grant{
 		ID:          id,
 		Region:      ng.Region,

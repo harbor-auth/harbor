@@ -77,9 +77,10 @@ func main() {
 		os.Exit(1)
 	}
 	if pool != nil {
-		// Deferred Close handles the clean-exit path (httpserver.Run returns nil
-		// after a graceful shutdown). All other paths use explicit pool.Close()
-		// before os.Exit() because os.Exit skips deferred functions.
+		// defer pool.Close() handles the clean-exit path: main() returns normally
+		// after httpserver.Run returns nil and deferred functions run as usual.
+		// Every os.Exit() path below calls pool.Close() explicitly because
+		// os.Exit skips deferred functions.
 		defer pool.Close()
 	}
 
@@ -144,6 +145,7 @@ func main() {
 		// client + deterministic demo-user secret keep the Authorization Code +
 		// PKCE flow exercisable before a regional DB is provisioned.
 		logger.Warn("DATABASE_URL not set — using in-memory stores (dev-only SCAFFOLD)")
+		logger.Warn("SCAFFOLD: FixedAuthSource wired — /authorize always authenticates as the hardcoded demo user; NOT for deployment (docs/DESIGN.md §11.1)")
 		inmemClients := oidc.NewInMemoryClientRegistry()
 		inmemClients.Put(oidc.Client{
 			ID:            "demo-client",
