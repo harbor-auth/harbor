@@ -217,7 +217,16 @@ func (s *DBSessionStore) RotateSession(ctx context.Context, oldID string, newSes
 		return fmt.Errorf("sessions: rotate (create in tx): %w", err)
 	}
 
-	return txn.Commit(ctx)
+	// Run Commit on a cancel-isolated context with a bounded timeout so a client
+	// disconnect cannot cause a committed rotation to appear as a failure.
+	// Without this guard: if ctx is cancelled while COMMIT is in flight, pgx
+	// returns context.Canceled even if the DB committed — RotateSession returns
+	// error → service.go returns server_error → client retries with the now-
+	// revoked old token → theft-signal → full family lockout. WithoutCancel
+	// breaks that chain; the 5 s timeout prevents a hung DB from blocking forever.
+	commitCtx, commitCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer commitCancel()
+	return txn.Commit(commitCtx)
 }
 
 // RevokeSessionsByUserClient implements oidc.SessionStore (theft-signal family

@@ -84,9 +84,16 @@ func (s *chaosFindGrantStore) FindGrant(ctx context.Context, userID, clientID st
 // newChaosService returns a minimal Service with in-memory stores suitable for
 // chaos tests. Callers replace individual store fields after construction.
 func newChaosService(sessionStore SessionStore, grantStore GrantStore) *Service {
+	clientReg := NewInMemoryClientRegistry()
+	clientReg.Put(Client{
+		ID:            testRefreshClientID,
+		SectorID:      "test.example.com",
+		RedirectURIs:  []string{"http://localhost/cb"},
+		ScopesAllowed: []string{"openid", "offline_access"},
+	})
 	return NewService(ServiceConfig{
 		Issuer:       "https://chaos.harbor.example",
-		Clients:      NewInMemoryClientRegistry(),
+		Clients:      clientReg,
 		Codes:        NewInMemoryAuthCodeStore(),
 		Tokens:       NewPlaceholderIssuer(),
 		Sessions:     NewStubSessionResolver("ppid-chaos"),

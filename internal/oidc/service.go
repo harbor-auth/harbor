@@ -443,6 +443,24 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 		return nil, terr
 	}
 
+	// Re-validate that the client still exists in the registry. The session was
+	// bound to session.ClientID at issuance, but clients can be removed after a
+	// refresh token is issued. Without this check, a removed client's tokens would
+	// remain redeemable for their full 14-day TTL.
+	// Note: ClientRegistry.Lookup returns (Client, bool) — no error. A registry
+	// failure (e.g. DB error in DBClientRegistry) returns (Client{}, false) and
+	// is indistinguishable from a missing client (INV-DB-CLIENT-ERROR-NOT-
+	// REDIRECTED). This is fail-closed: a registry outage on the refresh path
+	// returns invalid_client rather than server_error, which is conservative.
+	// ACCEPTED LIMITATION (M20-1): the client's enabled/disabled status and
+	// redirect URIs are not re-validated on every refresh — only existence is
+	// checked. Full re-validation would require exposing the Client struct to the
+	// refresh path, adding complexity for marginal benefit in the current model
+	// where clients are rarely mutated post-registration.
+	if _, ok := s.clients.Lookup(ctx, session.ClientID); !ok {
+		return nil, &TokenError{Code: ErrCodeInvalidClient, Description: "client is no longer registered", Status: 401}
+	}
+
 	// All fallible reads and computations happen BEFORE RotateSession so that
 	// a failure at any of these steps still leaves the old refresh token valid
 	// and the client can simply retry (docs/DESIGN.md §3.5).

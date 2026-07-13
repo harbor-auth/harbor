@@ -18,9 +18,16 @@ func newTestServiceWithSessions(t *testing.T) (*Service, *InMemorySessionStore, 
 	t.Helper()
 	sessionStore := NewInMemorySessionStore()
 	grantStore := NewInMemoryGrantStore()
+	clientReg := NewInMemoryClientRegistry()
+	clientReg.Put(Client{
+		ID:            testRefreshClientID,
+		SectorID:      "test.example.com",
+		RedirectURIs:  []string{"http://localhost/cb"},
+		ScopesAllowed: []string{"openid", "offline_access", "profile"},
+	})
 	svc := NewService(ServiceConfig{
 		Issuer:       "https://test.harbor.example",
-		Clients:      NewInMemoryClientRegistry(),
+		Clients:      clientReg,
 		Codes:        NewInMemoryAuthCodeStore(),
 		Tokens:       NewPlaceholderIssuer(),
 		Sessions:     NewStubSessionResolver("stub-ppid"),

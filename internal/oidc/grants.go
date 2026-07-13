@@ -129,7 +129,7 @@ func (s *InMemoryGrantStore) CreateGrant(_ context.Context, ng NewGrant) (Grant,
 		UserID:      ng.UserID,
 		ClientID:    ng.ClientID,
 		PairwiseSub: ng.PairwiseSub,
-		Scopes:      ng.Scopes,
+		Scopes:      append([]string(nil), ng.Scopes...), // clone: caller mutation must not affect stored grant
 		CreatedAt:   time.Now(),
 	}
 	s.byID[id] = g

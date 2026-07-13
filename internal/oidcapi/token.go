@@ -2,6 +2,7 @@ package oidcapi
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/harbor/harbor/internal/gen/openapi"
@@ -74,7 +75,11 @@ func writeTokenResponse(w http.ResponseWriter, t *oidc.IssuedTokens) {
 		v := t.RefreshExpiresIn
 		resp.RefreshExpiresIn = &v
 	}
-	_ = json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		// WriteHeader(200) was already sent — status cannot be changed.
+		// Log the write failure (usually a client TCP disconnect) for observability.
+		slog.Default().Error("oidcapi: failed to encode token response", "error", err)
+	}
 }
 
 // writeOAuthError emits the OAuth error body at the error's HTTP status, with
