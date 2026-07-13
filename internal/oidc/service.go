@@ -457,6 +457,17 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not issue tokens", Status: 500}
 	}
 
+	// offline_access guard: only rotate and re-issue a refresh token when
+	// offline_access is still present in the grant's frozen scopes. A manual
+	// grant-scope downgrade after issuance is handled fail-closed: return the
+	// freshly-signed access/ID tokens but no new refresh token, WITHOUT revoking
+	// the old session (it remains valid until expiry). This matches the Token()
+	// issuance gate and prevents issuing a refresh_token whose response scope
+	// omits offline_access (RFC 6749 §3.3 protocol violation).
+	if !scopeHasOfflineAccess(strings.Join(grant.Scopes, " ")) {
+		return &tokens, nil
+	}
+
 	// Step C: generate new opaque refresh-token material.
 	newPlaintext, newHash, err := newOpaqueToken()
 	if err != nil {

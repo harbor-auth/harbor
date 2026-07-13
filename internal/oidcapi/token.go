@@ -54,6 +54,7 @@ func (s *Server) PostToken(w http.ResponseWriter, r *http.Request) {
 func writeTokenResponse(w http.ResponseWriter, t *oidc.IssuedTokens) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	w.WriteHeader(http.StatusOK)
 	resp := openapi.TokenResponse{
 		AccessToken: t.AccessToken,
@@ -76,6 +77,7 @@ func writeTokenResponse(w http.ResponseWriter, t *oidc.IssuedTokens) {
 func writeOAuthError(w http.ResponseWriter, e *oidc.TokenError) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	if e.Code == oidc.ErrCodeInvalidClient {
 		w.Header().Set("WWW-Authenticate", "Basic")
 	}

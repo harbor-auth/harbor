@@ -337,7 +337,10 @@ func TestRefreshTokenRegionPropagated(t *testing.T) {
 }
 
 //harbor:invariant INV-REFRESH-OFFLINE-ACCESS-GATE
+//harbor:invariant INV-REFRESH-ROTATION-REQUIRES-OFFLINE-ACCESS
 func TestRefreshOfflineAccessGate(t *testing.T) {
+	// Sub-test 4 (tested via TestRefreshRotationRequiresOfflineAccess below):
+	// The Refresh() rotation path also gates on offline_access — see that test.
 	// A code exchange WITHOUT offline_access must NOT produce a refresh token.
 	svc, _, _ := newTestServiceWithSessions(t)
 	clientReg := NewInMemoryClientRegistry()
@@ -440,6 +443,65 @@ func TestRefreshOfflineAccessGate(t *testing.T) {
 	}
 	if tokens3.RefreshToken != "" {
 		t.Fatal("expected no refresh token when grant is absent even with offline_access+UserID (fail-closed on missing grant)")
+	}
+}
+
+// TestRefreshRotationRequiresOfflineAccess verifies the H14-2 fix: Refresh()
+// re-checks that the frozen grant still contains offline_access before Steps C/D
+// (rotation + new refresh token issuance). A grant scope downgrade after
+// issuance must be handled fail-closed: freshly-signed access/ID tokens are
+// returned, no new refresh token is issued, and the old session is NOT revoked
+// so the client is not locked out.
+//
+//harbor:invariant INV-REFRESH-ROTATION-REQUIRES-OFFLINE-ACCESS
+func TestRefreshRotationRequiresOfflineAccess(t *testing.T) {
+	svc, sessionStore, grantStore := newTestServiceWithSessions(t)
+
+	// Create a grant that does NOT contain offline_access (simulating a scope
+	// downgrade after the refresh session was originally issued).
+	if _, err := grantStore.CreateGrant(context.Background(), NewGrant{
+		Region:      "us",
+		UserID:      testRefreshUserID,
+		ClientID:    testRefreshClientID,
+		PairwiseSub: "ppid-rotation-no-offline",
+		Scopes:      []string{"openid"}, // offline_access deliberately absent
+	}); err != nil {
+		t.Fatalf("CreateGrant: %v", err)
+	}
+
+	// Seed a session directly (bypassing issueRefreshToken which would itself
+	// gate on offline_access — we want to test only the Refresh() re-check).
+	plaintext, hash, err := newOpaqueToken()
+	if err != nil {
+		t.Fatalf("newOpaqueToken: %v", err)
+	}
+	if err := sessionStore.CreateSession(context.Background(), RefreshSession{
+		ID:        "session-rotation-no-offline",
+		Region:    "us",
+		UserID:    testRefreshUserID,
+		ClientID:  testRefreshClientID,
+		TokenHash: hash,
+		ExpiresAt: svc.now().Add(defaultRefreshTTL),
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	token := encodeRefreshToken(plaintext)
+
+	// Refresh() must return access/ID tokens but NO refresh token (offline_access
+	// guard fires before Steps C+D).
+	tokens, terr := svc.Refresh(context.Background(), refreshReq(token))
+	if terr != nil {
+		t.Fatalf("Refresh: expected success (access token), got error: %v", terr)
+	}
+	if tokens.RefreshToken != "" {
+		t.Fatal("expected no refresh token when grant scopes no longer contain offline_access")
+	}
+
+	// The old session must NOT have been revoked — client is not locked out
+	// and can retry once the scope issue is resolved (or simply use access token).
+	_, err = sessionStore.GetSessionByTokenHash(context.Background(), hash)
+	if err != nil {
+		t.Fatalf("old session must still be valid (not revoked) after offline_access guard fires: %v", err)
 	}
 }
 

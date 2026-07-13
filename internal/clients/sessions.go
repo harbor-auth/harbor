@@ -174,7 +174,7 @@ func (s *DBSessionStore) RotateSession(ctx context.Context, oldID string, newSes
 
 	params, err := buildCreateSessionParams(newSession)
 	if err != nil {
-		return err
+		return fmt.Errorf("sessions: rotate (build params): %w", err)
 	}
 	if _, err := qtx.CreateSession(ctx, params); err != nil {
 		return fmt.Errorf("sessions: rotate (create in tx): %w", err)
