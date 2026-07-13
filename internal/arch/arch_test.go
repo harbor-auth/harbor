@@ -88,6 +88,15 @@ func containsMatching(set map[string]bool, substrs ...string) string {
 // legitimately depends on (via clients.DBSecretLoader → identity.PairwiseSecretAAD
 // on the /token PPID-resolution path). Forbidding it would contradict the
 // clients-based DB read model that §4.1/§6.1 permit.
+// Note (N10): the original TestHotPathDoesNotImportDatabase — which forbade
+// github.com/jackc/pgx and internal/gen/db from the hot path — was deliberately
+// removed when cmd/harbor-hot gained DB-backed stores via internal/clients
+// (PR #15). The relaxed boundary is: the hot path MUST NOT import the mgmt-only
+// enrollment packages, but it MAY import pgx transitively via internal/clients
+// to read the regional data plane (client registry, grants, sessions, secret
+// loader). This is a security-relevant architectural decision — see
+// docs/DESIGN.md §4.1 ("stateless" = owns no mutable PII state, not "no DB reads")
+// and §10.
 func TestHotPathDoesNotImportMgmtPackages(t *testing.T) {
 	deps := transitiveImports(t, modulePath+"/cmd/harbor-hot")
 

@@ -434,6 +434,15 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 // and logs the event. PII constraint (§6.5.7): only client_id + the error are
 // logged — never UserID, GrantID, or the token/hash.
 func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession) {
+	// Defensive guard: an empty UserID/ClientID would make RevokeSessionsByUserClient
+	// match zero rows and silently suppress the theft signal. Every concrete
+	// SessionStore populates both on the revoked-row path, so an empty value here
+	// signals a latent store bug — surface it loudly rather than no-op.
+	if session.UserID == "" || session.ClientID == "" {
+		s.logger.ErrorContext(ctx, "refresh-reuse signal: session has empty UserID or ClientID — family revoke skipped (latent store bug)",
+			slog.String("session_id", session.ID))
+		return
+	}
 	if err := s.sessionStore.RevokeSessionsByUserClient(ctx, session.UserID, session.ClientID); err != nil {
 		s.logger.ErrorContext(ctx, "refresh-family revocation failed after reuse detected",
 			slog.String("client_id", session.ClientID),

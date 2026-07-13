@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -33,9 +34,16 @@ import (
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	// DB-backed stores plug in when DATABASE_URL is configured; otherwise we run
 	// on in-memory dev scaffolds (docs/DESIGN.md §10).
-	pool := connectDB(context.Background(), logger)
+	pool, err := connectDB(ctx, logger)
+	if err != nil {
+		logger.Error("database connection failed", "error", err)
+		os.Exit(1)
+	}
 	if pool != nil {
 		defer pool.Close()
 	}
@@ -68,6 +76,15 @@ func main() {
 	// with an HSM-backed KeyProvider (docs/DESIGN.md §7.3).
 	kmsSecret := getenv("HARBOR_KMS_SECRET", "")
 	if kmsSecret == "" {
+		// When a real DB is wired, enrollment writes user DEKs sealed under this
+		// KMS secret. Falling back to a hardcoded dev key against a real DB would
+		// let anyone with the source re-derive every enrolled user's pairwise
+		// secret, so it is fatal (mirrors the harbor-hot KEK_SECRET guard).
+		if pool != nil {
+			logger.Error("HARBOR_KMS_SECRET must be set when DATABASE_URL is configured — refusing to enroll with a dev key against a real DB")
+			pool.Close()
+			os.Exit(1)
+		}
 		logger.Warn("HARBOR_KMS_SECRET not set — using insecure dev default; NEVER use in production")
 		kmsSecret = "harbor-dev-kms-secret-DO-NOT-USE-IN-PROD"
 	}
@@ -94,9 +111,6 @@ func main() {
 	// session middleware lands (docs/DESIGN.md §9) — production-safe default.
 	webauthn.RegisterRoutes(mux, svc, false)
 	mux.HandleFunc("POST /users/enroll", enrollHandler(enroller, logger))
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	logger.Info("starting harbor-mgmt", "port", port, "rp_id", rpID)
 	if err := httpserver.Run(ctx, ":"+port, mux, logger); err != nil {
@@ -159,25 +173,26 @@ func writeErrorJSON(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, jsonError{Code: code, Message: message})
 }
 
-// connectDB opens a pgx connection pool from DATABASE_URL. It returns nil when
-// DATABASE_URL is unset (dev mode: in-memory scaffolds). A configured-but-
-// unreachable database is fatal — fail fast rather than silently dropping data.
-func connectDB(ctx context.Context, logger *slog.Logger) *pgxpool.Pool {
+// connectDB opens a pgx connection pool from DATABASE_URL. It returns (nil, nil)
+// when DATABASE_URL is unset (dev mode: in-memory scaffolds), and a non-nil
+// error when a configured database is unreachable so the caller can fail fast
+// rather than silently dropping data. Matches cmd/harbor-hot's connectDB so both
+// binaries share one connection contract (testable, signal-context aware).
+func connectDB(ctx context.Context, logger *slog.Logger) (*pgxpool.Pool, error) {
 	url := os.Getenv("DATABASE_URL")
 	if url == "" {
-		return nil
+		return nil, nil
 	}
 	pool, err := pgxpool.New(ctx, url)
 	if err != nil {
-		logger.Error("failed to connect to database", "error", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("pgxpool.New: %w", err)
 	}
 	if err := pool.Ping(ctx); err != nil {
-		logger.Error("database ping failed", "error", err)
-		os.Exit(1)
+		pool.Close()
+		return nil, fmt.Errorf("db ping: %w", err)
 	}
 	logger.Info("connected to database")
-	return pool
+	return pool, nil
 }
 
 // --- env helpers ------------------------------------------------------------

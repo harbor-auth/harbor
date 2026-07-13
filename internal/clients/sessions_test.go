@@ -363,6 +363,8 @@ func TestDBSessionStoreRotateSession(t *testing.T) {
 // populated) so a replayed stolen-and-rotated token fires the theft-signal
 // family revoke (INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE) instead of silently
 // collapsing to not-found.
+//
+//harbor:invariant INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE
 func TestDBSessionStoreGetByTokenHash_RevokedAndExpired(t *testing.T) {
 	q := newFakeSessionQuerier()
 	store := NewDBSessionStore(q)
@@ -422,6 +424,8 @@ func (e *errSessionQuerier) RevokeSessionsByUserClient(context.Context, db.Revok
 // DB error is propagated as-is and NOT masked as ErrRefreshTokenNotFound.
 // Masking a DB outage as not-found would surface as invalid_grant and silently
 // reject valid tokens, triggering a mass logout (docs/DESIGN.md §10).
+//
+//harbor:invariant INV-DB-ERROR-NOT-MASKED
 func TestDBSessionStoreGetByTokenHash_DBError(t *testing.T) {
 	dbErr := errors.New("connection reset by peer")
 	store := NewDBSessionStore(&errSessionQuerier{err: dbErr})

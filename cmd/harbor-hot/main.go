@@ -115,6 +115,8 @@ func main() {
 		kekSecret := os.Getenv("KEK_SECRET")
 		if kekSecret == "" {
 			logger.Error("KEK_SECRET must be set when DATABASE_URL is configured")
+			// os.Exit skips deferred functions, so release the pool explicitly.
+			pool.Close()
 			os.Exit(1)
 		}
 		keyProvider, err := crypto.NewLocalKeyProvider(kekSecret)
@@ -132,6 +134,11 @@ func main() {
 		// replica cannot be redeemed by another. Warn so this isn't silently
 		// deployed multi-replica (docs/DESIGN.md §4.4).
 		logger.Warn("authorization codes stored in-memory — not suitable for multi-replica deployment")
+		// SCAFFOLD: even in the DB path the subject is still resolved by
+		// FixedAuthSource below, so every /authorize authenticates as the SAME
+		// hardcoded demo user regardless of who is calling. This must be replaced
+		// by real BFF-session-backed auth before any deployment (docs/DESIGN.md §11.1).
+		logger.Warn("SCAFFOLD: FixedAuthSource wired in DB path — /authorize always authenticates as the hardcoded demo user; NOT suitable for deployment (docs/DESIGN.md §11.1)")
 	} else {
 		// SCAFFOLD: in-memory stores for dev/test (DATABASE_URL not set). A demo
 		// client + deterministic demo-user secret keep the Authorization Code +
@@ -160,6 +167,7 @@ func main() {
 
 	svc := oidc.NewService(oidc.ServiceConfig{
 		Issuer:  issuer,
+		Logger:  logger,
 		Clients: clientRegistry,
 		Codes:   oidc.NewInMemoryAuthCodeStore(),
 		Tokens:  oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
