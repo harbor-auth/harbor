@@ -192,6 +192,10 @@ func main() {
 	logger.Info("starting harbor-hot", "port", port, "issuer", issuer)
 	if err := httpserver.Run(ctx, ":"+port, handler, logger); err != nil {
 		logger.Error("harbor-hot exited with error", "error", err)
+		// os.Exit skips deferred functions, so release the pool explicitly.
+		if pool != nil {
+			pool.Close()
+		}
 		os.Exit(1)
 	}
 }

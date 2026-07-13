@@ -69,6 +69,11 @@ func main() {
 	}, store, sessions)
 	if err != nil {
 		logger.Error("failed to configure webauthn service", "error", err)
+		// os.Exit skips deferred functions, so release the pool explicitly if
+		// it was opened (pool is nil in dev mode without DATABASE_URL).
+		if pool != nil {
+			pool.Close()
+		}
 		os.Exit(1)
 	}
 
@@ -120,6 +125,10 @@ func main() {
 	logger.Info("starting harbor-mgmt", "port", port, "rp_id", rpID)
 	if err := httpserver.Run(ctx, ":"+port, mux, logger); err != nil {
 		logger.Error("harbor-mgmt exited with error", "error", err)
+		// os.Exit skips deferred functions, so release the pool explicitly.
+		if pool != nil {
+			pool.Close()
+		}
 		os.Exit(1)
 	}
 }

@@ -429,17 +429,25 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	return &tokens, nil
 }
 
+// zeroUUID is the sentinel returned by uuidToString when pgtype.UUID.Valid is
+// false. It must be treated the same as the empty string for the theft-signal
+// guard: a zero-UUID UserID or ClientID would silently match zero rows in
+// RevokeSessionsByUserClient, suppressing the family revoke.
+const zeroUUID = "00000000-0000-0000-0000-000000000000"
+
 // signalRefreshReuse fires the theft signal when a revoked refresh token is
 // replayed: it revokes every active session in the same (user, client) family
 // and logs the event. PII constraint (§6.5.7): only client_id + the error are
 // logged — never UserID, GrantID, or the token/hash.
 func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession) {
-	// Defensive guard: an empty UserID/ClientID would make RevokeSessionsByUserClient
-	// match zero rows and silently suppress the theft signal. Every concrete
-	// SessionStore populates both on the revoked-row path, so an empty value here
-	// signals a latent store bug — surface it loudly rather than no-op.
-	if session.UserID == "" || session.ClientID == "" {
-		s.logger.ErrorContext(ctx, "refresh-reuse signal: session has empty UserID or ClientID — family revoke skipped (latent store bug)",
+	// Defensive guard: an empty or zero-UUID UserID/ClientID would make
+	// RevokeSessionsByUserClient match zero rows and silently suppress the theft
+	// signal. The empty-string case catches in-memory store bugs; the zero-UUID
+	// case ("00000000-...") catches a NULL pgtype.UUID that survived rowToRefreshSession
+	// via uuidToString. Both signal a latent store bug — surface loudly.
+	if session.UserID == "" || session.UserID == zeroUUID ||
+		session.ClientID == "" {
+		s.logger.ErrorContext(ctx, "refresh-reuse signal: session has empty/invalid UserID or ClientID — family revoke skipped (latent store bug)",
 			slog.String("session_id", session.ID))
 		return
 	}
