@@ -213,9 +213,9 @@ func rowToRefreshSession(row db.Session) oidc.RefreshSession {
 		revokedAt = row.RevokedAt.Time
 	}
 	return oidc.RefreshSession{
-		ID:          row.ID.String(),
+		ID:          uuidToString(row.ID),
 		Region:      row.Region,
-		UserID:      row.UserID.String(),
+		UserID:      uuidToString(row.UserID),
 		ClientID:    row.ClientID,
 		DeviceLabel: label,
 		TokenHash:   row.RefreshTokenHash,

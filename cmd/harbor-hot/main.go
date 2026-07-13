@@ -122,6 +122,8 @@ func main() {
 		keyProvider, err := crypto.NewLocalKeyProvider(kekSecret)
 		if err != nil {
 			logger.Error("failed to create key provider", "error", err)
+			// os.Exit skips deferred functions, so release the pool explicitly.
+			pool.Close()
 			os.Exit(1)
 		}
 		clientRegistry = clients.NewDBClientRegistry(q).WithLogger(logger)

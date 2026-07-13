@@ -91,6 +91,11 @@ func main() {
 	kp, err := crypto.NewLocalKeyProvider(kmsSecret)
 	if err != nil {
 		logger.Error("failed to create key provider", "error", err)
+		// os.Exit skips deferred functions, so release the pool explicitly if
+		// it was opened (pool is nil in dev mode without DATABASE_URL).
+		if pool != nil {
+			pool.Close()
+		}
 		os.Exit(1)
 	}
 
