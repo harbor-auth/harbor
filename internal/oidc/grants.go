@@ -96,7 +96,13 @@ func (s *InMemoryGrantStore) FindGrant(_ context.Context, userID, clientID strin
 	if !ok || g.RevokedAt != nil {
 		return Grant{}, false, nil
 	}
-	return *g, true, nil
+	// Clone Scopes so that caller mutation of the returned slice cannot corrupt
+	// the stored *Grant. Append-only callers are safe without a clone, but
+	// index-based mutation (g.Scopes[0] = "evil") would silently modify the
+	// stored grant without a copy.
+	copy := *g
+	copy.Scopes = append([]string(nil), g.Scopes...)
+	return copy, true, nil
 }
 
 // CreateGrant implements GrantStore. Mints a sequential string ID.

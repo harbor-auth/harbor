@@ -224,7 +224,8 @@ func (s *DBSessionStore) RotateSession(ctx context.Context, oldID string, newSes
 	// error → service.go returns server_error → client retries with the now-
 	// revoked old token → theft-signal → full family lockout. WithoutCancel
 	// breaks that chain; the 5 s timeout prevents a hung DB from blocking forever.
-	commitCtx, commitCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	const rotationCommitTimeout = 5 * time.Second
+	commitCtx, commitCancel := context.WithTimeout(context.WithoutCancel(ctx), rotationCommitTimeout)
 	defer commitCancel()
 	return txn.Commit(commitCtx)
 }

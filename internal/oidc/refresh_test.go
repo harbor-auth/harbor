@@ -596,6 +596,31 @@ func TestRefreshRevokedAndExpiredReturnsRevoked(t *testing.T) {
 	}
 }
 
+// TestRefreshDeregisteredClientRejected verifies that a valid refresh token
+// becomes unredeemable when its client is removed from the registry (H20-2).
+// Without this gate, a deregistered client's tokens would remain redeemable
+// for their full 14-day TTL.
+//
+//harbor:invariant INV-REFRESH-CLIENT-EXISTS
+func TestRefreshDeregisteredClientRejected(t *testing.T) {
+	svc, sessionStore, grantStore := newTestServiceWithSessions(t)
+	oldToken := seedSession(t, sessionStore, grantStore, "ppid-deregistered")
+
+	// Remove the client from the registry (simulate deregistration).
+	svc.clients = NewInMemoryClientRegistry() // empty — no clients registered
+
+	_, terr := svc.Refresh(context.Background(), refreshReq(oldToken))
+	if terr == nil {
+		t.Fatal("expected error for deregistered client; got nil")
+	}
+	if terr.Code != ErrCodeInvalidClient {
+		t.Fatalf("deregistered client: want invalid_client, got %q", terr.Code)
+	}
+	if terr.Status != 401 {
+		t.Fatalf("deregistered client: want HTTP 401, got %d", terr.Status)
+	}
+}
+
 // TestRefreshWrongClientRejected verifies that a refresh token may only be
 // redeemed by the client_id it was originally issued to. Presenting a valid
 // token with a different client_id returns invalid_grant — this prevents

@@ -295,6 +295,12 @@ func TestChaos_Refresh_FamilyRevokeFails_StillInvalidGrant(t *testing.T) {
 		InMemorySessionStore: innerStore,
 		revokeErr:            errors.New("sessions table: timeout during family revoke"),
 	}
+	// chaosSvc intentionally uses an empty client registry: this test only
+	// presents origToken (which is revoked), so the flow exits early at the
+	// ErrRefreshTokenRevoked → signalRefreshReuse path — before the H20-2
+	// client-existence check (which runs after ValidateRefreshParams, only
+	// reached for valid sessions). If this test is extended to also verify
+	// the successor-token path, register testRefreshClientID here.
 	chaosSvc := NewService(ServiceConfig{
 		Issuer:       "https://chaos.harbor.example",
 		Clients:      NewInMemoryClientRegistry(),

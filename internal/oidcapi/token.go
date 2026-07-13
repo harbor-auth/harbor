@@ -89,23 +89,22 @@ func writeOAuthError(w http.ResponseWriter, e *oidc.TokenError) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
-	// WWW-Authenticate: Basic is required by RFC 6749 §5.2 when the client
-	// fails to authenticate using HTTP Basic auth (invalid_client). Currently
-	// no code path returns ErrCodeInvalidClient (Harbor uses PKCE public-client
-	// flow, not client_secret_basic). This branch is retained as a placeholder
-	// for future client authentication support.
-	// NOTE: RFC 6750 §3 and RFC 7235 require the realm parameter
-	// (e.g. `Basic realm="Harbor"`) for a strictly conformant response, and
-	// RFC 6749 §5.2 requires error= and error_description= parameters. The
-	// bare `Basic` header emitted here is acceptable only while this branch is
-	// dead (no real caller). Add realm + error params when wiring real
-	// client_secret_basic support.
-	if e.Code == oidc.ErrCodeInvalidClient {
-		w.Header().Set("WWW-Authenticate", "Basic")
-	}
+	// WWW-Authenticate: Basic is required by RFC 6749 §5.2 only when the client
+	// authenticated via HTTP Basic (Authorization: Basic ...) and that
+	// authentication failed. Harbor is a PKCE public-client service — clients
+	// never send Authorization: Basic, so emitting WWW-Authenticate: Basic on
+	// invalid_client would be protocol-incorrect and would mislead client SDKs
+	// (e.g. AppAuth) into prompting for Basic credentials instead of restarting
+	// the authorization-code flow. The ErrCodeInvalidClient path is now live
+	// (H20-2: deregistered-client refresh gate) so this placeholder must stay
+	// inert. When client_secret_basic is added, re-add the header only on the
+	// specific path where HTTP Basic auth was attempted.
 	w.WriteHeader(e.Status)
-	_ = json.NewEncoder(w).Encode(openapi.OAuthError{
+	if err := json.NewEncoder(w).Encode(openapi.OAuthError{
 		Error:            e.Code,
 		ErrorDescription: e.Description,
-	})
+	}); err != nil {
+		// WriteHeader was already sent — status cannot be changed.
+		slog.Default().Warn("oidcapi: failed to encode oauth error response", "error", err)
+	}
 }
