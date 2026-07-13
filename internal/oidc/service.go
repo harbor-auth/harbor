@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // SessionResolver stands in for the passkey-login + consent step of the flow
@@ -95,6 +97,7 @@ type ServiceConfig struct {
 	Revocations  RevocationSink
 	Logger       *slog.Logger
 	NewCode      func() (string, error)
+	NewSessionID func() (string, error) // optional; defaults to uuid.NewString
 	Now          func() time.Time
 	CodeTTL      time.Duration
 }
@@ -113,6 +116,7 @@ type Service struct {
 	revocations  RevocationSink
 	logger       *slog.Logger
 	newCode      func() (string, error)
+	newSessionID func() (string, error)
 	now          func() time.Time
 	codeTTL      time.Duration
 }
@@ -130,6 +134,7 @@ func NewService(cfg ServiceConfig) *Service {
 		revocations:  cfg.Revocations,
 		logger:       cfg.Logger,
 		newCode:      cfg.NewCode,
+		newSessionID: cfg.NewSessionID,
 		now:          cfg.Now,
 		codeTTL:      cfg.CodeTTL,
 	}
@@ -158,6 +163,12 @@ func NewService(cfg ServiceConfig) *Service {
 	}
 	if svc.newCode == nil {
 		svc.newCode = defaultNewCode
+	}
+	if svc.newSessionID == nil {
+		// Session IDs must be valid UUIDs — DBSessionStore stores them in a
+		// uuid column and rejects any non-UUID string. defaultNewCode returns
+		// a base64url string, which would fail every DB CreateSession/Rotate.
+		svc.newSessionID = func() (string, error) { return uuid.NewString(), nil }
 	}
 	if svc.now == nil {
 		svc.now = time.Now

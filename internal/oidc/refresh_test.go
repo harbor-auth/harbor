@@ -2,6 +2,7 @@ package oidc
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -350,5 +351,94 @@ func TestRefreshOfflineAccessGate(t *testing.T) {
 	}
 	if tokens.RefreshToken != "" {
 		t.Fatal("expected no refresh token when offline_access is not granted")
+	}
+
+	// Sub-test: offline_access IS present but UserID is empty — still no refresh token.
+	// Both conditions (offline_access scope AND non-empty UserID) are required.
+	code2 := AuthCode{
+		Code:                "test-code-offline-no-userid",
+		ClientID:            testRefreshClientID,
+		RedirectURI:         "http://localhost/cb",
+		Scope:               "openid offline_access",
+		Subject:             "ppid-offline-no-userid",
+		CodeChallenge:       "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+		CodeChallengeMethod: "S256",
+		ExpiresAt:           time.Now().Add(60 * time.Second),
+		UserID:              "", // offline_access present but UserID empty → no refresh token
+	}
+	if err := svc.codes.Save(context.Background(), code2); err != nil {
+		t.Fatalf("Save code2: %v", err)
+	}
+	tokens2, terr2 := svc.Token(context.Background(), TokenRequest{
+		GrantType:    grantTypeAuthorizationCode,
+		Code:         "test-code-offline-no-userid",
+		RedirectURI:  "http://localhost/cb",
+		ClientID:     testRefreshClientID,
+		CodeVerifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+	})
+	if terr2 != nil {
+		t.Fatalf("Token (offline+no-userid): %v", terr2)
+	}
+	if tokens2.RefreshToken != "" {
+		t.Fatal("expected no refresh token when UserID is empty, even with offline_access")
+	}
+}
+
+// TestRefreshRevokedAndExpiredReturnsRevoked verifies that a session that is
+// both revoked AND past its ExpiresAt returns ErrRefreshTokenRevoked (not
+// ErrRefreshTokenNotFound). This ensures the theft signal fires even when an
+// attacker replays an expired-but-revoked token — parity with the DB store's
+// ordering guarantee (TestDBSessionStoreGetByTokenHash_RevokedAndExpired).
+//
+//harbor:invariant INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE
+func TestRefreshRevokedAndExpiredReturnsRevoked(t *testing.T) {
+	store := NewInMemorySessionStore()
+	plaintext, hash, err := newOpaqueToken()
+	if err != nil {
+		t.Fatalf("newOpaqueToken: %v", err)
+	}
+	if err := store.CreateSession(context.Background(), RefreshSession{
+		ID:        "revoked-and-expired",
+		Region:    "us",
+		UserID:    testRefreshUserID,
+		ClientID:  testRefreshClientID,
+		TokenHash: hash,
+		ExpiresAt: time.Now().Add(-time.Hour), // already expired
+	}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := store.RevokeSession(context.Background(), "revoked-and-expired"); err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+	// A token that is both revoked and expired must surface as Revoked so the
+	// theft detector can act — not as NotFound (which would silently discard it).
+	_, err = store.GetSessionByTokenHash(context.Background(), hashRefreshToken(plaintext))
+	if err == nil {
+		t.Fatal("expected error for revoked+expired session")
+	}
+	if !errors.Is(err, ErrRefreshTokenRevoked) {
+		t.Fatalf("revoked+expired: want ErrRefreshTokenRevoked, got %v", err)
+	}
+}
+
+// TestRefreshWrongClientRejected verifies that a refresh token may only be
+// redeemed by the client_id it was originally issued to. Presenting a valid
+// token with a different client_id returns invalid_grant — this prevents
+// a compromised RP from using another RP's refresh tokens.
+//
+//harbor:invariant INV-REFRESH-CLIENT-BINDING
+func TestRefreshWrongClientRejected(t *testing.T) {
+	svc, sessionStore, grantStore := newTestServiceWithSessions(t)
+	oldToken := seedSession(t, sessionStore, grantStore, "ppid-client-binding")
+	_, terr := svc.Refresh(context.Background(), TokenRequest{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: oldToken,
+		ClientID:     "different-client", // wrong client
+	})
+	if terr == nil {
+		t.Fatal("expected error when presenting token to wrong client")
+	}
+	if terr.Code != ErrCodeInvalidGrant {
+		t.Fatalf("wrong client: want invalid_grant, got %q", terr.Code)
 	}
 }

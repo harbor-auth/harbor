@@ -219,3 +219,9 @@ invariants:
     design_refs: [§3.5, §11.7]
     description: "A code exchange without offline_access in the consented scope must not issue a refresh token, regardless of whether a UserID is present. The gate is checked in Token() via scopeHasOfflineAccess() before issueRefreshToken is called — both conditions (offline_access AND non-empty UserID) must be true."
     enforced_by: [internal/oidc:TestRefreshOfflineAccessGate]
+
+- id: INV-REFRESH-CLIENT-BINDING
+  title: "Refresh token only redeemable by the client it was issued to"
+  design_refs: [§3.5, §11.7]
+  description: "A refresh token presented by a different client_id than the one recorded at issuance returns invalid_grant. Prevents a compromised RP from using another RP's refresh tokens (ValidateRefreshParams client-binding check)."
+  enforced_by: [internal/oidc:TestRefreshWrongClientRejected]

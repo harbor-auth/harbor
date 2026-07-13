@@ -3,6 +3,7 @@ package oidc
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -156,5 +157,11 @@ func (s *InMemoryGrantStore) ListGrantsByUser(_ context.Context, userID string) 
 			out = append(out, *g)
 		}
 	}
+	// Sort newest first to match the interface contract and DBGrantStore
+	// ordering. byID iteration order is non-deterministic (Go map), so without
+	// this the "connected apps" dashboard order would be unstable.
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
 	return out, nil
 }

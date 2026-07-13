@@ -79,9 +79,10 @@ func main() {
 	if err != nil {
 		logger.Error("failed to configure webauthn service", "error", err)
 		// os.Exit skips deferred functions, so release resources explicitly.
-		// stop() is called before pool.Close() — the inverse of LIFO defer order
-		// (pool.Close first, then stop) but safe: pgxpool handles a pre-cancelled
-		// context gracefully. pool may be nil when DATABASE_URL is not set.
+		// We call stop() first (cancels the context), then pool.Close() —
+		// the opposite of what LIFO defer order would produce (pool first, then
+		// stop). pgxpool handles a pre-cancelled context gracefully. pool may be
+		// nil when DATABASE_URL is not set.
 		stop()
 		if pool != nil {
 			pool.Close()
