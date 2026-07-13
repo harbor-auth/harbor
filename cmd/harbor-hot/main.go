@@ -90,7 +90,7 @@ func main() {
 			// SIGINT/SIGTERM arrived during startup (before the server bound).
 			// This is a clean shutdown, not a crash — exit 0 so process managers
 			// (systemd, k8s) don't restart the process.
-			logger.Info("startup cancelled by signal — exiting cleanly")
+			logger.Info("startup cancelled by signal — exiting cleanly", "error", err)
 			stop()
 			os.Exit(0)
 		}
@@ -208,6 +208,17 @@ func main() {
 
 	logger.Info("starting harbor-hot", "port", port, "issuer", issuer)
 	if err := httpserver.Run(ctx, ":"+port, handler, logger); err != nil {
+		if ctx.Err() != nil {
+			// Signal arrived while the server was running — httpserver.Run returned
+			// a non-nil error coincident with context cancellation. Treat as a clean
+			// shutdown so process managers don't restart the process.
+			logger.Info("server stopped by signal — exiting cleanly", "error", err)
+			stop()
+			if pool != nil {
+				pool.Close()
+			}
+			os.Exit(0)
+		}
 		logger.Error("harbor-hot exited with error", "error", err)
 		// os.Exit skips deferred functions, so release resources explicitly.
 		stop()

@@ -200,7 +200,7 @@ invariants:
     title: "Refresh after consent revocation returns invalid_grant (not server_error)"
     design_refs: [§3.5, §10, §11.7]
     description: "When FindGrant returns (Grant{}, false, nil) the authorization has been permanently revoked by the user. This must return invalid_grant (RFC 6749 §5.2) so well-behaved clients re-initiate consent rather than retrying indefinitely. Returning server_error for a permanently-gone grant would cause infinite retries and the user could never re-authenticate."
-    enforced_by: [internal/oidc:TestRefreshConsentRevoked, internal/clients:TestDBGrantStoreActiveOnlyAfterRevoke]
+    enforced_by: [internal/oidc:TestRefreshConsentRevoked]
 
   - id: INV-REFRESH-LOCKOUT-PREVENTION
     title: "Pre-rotation failures leave the old refresh token valid; no lock-out hazard"

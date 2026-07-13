@@ -30,7 +30,9 @@ func newTestServiceWithSessions(t *testing.T) (*Service, *InMemorySessionStore, 
 }
 
 // seedSession inserts a grant + RefreshSession and returns the plaintext token
-// string the client would hold.
+// string the client would hold. The session ID ("session-"+sub) is a simple
+// string, not a UUID — safe for InMemorySessionStore but NOT for DBSessionStore,
+// which requires a valid UUID in the id column.
 func seedSession(t *testing.T, store *InMemorySessionStore, grantStore *InMemoryGrantStore, sub string) string {
 	t.Helper()
 	if _, err := grantStore.CreateGrant(context.Background(), NewGrant{

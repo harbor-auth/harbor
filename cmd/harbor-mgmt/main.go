@@ -45,7 +45,7 @@ func main() {
 			// SIGINT/SIGTERM arrived during startup (before the server bound).
 			// This is a clean shutdown, not a crash — exit 0 so process managers
 			// (systemd, k8s) don't restart the process.
-			logger.Info("startup cancelled by signal — exiting cleanly")
+			logger.Info("startup cancelled by signal — exiting cleanly", "error", err)
 			stop()
 			os.Exit(0)
 		}
@@ -79,11 +79,9 @@ func main() {
 	if err != nil {
 		logger.Error("failed to configure webauthn service", "error", err)
 		// os.Exit skips deferred functions, so release resources explicitly.
-		// stop() cancels the signal context so any goroutines blocked on
-		// ctx.Done() receive the shutdown signal before pool.Close() drains the
-		// connection pool. This is the inverse of LIFO defer order (pool.Close
-		// first, then stop) but is safe: pgxpool handles a pre-cancelled context
-		// gracefully.
+		// stop() is called before pool.Close() — the inverse of LIFO defer order
+		// (pool.Close first, then stop) but safe: pgxpool handles a pre-cancelled
+		// context gracefully. pool may be nil when DATABASE_URL is not set.
 		stop()
 		if pool != nil {
 			pool.Close()
@@ -139,6 +137,17 @@ func main() {
 
 	logger.Info("starting harbor-mgmt", "port", port, "rp_id", rpID)
 	if err := httpserver.Run(ctx, ":"+port, mux, logger); err != nil {
+		if ctx.Err() != nil {
+			// Signal arrived while the server was running — httpserver.Run returned
+			// a non-nil error coincident with context cancellation. Treat as a clean
+			// shutdown so process managers don't restart the process.
+			logger.Info("server stopped by signal — exiting cleanly", "error", err)
+			stop()
+			if pool != nil {
+				pool.Close()
+			}
+			os.Exit(0)
+		}
 		logger.Error("harbor-mgmt exited with error", "error", err)
 		// os.Exit skips deferred functions, so release resources explicitly.
 		stop()
