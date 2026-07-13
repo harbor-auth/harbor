@@ -34,6 +34,12 @@ func NewStubSessionResolver(subject string) SessionResolver {
 	return stubSessionResolver{subject: subject}
 }
 
+// Resolve always returns userID="" (empty). This is intentional for unit-test
+// simplicity — Token() gates issueRefreshToken on `result.Code.UserID != ""`
+// (docs/DESIGN.md §3.5), so any test using stubSessionResolver will NEVER
+// receive a refresh token through a full Authorize→Token flow. Use
+// PPIDSessionResolver with a FixedAuthSource for refresh-token integration
+// tests (see newRefreshFlowServer in refresh_rotation_test.go).
 func (r stubSessionResolver) Resolve(_ context.Context, _ Client, _ string) (string, string, bool, error) {
 	return r.subject, "", true, nil
 }
@@ -479,6 +485,11 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	// TTL (up to 14 days). Matches the Token() gate (scopeHasOfflineAccess)
 	// and prevents a refresh_token response whose scope omits offline_access
 	// (RFC 6749 §3.3 protocol violation).
+	//
+	// NOTE: this path (grant exists but offline_access is absent) is currently
+	// only reachable via direct DB manipulation — there is no grant-update API.
+	// If a grant-update endpoint is ever added, this decision (leave the refresh
+	// session live) should be revisited in that PR before merging.
 	if !scopeHasOfflineAccess(scopeStr) {
 		return &tokens, nil
 	}

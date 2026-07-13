@@ -367,3 +367,53 @@ func TestChaos_Refresh_NewSessionIDFails_PreRotation(t *testing.T) {
 		t.Fatal("expected a new refresh token after recovery")
 	}
 }
+
+// TestChaos_Refresh_ValidateTokenParams_GatesStoreAccess verifies that the
+// H15-1 fix (ValidateTokenParams at the top of Refresh) short-circuits BEFORE
+// any store access on malformed requests. It asserts by error code: an empty
+// refresh_token or client_id must return invalid_request (the ValidateTokenParams
+// verdict), NOT invalid_grant (which would imply the store was reached and
+// returned not-found). Without the guard, an empty refresh_token computes
+// SHA-256 of zero bytes and fires a real store round-trip.
+func TestChaos_Refresh_ValidateTokenParams_GatesStoreAccess(t *testing.T) {
+	svc := newChaosService(NewInMemorySessionStore(), NewInMemoryGrantStore())
+
+	// Case 1: empty refresh_token → invalid_request (not invalid_grant).
+	_, terr := svc.Refresh(context.Background(), TokenRequest{
+		GrantType: grantTypeRefreshToken,
+		ClientID:  "some-client",
+		// RefreshToken intentionally empty
+	})
+	if terr == nil {
+		t.Fatal("empty refresh_token: expected error, got nil")
+	}
+	if terr.Code != ErrCodeInvalidRequest {
+		t.Fatalf("empty refresh_token: want invalid_request, got %q (implies ValidateTokenParams is not gating the store; the store was likely reached and returned invalid_grant)", terr.Code)
+	}
+
+	// Case 2: empty client_id → invalid_request.
+	_, terr2 := svc.Refresh(context.Background(), TokenRequest{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: "some-token",
+		// ClientID intentionally empty
+	})
+	if terr2 == nil {
+		t.Fatal("empty client_id: expected error, got nil")
+	}
+	if terr2.Code != ErrCodeInvalidRequest {
+		t.Fatalf("empty client_id: want invalid_request, got %q", terr2.Code)
+	}
+
+	// Case 3: wrong grant_type → rejected by ValidateTokenParams before the store.
+	_, terr3 := svc.Refresh(context.Background(), TokenRequest{
+		GrantType:    "authorization_code",
+		ClientID:     "some-client",
+		RefreshToken: "some-token",
+	})
+	if terr3 == nil {
+		t.Fatal("wrong grant_type: expected error, got nil")
+	}
+	if terr3.Code != ErrCodeUnsupportedGrantType && terr3.Code != ErrCodeInvalidRequest {
+		t.Fatalf("wrong grant_type: want unsupported_grant_type or invalid_request, got %q", terr3.Code)
+	}
+}

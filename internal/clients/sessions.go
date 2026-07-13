@@ -120,8 +120,15 @@ func (s *DBSessionStore) GetSessionByTokenHash(ctx context.Context, hash []byte)
 		return oidc.RefreshSession{}, fmt.Errorf("sessions: get by hash: %w", err)
 	}
 	sess := rowToRefreshSession(row)
-	// Revoked: return the populated session so the caller can fire the
-	// theft-signal family revoke (INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE).
+	// Revoked check MUST precede expiry check: a rotated token can be both
+	// revoked AND past its TTL (e.g. an old rotated session whose 14-day window
+	// has elapsed). ErrRefreshTokenRevoked must take priority so the theft signal
+	// fires for any replayed rotated token, regardless of TTL — revoking the
+	// whole (user, client) session family is still the correct response even
+	// after natural expiry. Swapping these checks would silently suppress the
+	// theft signal for all expired-but-revoked tokens.
+	// Return the populated session so the caller (signalRefreshReuse) has
+	// the UserID+ClientID needed to revoke the family (INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE).
 	if isRevoked(row) {
 		return sess, oidc.ErrRefreshTokenRevoked
 	}

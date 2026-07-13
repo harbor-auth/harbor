@@ -78,6 +78,12 @@ func writeOAuthError(w http.ResponseWriter, e *oidc.TokenError) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
+	// WWW-Authenticate: Basic is required by RFC 6749 §5.2 when the client
+	// fails to authenticate using HTTP Basic auth (invalid_client). Currently
+	// no code path returns ErrCodeInvalidClient (Harbor uses PKCE public-client
+	// flow, not client_secret_basic). This branch is retained as a placeholder
+	// for future client authentication support — remove the comment when a real
+	// caller exists.
 	if e.Code == oidc.ErrCodeInvalidClient {
 		w.Header().Set("WWW-Authenticate", "Basic")
 	}

@@ -31,6 +31,7 @@ func newFlowServer(t *testing.T) *httptest.Server {
 	clients := oidc.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
 		ID:            testClientID,
+		SectorID:      "localhost", // required for PPID derivation (§3.2); defensive consistency with prod wiring
 		RedirectURIs:  []string{testRedirectURI},
 		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
 	})

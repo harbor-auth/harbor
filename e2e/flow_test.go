@@ -154,12 +154,16 @@ func postRefreshToken(t *testing.T, refreshToken string) *http.Response {
 	return resp
 }
 
-// assertNoStore fails the test unless the response carries Cache-Control: no-store
-// (docs/DESIGN.md §11.7 — token responses must never be cached).
+// assertNoStore fails the test unless the response carries both
+// Cache-Control: no-store AND Pragma: no-cache (RFC 6749 §5.1;
+// docs/DESIGN.md §11.7 — token responses must never be cached).
 func assertNoStore(t *testing.T, resp *http.Response) {
 	t.Helper()
 	if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
 		t.Fatalf("Cache-Control = %q, want no-store", cc)
+	}
+	if p := resp.Header.Get("Pragma"); p != "no-cache" {
+		t.Fatalf("Pragma = %q, want no-cache (RFC 6749 §5.1)", p)
 	}
 }
 

@@ -77,6 +77,9 @@ func main() {
 		os.Exit(1)
 	}
 	if pool != nil {
+		// Deferred Close handles the clean-exit path (httpserver.Run returns nil
+		// after a graceful shutdown). All other paths use explicit pool.Close()
+		// before os.Exit() because os.Exit skips deferred functions.
 		defer pool.Close()
 	}
 
