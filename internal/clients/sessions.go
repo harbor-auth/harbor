@@ -35,6 +35,12 @@ type txBeginner interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
+// rotationCommitTimeout is the maximum time allowed for RotateSession's COMMIT
+// to complete on a cancel-isolated context (context.WithoutCancel). This
+// prevents a hung DB from blocking the rotation indefinitely while still
+// outlasting any transient network blip. See RotateSession for rationale.
+const rotationCommitTimeout = 5 * time.Second
+
 // DBSessionStore implements oidc.SessionStore over the sessions table
 // (docs/DESIGN.md §3.5, §10). Each method converts domain types to/from sqlc
 // types; only the token HASH is ever handled here — the plaintext refresh token
@@ -193,10 +199,13 @@ func (s *DBSessionStore) RotateSession(ctx context.Context, oldID string, newSes
 	if err != nil {
 		return fmt.Errorf("sessions: begin rotation tx: %w", err)
 	}
-	// WithoutCancel drops the parent's cancellation signal so Rollback runs even
-	// if ctx was cancelled (e.g. SIGINT mid-rotation). The parent's deadline is
-	// preserved; if that deadline has elapsed, Rollback fails with DeadlineExceeded
-	// and pgxpool closes and replaces the connection — safe but best-effort.
+	// WithoutCancel drops BOTH the parent's cancellation signal AND its deadline
+	// so Rollback runs even if ctx was cancelled (e.g. SIGINT mid-rotation) or
+	// its deadline has already elapsed. context.WithoutCancel does NOT preserve
+	// the parent deadline — the returned context has no deadline and never expires.
+	// For a best-effort Rollback this is preferable: a deadline-expired parent
+	// would otherwise cancel the Rollback immediately, leaving a dangling txn
+	// that pgxpool must clean up by closing and replacing the connection.
 	defer txn.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck // Rollback after Commit is a no-op (pgx.ErrTxClosed).
 
 	qtx := db.New(txn)
@@ -224,7 +233,6 @@ func (s *DBSessionStore) RotateSession(ctx context.Context, oldID string, newSes
 	// error → service.go returns server_error → client retries with the now-
 	// revoked old token → theft-signal → full family lockout. WithoutCancel
 	// breaks that chain; the 5 s timeout prevents a hung DB from blocking forever.
-	const rotationCommitTimeout = 5 * time.Second
 	commitCtx, commitCancel := context.WithTimeout(context.WithoutCancel(ctx), rotationCommitTimeout)
 	defer commitCancel()
 	return txn.Commit(commitCtx)

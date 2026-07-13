@@ -61,6 +61,10 @@ type GrantStore interface {
 type noopGrantStore struct{}
 
 func (noopGrantStore) FindGrant(_ context.Context, _, _ string) (Grant, bool, error) {
+	// Always returns not-found. See NewService panic guard for why noopGrantStore
+	// must NOT be paired with a real SessionStore: FindGrant returning false on
+	// every Refresh() call would trip INV-REFRESH-CONSENT-REVOKED and revoke the
+	// user's session every time they attempt a token refresh.
 	return Grant{}, false, nil
 }
 func (noopGrantStore) CreateGrant(_ context.Context, _ NewGrant) (Grant, error) {
@@ -98,11 +102,11 @@ func (s *InMemoryGrantStore) FindGrant(_ context.Context, userID, clientID strin
 	}
 	// Clone Scopes so that caller mutation of the returned slice cannot corrupt
 	// the stored *Grant. Append-only callers are safe without a clone, but
-	// index-based mutation (g.Scopes[0] = "evil") would silently modify the
+	// index-based mutation (out.Scopes[0] = "evil") would silently modify the
 	// stored grant without a copy.
-	copy := *g
-	copy.Scopes = append([]string(nil), g.Scopes...)
-	return copy, true, nil
+	out := *g
+	out.Scopes = append([]string(nil), g.Scopes...)
+	return out, true, nil
 }
 
 // CreateGrant implements GrantStore. Mints a sequential string ID.
@@ -140,7 +144,11 @@ func (s *InMemoryGrantStore) CreateGrant(_ context.Context, ng NewGrant) (Grant,
 	}
 	s.byID[id] = g
 	s.byPair[ng.UserID+":"+ng.ClientID] = g
-	return *g, nil
+	// Clone Scopes in the return value so caller mutation cannot corrupt the
+	// stored grant's Scopes slice (they share the same backing array otherwise).
+	ret := *g
+	ret.Scopes = append([]string(nil), g.Scopes...)
+	return ret, nil
 }
 
 // RevokeGrant implements GrantStore. Soft-deletes by ID.
@@ -163,7 +171,11 @@ func (s *InMemoryGrantStore) ListGrantsByUser(_ context.Context, userID string) 
 	var out []Grant
 	for _, g := range s.byID {
 		if g.UserID == userID && g.RevokedAt == nil {
-			out = append(out, *g)
+			// Clone Scopes for consistency with FindGrant: caller mutation of the
+			// returned slice must not corrupt the stored grant.
+			gc := *g
+			gc.Scopes = append([]string(nil), g.Scopes...)
+			out = append(out, gc)
 		}
 	}
 	// Sort newest first to match the interface contract and DBGrantStore

@@ -77,8 +77,8 @@ func writeTokenResponse(w http.ResponseWriter, t *oidc.IssuedTokens) {
 	}
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		// WriteHeader(200) was already sent — status cannot be changed.
-		// Log the write failure (usually a client TCP disconnect) for observability.
-		slog.Default().Error("oidcapi: failed to encode token response", "error", err)
+		// Log at Warn: these are almost always client TCP disconnects, not server bugs.
+		slog.Default().Warn("oidcapi: failed to encode token response", "error", err)
 	}
 }
 

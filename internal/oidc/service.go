@@ -457,6 +457,19 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	// checked. Full re-validation would require exposing the Client struct to the
 	// refresh path, adding complexity for marginal benefit in the current model
 	// where clients are rarely mutated post-registration.
+	//
+	// H22-1 GUARD: pre-check ctx.Err() before calling Lookup so that a cancelled
+	// context (client disconnect mid-request, SIGINT during shutdown) does not
+	// produce a false invalid_client. DBClientRegistry.Lookup swallows context
+	// errors and returns (Client{}, false), which is indistinguishable from a
+	// genuine deregistration. A transient server_error is more correct for a
+	// cancelled request than a permanent invalid_client (which client SDKs may
+	// interpret as "re-authorize from scratch"). A TOCTOU window remains (ctx
+	// could be cancelled between this check and Lookup) but eliminates the most
+	// common case of an already-cancelled ctx before the call.
+	if ctx.Err() != nil {
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "request context expired", Status: 500}
+	}
 	if _, ok := s.clients.Lookup(ctx, session.ClientID); !ok {
 		return nil, &TokenError{Code: ErrCodeInvalidClient, Description: "client is no longer registered", Status: 401}
 	}

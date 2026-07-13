@@ -599,11 +599,13 @@ func TestRefreshRevokedAndExpiredReturnsRevoked(t *testing.T) {
 // TestRefreshDeregisteredClientRejected verifies that a valid refresh token
 // becomes unredeemable when its client is removed from the registry (H20-2).
 // Without this gate, a deregistered client's tokens would remain redeemable
-// for their full 14-day TTL.
+// for their full 14-day TTL. Also verifies that the rejection does NOT consume
+// the token (no lockout): after re-registration the same token succeeds.
 //
 //harbor:invariant INV-REFRESH-CLIENT-EXISTS
 func TestRefreshDeregisteredClientRejected(t *testing.T) {
 	svc, sessionStore, grantStore := newTestServiceWithSessions(t)
+	originalClients := svc.clients // save for re-registration step
 	oldToken := seedSession(t, sessionStore, grantStore, "ppid-deregistered")
 
 	// Remove the client from the registry (simulate deregistration).
@@ -618,6 +620,18 @@ func TestRefreshDeregisteredClientRejected(t *testing.T) {
 	}
 	if terr.Status != 401 {
 		t.Fatalf("deregistered client: want HTTP 401, got %d", terr.Status)
+	}
+
+	// Verify no lockout: after re-registration the original token is still valid.
+	// The H20-2 check runs BEFORE RotateSession, so the rejection must NOT
+	// consume or revoke the session.
+	svc.clients = originalClients
+	tokens, terr2 := svc.Refresh(context.Background(), refreshReq(oldToken))
+	if terr2 != nil {
+		t.Fatalf("after re-registration, old token should be usable: %v", terr2)
+	}
+	if tokens == nil || tokens.AccessToken == "" {
+		t.Fatal("after re-registration, expected non-empty access token")
 	}
 }
 
