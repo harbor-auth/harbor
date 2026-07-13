@@ -74,8 +74,8 @@ func newRefreshFlowServerWithStore(t *testing.T) (*httptest.Server, *oidc.InMemo
 	return ts, sessions
 }
 
-// newRefreshFlowServerWithClients is like newRefreshFlowServer but also returns
-// the InMemorySessionStore and InMemoryClientRegistry so tests can manipulate them.
+// newRefreshFlowServerWithClients is like newRefreshFlowServerWithStore but also
+// returns the InMemoryClientRegistry so tests can manipulate client registrations.
 func newRefreshFlowServerWithClients(t *testing.T) (*httptest.Server, *oidc.InMemorySessionStore, *oidc.InMemoryClientRegistry) {
 	t.Helper()
 	return newRefreshFlowServerFull(t)
@@ -90,7 +90,7 @@ func newRefreshFlowServerWithClients(t *testing.T) (*httptest.Server, *oidc.InMe
 //     PPID and scopes from the consent grant
 func newRefreshFlowServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	ts, _ := newRefreshFlowServerWithStore(t)
+	ts, _, _ := newRefreshFlowServerFull(t)
 	return ts
 }
 

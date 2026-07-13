@@ -431,6 +431,17 @@ func TestChaos_Refresh_CancelledContextBeforeLookup(t *testing.T) {
 	if terr.Status != 500 {
 		t.Fatalf("cancelled context: want HTTP 500, got %d", terr.Status)
 	}
+
+	// No-lockout: the H22-1 pre-check fires before RotateSession, so the rejection
+	// must NOT consume the session. Call Refresh with a non-cancelled context and
+	// verify the same token still works — proves RotateSession was never reached.
+	tokens, terr2 := svc.Refresh(context.Background(), refreshReq(oldToken))
+	if terr2 != nil {
+		t.Fatalf("after cancelled-ctx rejection: old token must still be valid (no lockout); got %v", terr2)
+	}
+	if tokens == nil || tokens.RefreshToken == "" {
+		t.Fatal("after cancelled-ctx rejection: expected non-empty new refresh token")
+	}
 }
 
 // TestChaos_Refresh_ValidateTokenParams_GatesStoreAccess verifies that the

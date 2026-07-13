@@ -427,7 +427,12 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	if err != nil {
 		if errors.Is(err, ErrRefreshTokenRevoked) {
 			// A rotated (revoked) token was replayed: assume theft, revoke family.
-			s.signalRefreshReuse(ctx, session)
+			// WithoutCancel: the theft-signal family revoke is security-critical and
+			// must complete even if the HTTP request context was cancelled (client
+			// disconnect after replaying a revoked token). Passing the raw ctx would
+			// let a cancelled request silently skip RevokeSessionsByUserClient,
+			// leaving the compromised session family active.
+			s.signalRefreshReuse(context.WithoutCancel(ctx), session)
 			return nil, invalidGrant("refresh token is invalid")
 		}
 		if errors.Is(err, ErrRefreshTokenNotFound) {
@@ -468,7 +473,7 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	// could be cancelled between this check and Lookup) but eliminates the most
 	// common case of an already-cancelled ctx before the call.
 	if ctx.Err() != nil {
-		return nil, &TokenError{Code: ErrCodeServerError, Description: "request context expired", Status: 500}
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "context cancelled (client disconnect or shutdown)", Status: 500}
 	}
 	if _, ok := s.clients.Lookup(ctx, session.ClientID); !ok {
 		return nil, &TokenError{Code: ErrCodeInvalidClient, Description: "client is no longer registered", Status: 401}
@@ -622,6 +627,10 @@ const zeroUUID = "00000000-0000-0000-0000-000000000000"
 // replayed: it revokes every active session in the same (user, client) family
 // and logs the event. PII constraint (§6.5.7): only client_id + the error are
 // logged — never UserID, GrantID, or the token/hash.
+//
+// The caller passes context.WithoutCancel(ctx) so this family revoke completes
+// even when the originating HTTP request context is cancelled — the theft
+// signal is security-critical and must not be skipped on a client disconnect.
 func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession) {
 	// Defensive guard: an empty or zero-UUID UserID/ClientID would make
 	// RevokeSessionsByUserClient match zero rows and silently suppress the theft
