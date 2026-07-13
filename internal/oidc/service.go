@@ -377,8 +377,15 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	//
 	// Step A: recover the frozen PPID + scopes from the consent grant.
 	grant, found, err := s.grants.FindGrant(ctx, session.UserID, session.ClientID)
-	if err != nil || !found {
+	if err != nil {
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not recover grant for token issuance", Status: 500}
+	}
+	if !found {
+		// The user revoked consent after the refresh token was issued. This is
+		// invalid_grant (RFC 6749 §5.2) — the authorization is gone permanently.
+		// Returning server_error here would cause well-behaved clients to retry
+		// indefinitely, never learning that re-consent is required.
+		return nil, invalidGrant("consent grant has been revoked")
 	}
 
 	// Step B: mint the new access/ID tokens — depends only on grant + session,
