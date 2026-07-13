@@ -48,7 +48,7 @@ func seedSession(t *testing.T, store *InMemorySessionStore, grantStore *InMemory
 		t.Fatalf("seedSession: newOpaqueToken: %v", err)
 	}
 	rs := RefreshSession{
-		ID:        "session-1",
+		ID:        "session-" + sub,
 		Region:    "us",
 		UserID:    testRefreshUserID,
 		ClientID:  testRefreshClientID,
@@ -235,17 +235,16 @@ func TestRefreshConsentRevoked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListGrantsByUser: %v", err)
 	}
+	if len(grants) == 0 {
+		t.Fatal("seedSession must have created at least one grant — none found (seedSession or CreateGrant bug)")
+	}
 	for _, g := range grants {
 		if err := grantStore.RevokeGrant(context.Background(), g.ID); err != nil {
 			t.Fatalf("RevokeGrant: %v", err)
 		}
 	}
 
-	_, terr := svc.Refresh(context.Background(), TokenRequest{
-		GrantType:    grantTypeRefreshToken,
-		RefreshToken: oldToken,
-		ClientID:     testRefreshClientID,
-	})
+	_, terr := svc.Refresh(context.Background(), refreshReq(oldToken))
 	if terr == nil {
 		t.Fatal("expected error when grant has been revoked")
 	}

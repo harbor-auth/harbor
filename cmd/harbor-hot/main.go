@@ -49,9 +49,6 @@ func connectDB(ctx context.Context, logger *slog.Logger) (*pgxpool.Pool, error) 
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("db ping: interrupted by shutdown signal during startup: %w", err)
-		}
 		return nil, fmt.Errorf("db ping: %w", err)
 	}
 	logger.Info("connected to database")
@@ -89,6 +86,14 @@ func main() {
 
 	pool, err := connectDB(ctx, logger)
 	if err != nil {
+		if ctx.Err() != nil {
+			// SIGINT/SIGTERM arrived during startup (before the server bound).
+			// This is a clean shutdown, not a crash — exit 0 so process managers
+			// (systemd, k8s) don't restart the process.
+			logger.Info("startup cancelled by signal — exiting cleanly")
+			stop()
+			os.Exit(0)
+		}
 		logger.Error("database connection failed", "error", err)
 		stop()
 		os.Exit(1)
@@ -121,6 +126,11 @@ func main() {
 		if kekSecret == "" {
 			logger.Error("KEK_SECRET must be set when DATABASE_URL is configured")
 			// os.Exit skips deferred functions, so release resources explicitly.
+			// stop() cancels the signal context so any goroutines blocked on
+			// ctx.Done() receive the shutdown signal before pool.Close() drains the
+			// connection pool. This is the inverse of LIFO defer order (pool.Close
+			// first, then stop) but is safe: pgxpool handles a pre-cancelled context
+			// gracefully.
 			stop()
 			pool.Close()
 			os.Exit(1)
