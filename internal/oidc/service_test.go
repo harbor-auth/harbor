@@ -330,13 +330,25 @@ func TestService_Token_ConsumeError(t *testing.T) {
 	}
 }
 
-// errTokenIssuer returns a fixed error from Issue.
-type errTokenIssuer struct {
-	issueErr error
-}
-
-func (i errTokenIssuer) Issue(_ context.Context, _ IssueParams) (IssuedTokens, error) {
-	return IssuedTokens{}, i.issueErr
+// TestNewService_PanicsWhenSessionStoreWithoutGrantStore verifies the startup
+// misconfiguration guard: passing a real SessionStore without a GrantStore (or
+// with the default noopGrantStore) must panic at construction time rather than
+// silently serving invalid_grant for every valid refresh token in production.
+func TestNewService_PanicsWhenSessionStoreWithoutGrantStore(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic when SessionStore is set but Grants is nil/noopGrantStore")
+		}
+	}()
+	NewService(ServiceConfig{
+		Issuer:       "https://test",
+		Clients:      NewInMemoryClientRegistry(),
+		Codes:        NewInMemoryAuthCodeStore(),
+		Tokens:       NewPlaceholderIssuer(),
+		Sessions:     NewStubSessionResolver("sub"),
+		SessionStore: NewInMemorySessionStore(),
+		// Grants intentionally omitted → defaults to noopGrantStore → must panic
+	})
 }
 
 func TestService_Token_IssueError(t *testing.T) {

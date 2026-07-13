@@ -41,6 +41,12 @@ func (s *Server) GetAuthorize(w http.ResponseWriter, r *http.Request, params ope
 	if result.State != "" {
 		q.Set("state", result.State)
 	}
+	// RFC 6749 §4.1.2: the authorization server MUST include the scope parameter
+	// in the redirect if the granted scope differs from the requested scope.
+	// Harbor currently rejects any disallowed scope with invalid_scope (strict
+	// reject-not-narrow), so the returned scope always equals the requested scope
+	// and inclusion is optional. If scope negotiation (granting a subset) is
+	// added in a future PR, add Scope to AuthorizeResult and set it here.
 	redirectWithQuery(w, r, result.RedirectURI, q)
 }
 

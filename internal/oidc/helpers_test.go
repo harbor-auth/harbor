@@ -48,3 +48,15 @@ func refreshReq(token string) TokenRequest {
 		ClientID:     testRefreshClientID,
 	}
 }
+
+// errTokenIssuer returns a fixed error from Issue. Defined here (shared test
+// helpers) because it is used by both service_test.go (TestService_Token_IssueError)
+// and chaos_test.go (TestChaos_Refresh_TokenSigningFails_PreRotation). All three
+// files are in package oidc, so the type is visible across the test build.
+type errTokenIssuer struct {
+	issueErr error
+}
+
+func (i errTokenIssuer) Issue(_ context.Context, _ IssueParams) (IssuedTokens, error) {
+	return IssuedTokens{}, i.issueErr
+}

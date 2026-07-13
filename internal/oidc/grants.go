@@ -160,7 +160,13 @@ func (s *InMemoryGrantStore) ListGrantsByUser(_ context.Context, userID string) 
 	// Sort newest first to match the interface contract and DBGrantStore
 	// ordering. byID iteration order is non-deterministic (Go map), so without
 	// this the "connected apps" dashboard order would be unstable.
+	// Tiebreaker on ID (lexicographic descending) stabilises the sort when two
+	// grants share the same CreatedAt timestamp (possible in fast-running tests
+	// where time.Now() has millisecond resolution).
 	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID > out[j].ID // later sequential ID = newer grant
+		}
 		return out[i].CreatedAt.After(out[j].CreatedAt)
 	})
 	return out, nil

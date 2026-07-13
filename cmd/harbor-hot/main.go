@@ -126,7 +126,7 @@ func main() {
 		}
 		clientRegistry = clients.NewDBClientRegistry(q).WithLogger(logger)
 		grantStore = clients.NewDBGrantStore(q)
-		sessionStore = clients.NewDBSessionStore(q).WithPool(pool)
+		sessionStore = clients.NewDBSessionStoreWithPool(q, pool)
 		secretLoader = clients.NewDBSecretLoader(q, keyProvider, crypto.NewCipher())
 		logger.Info("using DB-backed stores")
 		// SCAFFOLD: authorization codes are still stored in-memory (see the

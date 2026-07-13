@@ -39,7 +39,7 @@ func NewStubSessionResolver(subject string) SessionResolver {
 // (docs/DESIGN.md §3.5), so any test using stubSessionResolver will NEVER
 // receive a refresh token through a full Authorize→Token flow. Use
 // PPIDSessionResolver with a FixedAuthSource for refresh-token integration
-// tests (see newRefreshFlowServer in refresh_rotation_test.go).
+// tests (see newRefreshFlowServerWithStore in refresh_rotation_test.go).
 func (r stubSessionResolver) Resolve(_ context.Context, _ Client, _ string) (string, string, bool, error) {
 	return r.subject, "", true, nil
 }
@@ -526,7 +526,7 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 		Region:      session.Region,
 		UserID:      session.UserID,
 		ClientID:    session.ClientID,
-		GrantID:     session.GrantID, // always "" until a DB column exists; placeholder for future FK carry-through
+		GrantID:     session.GrantID, // always copies "" (no DB column yet); see TODO(grant-fk) in buildCreateSessionParams
 		DeviceLabel: session.DeviceLabel,
 		TokenHash:   newHash,
 		ExpiresAt:   s.now().Add(defaultRefreshTTL),
@@ -545,6 +545,13 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	}
 
 	// After RotateSession the old token is gone. No more fallible operations.
+	// ACCEPTED RISK (RFC 6749 §10.4): if the HTTP response write fails after
+	// this point, the client loses the new token and cannot retry — presenting
+	// the (now-revoked) old token fires the theft signal and revokes the family.
+	// This is the standard refresh-rotation trade-off. A durable outbox pattern
+	// (write pending→after-commit→send) would eliminate the window but adds
+	// significant complexity. Documented in docs/DESIGN.md §3.5 for future
+	// revisit when SLA requirements are known.
 	tokens.RefreshToken = encodeRefreshToken(newPlaintext)
 	tokens.RefreshExpiresIn = int(defaultRefreshTTL.Seconds())
 	return &tokens, nil

@@ -57,6 +57,19 @@ func (s *DBSessionStore) WithPool(p txBeginner) *DBSessionStore {
 	return s
 }
 
+// NewDBSessionStoreWithPool is the production constructor: wraps q for queries
+// and p for atomic single-transaction rotation (RotateSession). Panics if
+// either argument is nil — callers must ensure both are wired before startup.
+func NewDBSessionStoreWithPool(q sessionQuerier, p txBeginner) *DBSessionStore {
+	if q == nil {
+		panic("clients.NewDBSessionStoreWithPool: q must not be nil")
+	}
+	if p == nil {
+		panic("clients.NewDBSessionStoreWithPool: p must not be nil")
+	}
+	return &DBSessionStore{q: q, tx: p}
+}
+
 // Compile-time proof that DBSessionStore implements oidc.SessionStore.
 var _ oidc.SessionStore = (*DBSessionStore)(nil)
 
