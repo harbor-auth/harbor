@@ -19,7 +19,11 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/harbor/harbor/internal/clients"
 	"github.com/harbor/harbor/internal/crypto"
+	"github.com/harbor/harbor/internal/gen/db"
 	"github.com/harbor/harbor/internal/httpserver"
 	"github.com/harbor/harbor/internal/identity"
 	"github.com/harbor/harbor/internal/region"
@@ -28,6 +32,13 @@ import (
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	// DB-backed stores plug in when DATABASE_URL is configured; otherwise we run
+	// on in-memory dev scaffolds (docs/DESIGN.md §10).
+	pool := connectDB(context.Background(), logger)
+	if pool != nil {
+		defer pool.Close()
+	}
 
 	port := getenv("PORT", "8081")
 
@@ -66,9 +77,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	// SCAFFOLD: noopUserPersister drops enrollments silently. Wire a real
-	// sqlc-backed UserPersister once DATABASE_URL is configured.
-	enroller := identity.NewEnroller(kp, crypto.NewCipher(), &noopUserPersister{logger: logger})
+	// PersistUser target: a real sqlc-backed UserPersister when DATABASE_URL is
+	// configured, otherwise the no-op scaffold that drops enrollments (dev only;
+	// docs/DESIGN.md §10).
+	var persister identity.UserPersister
+	if pool != nil {
+		persister = clients.NewDBUserPersister(db.New(pool))
+	} else {
+		logger.Warn("DATABASE_URL not set — enrollments will not be persisted (dev mode)")
+		persister = &noopUserPersister{logger: logger}
+	}
+	enroller := identity.NewEnroller(kp, crypto.NewCipher(), persister)
 
 	mux := httpserver.NewHealthMux()
 	// Passkey ceremony endpoints. userIDFromRequest returns 501 until the BFF
@@ -138,6 +157,27 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErrorJSON(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, jsonError{Code: code, Message: message})
+}
+
+// connectDB opens a pgx connection pool from DATABASE_URL. It returns nil when
+// DATABASE_URL is unset (dev mode: in-memory scaffolds). A configured-but-
+// unreachable database is fatal — fail fast rather than silently dropping data.
+func connectDB(ctx context.Context, logger *slog.Logger) *pgxpool.Pool {
+	url := os.Getenv("DATABASE_URL")
+	if url == "" {
+		return nil
+	}
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		logger.Error("failed to connect to database", "error", err)
+		os.Exit(1)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		logger.Error("database ping failed", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("connected to database")
+	return pool
 }
 
 // --- env helpers ------------------------------------------------------------
