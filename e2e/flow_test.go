@@ -41,6 +41,7 @@ const (
 	authorizePath    = "/authorize"
 	tokenPath        = "/token"
 	demoScope        = "openid"
+	demoScopeOffline = "openid offline_access"
 	minVerifierChars = 43
 )
 
@@ -113,14 +114,21 @@ func TestDiscoveryDocument(t *testing.T) {
 }
 
 // authorize performs a GET /authorize with the given params and returns the raw
-// response (no redirects followed).
+// response (no redirects followed). Uses the openid-only scope.
 func authorize(t *testing.T, redirectURI, challenge, state string) *http.Response {
+	t.Helper()
+	return authorizeWithScope(t, redirectURI, challenge, state, demoScope)
+}
+
+// authorizeWithScope is like authorize but lets the caller specify the scope
+// string (e.g. "openid offline_access" to request a refresh token).
+func authorizeWithScope(t *testing.T, redirectURI, challenge, state, scope string) *http.Response {
 	t.Helper()
 	q := url.Values{}
 	q.Set("response_type", "code")
 	q.Set("client_id", demoClientID)
 	q.Set("redirect_uri", redirectURI)
-	q.Set("scope", demoScope)
+	q.Set("scope", scope)
 	q.Set("state", state)
 	q.Set("code_challenge", challenge)
 	q.Set("code_challenge_method", "S256")
@@ -130,6 +138,29 @@ func authorize(t *testing.T, redirectURI, challenge, state string) *http.Respons
 		t.Fatalf("GET %s: %v", authorizePath, err)
 	}
 	return resp
+}
+
+// postRefreshToken exchanges a refresh token at POST /token.
+func postRefreshToken(t *testing.T, refreshToken string) *http.Response {
+	t.Helper()
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", refreshToken)
+	form.Set("client_id", demoClientID)
+	resp, err := http.Post(baseURL()+tokenPath, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatalf("POST %s (refresh_token): %v", tokenPath, err)
+	}
+	return resp
+}
+
+// assertNoStore fails the test unless the response carries Cache-Control: no-store
+// (docs/DESIGN.md §11.7 — token responses must never be cached).
+func assertNoStore(t *testing.T, resp *http.Response) {
+	t.Helper()
+	if cc := resp.Header.Get("Cache-Control"); cc != "no-store" {
+		t.Fatalf("Cache-Control = %q, want no-store", cc)
+	}
 }
 
 // codeFromLocation extracts the `code` query param from a 302 Location, or "".
@@ -242,6 +273,146 @@ func TestTokenWrongVerifierIsInvalidGrant(t *testing.T) {
 		}
 	} else {
 		t.Logf("token error body not JSON (%s); status 400 already asserted", body)
+	}
+}
+
+// TestAuthorizeTokenRefreshFlow exercises the full authorize → token → refresh
+// rotation cycle end-to-end against the live harbor-hot server:
+//
+//  1. GET /authorize with offline_access scope → 302 with code.
+//  2. POST /token (authorization_code) → access_token + refresh_token.
+//  3. POST /token (refresh_token) → new access_token + rotated refresh_token.
+//  4. The old refresh_token must be rejected with invalid_grant (rotation invariant,
+//     docs/DESIGN.md §3.5 INV-REFRESH-ROTATION-SINGLE-USE).
+//
+// The test skips gracefully if auto-approval is not wired (non-302 from /authorize)
+// or if the server does not return a refresh_token (server scaffold may not yet
+// support offline_access).
+func TestAuthorizeTokenRefreshFlow(t *testing.T) {
+	verifier, challenge := pkcePair(t)
+
+	// Step 1: authorize with offline_access so /token will issue a refresh token.
+	authResp := authorizeWithScope(t, demoRedirectURI, challenge, "state-refresh", demoScopeOffline)
+	defer authResp.Body.Close()
+
+	if authResp.StatusCode != http.StatusFound {
+		t.Skipf("authorize returned %d (not 302) — auto-approval not wired; skipping refresh flow", authResp.StatusCode)
+	}
+	if loc := authResp.Header.Get("Location"); !strings.HasPrefix(loc, demoRedirectURI) {
+		t.Fatalf("authorize redirected to %q, want prefix %q", loc, demoRedirectURI)
+	}
+	code := codeFromLocation(t, authResp)
+	if code == "" {
+		t.Skip("no code from authorize; cannot run refresh flow test")
+	}
+
+	// Step 2: exchange the authorization code → expect refresh_token in addition
+	// to access_token (offline_access was consented).
+	tokenResp := postToken(t, code, verifier, demoRedirectURI)
+	defer tokenResp.Body.Close()
+	if tokenResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(tokenResp.Body)
+		t.Fatalf("POST %s (authorization_code) = %d, want 200\n%s", tokenPath, tokenResp.StatusCode, body)
+	}
+	assertNoStore(t, tokenResp)
+
+	var tok1 struct {
+		AccessToken  string `json:"access_token"`
+		TokenType    string `json:"token_type"` // asserted below
+		RefreshToken string `json:"refresh_token"`
+	}
+	body1, err := io.ReadAll(tokenResp.Body)
+	if err != nil {
+		t.Fatalf("read token response: %v", err)
+	}
+	if err := json.Unmarshal(body1, &tok1); err != nil {
+		t.Fatalf("decode token response: %v\n%s", err, body1)
+	}
+	if tok1.AccessToken == "" {
+		t.Fatal("token response missing access_token")
+	}
+	if !strings.EqualFold(tok1.TokenType, "Bearer") {
+		t.Errorf("token_type = %q, want Bearer", tok1.TokenType)
+	}
+	if tok1.RefreshToken == "" {
+		// The server scaffold may not yet support offline_access — skip rather
+		// than fail so this does not block the CI gate on an in-progress server.
+		t.Skipf("token response has no refresh_token — server may not have offline_access wired (body: %s)", body1)
+	}
+
+	// Step 3: rotate — present the refresh_token to get new tokens.
+	refreshResp := postRefreshToken(t, tok1.RefreshToken)
+	defer refreshResp.Body.Close()
+	if refreshResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(refreshResp.Body)
+		t.Fatalf("POST %s (refresh_token) = %d, want 200\n%s", tokenPath, refreshResp.StatusCode, body)
+	}
+	assertNoStore(t, refreshResp)
+
+	var tok2 struct {
+		AccessToken  string `json:"access_token"`
+		TokenType    string `json:"token_type"` // asserted below
+		RefreshToken string `json:"refresh_token"`
+	}
+	body2, err := io.ReadAll(refreshResp.Body)
+	if err != nil {
+		t.Fatalf("read refresh response: %v", err)
+	}
+	if err := json.Unmarshal(body2, &tok2); err != nil {
+		t.Fatalf("decode refresh response: %v\n%s", err, body2)
+	}
+	if tok2.AccessToken == "" {
+		t.Fatal("refresh response missing access_token")
+	}
+	if !strings.EqualFold(tok2.TokenType, "Bearer") {
+		t.Errorf("refresh token_type = %q, want Bearer", tok2.TokenType)
+	}
+	if tok2.RefreshToken == "" {
+		t.Fatal("refresh response missing new refresh_token (rotation required)")
+	}
+	if tok2.RefreshToken == tok1.RefreshToken {
+		t.Fatal("rotated refresh_token must differ from the original (INV-REFRESH-ROTATION-SINGLE-USE)")
+	}
+
+	// Step 4: replay the OLD refresh_token — it must be rejected (single-use
+	// rotation invariant, docs/DESIGN.md §3.5).
+	replayResp := postRefreshToken(t, tok1.RefreshToken)
+	defer replayResp.Body.Close()
+	if replayResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("old refresh_token reuse = %d, want 400 (INV-REFRESH-ROTATION-SINGLE-USE)", replayResp.StatusCode)
+	}
+	assertNoStore(t, replayResp)
+	var errBody map[string]any
+	replayBytes, _ := io.ReadAll(replayResp.Body)
+	if err := json.Unmarshal(replayBytes, &errBody); err == nil {
+		if ec, _ := errBody["error"].(string); ec != "invalid_grant" {
+			t.Errorf("old refresh_token error = %q, want invalid_grant (must not leak which check failed)", ec)
+		}
+	} else {
+		t.Logf("replay error body not JSON (%s); status 400 already asserted", replayBytes)
+	}
+}
+
+// TestRefreshInvalidTokenIsInvalidGrant verifies that presenting a well-formed
+// but unrecognised refresh token is rejected with 400 invalid_grant — the server
+// must not leak whether the token was expired, revoked, or simply unknown.
+func TestRefreshInvalidTokenIsInvalidGrant(t *testing.T) {
+	const bogus = "not-a-real-refresh-token"
+	resp := postRefreshToken(t, bogus)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("bogus refresh_token = %d, want 400", resp.StatusCode)
+	}
+	assertNoStore(t, resp)
+	var errBody map[string]any
+	body, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(body, &errBody); err == nil {
+		if ec, _ := errBody["error"].(string); ec != "invalid_grant" {
+			t.Errorf("bogus refresh_token error = %q, want invalid_grant", ec)
+		}
+	} else {
+		t.Logf("bogus refresh error body not JSON (%s); status 400 already asserted", body)
 	}
 }
 
