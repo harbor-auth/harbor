@@ -199,8 +199,8 @@ invariants:
   - id: INV-REFRESH-CONSENT-REVOKED
     title: "Refresh after consent revocation returns invalid_grant (not server_error)"
     design_refs: [§3.5, §10, §11.7]
-    description: "When FindGrant returns (Grant{}, false, nil) the authorization has been permanently revoked by the user. This must return invalid_grant (RFC 6749 §5.2) so well-behaved clients re-initiate consent rather than retrying indefinitely. Returning server_error for a permanently-gone grant would cause infinite retries and the user could never re-authenticate."
-    enforced_by: [internal/oidc:TestRefreshConsentRevoked]
+    description: "When FindGrant returns (Grant{}, false, nil) the authorization has been permanently revoked by the user. This must return invalid_grant (RFC 6749 §5.2) so well-behaved clients re-initiate consent rather than retrying indefinitely. Returning server_error for a permanently-gone grant would cause infinite retries and the user could never re-authenticate. Accepted TOCTOU window: if consent is revoked concurrently between FindGrant (Step A) and RotateSession (Step D), access tokens already minted in Step B remain valid until their TTL expires. Eliminating this window would require a distributed lock on the grant during token issuance — an accepted architectural trade-off documented here so reviewers do not mistake it for a bug. The invariant is enforced at the FindGrant level; concurrent revocation is bounded by the access token TTL."
+    enforced_by: [internal/oidc:TestRefreshConsentRevoked, internal/clients:TestDBGrantStoreActiveOnlyAfterRevoke]
 
   - id: INV-REFRESH-LOCKOUT-PREVENTION
     title: "Pre-rotation failures leave the old refresh token valid; no lock-out hazard"

@@ -12,15 +12,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/harbor/harbor/internal/clients"
 	"github.com/harbor/harbor/internal/crypto"
@@ -39,7 +36,7 @@ func main() {
 
 	// DB-backed stores plug in when DATABASE_URL is configured; otherwise we run
 	// on in-memory dev scaffolds (docs/DESIGN.md §10).
-	pool, err := connectDB(ctx, logger)
+	pool, err := clients.ConnectDB(ctx, logger)
 	if err != nil {
 		if ctx.Err() != nil {
 			// SIGINT/SIGTERM arrived during startup (before the server bound).
@@ -211,28 +208,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErrorJSON(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, jsonError{Code: code, Message: message})
-}
-
-// connectDB opens a pgx connection pool from DATABASE_URL. It returns (nil, nil)
-// when DATABASE_URL is unset (dev mode: in-memory scaffolds), and a non-nil
-// error when a configured database is unreachable so the caller can fail fast
-// rather than silently dropping data. Matches cmd/harbor-hot's connectDB so both
-// binaries share one connection contract (testable, signal-context aware).
-func connectDB(ctx context.Context, logger *slog.Logger) (*pgxpool.Pool, error) {
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
-		return nil, nil
-	}
-	pool, err := pgxpool.New(ctx, url)
-	if err != nil {
-		return nil, fmt.Errorf("pgxpool.New: %w", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("db ping: %w", err)
-	}
-	logger.Info("connected to database")
-	return pool, nil
 }
 
 // --- env helpers ------------------------------------------------------------

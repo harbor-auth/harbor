@@ -18,14 +18,11 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/harbor/harbor/internal/clients"
 	"github.com/harbor/harbor/internal/crypto"
@@ -35,25 +32,6 @@ import (
 	"github.com/harbor/harbor/internal/oidc"
 	"github.com/harbor/harbor/internal/oidcapi"
 )
-
-// connectDB creates a pgxpool from DATABASE_URL. Returns (nil, nil) when
-// DATABASE_URL is unset — the caller falls back to in-memory dev scaffolds.
-func connectDB(ctx context.Context, logger *slog.Logger) (*pgxpool.Pool, error) {
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
-		return nil, nil
-	}
-	pool, err := pgxpool.New(ctx, url)
-	if err != nil {
-		return nil, fmt.Errorf("pgxpool.New: %w", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("db ping: %w", err)
-	}
-	logger.Info("connected to database")
-	return pool, nil
-}
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -84,7 +62,7 @@ func main() {
 		os.Exit(1) // pool is not yet created at this point — no pool.Close() needed
 	}
 
-	pool, err := connectDB(ctx, logger)
+	pool, err := clients.ConnectDB(ctx, logger)
 	if err != nil {
 		if ctx.Err() != nil {
 			// SIGINT/SIGTERM arrived during startup (before the server bound).

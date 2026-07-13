@@ -407,6 +407,40 @@ func TestRefreshOfflineAccessGate(t *testing.T) {
 	if tokens2.RefreshToken != "" {
 		t.Fatal("expected no refresh token when UserID is empty, even with offline_access")
 	}
+
+	// Sub-test 3: offline_access present, UserID non-empty, but no active grant exists
+	// (simulates consent revoked between /authorize and /token, or noopGrantStore
+	// dev wiring with a real UserID). issueRefreshToken must skip gracefully — the
+	// access token exchange still succeeds but no refresh token is emitted.
+	// svc's grantStore (from newTestServiceWithSessions) is empty, so FindGrant
+	// returns found=false — exactly the fail-closed path under test.
+	code3 := AuthCode{
+		Code:                "test-code-offline-userid-nogrant",
+		ClientID:            testRefreshClientID,
+		RedirectURI:         "http://localhost/cb",
+		Scope:               "openid offline_access",
+		Subject:             "ppid-offline-userid-nogrant",
+		CodeChallenge:       "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+		CodeChallengeMethod: "S256",
+		ExpiresAt:           time.Now().Add(60 * time.Second),
+		UserID:              testRefreshUserID, // non-empty — triggers issueRefreshToken — but no grant exists
+	}
+	if err := svc.codes.Save(context.Background(), code3); err != nil {
+		t.Fatalf("Save code3: %v", err)
+	}
+	tokens3, terr3 := svc.Token(context.Background(), TokenRequest{
+		GrantType:    grantTypeAuthorizationCode,
+		Code:         "test-code-offline-userid-nogrant",
+		RedirectURI:  "http://localhost/cb",
+		ClientID:     testRefreshClientID,
+		CodeVerifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+	})
+	if terr3 != nil {
+		t.Fatalf("Token (offline+userid+nogrant): %v", terr3)
+	}
+	if tokens3.RefreshToken != "" {
+		t.Fatal("expected no refresh token when grant is absent even with offline_access+UserID (fail-closed on missing grant)")
+	}
 }
 
 // TestRefreshRevokedAndExpiredReturnsRevoked verifies that a session that is

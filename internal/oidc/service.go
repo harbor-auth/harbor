@@ -138,17 +138,6 @@ func NewService(cfg ServiceConfig) *Service {
 		now:          cfg.Now,
 		codeTTL:      cfg.CodeTTL,
 	}
-	// Misconfiguration guard: a real SessionStore without a GrantStore is a
-	// latent bug — every Refresh() would return invalid_grant (noopGrantStore
-	// returns found=false for every lookup). Panic at construction so the bug
-	// surfaces at startup rather than silently in production traffic.
-	// The inverse (Grants without SessionStore) is legitimate: PPID resolution
-	// uses grants; refresh tokens are independently optional.
-	if cfg.SessionStore != nil && cfg.Grants == nil {
-		panic("oidc: ServiceConfig.SessionStore is set but Grants is not — " +
-			"Refresh() will return invalid_grant for every valid token; " +
-			"wire both or neither")
-	}
 	if svc.grants == nil {
 		svc.grants = noopGrantStore{}
 	}
@@ -175,6 +164,21 @@ func NewService(cfg ServiceConfig) *Service {
 	}
 	if svc.codeTTL == 0 {
 		svc.codeTTL = defaultCodeTTL
+	}
+	// Misconfiguration guard (catches both cfg.Grants == nil and the typed-non-nil
+	// bypass where the caller passes cfg.Grants = noopGrantStore{} explicitly).
+	// A real SessionStore with noopGrantStore means every Refresh() returns
+	// invalid_grant (noopGrantStore returns found=false for every lookup) — an
+	// invisible production outage. Panic at construction so the bug surfaces at
+	// startup rather than silently in production traffic.
+	// The inverse (Grants without SessionStore) is legitimate: PPID resolution
+	// uses grants; refresh tokens are independently optional.
+	if cfg.SessionStore != nil {
+		if _, isNoop := svc.grants.(noopGrantStore); isNoop {
+			panic("oidc: ServiceConfig.SessionStore is set but Grants is noopGrantStore — " +
+				"Refresh() will return invalid_grant for every valid token; " +
+				"wire both or neither")
+		}
 	}
 	return svc
 }
