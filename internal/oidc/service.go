@@ -401,6 +401,9 @@ func scopeHasOfflineAccess(scope string) bool {
 // Reuse of a rotated token is caught in step 2 because RevokeSession tombstones
 // (rather than deletes) the old session.
 func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens, *TokenError) {
+	if terr := ValidateTokenParams(req); terr != nil {
+		return nil, terr
+	}
 	raw, err := decodeRefreshToken(req.RefreshToken)
 	if err != nil {
 		return nil, invalidGrant("refresh token is invalid")
@@ -434,6 +437,9 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	// Step A: recover the frozen PPID + scopes from the consent grant.
 	grant, found, err := s.grants.FindGrant(ctx, session.UserID, session.ClientID)
 	if err != nil {
+		s.logger.ErrorContext(ctx, "refresh: grant lookup failed",
+			slog.String("client_id", session.ClientID),
+			slog.Any("error", err))
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not recover grant for token issuance", Status: 500}
 	}
 	if !found {
@@ -447,34 +453,49 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	// Step B: mint the new access/ID tokens — depends only on grant + session,
 	// NOT on the new refresh session that RotateSession will create. Doing this
 	// before rotation means that if signing fails the old token is still live.
+	scopeStr := strings.Join(grant.Scopes, " ")
 	tokens, err := s.tokens.Issue(ctx, IssueParams{
 		Issuer:   s.issuer,
 		Subject:  grant.PairwiseSub,
 		ClientID: session.ClientID,
-		Scope:    strings.Join(grant.Scopes, " "),
+		Scope:    scopeStr,
 	})
 	if err != nil {
+		s.logger.ErrorContext(ctx, "refresh: token signing failed",
+			slog.String("client_id", session.ClientID),
+			slog.Any("error", err))
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not issue tokens", Status: 500}
 	}
 
 	// offline_access guard: only rotate and re-issue a refresh token when
-	// offline_access is still present in the grant's frozen scopes. A manual
-	// grant-scope downgrade after issuance is handled fail-closed: return the
-	// freshly-signed access/ID tokens but no new refresh token, WITHOUT revoking
-	// the old session (it remains valid until expiry). This matches the Token()
-	// issuance gate and prevents issuing a refresh_token whose response scope
-	// omits offline_access (RFC 6749 §3.3 protocol violation).
-	if !scopeHasOfflineAccess(strings.Join(grant.Scopes, " ")) {
+	// offline_access is still present in the grant's frozen scopes.
+	// A grant scope downgrade after issuance is handled conservatively:
+	// the freshly-signed access/ID tokens are returned (so the request
+	// succeeds) but no new refresh token is issued and the old session is
+	// NOT revoked (so the client can retry on expiry without being locked
+	// out). SECURITY NOTE: to stop a client from ever refreshing again,
+	// operators must REVOKE the consent grant entirely — a partial scope
+	// removal leaves the existing refresh session valid until its natural
+	// TTL (up to 14 days). Matches the Token() gate (scopeHasOfflineAccess)
+	// and prevents a refresh_token response whose scope omits offline_access
+	// (RFC 6749 §3.3 protocol violation).
+	if !scopeHasOfflineAccess(scopeStr) {
 		return &tokens, nil
 	}
 
 	// Step C: generate new opaque refresh-token material.
 	newPlaintext, newHash, err := newOpaqueToken()
 	if err != nil {
+		s.logger.ErrorContext(ctx, "refresh: failed to generate refresh token material",
+			slog.String("client_id", session.ClientID),
+			slog.Any("error", err))
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not generate refresh token", Status: 500}
 	}
 	newSessionID, err := s.newSessionID()
 	if err != nil {
+		s.logger.ErrorContext(ctx, "refresh: failed to generate session id",
+			slog.String("client_id", session.ClientID),
+			slog.Any("error", err))
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not generate session id", Status: 500}
 	}
 	newSession := RefreshSession{
@@ -494,6 +515,9 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	// With a pool-wired DBSessionStore this is a single transaction; with
 	// InMemorySessionStore it is atomic under the store's mutex.
 	if err := s.sessionStore.RotateSession(ctx, session.ID, newSession); err != nil {
+		s.logger.ErrorContext(ctx, "refresh: session rotation failed",
+			slog.String("client_id", session.ClientID),
+			slog.Any("error", err))
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not rotate session", Status: 500}
 	}
 

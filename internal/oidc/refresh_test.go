@@ -339,9 +339,9 @@ func TestRefreshTokenRegionPropagated(t *testing.T) {
 //harbor:invariant INV-REFRESH-OFFLINE-ACCESS-GATE
 //harbor:invariant INV-REFRESH-ROTATION-REQUIRES-OFFLINE-ACCESS
 func TestRefreshOfflineAccessGate(t *testing.T) {
-	// Sub-test 4 (tested via TestRefreshRotationRequiresOfflineAccess below):
-	// The Refresh() rotation path also gates on offline_access — see that test.
-	// A code exchange WITHOUT offline_access must NOT produce a refresh token.
+	// Token() gate: a code exchange WITHOUT offline_access must NOT produce a
+	// refresh token. The Refresh() rotation gate is covered by the separate
+	// TestRefreshRotationRequiresOfflineAccess test below.
 	svc, _, _ := newTestServiceWithSessions(t)
 	clientReg := NewInMemoryClientRegistry()
 	clientReg.Put(Client{
@@ -492,6 +492,9 @@ func TestRefreshRotationRequiresOfflineAccess(t *testing.T) {
 	tokens, terr := svc.Refresh(context.Background(), refreshReq(token))
 	if terr != nil {
 		t.Fatalf("Refresh: expected success (access token), got error: %v", terr)
+	}
+	if tokens.AccessToken == "" {
+		t.Fatal("expected non-empty access token even when offline_access was removed from grant scopes")
 	}
 	if tokens.RefreshToken != "" {
 		t.Fatal("expected no refresh token when grant scopes no longer contain offline_access")

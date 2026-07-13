@@ -160,7 +160,7 @@ func (s *DBSessionStore) RotateSession(ctx context.Context, oldID string, newSes
 	if err != nil {
 		return fmt.Errorf("sessions: begin rotation tx: %w", err)
 	}
-	defer txn.Rollback(ctx) //nolint:errcheck // Rollback after Commit is a no-op (returns pgx.ErrTxClosed); unrecoverable from a deferred call.
+	defer txn.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck // Rollback after Commit is a no-op (pgx.ErrTxClosed). WithoutCancel ensures cleanup runs even if ctx was cancelled (e.g. SIGINT mid-rotation).
 
 	qtx := db.New(txn)
 
