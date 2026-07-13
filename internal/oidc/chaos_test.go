@@ -340,14 +340,14 @@ func TestChaos_Refresh_NewSessionIDFails_PreRotation(t *testing.T) {
 
 	svc := newChaosService(sessionStore, grantStore)
 
-	// Inject fault: Refresh calls newCode exactly once (Step C — the new
-	// session ID). Fail that call unconditionally; the counter guards against
-	// a future refactor that adds extra newCode calls before Step C, which
-	// would change the test's intent without a compilation error.
-	callCount := 0
+	// Inject fault: fail the first (and only) newCode call in Refresh — Step C
+	// generates the new session ID and is the only newCode call on the refresh
+	// path. 'called' ensures the fault fires exactly once so Step 2's recovery
+	// (svc.newCode = defaultNewCode) is unambiguous.
+	called := false
 	svc.newCode = func() (string, error) {
-		callCount++
-		if callCount == 1 {
+		if !called {
+			called = true
 			return "", errors.New("entropy source temporarily exhausted")
 		}
 		return defaultNewCode()

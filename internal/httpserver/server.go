@@ -66,6 +66,12 @@ func Run(ctx context.Context, addr string, h http.Handler, logger *slog.Logger) 
 		}
 	}()
 
+	// Pre-bind signal race: if the context is already cancelled here (SIGINT
+	// arrived between srv construction and ListenAndServe), ListenAndServe will
+	// call Shutdown via the goroutine above and then return http.ErrServerClosed
+	// — which Run swallows, returning nil. The caller (cmd/harbor-hot,
+	// cmd/harbor-mgmt) then exits cleanly. This is the correct outcome: the
+	// server was never fully bound, so a nil-return (not an error) is right.
 	logger.Info("http server listening", "addr", addr)
 	err := srv.ListenAndServe()
 	serveErr <- err

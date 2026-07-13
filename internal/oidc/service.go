@@ -133,6 +133,17 @@ func NewService(cfg ServiceConfig) *Service {
 		now:          cfg.Now,
 		codeTTL:      cfg.CodeTTL,
 	}
+	// Misconfiguration guard: a real SessionStore without a GrantStore is a
+	// latent bug — every Refresh() would return invalid_grant (noopGrantStore
+	// returns found=false for every lookup). Panic at construction so the bug
+	// surfaces at startup rather than silently in production traffic.
+	// The inverse (Grants without SessionStore) is legitimate: PPID resolution
+	// uses grants; refresh tokens are independently optional.
+	if cfg.SessionStore != nil && cfg.Grants == nil {
+		panic("oidc: ServiceConfig.SessionStore is set but Grants is not — " +
+			"Refresh() will return invalid_grant for every valid token; " +
+			"wire both or neither")
+	}
 	if svc.grants == nil {
 		svc.grants = noopGrantStore{}
 	}
@@ -293,7 +304,33 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 // (on success) attaches the plaintext + TTL to tokens. Best-effort: a failure is
 // logged and leaves tokens without a refresh token rather than failing the
 // whole exchange.
+//
+// The user's home region is recovered from the consent grant (just created by
+// PPIDSessionResolver.Resolve) so the session satisfies the user-owned-row
+// contract (DESIGN §10). Fail-closed on region: if the grant cannot be found
+// (consent revoked in the ~60s code-TTL window, or noopGrantStore dev wiring)
+// the refresh token is skipped — an unregioned session would propagate forever
+// through RotateSession's `newSession.Region = session.Region` copy.
+// The H9-2 panic guard ensures that in production (real SessionStore) a real
+// GrantStore is always wired, so the not-found path is a genuine edge case.
 func (s *Service) issueRefreshToken(ctx context.Context, tokens *IssuedTokens, code AuthCode) {
+	// Step 0: recover the region from the consent grant. Fail-closed.
+	grant, found, err := s.grants.FindGrant(ctx, code.UserID, code.ClientID)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "failed to recover grant region for refresh session — skipping refresh token",
+			slog.String("client_id", code.ClientID),
+			slog.Any("error", err))
+		return
+	}
+	if !found {
+		// Consent was revoked between Authorize and Token (race), or this is a
+		// noopGrantStore dev wiring (SessionStore also noop in that case per the
+		// NewService panic guard). Either way, skip the refresh token.
+		s.logger.WarnContext(ctx, "skipping refresh token: no active grant found — consent may have been revoked between /authorize and /token",
+			slog.String("client_id", code.ClientID))
+		return
+	}
+
 	plaintext, hash, err := newOpaqueToken()
 	if err != nil {
 		s.logger.ErrorContext(ctx, "failed to generate refresh token", slog.Any("error", err))
@@ -306,6 +343,7 @@ func (s *Service) issueRefreshToken(ctx context.Context, tokens *IssuedTokens, c
 	}
 	rs := RefreshSession{
 		ID:        sessionID,
+		Region:    grant.Region,
 		UserID:    code.UserID,
 		ClientID:  code.ClientID,
 		TokenHash: hash,

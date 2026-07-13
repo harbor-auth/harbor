@@ -98,9 +98,22 @@ func (s *InMemoryGrantStore) FindGrant(_ context.Context, userID, clientID strin
 }
 
 // CreateGrant implements GrantStore. Mints a sequential string ID.
+// If an active grant already exists for the (userID, clientID) pair, it is
+// soft-deleted before the new one is created — mirroring the DB UNIQUE index
+// semantics on (user_id, client_id) for active grants. Without this, the old
+// pointer in byID would become orphaned (FindGrant via byPair would shadow it,
+// but ListGrantsByUser via byID would not, producing inconsistent results).
 func (s *InMemoryGrantStore) CreateGrant(_ context.Context, ng NewGrant) (Grant, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Soft-delete any existing ACTIVE grant for this (user, client) pair so byID
+	// and byPair stay consistent. Only revoke if RevokedAt is nil — byPair can
+	// already point to a previously revoked grant (RevokeGrant mutates the shared
+	// pointer but does not clear byPair).
+	if existing, ok := s.byPair[ng.UserID+":"+ng.ClientID]; ok && existing.RevokedAt == nil {
+		now := time.Now()
+		existing.RevokedAt = &now
+	}
 	id := fmt.Sprintf("grant-%d", len(s.byID)+1)
 	g := &Grant{
 		ID:          id,

@@ -255,6 +255,95 @@ func TestRefreshConsentRevoked(t *testing.T) {
 	}
 }
 
+// TestRefreshTokenRegionPropagated verifies that the RefreshSession created
+// by issueRefreshToken (called from Token during code exchange) carries the
+// user's home region from the consent grant, satisfying the user-owned-row
+// contract (docs/DESIGN.md §10). An unregioned session would propagate the
+// empty region forever through RotateSession's newSession.Region copy.
+//
+//harbor:invariant INV-REFRESH-LOCKOUT-PREVENTION
+func TestRefreshTokenRegionPropagated(t *testing.T) {
+	const wantRegion = "eu-west-1"
+
+	// Build stores.
+	sessionStore := NewInMemorySessionStore()
+	grantStore := NewInMemoryGrantStore()
+
+	// Build a PPIDSessionResolver wired to the same grantStore so the grant
+	// created by Resolve is visible to issueRefreshToken's FindGrant call.
+	secretLoader := NewInMemorySecretLoader()
+	secretLoader.Put(testRefreshUserID, UserSecret{
+		Region: wantRegion,
+		Secret: []byte("32-byte-test-secret-for-ppid-der"),
+	})
+	resolver := NewPPIDSessionResolver(PPIDSessionResolverConfig{
+		Auth:   NewFixedAuthSource(testRefreshUserID),
+		Loader: secretLoader,
+		Grants: grantStore,
+	})
+
+	clientReg := NewInMemoryClientRegistry()
+	clientReg.Put(Client{
+		ID:            testRefreshClientID,
+		SectorID:      "test.example.com",
+		RedirectURIs:  []string{"http://localhost/cb"},
+		ScopesAllowed: []string{"openid", "offline_access"},
+	})
+
+	svc := NewService(ServiceConfig{
+		Issuer:       "https://test.harbor.example",
+		Clients:      clientReg,
+		Codes:        NewInMemoryAuthCodeStore(),
+		Tokens:       NewPlaceholderIssuer(),
+		Sessions:     resolver,
+		SessionStore: sessionStore,
+		Grants:       grantStore,
+	})
+
+	// Step 1: Authorize to get a code.
+	result, aerr := svc.Authorize(context.Background(), AuthorizeRequest{
+		ClientID:            testRefreshClientID,
+		RedirectURI:         "http://localhost/cb",
+		ResponseType:        "code",
+		Scope:               "openid offline_access",
+		CodeChallenge:       "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+		CodeChallengeMethod: "S256",
+		State:               "st",
+	})
+	if aerr != nil {
+		t.Fatalf("Authorize: %v", aerr)
+	}
+
+	// Step 2: Exchange the code for tokens — issueRefreshToken is called here.
+	tokens, terr := svc.Token(context.Background(), TokenRequest{
+		GrantType:    grantTypeAuthorizationCode,
+		Code:         result.Code,
+		RedirectURI:  "http://localhost/cb",
+		ClientID:     testRefreshClientID,
+		CodeVerifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+	})
+	if terr != nil {
+		t.Fatalf("Token: %v", terr)
+	}
+	if tokens.RefreshToken == "" {
+		t.Fatal("expected a refresh token to be issued")
+	}
+
+	// Step 3: Decode the refresh token and look up the session to verify region.
+	plaintext, err := decodeRefreshToken(tokens.RefreshToken)
+	if err != nil {
+		t.Fatalf("decodeRefreshToken: %v", err)
+	}
+	hash := hashRefreshToken(plaintext)
+	session, err := sessionStore.GetSessionByTokenHash(context.Background(), hash)
+	if err != nil {
+		t.Fatalf("GetSessionByTokenHash: %v", err)
+	}
+	if session.Region != wantRegion {
+		t.Fatalf("session.Region = %q, want %q — issueRefreshToken did not propagate region from grant", session.Region, wantRegion)
+	}
+}
+
 func TestRefreshOfflineAccessGate(t *testing.T) {
 	// A code exchange WITHOUT offline_access must NOT produce a refresh token.
 	svc, _, _ := newTestServiceWithSessions(t)
