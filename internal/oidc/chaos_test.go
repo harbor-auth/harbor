@@ -391,6 +391,48 @@ func TestChaos_Refresh_NewSessionIDFails_PreRotation(t *testing.T) {
 	}
 }
 
+// TestChaos_Refresh_CancelledContextBeforeLookup verifies H22-1: if the request
+// context is already cancelled when Refresh() reaches the client-registry check,
+// the service returns server_error (not invalid_client) so a client disconnect
+// does not produce a false "client deregistered" permanent error.
+//
+// Mechanism: DBClientRegistry.Lookup swallows context errors and returns
+// (Client{}, false), which is indistinguishable from genuine deregistration.
+// The ctx.Err() pre-check (H22-1) catches an already-cancelled context BEFORE
+// Lookup is called and returns server_error instead.
+//
+// Note: the InMemorySessionStore and InMemoryGrantStore used here do not check
+// context cancellation, so the flow proceeds normally through GetSessionByTokenHash,
+// ValidateRefreshParams, and FindGrant — only the H22-1 check fires.
+//
+//harbor:invariant INV-REFRESH-CLIENT-EXISTS
+func TestChaos_Refresh_CancelledContextBeforeLookup(t *testing.T) {
+	sessionStore := NewInMemorySessionStore()
+	grantStore := NewInMemoryGrantStore()
+	oldToken := seedSession(t, sessionStore, grantStore, "ppid-cancelled-ctx")
+
+	svc := newChaosService(sessionStore, grantStore)
+
+	// Cancel the context before calling Refresh to simulate a client disconnect
+	// that arrives after the session lookup but before the client registry check.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // ctx.Err() != nil immediately
+
+	_, terr := svc.Refresh(ctx, refreshReq(oldToken))
+	if terr == nil {
+		t.Fatal("expected error for cancelled context")
+	}
+	// H22-1 guard: must be server_error (transient), NOT invalid_client (permanent).
+	// invalid_client would cause well-behaved client SDKs (e.g. AppAuth) to restart
+	// the entire authorization flow, logging out the user unnecessarily.
+	if terr.Code != ErrCodeServerError {
+		t.Fatalf("cancelled context: want server_error, got %q (H22-1 guard may be missing or misplaced)", terr.Code)
+	}
+	if terr.Status != 500 {
+		t.Fatalf("cancelled context: want HTTP 500, got %d", terr.Status)
+	}
+}
+
 // TestChaos_Refresh_ValidateTokenParams_GatesStoreAccess verifies that the
 // H15-1 fix (ValidateTokenParams at the top of Refresh) short-circuits BEFORE
 // any store access on malformed requests. It asserts by error code: an empty

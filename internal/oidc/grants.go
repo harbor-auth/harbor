@@ -63,8 +63,10 @@ type noopGrantStore struct{}
 func (noopGrantStore) FindGrant(_ context.Context, _, _ string) (Grant, bool, error) {
 	// Always returns not-found. See NewService panic guard for why noopGrantStore
 	// must NOT be paired with a real SessionStore: FindGrant returning false on
-	// every Refresh() call would trip INV-REFRESH-CONSENT-REVOKED and revoke the
-	// user's session every time they attempt a token refresh.
+	// every Refresh() call triggers the consent-revocation path in service.go —
+	// which (1) best-effort revokes the user's active session and (2) returns
+	// invalid_grant — permanently locking out users whose tokens were legitimately
+	// issued. Use DBGrantStore or InMemoryGrantStore in any setup with real sessions.
 	return Grant{}, false, nil
 }
 func (noopGrantStore) CreateGrant(_ context.Context, _ NewGrant) (Grant, error) {
@@ -144,8 +146,11 @@ func (s *InMemoryGrantStore) CreateGrant(_ context.Context, ng NewGrant) (Grant,
 	}
 	s.byID[id] = g
 	s.byPair[ng.UserID+":"+ng.ClientID] = g
-	// Clone Scopes in the return value so caller mutation cannot corrupt the
-	// stored grant's Scopes slice (they share the same backing array otherwise).
+	// Clone 2: ret := *g copies the Grant struct by value, including the Scopes
+	// slice header — ret.Scopes and g.Scopes would share the same backing array.
+	// Index-mutation by the caller (ret.Scopes[0] = "evil") would silently corrupt
+	// the stored grant. Clone 1 (above in g.Scopes initialisation) protected g from
+	// ng.Scopes; this clone protects g from the returned ret.Scopes.
 	ret := *g
 	ret.Scopes = append([]string(nil), g.Scopes...)
 	return ret, nil

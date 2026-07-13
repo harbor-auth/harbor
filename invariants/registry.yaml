@@ -230,7 +230,7 @@ invariants:
     title: "Refresh token is not redeemable if the issuing client is no longer registered"
     design_refs: [§3.5, §11.7]
     description: "After ValidateRefreshParams succeeds, Refresh() re-validates that the session's client_id still exists in the ClientRegistry. A client deregistered after token issuance returns invalid_client (HTTP 401) rather than allowing its refresh tokens to remain redeemable for their full 14-day TTL. Note: ClientRegistry.Lookup is (Client, bool) — a registry outage or a cancelled request context (client disconnect, SIGINT) both cause DBClientRegistry.Lookup to return (Client{}, false), indistinguishable from genuine deregistration. A ctx.Err() pre-check (H22-1) returns server_error for already-cancelled contexts, reducing the false-positive window to a narrow TOCTOU gap. Full re-validation of client status/redirect-URIs on every refresh is not performed (M20-1 accepted limitation)."
-    enforced_by: [internal/oidc:TestRefreshDeregisteredClientRejected, internal/oidcapi:TestToken_DeregisteredClient_InvalidClient]
+    enforced_by: [internal/oidc:TestRefreshDeregisteredClientRejected, internal/oidcapi:TestToken_DeregisteredClient_InvalidClient, internal/oidc:TestChaos_Refresh_CancelledContextBeforeLookup]
 
   - id: INV-REFRESH-REGION-PROPAGATED
     title: "Refresh session carries the user's home region; rotation preserves it"
