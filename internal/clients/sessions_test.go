@@ -356,3 +356,84 @@ func TestDBSessionStoreRotateSession(t *testing.T) {
 		t.Fatalf("expected new session ID %q, got %q", rs2.ID, got.ID)
 	}
 }
+
+// TestDBSessionStoreGetByTokenHash_RevokedAndExpired verifies the revoked check
+// takes precedence over the expiry check: a session that is BOTH revoked and
+// past its ExpiresAt must still return ErrRefreshTokenRevoked (with the row
+// populated) so a replayed stolen-and-rotated token fires the theft-signal
+// family revoke (INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE) instead of silently
+// collapsing to not-found.
+func TestDBSessionStoreGetByTokenHash_RevokedAndExpired(t *testing.T) {
+	q := newFakeSessionQuerier()
+	store := NewDBSessionStore(q)
+	ctx := context.Background()
+
+	// Create an already-expired session (negative TTL), then revoke it.
+	hash := []byte("sha256-revoked-expired-32-bytes--")
+	rs := buildTestSession(t, "00000000-0000-0000-0000-000000000501", sessTestUserID, hash, -time.Hour)
+	if err := store.CreateSession(ctx, rs); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := store.RevokeSession(ctx, rs.ID); err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+
+	got, err := store.GetSessionByTokenHash(ctx, hash)
+	if !errors.Is(err, oidc.ErrRefreshTokenRevoked) {
+		t.Fatalf("revoked+expired: expected ErrRefreshTokenRevoked, got %v", err)
+	}
+	if got.ID != rs.ID {
+		t.Fatalf("revoked session must be returned for the theft signal; expected ID %q, got %q", rs.ID, got.ID)
+	}
+}
+
+// errSessionQuerier is a sessionQuerier whose GetSessionByHash returns a
+// non-ErrNoRows error, simulating a transient DB failure. Only GetSessionByHash
+// is exercised; the other methods panic because they must never be reached on
+// this path.
+type errSessionQuerier struct{ err error }
+
+func (e *errSessionQuerier) GetSessionByHash(context.Context, []byte) (db.Session, error) {
+	return db.Session{}, e.err
+}
+func (e *errSessionQuerier) CreateSession(context.Context, db.CreateSessionParams) (db.Session, error) {
+	panic("unexpected CreateSession")
+}
+func (e *errSessionQuerier) GetSession(context.Context, pgtype.UUID) (db.Session, error) {
+	panic("unexpected GetSession")
+}
+func (e *errSessionQuerier) GetActiveSession(context.Context, pgtype.UUID) (db.Session, error) {
+	panic("unexpected GetActiveSession")
+}
+func (e *errSessionQuerier) ListSessionsByUser(context.Context, pgtype.UUID) ([]db.Session, error) {
+	panic("unexpected ListSessionsByUser")
+}
+func (e *errSessionQuerier) RevokeSession(context.Context, pgtype.UUID) error {
+	panic("unexpected RevokeSession")
+}
+func (e *errSessionQuerier) RevokeSessionsByUser(context.Context, pgtype.UUID) error {
+	panic("unexpected RevokeSessionsByUser")
+}
+func (e *errSessionQuerier) RevokeSessionsByUserClient(context.Context, db.RevokeSessionsByUserClientParams) error {
+	panic("unexpected RevokeSessionsByUserClient")
+}
+
+// TestDBSessionStoreGetByTokenHash_DBError verifies a transient (non-ErrNoRows)
+// DB error is propagated as-is and NOT masked as ErrRefreshTokenNotFound.
+// Masking a DB outage as not-found would surface as invalid_grant and silently
+// reject valid tokens, triggering a mass logout (docs/DESIGN.md §10).
+func TestDBSessionStoreGetByTokenHash_DBError(t *testing.T) {
+	dbErr := errors.New("connection reset by peer")
+	store := NewDBSessionStore(&errSessionQuerier{err: dbErr})
+
+	_, err := store.GetSessionByTokenHash(context.Background(), []byte("any-hash"))
+	if err == nil {
+		t.Fatal("expected an error, got nil")
+	}
+	if errors.Is(err, oidc.ErrRefreshTokenNotFound) {
+		t.Fatalf("DB error must not be masked as ErrRefreshTokenNotFound; got %v", err)
+	}
+	if !errors.Is(err, dbErr) {
+		t.Fatalf("expected wrapped DB error %v, got %v", dbErr, err)
+	}
+}

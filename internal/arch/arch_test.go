@@ -100,6 +100,41 @@ func TestHotPathDoesNotImportMgmtPackages(t *testing.T) {
 	}
 }
 
+// TestOIDCCoreDoesNotImportClients enforces the dependency inversion that keeps
+// internal/oidc a pure, independently-testable core (§1.7): the OIDC flow defines
+// its store INTERFACES (store.go) and must never depend on their DB-backed
+// implementations in internal/clients. If oidc imported clients, the core would
+// transitively pull in pgx + internal/gen/db and could no longer be exercised
+// without a database — collapsing the seam that lets every branch be unit-tested.
+func TestOIDCCoreDoesNotImportClients(t *testing.T) {
+	deps := transitiveImports(t, modulePath+"/internal/oidc")
+
+	if bad := containsMatching(deps,
+		modulePath+"/internal/clients",
+	); bad != "" {
+		t.Errorf("internal/oidc transitively imports %q — the pure OIDC core must not "+
+			"depend on its store implementations (§1.7): clients depends on oidc, never "+
+			"the reverse", bad)
+	}
+}
+
+// TestClientsDoesNotImportWebAuthn keeps internal/clients usable from BOTH the
+// hot path and the mgmt path. clients is the shared DB-adapter layer; if it
+// imported internal/webauthn (the mgmt-only enrollment ceremonies) then the hot
+// path — which legitimately depends on clients (§4.1, §6.1) — would transitively
+// pull in the mgmt-only package and break TestHotPathDoesNotImportMgmtPackages.
+func TestClientsDoesNotImportWebAuthn(t *testing.T) {
+	deps := transitiveImports(t, modulePath+"/internal/clients")
+
+	if bad := containsMatching(deps,
+		modulePath+"/internal/webauthn",
+	); bad != "" {
+		t.Errorf("internal/clients transitively imports %q — the shared DB-adapter layer "+
+			"must stay free of the mgmt-only WebAuthn package so the hot path can import "+
+			"clients without pulling in enrollment code (§4.1, §6.1)", bad)
+	}
+}
+
 // TestRegionIsolationNoCrossRegionImports documents §5.3/§5.4: region resolution
 // is pure logic. It must not reach into persistence or the OIDC flow, so that
 // the data-plane isolation boundary can't be eroded by an incidental import.

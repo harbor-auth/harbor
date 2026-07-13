@@ -60,15 +60,18 @@ func (s *DBSessionStore) WithPool(p txBeginner) *DBSessionStore {
 // Compile-time proof that DBSessionStore implements oidc.SessionStore.
 var _ oidc.SessionStore = (*DBSessionStore)(nil)
 
-// CreateSession implements oidc.SessionStore.
-func (s *DBSessionStore) CreateSession(ctx context.Context, rs oidc.RefreshSession) error {
+// buildCreateSessionParams converts a domain RefreshSession into sqlc
+// CreateSessionParams, parsing the UUIDs and normalising the optional device
+// label. Shared by CreateSession and RotateSession so the two write paths
+// cannot silently diverge.
+func buildCreateSessionParams(rs oidc.RefreshSession) (db.CreateSessionParams, error) {
 	var id pgtype.UUID
 	if err := id.Scan(rs.ID); err != nil {
-		return fmt.Errorf("sessions: parse session ID %q: %w", rs.ID, err)
+		return db.CreateSessionParams{}, fmt.Errorf("sessions: parse session ID %q: %w", rs.ID, err)
 	}
 	var userID pgtype.UUID
 	if err := userID.Scan(rs.UserID); err != nil {
-		return fmt.Errorf("sessions: parse user ID %q: %w", rs.UserID, err)
+		return db.CreateSessionParams{}, fmt.Errorf("sessions: parse user ID %q: %w", rs.UserID, err)
 	}
 	var deviceLabel *string
 	if rs.DeviceLabel != "" {
@@ -77,9 +80,9 @@ func (s *DBSessionStore) CreateSession(ctx context.Context, rs oidc.RefreshSessi
 	}
 	var expiresAt pgtype.Timestamptz
 	if err := expiresAt.Scan(rs.ExpiresAt); err != nil {
-		return fmt.Errorf("sessions: parse expires_at: %w", err)
+		return db.CreateSessionParams{}, fmt.Errorf("sessions: parse expires_at: %w", err)
 	}
-	_, err := s.q.CreateSession(ctx, db.CreateSessionParams{
+	return db.CreateSessionParams{
 		ID:               id,
 		Region:           rs.Region,
 		UserID:           userID,
@@ -87,7 +90,16 @@ func (s *DBSessionStore) CreateSession(ctx context.Context, rs oidc.RefreshSessi
 		DeviceLabel:      deviceLabel,
 		RefreshTokenHash: rs.TokenHash,
 		ExpiresAt:        expiresAt,
-	})
+	}, nil
+}
+
+// CreateSession implements oidc.SessionStore.
+func (s *DBSessionStore) CreateSession(ctx context.Context, rs oidc.RefreshSession) error {
+	params, err := buildCreateSessionParams(rs)
+	if err != nil {
+		return err
+	}
+	_, err = s.q.CreateSession(ctx, params)
 	return err
 }
 
@@ -160,32 +172,11 @@ func (s *DBSessionStore) RotateSession(ctx context.Context, oldID string, newSes
 		return fmt.Errorf("sessions: rotate (revoke in tx): %w", err)
 	}
 
-	var newID pgtype.UUID
-	if err := newID.Scan(newSession.ID); err != nil {
-		return fmt.Errorf("sessions: parse new session ID %q: %w", newSession.ID, err)
+	params, err := buildCreateSessionParams(newSession)
+	if err != nil {
+		return err
 	}
-	var userID pgtype.UUID
-	if err := userID.Scan(newSession.UserID); err != nil {
-		return fmt.Errorf("sessions: parse user ID %q: %w", newSession.UserID, err)
-	}
-	var deviceLabel *string
-	if newSession.DeviceLabel != "" {
-		label := newSession.DeviceLabel
-		deviceLabel = &label
-	}
-	var expiresAt pgtype.Timestamptz
-	if err := expiresAt.Scan(newSession.ExpiresAt); err != nil {
-		return fmt.Errorf("sessions: parse expires_at: %w", err)
-	}
-	if _, err := qtx.CreateSession(ctx, db.CreateSessionParams{
-		ID:               newID,
-		Region:           newSession.Region,
-		UserID:           userID,
-		ClientID:         newSession.ClientID,
-		DeviceLabel:      deviceLabel,
-		RefreshTokenHash: newSession.TokenHash,
-		ExpiresAt:        expiresAt,
-	}); err != nil {
+	if _, err := qtx.CreateSession(ctx, params); err != nil {
 		return fmt.Errorf("sessions: rotate (create in tx): %w", err)
 	}
 

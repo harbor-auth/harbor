@@ -142,10 +142,8 @@ func uuidToString(u pgtype.UUID) string {
 	if !u.Valid {
 		return "00000000-0000-0000-0000-000000000000"
 	}
-	// pgtype.UUID bytes are the raw 16-byte representation.
-	b := u.Bytes
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
-		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	// pgtype.UUID.String() emits the canonical lowercase hyphenated form.
+	return u.String()
 }
 
 // timePtrFromPgtz converts a pgtype.Timestamptz to a *time.Time. nil = invalid/zero.

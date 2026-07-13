@@ -69,6 +69,13 @@ func (l *DBSecretLoader) LoadUserSecret(ctx context.Context, userID string) (oid
 	if err != nil {
 		return oidc.UserSecret{}, fmt.Errorf("clients: LoadUserSecret: unwrap DEK: %w", err)
 	}
+	// Zero the DEK bytes once we're done. DEK is [32]byte (a value type), so
+	// clear(dek[:]) is the compiler-resistant approach (Go 1.21+ builtin).
+	// Note: Decrypt receives dek by value (a copy) and that copy cannot be
+	// zeroed from here — this is a Go language limitation for value types.
+	// This zeroes the local stack frame copy, which is the best we can do
+	// short of passing a *DEK everywhere (§7.3 best-effort hygiene).
+	defer func() { clear(dek[:]) }()
 
 	secret, err := l.cipher.Decrypt(dek, user.PairwiseSecret, identity.PairwiseSecretAAD(userID))
 	if err != nil {

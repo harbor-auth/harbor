@@ -371,9 +371,30 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 		return nil, terr
 	}
 
-	// Generate new token material BEFORE calling RotateSession so both the
-	// revoke and create happen in a single atomic transaction when a real DB
-	// pool is wired (docs/DESIGN.md §3.5 — no crash window between the two).
+	// All fallible reads and computations happen BEFORE RotateSession so that
+	// a failure at any of these steps still leaves the old refresh token valid
+	// and the client can simply retry (docs/DESIGN.md §3.5).
+	//
+	// Step A: recover the frozen PPID + scopes from the consent grant.
+	grant, found, err := s.grants.FindGrant(ctx, session.UserID, session.ClientID)
+	if err != nil || !found {
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not recover grant for token issuance", Status: 500}
+	}
+
+	// Step B: mint the new access/ID tokens — depends only on grant + session,
+	// NOT on the new refresh session that RotateSession will create. Doing this
+	// before rotation means that if signing fails the old token is still live.
+	tokens, err := s.tokens.Issue(ctx, IssueParams{
+		Issuer:   s.issuer,
+		Subject:  grant.PairwiseSub,
+		ClientID: session.ClientID,
+		Scope:    strings.Join(grant.Scopes, " "),
+	})
+	if err != nil {
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not issue tokens", Status: 500}
+	}
+
+	// Step C: generate new opaque refresh-token material.
 	newPlaintext, newHash, err := newOpaqueToken()
 	if err != nil {
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not generate refresh token", Status: 500}
@@ -392,29 +413,17 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 		TokenHash:   newHash,
 		ExpiresAt:   s.now().Add(defaultRefreshTTL),
 	}
-	// RotateSession atomically revokes the old session and creates the new one.
+
+	// Step D: RotateSession is the commit point — everything before here can
+	// fail without locking the client out. After this call the old token is
+	// revoked, so the only remaining operations are infallible assignments.
 	// With a pool-wired DBSessionStore this is a single transaction; with
 	// InMemorySessionStore it is atomic under the store's mutex.
 	if err := s.sessionStore.RotateSession(ctx, session.ID, newSession); err != nil {
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not rotate session", Status: 500}
 	}
 
-	// Recover the frozen PPID + scopes from the consent grant so the rotated
-	// tokens carry the same sub the RP already knows (§3.2).
-	grant, found, err := s.grants.FindGrant(ctx, session.UserID, session.ClientID)
-	if err != nil || !found {
-		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not recover grant for token issuance", Status: 500}
-	}
-
-	tokens, err := s.tokens.Issue(ctx, IssueParams{
-		Issuer:   s.issuer,
-		Subject:  grant.PairwiseSub,
-		ClientID: session.ClientID,
-		Scope:    strings.Join(grant.Scopes, " "),
-	})
-	if err != nil {
-		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not issue tokens", Status: 500}
-	}
+	// After RotateSession the old token is gone. No more fallible operations.
 	tokens.RefreshToken = encodeRefreshToken(newPlaintext)
 	tokens.RefreshExpiresIn = int(defaultRefreshTTL.Seconds())
 	return &tokens, nil

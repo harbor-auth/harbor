@@ -108,23 +108,30 @@ func main() {
 	if pool != nil {
 		q := db.New(pool)
 		// SCAFFOLD: dev-only LocalKeyProvider. Swap for the HSM-backed KeyProvider
-		// in production (docs/DESIGN.md §7.3). KEK_SECRET should be set when
-		// DATABASE_URL is configured so the pairwise-secret DEKs unwrap correctly.
+		// in production (docs/DESIGN.md §7.3). KEK_SECRET MUST be set when
+		// DATABASE_URL is configured so the pairwise-secret DEKs unwrap correctly —
+		// falling back to a hardcoded dev key against a real DB would let anyone
+		// with the source re-derive every user's pairwise secret, so it is fatal.
 		kekSecret := os.Getenv("KEK_SECRET")
 		if kekSecret == "" {
-			kekSecret = "dev-only-kek-NOT-FOR-PRODUCTION"
-			logger.Warn("KEK_SECRET not set — using dev-only key derivation (NEVER use in production)")
+			logger.Error("KEK_SECRET must be set when DATABASE_URL is configured")
+			os.Exit(1)
 		}
 		keyProvider, err := crypto.NewLocalKeyProvider(kekSecret)
 		if err != nil {
 			logger.Error("failed to create key provider", "error", err)
 			os.Exit(1)
 		}
-		clientRegistry = clients.NewDBClientRegistry(q)
+		clientRegistry = clients.NewDBClientRegistry(q).WithLogger(logger)
 		grantStore = clients.NewDBGrantStore(q)
 		sessionStore = clients.NewDBSessionStore(q).WithPool(pool)
 		secretLoader = clients.NewDBSecretLoader(q, keyProvider, crypto.NewCipher())
 		logger.Info("using DB-backed stores")
+		// SCAFFOLD: authorization codes are still stored in-memory (see the
+		// oidc.NewInMemoryAuthCodeStore wiring below), so a code issued by one
+		// replica cannot be redeemed by another. Warn so this isn't silently
+		// deployed multi-replica (docs/DESIGN.md §4.4).
+		logger.Warn("authorization codes stored in-memory — not suitable for multi-replica deployment")
 	} else {
 		// SCAFFOLD: in-memory stores for dev/test (DATABASE_URL not set). A demo
 		// client + deterministic demo-user secret keep the Authorization Code +
