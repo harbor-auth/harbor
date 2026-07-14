@@ -276,6 +276,7 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 	}
 	if consumed {
 		// Assume theft: revoke everything minted from this code.
+		// Raw ctx: signalCodeReuse self-enforces context.WithoutCancel + 10 s timeout internally.
 		s.signalCodeReuse(ctx, stored)
 		return nil, invalidGrant("authorization code has already been used")
 	}
@@ -295,6 +296,7 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 	case ConsumeNotFound:
 		return nil, invalidGrant("authorization code is invalid")
 	case ConsumeReused:
+		// Raw ctx: signalCodeReuse self-enforces context.WithoutCancel + 10 s timeout internally.
 		s.signalCodeReuse(ctx, result.Code)
 		return nil, invalidGrant("authorization code has already been used")
 	}
@@ -427,6 +429,7 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	if err != nil {
 		if errors.Is(err, ErrRefreshTokenRevoked) {
 			// A rotated (revoked) token was replayed: assume theft, revoke family.
+			// Raw ctx: signalRefreshReuse self-enforces context.WithoutCancel + 10 s timeout internally.
 			s.signalRefreshReuse(ctx, session)
 			return nil, invalidGrant("refresh token is invalid")
 		}
@@ -628,11 +631,14 @@ const zeroUUID = "00000000-0000-0000-0000-000000000000"
 // revoke completes even on client disconnect or SIGINT. Callers pass the raw
 // request ctx; no call-site discipline is required.
 func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession) {
-	// Detach from the request context: family revocation is security-critical
-	// and must complete even if the HTTP client disconnected or the server is
-	// shutting down. A cancelled ctx would abort RevokeSessionsByUserClient,
-	// silently leaving the compromised session family active.
-	ctx = context.WithoutCancel(ctx)
+	// Detach and bound: 10 s limit prevents a hung DB from blocking the response
+	// goroutine indefinitely; context.WithoutCancel ensures client disconnect does
+	// not abort RevokeSessionsByUserClient (context.WithoutCancel strips the parent
+	// deadline, so an explicit timeout is required to bound this security-critical
+	// revoke).
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
 	// Defensive guard: an empty or zero-UUID UserID/ClientID would make
 	// RevokeSessionsByUserClient match zero rows and silently suppress the theft
 	// signal. The empty-string case catches in-memory store bugs; the zero-UUID
@@ -645,7 +651,7 @@ func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession
 	// through uuidToString, so the empty-string check is sufficient for it.
 	if session.UserID == "" || session.UserID == zeroUUID ||
 		session.ClientID == "" {
-		s.logger.ErrorContext(ctx, "refresh-reuse signal: session has empty/invalid UserID or ClientID — family revoke skipped (latent store bug)",
+		s.logger.ErrorContext(ctx, "refresh-reuse signal: session has empty/zero UserID or empty ClientID — family revoke skipped (latent store bug)",
 			slog.String("session_id", session.ID))
 		return
 	}
@@ -674,9 +680,20 @@ func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession
 // failure is retried, not merely alerted (the in-process best-effort signal
 // is the correct interim handling, not the final design).
 func (s *Service) signalCodeReuse(ctx context.Context, code AuthCode) {
-	// Detach from the request context: code-family revocation is security-critical
-	// and must complete even if the HTTP client disconnected mid-request.
-	ctx = context.WithoutCancel(ctx)
+	// Detach and bound: 10 s limit prevents a hung DB from blocking the response
+	// goroutine indefinitely; context.WithoutCancel ensures client disconnect does
+	// not abort RevokeCodeFamily (context.WithoutCancel strips the parent deadline,
+	// so an explicit timeout is required to bound this security-critical revoke).
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	// Defensive guard (parity with signalRefreshReuse): an empty ClientID would
+	// make RevokeCodeFamily target the wrong family or match nothing — surface it
+	// loudly rather than silently suppressing the theft signal.
+	if code.ClientID == "" {
+		s.logger.ErrorContext(ctx, "code-reuse signal: code has empty ClientID — family revoke skipped (latent store bug)")
+		return
+	}
 	if err := s.revocations.RevokeCodeFamily(ctx, code); err != nil {
 		s.logger.ErrorContext(ctx, "code-family revocation failed after reuse detected",
 			slog.String("client_id", code.ClientID),

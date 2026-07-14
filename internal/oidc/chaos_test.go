@@ -480,17 +480,21 @@ func TestChaos_Refresh_ValidateTokenParams_GatesStoreAccess(t *testing.T) {
 		t.Fatalf("empty client_id: want invalid_request, got %q", terr2.Code)
 	}
 
-	// Case 3: wrong grant_type → rejected by ValidateTokenParams before the store.
+	// Case 3: unknown grant_type → hits the default branch in ValidateTokenParams
+	// and returns unsupported_grant_type, confirming the gate fires before store.
+	// Note: "authorization_code" is a *recognized* grant type in ValidateTokenParams
+	// (it has its own case), so using it here would trigger invalid_request (missing
+	// params), not unsupported_grant_type. Use a truly unknown type instead.
 	_, terr3 := svc.Refresh(context.Background(), TokenRequest{
-		GrantType:    "authorization_code",
+		GrantType:    "urn:ietf:params:oauth:grant-type:device_code",
 		ClientID:     "some-client",
 		RefreshToken: "some-token",
 	})
 	if terr3 == nil {
-		t.Fatal("wrong grant_type: expected error, got nil")
+		t.Fatal("unknown grant_type: expected error, got nil")
 	}
-	if terr3.Code != ErrCodeUnsupportedGrantType && terr3.Code != ErrCodeInvalidRequest {
-		t.Fatalf("wrong grant_type: want unsupported_grant_type or invalid_request, got %q", terr3.Code)
+	if terr3.Code != ErrCodeUnsupportedGrantType {
+		t.Fatalf("unknown grant_type: want unsupported_grant_type, got %q (ValidateTokenParams should reject unknown grant_type)", terr3.Code)
 	}
 }
 
@@ -503,6 +507,8 @@ func TestChaos_Refresh_ValidateTokenParams_GatesStoreAccess(t *testing.T) {
 //
 // The correct client response is still invalid_grant (not 5xx) so the attacker
 // learns nothing from the guard firing.
+//
+//harbor:invariant INV-REFRESH-THEFT-SIGNAL-ZERO-UUID-GUARD
 func TestChaos_Refresh_SignalRefreshReuse_ZeroUUID(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -544,7 +550,7 @@ func TestChaos_Refresh_SignalRefreshReuse_ZeroUUID(t *testing.T) {
 			}
 
 			// The ERROR log must fire.
-			if !strings.Contains(logBuf.String(), "empty/invalid UserID") {
+			if !strings.Contains(logBuf.String(), "empty/zero UserID") {
 				t.Fatalf("expected ERROR log for zero-UUID guard; got: %s", logBuf.String())
 			}
 		})

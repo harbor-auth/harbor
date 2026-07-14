@@ -61,12 +61,8 @@ type GrantStore interface {
 type noopGrantStore struct{}
 
 func (noopGrantStore) FindGrant(_ context.Context, _, _ string) (Grant, bool, error) {
-	// Always returns not-found. See NewService panic guard for why noopGrantStore
-	// must NOT be paired with a real SessionStore: FindGrant returning false on
-	// every Refresh() call triggers the consent-revocation path in service.go —
-	// which (1) best-effort revokes the user's active session and (2) returns
-	// invalid_grant — permanently locking out users whose tokens were legitimately
-	// issued. Use DBGrantStore or InMemoryGrantStore in any setup with real sessions.
+	// Always returns not-found. See NewService panic guard in service.go for why
+	// this must NOT be paired with a real SessionStore.
 	return Grant{}, false, nil
 }
 func (noopGrantStore) CreateGrant(_ context.Context, _ NewGrant) (Grant, error) {

@@ -172,6 +172,12 @@ invariants:
     description: "When a revoked refresh token is presented, ErrRefreshTokenRevoked is detected and RevokeSessionsByUserClient is called, invalidating every active session for that (user, client) pair — including the legitimately rotated successor token. This detects token theft and forces re-authentication. A revoke-side DB failure must NOT become a 5xx or allow the replayed token to succeed. ACCEPTED RISK (bearer-token DoS property): replaying a rotated (revoked) token unconditionally revokes the successor, even if held by the legitimate client. An attacker who obtains only the old rotated token (but not the successor) can force the legitimate holder to re-authenticate. This is the standard security/availability trade-off of stateless rotation — aggressive, scope-limited revocation (user×client only, not user-wide) is preferred over partial revocation that risks leaving a stolen successor token active. See docs/DESIGN.md §3.5."
     enforced_by: [internal/oidc:TestRefreshReuseFiresTheftSignal, internal/oidcapi:TestToken_RefreshTheftSignal_RevokesFamily, internal/clients:TestDBSessionStoreGetByTokenHash_RevokedAndExpired, internal/oidc:TestChaos_Refresh_FamilyRevokeFails_StillInvalidGrant]
 
+  - id: INV-REFRESH-THEFT-SIGNAL-ZERO-UUID-GUARD
+    title: "signalRefreshReuse guards against zero/empty UserID suppressing the theft signal"
+    design_refs: [§3.5, §11.7]
+    description: "When GetSessionByTokenHash returns ErrRefreshTokenRevoked with a session whose UserID is empty or the zero-UUID sentinel, the family revoke is skipped and an ERROR is logged rather than calling RevokeSessionsByUserClient with an invalid ID. An invalid UserID would match zero rows in the DB, silently suppressing the theft signal and masking a store bug as a no-op. The correct client response is still invalid_grant (not 5xx) so the attacker learns nothing from the guard firing."
+    enforced_by: [internal/oidc:TestChaos_Refresh_SignalRefreshReuse_ZeroUUID]
+
   - id: INV-ENROLL-DEK-FRESH
     title: "Each enrollment generates a fresh DEK; keys are never reused across users"
     design_refs: [§4.4, §10]

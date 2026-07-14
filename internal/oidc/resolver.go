@@ -72,6 +72,9 @@ func NewInMemorySecretLoader() *InMemorySecretLoader {
 func (l *InMemorySecretLoader) Put(userID string, us UserSecret) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// Clone Secret so a caller that reuses the []byte slice after Put cannot
+	// corrupt the stored secret via the shared backing array.
+	us.Secret = append([]byte(nil), us.Secret...)
 	l.secrets[userID] = us
 }
 
@@ -83,6 +86,8 @@ func (l *InMemorySecretLoader) LoadUserSecret(_ context.Context, userID string) 
 	if !ok {
 		return UserSecret{}, ErrUserSecretNotFound
 	}
+	// Clone Secret so the caller cannot corrupt the stored value via the returned slice.
+	us.Secret = append([]byte(nil), us.Secret...)
 	return us, nil
 }
 
