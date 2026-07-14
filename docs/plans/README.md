@@ -14,64 +14,57 @@ snippets, and implementation checklists.
 ## Dependency graph (ASCII)
 
 ```
-┌──────────────────────────────────────── LAYER 0 ────────────────────────────────────────────────┐
-│  No prerequisites — build any or all in parallel                                                │
+┌──────────────────────────────── LAYER 0 — no prerequisites ─────────────────────────────────────┐
 │                                                                                                  │
-│  ┌──────────────────────────┐  ┌──────────────────────┐  ┌─────────────────────┐  ┌──────────────────────────┐
-│  │ envelope-encryption-kms  │  │  real-token-issuance  │  │ auth-code-          │  │ client-grant-            │
-│  │         [kms]            │  │       [token]         │  │ persistence         │  │ persistence              │
-│  │  §4.4 · §7.3 · §10      │  │  §3.3 · §3.4 · §7.3  │  │  §4.1 · §10        │  │  §3.2 · §10             │
-│  └──────────┬───────────────┘  └──────────┬───────────┘  └─────────┬───────────┘  └──────────┬─────────────┘
-└─────────────┼──────────────────────────────┼───────────────────────┼───────────────────────────┼─────────────┘
-              │                              │                        │                           │
-              │                              │                        │                           │
-              ▼                              │                        │                           │
-  ┌───────────────────────┐                 │                        │                           │
-  │    user-enrollment    │                 │                        │                           │
-  │   §11.1 · §10 · §4.4  │                 │                        │                           │
-  └───────────┬───────────┘                 │                        │                           │
-              │                             │                        │                           │
-              │            ┌────────────────┘                        │                           │
-              │            │                                         │                           │
-              └────────────┼─────────────────────────────────────────┼───────────────────────────┘
-                           │         (needs: user-enrollment +        │
-                           │          real-token-issuance +           │
-                           │          client-grant-persistence)       │
-                           ▼                                         │
-              ┌─────────────────────────┐                            │
-              │    session-ppid-seam    │                            │
-              │     §3.2 · §11.2       │                            │
-              └───────────┬─────────────┘                            │
-                          │                                          │
-          ┌───────────────┼────────────────────┐                    │
-          │               │                    │                    │
-          ▼               ▼                    ▼                    │
-  ┌───────────────┐  ┌──────────────┐  ┌──────────────────────┐    │
-  │ bff-session-  │  │  grant-id-   │  │  refresh-token-      │    │
-  │ middleware    │  │  fk          │  │  rotation            │    │
-  │ §9·§11.1·11.2 │  │ §3.5·§10·11.3│  │  §3.5 · §10         │    │
-  └───────────────┘  └──────┬───────┘  └──────────┬───────────┘    │
-   (end-to-end login)        │                     │                │
-                             └──────────┬──────────┘                │
-                                        │                           │
-                                        ▼                           │
-                           ┌─────────────────────────┐             │
-                           │    revocation-outbox     │             │
-                           │     §3.5 · §3.5.2 · §10  │             │
-                           └────────────┬────────────┘             │
-                                        │                           │
-                                        │   ┌───────────────────────┘
-                                        │   │  (also needs real-token-issuance)
-                                        ▼   ▼
+│  ┌─────────────────────┐  ┌──────────────────────┐  ┌─────────────────┐  ┌─────────────────┐   │
+│  │ envelope-encryption │  │  real-token-issuance  │  │  auth-code-     │  │ client-grant-   │   │
+│  │ -kms §4.4·§7.3·§10  │  │  §3.3 · §3.4 · §7.3   │  │  persistence    │  │ persistence     │   │
+│  └──────────┬──────────┘  └──┬──────────────┬─────┘  │  §4.1 · §10    │  │  §3.2 · §10    │   │
+└─────────────┼────────────────┼──────────────┼─────────┴─────────────────┴──┴─────────────────┴──┘
+              │                │              │                                              │
+              │         LAYER 1│              │                                              │
+              ▼                ▼              ▼                                              │
+  ┌───────────────────┐  ┌─────────────────┐  ┌────────────────────┐                       │
+  │  user-enrollment  │  │ signing-key-    │  │ token-             │                       │
+  │  §11.1 · §10·§4.4 │  │ rotation §7.3   │  │ introspection §3.3 │                       │
+  └────────┬──────────┘  └─────────────────┘  └────────────────────┘                       │
+           │                                                                                │
+           └──────────────────── + real-token-issuance + ────────────────────────────────┘
+                                              │
+                             LAYER 2          │
+          ┌──────────────────────────────────┐│
+          ▼                                  ▼▼
+┌─────────────────────────┐     ┌────────────────────────────┐
+│    session-ppid-seam    │     │    userinfo-endpoint       │
+│     §3.2 · §11.2        │     │    §3.3 · §11.4 · §3.1     │
+└───────────┬─────────────┘     └────────────────────────────┘
+            │
+            │             LAYER 3
+┌───────────┼──────────────────────────────┐
+▼           ▼                              ▼
+┌─────────────────┐  ┌──────────────┐  ┌──────────────────────┐
+│  bff-session-   │  │  grant-id-fk │  │  refresh-token-      │
+│  middleware     │  │ §3.5·§10·11.3│  │  rotation §3.5·§10   │
+│  §9·§11.1·§11.2 │  └──────┬───────┘  └──────────┬───────────┘
+└─────────────────┘         │                      │
+  (end-to-end login)        └──────────┬───────────┘
+                                       │
+                            LAYER 4    ▼
+                           ┌─────────────────────────┐
+                           │    revocation-outbox    │
+                           │    §3.5 · §3.5.2 · §10  │
+                           └────────────┬────────────┘
+                                        │  (+ real-token-issuance)
+                            LAYER 5     ▼
                            ┌──────────────────────────────┐
                            │  bloom-filter-revocation     │
-                           │  §3.5 · §3.5.2 · §3.5.4·§7.4│
+                           │ §3.5 · §3.5.2 · §3.5.4 · §7.4│
                            └──────────────────────────────┘
 
 
-──────────────────────── FINAL INTEGRATION GATE ─────────────────────────────
-  (requires real-token-issuance + auth-code-persistence + user-enrollment
-   and — to have a fully green suite — effectively everything above)
+──────────────────────── LAYER 6 — final integration gate ───────────────────
+  (requires: real-token-issuance + auth-code-persistence + user-enrollment +
+   session-ppid-seam; fully green conformance suite only after all layers land)
 
                            ┌──────────────────────────────┐
                            │       oidf-conformance        │
@@ -100,33 +93,43 @@ can land in any order (or simultaneously on separate branches).
 
 ## Edge list (machine-readable)
 
-Each row is `(plan, requires)` — `requires` must be in a merged state before
-`plan` starts implementation.
+Each row is `(plan, requires)`. **Type** distinguishes:
+- **hard** — the plan literally cannot function without the prerequisite
+- **soft** — the plan can be prototyped or partially validated without it, but production deployment requires it (see note in individual plan file)
 
-| Plan | Requires |
-|---|---|
-| `envelope-encryption-kms` | *(none)* |
-| `real-token-issuance` | *(none)* |
-| `auth-code-persistence` | *(none)* |
-| `client-grant-persistence` | *(none)* |
-| `user-enrollment` | `envelope-encryption-kms` |
-| `signing-key-rotation` | `real-token-issuance` |
-| `token-introspection` | `real-token-issuance` |
-| `userinfo-endpoint` | `real-token-issuance` · `user-enrollment` |
-| `session-ppid-seam` | `user-enrollment` · `client-grant-persistence` · `real-token-issuance` |
-| `bff-session-middleware` | `user-enrollment` · `session-ppid-seam` |
-| `grant-id-fk` | `client-grant-persistence` · `session-ppid-seam` |
-| `refresh-token-rotation` | `real-token-issuance` · `session-ppid-seam` |
-| `revocation-outbox` | `refresh-token-rotation` · `grant-id-fk` |
-| `bloom-filter-revocation` | `real-token-issuance` · `revocation-outbox` |
-| `oidf-conformance` | `real-token-issuance` · `auth-code-persistence` · `user-enrollment` · `session-ppid-seam` |
+> **Note on `bff-session-middleware` direction:** Architecturally the BFF session
+> *provides* the secure `user_id` to the SessionResolver, which might suggest
+> `session-ppid-seam` should depend on BFF instead. The current edge is
+> intentional: the seam is scaffolded first against the `?user_id` placeholder
+> so its `SessionResolver` interface can be defined and tested independently;
+> BFF then replaces that insecure source without changing the interface. The
+> BFF plan requires the seam's interface to exist before it can be wired in.
+
+| Plan | Requires | Type |
+|---|---|---|
+| `envelope-encryption-kms` | *(none)* | — |
+| `real-token-issuance` | *(none)* | — |
+| `auth-code-persistence` | *(none)* | — |
+| `client-grant-persistence` | *(none)* | — |
+| `user-enrollment` | `envelope-encryption-kms` | hard |
+| `signing-key-rotation` | `real-token-issuance` | hard |
+| `token-introspection` | `real-token-issuance` | hard |
+| `userinfo-endpoint` | `real-token-issuance` · `user-enrollment` | hard |
+| `session-ppid-seam` | `user-enrollment` · `client-grant-persistence` · `real-token-issuance` | hard |
+| `bff-session-middleware` | `user-enrollment` · `session-ppid-seam` | hard (see direction note above) |
+| `grant-id-fk` | `client-grant-persistence` · `session-ppid-seam` | hard |
+| `refresh-token-rotation` | `real-token-issuance` · `session-ppid-seam` | hard |
+| `revocation-outbox` | `refresh-token-rotation` · `grant-id-fk` | soft — can prototype against `RevokeSessionsByUserClient` without `grant-id-fk` |
+| `bloom-filter-revocation` | `real-token-issuance` · `revocation-outbox` | soft — can prototype with stub JTIs; `revocation-outbox` is the production-grade persistent kill path |
+| `oidf-conformance` | `real-token-issuance` · `auth-code-persistence` · `user-enrollment` · `session-ppid-seam` | hard |
 
 ---
 
 ## The three critical paths
 
-There are two long chains from roots to the final gate — knowing them tells you
-which plans are on the critical path and can't slip.
+Each named path is the longest unbroken chain from a root (Layer 0) through
+to a significant milestone. Plans on these paths cannot slip without delaying
+everything downstream.
 
 ### Critical path A — "First Honest Token"
 
@@ -178,14 +181,15 @@ token-signing track.
 
 If starting from scratch today, the optimal sequence is:
 
-1. **In parallel:** `envelope-encryption-kms` + `real-token-issuance` + `auth-code-persistence` + `client-grant-persistence`
-2. **Then:** `user-enrollment`
-3. **Then:** `session-ppid-seam` (the convergence point for three Phase-0 plans)
-4. **Then in parallel:** `bff-session-middleware` + `grant-id-fk` + `refresh-token-rotation`
-5. **Then:** `revocation-outbox`
-6. **Then:** `bloom-filter-revocation`
-7. **Finally:** `oidf-conformance` (the §1.8 Stage-7 gate — green CI confirms everything composes)
+1. **In parallel (Phase 0):** `envelope-encryption-kms` + `real-token-issuance` + `auth-code-persistence` + `client-grant-persistence`
+2. **Then in parallel (Phase 1):** `user-enrollment` (unblocked by kms) · `signing-key-rotation` · `token-introspection` (both unblocked by real-token-issuance)
+3. **Then in parallel (Phase 2):** `session-ppid-seam` (the convergence point) · `userinfo-endpoint` (needs real-token + user-enrollment)
+4. **Then in parallel (Phase 3):** `bff-session-middleware` + `grant-id-fk` + `refresh-token-rotation`
+5. **Then (Phase 4):** `revocation-outbox`
+6. **Then (Phase 5):** `bloom-filter-revocation`
+7. **Finally (Phase 6):** `oidf-conformance` (the §1.8 Stage-7 gate — green CI confirms everything composes)
 
 > **Tip for agents:** Start with `real-token-issuance` if you can only do one
-> plan — it unblocks `session-ppid-seam`, which in turn unblocks three more
-> plans simultaneously. It's the highest-leverage first move.
+> plan — it unblocks `session-ppid-seam` (Phase 2), `signing-key-rotation`, and
+> `token-introspection` (both Phase 1) simultaneously. It's the highest-leverage
+> first move.
