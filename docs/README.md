@@ -32,6 +32,8 @@ docs/plans/         → future WHAT — intent not yet built
 
 ## Plans (future / in progress)
 
+> See **[`plans/README.md`](plans/README.md)** for the full dependency graph (ASCII DAG), build phases, critical paths, and the edge list in machine-readable form.
+
 | Plan | Status | DESIGN § | Promotes to |
 |---|---|---|---|
 | [envelope-encryption-kms](plans/envelope-encryption-kms.md) | in-progress | §4.4, §7.3, §10 | `internal/crypto/` |
