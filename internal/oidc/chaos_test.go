@@ -451,6 +451,8 @@ func TestChaos_Refresh_CancelledContextBeforeLookup(t *testing.T) {
 // verdict), NOT invalid_grant (which would imply the store was reached and
 // returned not-found). Without the guard, an empty refresh_token computes
 // SHA-256 of zero bytes and fires a real store round-trip.
+//
+//harbor:invariant INV-REFRESH-LOCKOUT-PREVENTION
 func TestChaos_Refresh_ValidateTokenParams_GatesStoreAccess(t *testing.T) {
 	svc := newChaosService(NewInMemorySessionStore(), NewInMemoryGrantStore())
 
@@ -511,15 +513,18 @@ func TestChaos_Refresh_ValidateTokenParams_GatesStoreAccess(t *testing.T) {
 //harbor:invariant INV-REFRESH-THEFT-SIGNAL-ZERO-UUID-GUARD
 func TestChaos_Refresh_SignalRefreshReuse_ZeroUUID(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		userID string
+		name     string
+		userID   string
+		clientID string
+		wantLog  string
 	}{
-		{name: "empty", userID: ""},
-		{name: "zero_uuid", userID: zeroUUID},
+		{name: "empty_user_id", userID: "", clientID: "some-client", wantLog: "empty/zero UserID"},
+		{name: "zero_uuid", userID: zeroUUID, clientID: "some-client", wantLog: "empty/zero UserID"},
+		{name: "empty_client_id", userID: "valid-user-id", clientID: "", wantLog: "empty ClientID"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			// Chaos store: GetSessionByTokenHash returns Revoked with a bad UserID.
-			chaosStore := &badUserIDSessionStore{userID: tc.userID}
+			// Chaos store: GetSessionByTokenHash returns Revoked with a bad field.
+			chaosStore := &badSessionFieldsStore{userID: tc.userID, clientID: tc.clientID}
 
 			var logBuf bytes.Buffer
 			logger := slog.New(slog.NewTextHandler(&logBuf, nil))
@@ -550,21 +555,84 @@ func TestChaos_Refresh_SignalRefreshReuse_ZeroUUID(t *testing.T) {
 			}
 
 			// The ERROR log must fire.
-			if !strings.Contains(logBuf.String(), "empty/zero UserID") {
-				t.Fatalf("expected ERROR log for zero-UUID guard; got: %s", logBuf.String())
+			if !strings.Contains(logBuf.String(), tc.wantLog) {
+				t.Fatalf("expected ERROR log containing %q; got: %s", tc.wantLog, logBuf.String())
 			}
 		})
 	}
 }
 
-// badUserIDSessionStore always returns ErrRefreshTokenRevoked with a session
-// whose UserID is set to the configured (bad) value — simulates a DBSessionStore
-// bug where rowToRefreshSession emits a zero UUID instead of the stored value.
-type badUserIDSessionStore struct {
+// badSessionFieldsStore always returns ErrRefreshTokenRevoked with a session
+// whose fields are set to the configured (bad) values — simulates a DBSessionStore
+// bug where rowToRefreshSession emits a zero/empty field instead of the stored value.
+type badSessionFieldsStore struct {
 	noopSessionStore
-	userID string
+	userID   string
+	clientID string
 }
 
-func (s *badUserIDSessionStore) GetSessionByTokenHash(_ context.Context, _ []byte) (RefreshSession, error) {
-	return RefreshSession{UserID: s.userID, ClientID: "some-client"}, ErrRefreshTokenRevoked
+func (s *badSessionFieldsStore) GetSessionByTokenHash(_ context.Context, _ []byte) (RefreshSession, error) {
+	return RefreshSession{UserID: s.userID, ClientID: s.clientID}, ErrRefreshTokenRevoked
+}
+
+// TestChaos_Token_SignalCodeReuse_EmptyClientID verifies the defensive guard in
+// signalCodeReuse: when a replayed authorization code has an empty ClientID
+// (simulating a DBAuthCodeStore bug where rowToAuthCode emits an empty client_id),
+// RevokeCodeFamily is skipped and an ERROR is logged rather than silently
+// suppressing the code-theft signal.
+//
+// The client response is still invalid_grant so the attacker learns nothing.
+// This is the auth-code-path parity of TestChaos_Refresh_SignalRefreshReuse_ZeroUUID.
+//
+//harbor:invariant INV-CODE-THEFT-SIGNAL-EMPTY-CLIENT-GUARD
+func TestChaos_Token_SignalCodeReuse_EmptyClientID(t *testing.T) {
+	const codeVal = "chaos-replay-empty-client"
+
+	// Seed a consumed code with ClientID "" — simulates a store bug where
+	// rowToAuthCode emits an empty client_id instead of the stored value.
+	codeStore := NewInMemoryAuthCodeStore()
+	if err := codeStore.Save(context.Background(), AuthCode{Code: codeVal, ClientID: ""}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	// First Consume marks the entry consumed; the next Peek in Token() returns
+	// (stored, found=true, consumed=true, nil), triggering signalCodeReuse.
+	if _, err := codeStore.Consume(context.Background(), codeVal); err != nil {
+		t.Fatalf("seed Consume: %v", err)
+	}
+
+	sink := NewRecordingRevocationSink()
+	var logBuf bytes.Buffer
+	svc := NewService(ServiceConfig{
+		Issuer:      "https://chaos.harbor.example",
+		Clients:     NewInMemoryClientRegistry(),
+		Codes:       codeStore,
+		Tokens:      NewPlaceholderIssuer(),
+		Sessions:    NewStubSessionResolver("ppid-chaos"),
+		Revocations: sink,
+		Logger:      slog.New(slog.NewTextHandler(&logBuf, nil)),
+	})
+
+	// Peek fires BEFORE ValidateTokenExchange, so the consumed path short-circuits
+	// with stored.ClientID="" before any ClientID-binding or PKCE check.
+	_, terr := svc.Token(context.Background(), TokenRequest{
+		GrantType:    "authorization_code",
+		Code:         codeVal,
+		ClientID:     "any-client", // ValidateTokenParams requires non-empty; binding check never reached
+		RedirectURI:  "http://localhost/cb",
+		CodeVerifier: "any-verifier",
+	})
+	if terr == nil {
+		t.Fatal("expected error (code already consumed), got nil")
+	}
+	if terr.Code != ErrCodeInvalidGrant {
+		t.Fatalf("want invalid_grant, got %q", terr.Code)
+	}
+
+	// The empty-ClientID guard must fire and suppress RevokeCodeFamily.
+	if !strings.Contains(logBuf.String(), "empty ClientID") {
+		t.Fatalf("expected ERROR log for empty-ClientID guard; got: %s", logBuf.String())
+	}
+	if r := sink.Revoked(); len(r) != 0 {
+		t.Fatalf("empty-ClientID guard must skip RevokeCodeFamily; got %d call(s)", len(r))
+	}
 }

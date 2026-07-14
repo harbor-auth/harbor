@@ -627,17 +627,18 @@ const zeroUUID = "00000000-0000-0000-0000-000000000000"
 // logged — never UserID, GrantID, or the token/hash.
 //
 // Self-enforcing context isolation: the first thing this function does is
-// detach from the caller's context via context.WithoutCancel so the family
-// revoke completes even on client disconnect or SIGINT. Callers pass the raw
-// request ctx; no call-site discipline is required.
+// bind a 10 s timeout on a cancel-detached context
+// (context.WithTimeout(context.WithoutCancel(ctx), 10s)) so the family revoke
+// completes even on client disconnect or SIGINT, and a hung DB cannot block the
+// response goroutine indefinitely. Callers pass the raw request ctx; no
+// call-site discipline is required.
 func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession) {
 	// Detach and bound: 10 s limit prevents a hung DB from blocking the response
 	// goroutine indefinitely; context.WithoutCancel ensures client disconnect does
 	// not abort RevokeSessionsByUserClient (context.WithoutCancel strips the parent
 	// deadline, so an explicit timeout is required to bound this security-critical
 	// revoke).
-	var cancel context.CancelFunc
-	ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	// Defensive guard: an empty or zero-UUID UserID/ClientID would make
 	// RevokeSessionsByUserClient match zero rows and silently suppress the theft
@@ -684,8 +685,7 @@ func (s *Service) signalCodeReuse(ctx context.Context, code AuthCode) {
 	// goroutine indefinitely; context.WithoutCancel ensures client disconnect does
 	// not abort RevokeCodeFamily (context.WithoutCancel strips the parent deadline,
 	// so an explicit timeout is required to bound this security-critical revoke).
-	var cancel context.CancelFunc
-	ctx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	// Defensive guard (parity with signalRefreshReuse): an empty ClientID would
 	// make RevokeCodeFamily target the wrong family or match nothing — surface it

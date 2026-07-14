@@ -376,6 +376,10 @@ func TestRowToGrantWithNilScopes(t *testing.T) {
 
 func TestUUIDToStringInvalid(t *testing.T) {
 	// An invalid (zero) pgtype.UUID should return the zero UUID string.
+	// COUPLING NOTE: this sentinel value ("00000000-...") must match zeroUUID in
+	// internal/oidc/service.go. The signalRefreshReuse guard checks for this
+	// specific string to detect a NULL pgtype.UUID that survived rowToRefreshSession.
+	// If this sentinel is changed, update the guard in service.go accordingly.
 	var invalid pgtype.UUID // Valid = false by default
 	result := uuidToString(invalid)
 	if result != "00000000-0000-0000-0000-000000000000" {

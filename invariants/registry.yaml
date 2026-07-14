@@ -173,10 +173,16 @@ invariants:
     enforced_by: [internal/oidc:TestRefreshReuseFiresTheftSignal, internal/oidcapi:TestToken_RefreshTheftSignal_RevokesFamily, internal/clients:TestDBSessionStoreGetByTokenHash_RevokedAndExpired, internal/oidc:TestChaos_Refresh_FamilyRevokeFails_StillInvalidGrant]
 
   - id: INV-REFRESH-THEFT-SIGNAL-ZERO-UUID-GUARD
-    title: "signalRefreshReuse guards against zero/empty UserID suppressing the theft signal"
+    title: "signalRefreshReuse guards against zero/empty UserID or empty ClientID suppressing the theft signal"
     design_refs: [§3.5, §11.7]
-    description: "When GetSessionByTokenHash returns ErrRefreshTokenRevoked with a session whose UserID is empty or the zero-UUID sentinel, the family revoke is skipped and an ERROR is logged rather than calling RevokeSessionsByUserClient with an invalid ID. An invalid UserID would match zero rows in the DB, silently suppressing the theft signal and masking a store bug as a no-op. The correct client response is still invalid_grant (not 5xx) so the attacker learns nothing from the guard firing."
+    description: "When GetSessionByTokenHash returns ErrRefreshTokenRevoked with a session whose UserID is empty or the zero-UUID sentinel (NULL pgtype.UUID via uuidToString), or whose ClientID is empty, the family revoke is skipped and an ERROR is logged rather than calling RevokeSessionsByUserClient with an invalid argument. An invalid UserID would match zero rows in the DB; an empty ClientID could match the wrong family. Both silently suppress the theft signal and mask a latent store bug as a no-op. The correct client response is still invalid_grant (not 5xx) so the attacker learns nothing from the guard firing."
     enforced_by: [internal/oidc:TestChaos_Refresh_SignalRefreshReuse_ZeroUUID]
+
+  - id: INV-CODE-THEFT-SIGNAL-EMPTY-CLIENT-GUARD
+    title: "signalCodeReuse guards against empty ClientID suppressing the code-theft signal"
+    design_refs: [§11.7]
+    description: "When an authorization code with an empty ClientID is replayed (simulating a DBAuthCodeStore bug), signalCodeReuse skips RevokeCodeFamily and emits an ERROR log rather than targeting the wrong code family or matching zero rows — either of which would silently suppress the theft signal and mask a latent store bug as a no-op. Parity with INV-REFRESH-THEFT-SIGNAL-ZERO-UUID-GUARD for the auth-code path. The correct client response is still invalid_grant so the attacker learns nothing from the guard firing."
+    enforced_by: [internal/oidc:TestChaos_Token_SignalCodeReuse_EmptyClientID]
 
   - id: INV-ENROLL-DEK-FRESH
     title: "Each enrollment generates a fresh DEK; keys are never reused across users"
