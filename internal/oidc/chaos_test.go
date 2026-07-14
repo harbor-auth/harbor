@@ -558,6 +558,13 @@ func TestChaos_Refresh_SignalRefreshReuse_ZeroUUID(t *testing.T) {
 			if !strings.Contains(logBuf.String(), tc.wantLog) {
 				t.Fatalf("expected ERROR log containing %q; got: %s", tc.wantLog, logBuf.String())
 			}
+
+			// NEGATIVE assertion: the guard must prevent RevokeSessionsByUserClient
+			// from being called. Without the guard, a bad UserID/ClientID would
+			// silently match zero rows — the call counter proves it was skipped.
+			if chaosStore.revokeCallCount != 0 {
+				t.Fatalf("guard must prevent RevokeSessionsByUserClient; got %d call(s)", chaosStore.revokeCallCount)
+			}
 		})
 	}
 }
@@ -565,14 +572,22 @@ func TestChaos_Refresh_SignalRefreshReuse_ZeroUUID(t *testing.T) {
 // badSessionFieldsStore always returns ErrRefreshTokenRevoked with a session
 // whose fields are set to the configured (bad) values — simulates a DBSessionStore
 // bug where rowToRefreshSession emits a zero/empty field instead of the stored value.
+// revokeCallCount records how many times RevokeSessionsByUserClient was called so
+// tests can assert the guard prevented the call (expect 0).
 type badSessionFieldsStore struct {
 	noopSessionStore
-	userID   string
-	clientID string
+	userID          string
+	clientID        string
+	revokeCallCount int
 }
 
 func (s *badSessionFieldsStore) GetSessionByTokenHash(_ context.Context, _ []byte) (RefreshSession, error) {
 	return RefreshSession{UserID: s.userID, ClientID: s.clientID}, ErrRefreshTokenRevoked
+}
+
+func (s *badSessionFieldsStore) RevokeSessionsByUserClient(_ context.Context, _, _ string) error {
+	s.revokeCallCount++
+	return nil
 }
 
 // TestChaos_Token_SignalCodeReuse_EmptyClientID verifies the defensive guard in

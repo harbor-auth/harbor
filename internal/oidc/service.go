@@ -633,11 +633,12 @@ const zeroUUID = "00000000-0000-0000-0000-000000000000"
 // response goroutine indefinitely. Callers pass the raw request ctx; no
 // call-site discipline is required.
 func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession) {
-	// Detach and bound: 10 s limit prevents a hung DB from blocking the response
-	// goroutine indefinitely; context.WithoutCancel ensures client disconnect does
-	// not abort RevokeSessionsByUserClient (context.WithoutCancel strips the parent
-	// deadline, so an explicit timeout is required to bound this security-critical
-	// revoke).
+	// Detach and bound: 10 s timeout bounds the maximum blocking time if the DB
+	// hangs (both signal functions run synchronously and block the response
+	// goroutine for up to this limit); context.WithoutCancel ensures client
+	// disconnect does not abort RevokeSessionsByUserClient (context.WithoutCancel
+	// strips the parent deadline, so an explicit timeout is required to bound
+	// the wait).
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	// Defensive guard: an empty or zero-UUID UserID/ClientID would make
@@ -681,15 +682,24 @@ func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession
 // failure is retried, not merely alerted (the in-process best-effort signal
 // is the correct interim handling, not the final design).
 func (s *Service) signalCodeReuse(ctx context.Context, code AuthCode) {
-	// Detach and bound: 10 s limit prevents a hung DB from blocking the response
-	// goroutine indefinitely; context.WithoutCancel ensures client disconnect does
-	// not abort RevokeCodeFamily (context.WithoutCancel strips the parent deadline,
-	// so an explicit timeout is required to bound this security-critical revoke).
+	// Detach and bound: 10 s timeout bounds the maximum blocking time if the DB
+	// hangs (both signal functions run synchronously and block the response
+	// goroutine for up to this limit); context.WithoutCancel ensures client
+	// disconnect does not abort RevokeCodeFamily (context.WithoutCancel strips
+	// the parent deadline, so an explicit timeout is required to bound the wait).
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	// Defensive guard (parity with signalRefreshReuse): an empty ClientID would
 	// make RevokeCodeFamily target the wrong family or match nothing — surface it
 	// loudly rather than silently suppressing the theft signal.
+	//
+	// Asymmetry note: signalRefreshReuse also guards against a zero/empty UserID
+	// because RevokeSessionsByUserClient(userID, clientID) uses both as direct DB
+	// filter keys. Here, the full AuthCode struct is passed to RevokeCodeFamily;
+	// the RevocationSink implementation determines the query. code.Subject (PPID)
+	// is not a DB routing key for code family revocation in the current design, so
+	// only ClientID is validated. If a future RevocationSink uses code.Subject as
+	// a filter, add a guard here (and update INV-CODE-THEFT-SIGNAL-EMPTY-CLIENT-GUARD).
 	if code.ClientID == "" {
 		s.logger.ErrorContext(ctx, "code-reuse signal: code has empty ClientID — family revoke skipped (latent store bug)")
 		return
