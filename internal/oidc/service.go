@@ -427,12 +427,7 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	if err != nil {
 		if errors.Is(err, ErrRefreshTokenRevoked) {
 			// A rotated (revoked) token was replayed: assume theft, revoke family.
-			// WithoutCancel: the theft-signal family revoke is security-critical and
-			// must complete even if the HTTP request context was cancelled (client
-			// disconnect after replaying a revoked token). Passing the raw ctx would
-			// let a cancelled request silently skip RevokeSessionsByUserClient,
-			// leaving the compromised session family active.
-			s.signalRefreshReuse(context.WithoutCancel(ctx), session)
+			s.signalRefreshReuse(ctx, session)
 			return nil, invalidGrant("refresh token is invalid")
 		}
 		if errors.Is(err, ErrRefreshTokenNotFound) {
@@ -628,10 +623,16 @@ const zeroUUID = "00000000-0000-0000-0000-000000000000"
 // and logs the event. PII constraint (§6.5.7): only client_id + the error are
 // logged — never UserID, GrantID, or the token/hash.
 //
-// The caller passes context.WithoutCancel(ctx) so this family revoke completes
-// even when the originating HTTP request context is cancelled — the theft
-// signal is security-critical and must not be skipped on a client disconnect.
+// Self-enforcing context isolation: the first thing this function does is
+// detach from the caller's context via context.WithoutCancel so the family
+// revoke completes even on client disconnect or SIGINT. Callers pass the raw
+// request ctx; no call-site discipline is required.
 func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession) {
+	// Detach from the request context: family revocation is security-critical
+	// and must complete even if the HTTP client disconnected or the server is
+	// shutting down. A cancelled ctx would abort RevokeSessionsByUserClient,
+	// silently leaving the compromised session family active.
+	ctx = context.WithoutCancel(ctx)
 	// Defensive guard: an empty or zero-UUID UserID/ClientID would make
 	// RevokeSessionsByUserClient match zero rows and silently suppress the theft
 	// signal. The empty-string case catches in-memory store bugs; the zero-UUID
@@ -665,10 +666,17 @@ func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession
 // PII constraint (§6.5.7): only client_id + the error value are logged.
 // Never log Subject (PPID), Code (a secret), or Nonce.
 //
+// Self-enforcing context isolation: mirrors signalRefreshReuse — the function
+// immediately detaches from the caller's context so code-family revocation
+// completes even on client disconnect or SIGINT. Callers pass the raw ctx.
+//
 // TODO(security): route revocation through a durable outbox so a transient
 // failure is retried, not merely alerted (the in-process best-effort signal
 // is the correct interim handling, not the final design).
 func (s *Service) signalCodeReuse(ctx context.Context, code AuthCode) {
+	// Detach from the request context: code-family revocation is security-critical
+	// and must complete even if the HTTP client disconnected mid-request.
+	ctx = context.WithoutCancel(ctx)
 	if err := s.revocations.RevokeCodeFamily(ctx, code); err != nil {
 		s.logger.ErrorContext(ctx, "code-family revocation failed after reuse detected",
 			slog.String("client_id", code.ClientID),
