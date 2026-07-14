@@ -635,9 +635,10 @@ const zeroUUID = "00000000-0000-0000-0000-000000000000"
 func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession) {
 	// Detach and bound: context.WithoutCancel ensures client disconnect does not
 	// abort RevokeSessionsByUserClient; the explicit 10 s timeout caps the
-	// worst-case latency added to the caller (this function blocks for up to
-	// 10 s if the DB hangs — context.WithoutCancel strips the parent deadline,
-	// so an explicit timeout is required to restore the bound).
+	// worst-case latency added to the caller (this function runs synchronously
+	// and blocks the caller for up to 10 s if the DB hangs —
+	// context.WithoutCancel strips the parent deadline, so an explicit timeout
+	// is required to restore the bound).
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	// Defensive guard: an empty or zero-UUID UserID/ClientID would make
@@ -683,9 +684,10 @@ func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession
 func (s *Service) signalCodeReuse(ctx context.Context, code AuthCode) {
 	// Detach and bound: context.WithoutCancel ensures client disconnect does not
 	// abort RevokeCodeFamily; the explicit 10 s timeout caps the worst-case
-	// latency added to the caller (this function blocks for up to 10 s if the
-	// DB hangs — context.WithoutCancel strips the parent deadline, so an
-	// explicit timeout is required to restore the bound).
+	// latency added to the caller (this function runs synchronously and blocks
+	// the caller for up to 10 s if the DB hangs — context.WithoutCancel strips
+	// the parent deadline, so an explicit timeout is required to restore the
+	// bound).
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
 	// Defensive guard (parity with signalRefreshReuse): an empty ClientID would

@@ -216,9 +216,9 @@ invariants:
 
   - id: INV-VALIDATE-TOKEN-PARAMS-GATE
     title: "ValidateTokenParams gates store access; malformed requests never reach the session/code store"
-    design_refs: [§11.7]
+    design_refs: [§3.1, §3.5, §11.7]
     description: "ValidateTokenParams is called at the top of both Token() and Refresh() so that a malformed request (empty refresh_token, empty client_id, or unknown grant_type) returns invalid_request or unsupported_grant_type without any store access. Without this gate, an empty refresh_token would compute SHA-256 of zero bytes and fire a real DB round-trip; an unknown grant_type would bypass routing unexpectedly. This is a defense-in-depth gate: oidcapi/token.go also validates grant_type before routing, but the service-layer gate ensures correctness for direct callers and future non-HTTP integrations."
-    enforced_by: [internal/oidc:TestChaos_Refresh_ValidateTokenParams_GatesStoreAccess]
+    enforced_by: [internal/oidc:TestChaos_Refresh_ValidateTokenParams_GatesStoreAccess, internal/oidc:TestChaos_Token_ValidateTokenParams_GatesStoreAccess]
 
   - id: INV-REFRESH-LOCKOUT-PREVENTION
     title: "Pre-rotation failures leave the old refresh token valid; no lock-out hazard"

@@ -504,6 +504,85 @@ func TestChaos_Refresh_ValidateTokenParams_GatesStoreAccess(t *testing.T) {
 	}
 }
 
+// TestChaos_Token_ValidateTokenParams_GatesStoreAccess verifies that the
+// ValidateTokenParams gate at the top of Token() short-circuits BEFORE any code
+// store access on malformed authorization_code requests. Parity with
+// TestChaos_Refresh_ValidateTokenParams_GatesStoreAccess for the Token() path.
+//
+//harbor:invariant INV-VALIDATE-TOKEN-PARAMS-GATE
+func TestChaos_Token_ValidateTokenParams_GatesStoreAccess(t *testing.T) {
+	// Use a store that panics on any access — if ValidateTokenParams does NOT
+	// gate the store, the panic fires and makes the gap unmissable.
+	panicCodes := &panicOnAccessAuthCodeStore{}
+	svc := NewService(ServiceConfig{
+		Issuer:   "https://chaos.harbor.example",
+		Clients:  NewInMemoryClientRegistry(),
+		Codes:    panicCodes,
+		Tokens:   NewPlaceholderIssuer(),
+		Sessions: NewStubSessionResolver("ppid-chaos"),
+	})
+
+	// Case 1: empty code → invalid_request (ValidateTokenParams gate).
+	_, terr := svc.Token(context.Background(), TokenRequest{
+		GrantType:    "authorization_code",
+		ClientID:     "some-client",
+		RedirectURI:  "http://localhost/cb",
+		CodeVerifier: "some-verifier",
+		// Code intentionally empty
+	})
+	if terr == nil {
+		t.Fatal("empty code: expected error, got nil")
+	}
+	if terr.Code != ErrCodeInvalidRequest {
+		t.Fatalf("empty code: want invalid_request, got %q", terr.Code)
+	}
+
+	// Case 2: empty client_id → invalid_request.
+	_, terr2 := svc.Token(context.Background(), TokenRequest{
+		GrantType:    "authorization_code",
+		Code:         "some-code",
+		RedirectURI:  "http://localhost/cb",
+		CodeVerifier: "some-verifier",
+		// ClientID intentionally empty
+	})
+	if terr2 == nil {
+		t.Fatal("empty client_id: expected error, got nil")
+	}
+	if terr2.Code != ErrCodeInvalidRequest {
+		t.Fatalf("empty client_id: want invalid_request, got %q", terr2.Code)
+	}
+
+	// Case 3: empty redirect_uri → invalid_request.
+	_, terr3 := svc.Token(context.Background(), TokenRequest{
+		GrantType:    "authorization_code",
+		Code:         "some-code",
+		ClientID:     "some-client",
+		CodeVerifier: "some-verifier",
+		// RedirectURI intentionally empty
+	})
+	if terr3 == nil {
+		t.Fatal("empty redirect_uri: expected error, got nil")
+	}
+	if terr3.Code != ErrCodeInvalidRequest {
+		t.Fatalf("empty redirect_uri: want invalid_request, got %q", terr3.Code)
+	}
+}
+
+// panicOnAccessAuthCodeStore panics on any method call. Used by
+// TestChaos_Token_ValidateTokenParams_GatesStoreAccess to prove that
+// ValidateTokenParams fires before any store access.
+type panicOnAccessAuthCodeStore struct{}
+
+func (panicOnAccessAuthCodeStore) Save(_ context.Context, _ AuthCode) error {
+	panic("Save called: ValidateTokenParams gate is missing")
+}
+func (panicOnAccessAuthCodeStore) Peek(_ context.Context, _ string) (AuthCode, bool, bool, error) {
+	panic("Peek called: ValidateTokenParams gate is missing")
+}
+func (panicOnAccessAuthCodeStore) Consume(_ context.Context, _ string) (ConsumeResult, error) {
+	panic("Consume called: ValidateTokenParams gate is missing")
+}
+
 // TestChaos_Refresh_SignalRefreshReuse_ZeroUUID verifies the defensive guard in
 // signalRefreshReuse: when GetSessionByTokenHash returns ErrRefreshTokenRevoked
 // with a session whose UserID is empty or the zero UUID sentinel, the family
@@ -579,8 +658,7 @@ func TestChaos_Refresh_SignalRefreshReuse_ZeroUUID(t *testing.T) {
 // badSessionFieldsStore always returns ErrRefreshTokenRevoked with a session
 // whose fields are set to the configured (bad) values — simulates a DBSessionStore
 // bug where rowToRefreshSession emits a zero/empty field instead of the stored value.
-// mu protects revokeCallCount so reads are safe after the synchronous Refresh() call
-// returns; in tests that exercise the guard (bad UserID/ClientID), the count must be 0.
+// mu protects revokeCallCount against concurrent reads/writes.
 type badSessionFieldsStore struct {
 	noopSessionStore
 	mu              sync.Mutex
@@ -589,6 +667,10 @@ type badSessionFieldsStore struct {
 	revokeCallCount int
 }
 
+// GetSessionByTokenHash returns ErrRefreshTokenRevoked with a session whose
+// fields reflect the configured (bad) values. userID and clientID are
+// write-once at struct literal construction and never mutated — no lock is
+// needed here (mu protects only revokeCallCount).
 func (s *badSessionFieldsStore) GetSessionByTokenHash(_ context.Context, _ []byte) (RefreshSession, error) {
 	return RefreshSession{UserID: s.userID, ClientID: s.clientID}, ErrRefreshTokenRevoked
 }
@@ -662,19 +744,20 @@ func TestChaos_Token_SignalCodeReuse_EmptyClientID(t *testing.T) {
 	}
 }
 
-// chaosConsumePathCodeStore implements AuthCodeStore for testing the ConsumeReused
-// path in Token() (Path 2 — the Consume call, not the Peek call). Peek returns
-// found=true, consumed=false so Token() proceeds through ValidateTokenExchange.
-// Consume then returns ConsumeReused with a code whose ClientID is empty,
-// simulating a DBAuthCodeStore bug in the row returned by the consume query.
+// chaosConsumePathCodeStore implements AuthCodeStore for testing the Consume-reuse
+// path in Token(). Peek returns found=true, consumed=false so Token() proceeds
+// through ValidateTokenExchange. Consume then returns ConsumeReused with a code
+// whose ClientID is empty, simulating a DBAuthCodeStore bug in the row returned
+// by the consume query. Save is a no-op since Token() never calls codes.Save.
 type chaosConsumePathCodeStore struct {
-	*InMemoryAuthCodeStore
 	peekCode  AuthCode // returned by Peek; must pass ValidateTokenExchange
 	reuseCode AuthCode // returned by Consume as ConsumeReused (empty ClientID)
 }
 
+func (s *chaosConsumePathCodeStore) Save(_ context.Context, _ AuthCode) error { return nil }
+
 func (s *chaosConsumePathCodeStore) Peek(_ context.Context, _ string) (AuthCode, bool, bool, error) {
-	return s.peekCode, true, false, nil // found, not consumed — drives Path 2
+	return s.peekCode, true, false, nil // not yet consumed — drives Consume-reuse path
 }
 
 func (s *chaosConsumePathCodeStore) Consume(_ context.Context, _ string) (ConsumeResult, error) {
@@ -689,9 +772,9 @@ func (s *chaosConsumePathCodeStore) Consume(_ context.Context, _ string) (Consum
 // the consume query's row mapping). The guard must suppress RevokeCodeFamily and
 // log an ERROR; the client response must still be invalid_grant.
 //
-// Complements TestChaos_Token_SignalCodeReuse_EmptyClientID (which covers Path 1
-// via the Peek consumed=true short-circuit) for full guard coverage across both
-// call sites of signalCodeReuse in Token().
+// Complements TestChaos_Token_SignalCodeReuse_EmptyClientID (which covers the
+// Peek consumed=true short-circuit) for full guard coverage across both call
+// sites of signalCodeReuse in Token().
 //
 //harbor:invariant INV-CODE-THEFT-SIGNAL-EMPTY-CLIENT-GUARD
 func TestChaos_Token_SignalCodeReuse_ConsumePathEmptyClientID(t *testing.T) {
@@ -722,7 +805,7 @@ func TestChaos_Token_SignalCodeReuse_ConsumePathEmptyClientID(t *testing.T) {
 	svc := NewService(ServiceConfig{
 		Issuer:      "https://chaos.harbor.example",
 		Clients:     NewInMemoryClientRegistry(),
-		Codes:       &chaosConsumePathCodeStore{InMemoryAuthCodeStore: NewInMemoryAuthCodeStore(), peekCode: peekCode, reuseCode: reuseCode},
+		Codes:       &chaosConsumePathCodeStore{peekCode: peekCode, reuseCode: reuseCode},
 		Tokens:      NewPlaceholderIssuer(),
 		Sessions:    NewStubSessionResolver("ppid-chaos"),
 		Revocations: sink,
@@ -743,7 +826,7 @@ func TestChaos_Token_SignalCodeReuse_ConsumePathEmptyClientID(t *testing.T) {
 		t.Fatalf("want invalid_grant, got %q", terr.Code)
 	}
 
-	// The empty-ClientID guard must fire (Consume path / Path 2).
+	// The empty-ClientID guard must fire (Consume-reuse path).
 	if !strings.Contains(logBuf.String(), "empty ClientID") {
 		t.Fatalf("expected ERROR log for empty-ClientID guard (Consume path); got: %s", logBuf.String())
 	}
