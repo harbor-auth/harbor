@@ -1,7 +1,8 @@
 // Package oidc holds Harbor's OAuth 2.1 / OpenID Connect Authorization Code
 // flow logic: PKCE verification, /authorize request validation, and /token code
 // exchange. Following docs/DESIGN.md §1.7, the security-critical logic here is a
-// PURE core (no net/http, no database) so it is exhaustively unit-testable
+// PURE core (no database, no HTTP handlers — net/http is imported only for its
+// status-code constants) so it is exhaustively unit-testable
 // without mocks; the thin I/O layer lives in internal/oidcapi and the stores in
 // this package's *interfaces* (store.go), with in-memory implementations for now.
 package oidc

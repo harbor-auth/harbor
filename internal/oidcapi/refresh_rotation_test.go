@@ -12,9 +12,16 @@ import (
 	"github.com/harbor/harbor/internal/oidc"
 )
 
-// newRefreshFlowServerWithStore is like newRefreshFlowServer but also returns
-// the InMemorySessionStore so tests can manipulate it (e.g. force-expire sessions).
-func newRefreshFlowServerWithStore(t *testing.T) (*httptest.Server, *oidc.InMemorySessionStore) {
+// newRefreshFlowServerFull is the single canonical constructor for the full
+// refresh-token rotation test server. It returns all three handles so the two
+// public helpers below can share this implementation without duplication.
+//
+// Wiring decisions:
+//   - offline_access in ScopesAllowed so /token issues a refresh token
+//   - SectorID: "localhost" required: PPIDSessionResolver fails closed without it
+//   - Shared InMemoryGrantStore between resolver and service so FindGrant
+//     succeeds in Refresh() (resolver reads grants written at code exchange)
+func newRefreshFlowServerFull(t *testing.T) (*httptest.Server, *oidc.InMemorySessionStore, *oidc.InMemoryClientRegistry) {
 	t.Helper()
 	const userID = "00000000-0000-0000-0000-000000000042"
 
@@ -49,14 +56,29 @@ func newRefreshFlowServerWithStore(t *testing.T) (*httptest.Server, *oidc.InMemo
 		Tokens:       oidc.NewPlaceholderIssuer(),
 		Sessions:     resolver,
 		SessionStore: sessions,
-		Grants:       grants, // shared with resolver so FindGrant succeeds in Refresh()
+		Grants:       grants,
 	})
 
 	srv := New(Config{Issuer: "https://eu.harbor.id", Service: svc})
 	h := openapi.HandlerFromMux(srv, http.NewServeMux())
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
+	return ts, sessions, clients
+}
+
+// newRefreshFlowServerWithStore is like newRefreshFlowServer but also returns
+// the InMemorySessionStore so tests can manipulate it (e.g. force-expire sessions).
+func newRefreshFlowServerWithStore(t *testing.T) (*httptest.Server, *oidc.InMemorySessionStore) {
+	t.Helper()
+	ts, sessions, _ := newRefreshFlowServerFull(t)
 	return ts, sessions
+}
+
+// newRefreshFlowServerWithClients is like newRefreshFlowServerWithStore but also
+// returns the InMemoryClientRegistry so tests can manipulate client registrations.
+func newRefreshFlowServerWithClients(t *testing.T) (*httptest.Server, *oidc.InMemorySessionStore, *oidc.InMemoryClientRegistry) {
+	t.Helper()
+	return newRefreshFlowServerFull(t)
 }
 
 // newRefreshFlowServer builds a Server wired for the full refresh-token rotation
@@ -68,7 +90,7 @@ func newRefreshFlowServerWithStore(t *testing.T) (*httptest.Server, *oidc.InMemo
 //     PPID and scopes from the consent grant
 func newRefreshFlowServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	ts, _ := newRefreshFlowServerWithStore(t)
+	ts, _, _ := newRefreshFlowServerFull(t)
 	return ts
 }
 
@@ -143,6 +165,53 @@ func postRefresh(t *testing.T, ts *httptest.Server, refreshToken string) *http.R
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// TestToken_DeregisteredClient_InvalidClient verifies that a valid refresh token
+// becomes unredeemable when its issuing client is removed from the registry
+// (INV-REFRESH-CLIENT-EXISTS / H20-2 gate). Also verifies M21-1: the response
+// must NOT include WWW-Authenticate: Basic because Harbor is a PKCE public-client
+// service and never accepts Authorization: Basic credentials.
+//
+//harbor:invariant INV-REFRESH-CLIENT-EXISTS
+func TestToken_DeregisteredClient_InvalidClient(t *testing.T) {
+	ts, _, clients := newRefreshFlowServerWithClients(t)
+	refreshToken := mintRefreshToken(t, ts)
+
+	// Deregister the client after token issuance.
+	clients.Delete(testClientID)
+
+	res := postRefresh(t, ts, refreshToken)
+	defer func() { _ = res.Body.Close() }()
+
+	// Must be 401 invalid_client — not redeemable after deregistration.
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("deregistered client status = %d, want 401", res.StatusCode)
+	}
+	assertNoStore(t, res)
+	if code := decodeOAuthErrorCode(t, res); code != "invalid_client" {
+		t.Fatalf("deregistered client error = %q, want invalid_client", code)
+	}
+	// M21-1: PKCE public-client flows must NOT emit WWW-Authenticate: Basic.
+	// Sending it would mislead client SDKs into prompting for HTTP Basic credentials.
+	if h := res.Header.Get("WWW-Authenticate"); h != "" {
+		t.Fatalf("deregistered client: unexpected WWW-Authenticate header %q (must be absent for PKCE flows)", h)
+	}
+
+	// No-lockout: the H20-2 check runs BEFORE RotateSession, so the rejection
+	// must NOT consume or tombstone the session. After re-registering the client
+	// the original token must succeed (proves it was not rotated away).
+	clients.Put(oidc.Client{
+		ID:            testClientID,
+		RedirectURIs:  []string{testRedirectURI},
+		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
+		SectorID:      "localhost",
+	})
+	res2 := postRefresh(t, ts, refreshToken)
+	defer func() { _ = res2.Body.Close() }()
+	if res2.StatusCode != http.StatusOK {
+		t.Fatalf("after re-registration: status = %d, want 200 (no lockout — H20-2 check must be pre-rotation)", res2.StatusCode)
+	}
+}
 
 // TestToken_RefreshRotation exercises the full rotation cycle end-to-end:
 //

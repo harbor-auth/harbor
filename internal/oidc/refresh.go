@@ -27,7 +27,7 @@ type RefreshSession struct {
 	ID          string // UUID string
 	Region      string // user's home jurisdiction (§5)
 	UserID      string // internal user UUID
-	GrantID     string // associated consent grant UUID — carried in-memory only; not persisted to the sessions table (no DB column exists yet)
+	GrantID     string // associated consent grant UUID — always "" until a DB column is added (no persistence yet). The copy-through in Refresh() (newSession.GrantID = session.GrantID) is a placeholder.
 	ClientID    string // the RP this session belongs to
 	DeviceLabel string // optional: UA string / device name
 	TokenHash   []byte // SHA-256 of the opaque plaintext — NEVER the plaintext
@@ -80,6 +80,11 @@ type sessionEntry struct {
 
 // InMemorySessionStore is a dev/test SessionStore. NOT for production — a real
 // store persists sessions durably (internal/clients.DBSessionStore).
+//
+// Time: expiry checks use time.Now() directly (wall-clock), not an injectable
+// clock. Use ForceExpireAllForTest() to fast-forward expiry in tests rather
+// than sleeping. A future refactor could inject a clock via the constructor, but
+// the current test-helper approach is sufficient for the existing test surface.
 type InMemorySessionStore struct {
 	mu     sync.Mutex
 	byID   map[string]*sessionEntry
@@ -150,6 +155,27 @@ func (s *InMemorySessionStore) RotateSession(_ context.Context, oldID string, ne
 	return nil
 }
 
+// ForceExpireAllForTest immediately back-dates every active session's ExpiresAt
+// to one second in the past, simulating TTL expiry without sleeping.
+// For use in tests only — not called from production code paths.
+//
+// NOTE: This method intentionally lives in non-test code (not export_test.go)
+// because internal/oidcapi tests call it cross-package on a *InMemorySessionStore
+// value imported from internal/oidc. Moving it to export_test.go would make it
+// invisible to external test packages (Go test exports are intra-package only)
+// without introducing a separate testutil package. Accept as a test-helper
+// with a sufficiently obvious name to prevent accidental production use.
+func (s *InMemorySessionStore) ForceExpireAllForTest() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	past := time.Now().Add(-time.Second)
+	for _, e := range s.byID {
+		if !e.revoked {
+			e.s.ExpiresAt = past
+		}
+	}
+}
+
 // RevokeSessionsByUserClient implements SessionStore (theft signal family revoke).
 func (s *InMemorySessionStore) RevokeSessionsByUserClient(_ context.Context, userID, clientID string) error {
 	s.mu.Lock()
@@ -161,20 +187,6 @@ func (s *InMemorySessionStore) RevokeSessionsByUserClient(_ context.Context, use
 		}
 	}
 	return nil
-}
-
-// ForceExpireAllForTest immediately back-dates every active session's ExpiresAt
-// to one second in the past, simulating TTL expiry without sleeping.
-// This is a test-only helper; never call it from production code.
-func (s *InMemorySessionStore) ForceExpireAllForTest() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	past := time.Now().Add(-time.Second)
-	for _, e := range s.byID {
-		if !e.revoked {
-			e.s.ExpiresAt = past
-		}
-	}
 }
 
 // hashRefreshToken returns the SHA-256 digest of plaintext. Only the digest is

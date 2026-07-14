@@ -80,6 +80,7 @@ func TestDBClientRegistryLookupUnknown(t *testing.T) {
 	}
 }
 
+//harbor:invariant INV-DB-CLIENT-ERROR-NOT-REDIRECTED
 func TestDBClientRegistryLookupDBError(t *testing.T) {
 	// A non-ErrNoRows DB error must return found=false (open-redirect defence).
 	f := &errRPQuerier{err: errors.New("connection reset")}

@@ -32,14 +32,25 @@ docs/plans/         → future WHAT — intent not yet built
 
 ## Plans (future / in progress)
 
+> See **[`plans/README.md`](plans/README.md)** for the full dependency graph (ASCII DAG), build phases, critical paths, and the edge list in machine-readable form.
+
 | Plan | Status | DESIGN § | Promotes to |
 |---|---|---|---|
 | [envelope-encryption-kms](plans/envelope-encryption-kms.md) | in-progress | §4.4, §7.3, §10 | `internal/crypto/` |
 | [real-token-issuance](plans/real-token-issuance.md) | draft | §3.3, §3.4, §7.3 | `internal/crypto/`, `internal/oidc/`, `api/openapi/harbor.yaml` |
+| [signing-key-rotation](plans/signing-key-rotation.md) | draft | §7.3, §3.5.4, §3.3 | `internal/crypto/`, `cmd/harbor-hot/`, `cmd/harbor-mgmt/` |
+| [token-introspection](plans/token-introspection.md) | draft | §3.3, §3.5, §3.5.2 | `internal/oidcapi/`, `api/openapi/harbor.yaml` |
+| [auth-code-persistence](plans/auth-code-persistence.md) | draft | §4.1, §4.4, §10 | `internal/oidc/`, `internal/clients/`, `cmd/harbor-hot/` |
 | [client-grant-persistence](plans/client-grant-persistence.md) | draft | §3.2, §10 | `internal/oidc/`, `internal/clients/`, `db/queries/` |
 | [user-enrollment](plans/user-enrollment.md) | draft | §11.1, §10, §4.4 | `internal/identity/`, `internal/webauthn/` |
+| [bff-session-middleware](plans/bff-session-middleware.md) | draft | §9, §11.1, §11.2 | `internal/oidc/`, `internal/webauthn/`, `cmd/harbor-mgmt/` |
+| [userinfo-endpoint](plans/userinfo-endpoint.md) | draft | §3.3, §11.4, §3.1 | `internal/oidcapi/`, `api/openapi/harbor.yaml` |
 | [session-ppid-seam](plans/session-ppid-seam.md) | draft | §3.2, §11.2 | `internal/oidc/`, `internal/identity/` |
 | [refresh-token-rotation](plans/refresh-token-rotation.md) | draft | §3.5, §10 | `internal/oidc/`, `internal/clients/`, `db/queries/` |
+| [grant-id-fk](plans/grant-id-fk.md) | draft | §3.5, §10, §11.3 | `db/migrations/`, `internal/clients/`, `internal/oidc/` |
+| [revocation-outbox](plans/revocation-outbox.md) | draft | §3.5, §3.5.2, §10 | `internal/oidc/`, `internal/clients/`, `db/migrations/` |
+| [bloom-filter-revocation](plans/bloom-filter-revocation.md) | draft | §3.5, §3.5.2, §7.4 | `internal/oidc/`, `cmd/harbor-hot/`, `cmd/harbor-mgmt/` |
+| [oidf-conformance](plans/oidf-conformance.md) | draft | §1.8, §11.7, §3.1 | `internal/oidcapi/`, `internal/oidc/`, `conformance/` |
 
 > A plan appears here until it's implemented, then **`@plan promote`** moves its row into the **Features** table above. Author the next one with **`@plan new <slug>`**.
 

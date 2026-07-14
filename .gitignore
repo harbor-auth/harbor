@@ -2,6 +2,8 @@
 /bin/
 /agentcheck
 /testweakening
+/harbor-hot
+/harbor-mgmt
 check-results.json
 
 # Test / coverage

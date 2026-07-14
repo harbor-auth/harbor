@@ -2,6 +2,7 @@ package oidcapi
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/harbor/harbor/internal/gen/openapi"
@@ -33,6 +34,12 @@ func (s *Server) PostToken(w http.ResponseWriter, r *http.Request) {
 		ClientID:     r.PostFormValue("client_id"),
 		CodeVerifier: r.PostFormValue("code_verifier"),
 		RefreshToken: r.PostFormValue("refresh_token"),
+		// NOTE: RFC 6749 §6 allows a client to request a narrower scope on a
+		// refresh_token grant via the `scope` form parameter. Harbor currently
+		// does not parse this field — TokenRequest has no Scope field — so any
+		// client-supplied scope on a refresh request is silently ignored and the
+		// full frozen grant scopes are always returned. This is a known
+		// intentional omission documented in service.go Refresh() Step B.
 	}
 
 	var tokens *oidc.IssuedTokens
@@ -54,6 +61,7 @@ func (s *Server) PostToken(w http.ResponseWriter, r *http.Request) {
 func writeTokenResponse(w http.ResponseWriter, t *oidc.IssuedTokens) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	w.WriteHeader(http.StatusOK)
 	resp := openapi.TokenResponse{
 		AccessToken: t.AccessToken,
@@ -67,7 +75,11 @@ func writeTokenResponse(w http.ResponseWriter, t *oidc.IssuedTokens) {
 		v := t.RefreshExpiresIn
 		resp.RefreshExpiresIn = &v
 	}
-	_ = json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		// WriteHeader(200) was already sent — status cannot be changed.
+		// Log at Warn: these are almost always client TCP disconnects, not server bugs.
+		slog.Default().Warn("oidcapi: failed to encode token response", "error", err)
+	}
 }
 
 // writeOAuthError emits the OAuth error body at the error's HTTP status, with
@@ -76,12 +88,23 @@ func writeTokenResponse(w http.ResponseWriter, t *oidc.IssuedTokens) {
 func writeOAuthError(w http.ResponseWriter, e *oidc.TokenError) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	if e.Code == oidc.ErrCodeInvalidClient {
-		w.Header().Set("WWW-Authenticate", "Basic")
-	}
+	w.Header().Set("Pragma", "no-cache")
+	// WWW-Authenticate: Basic is required by RFC 6749 §5.2 only when the client
+	// authenticated via HTTP Basic (Authorization: Basic ...) and that
+	// authentication failed. Harbor is a PKCE public-client service — clients
+	// never send Authorization: Basic, so emitting WWW-Authenticate: Basic on
+	// invalid_client would be protocol-incorrect and would mislead client SDKs
+	// (e.g. AppAuth) into prompting for Basic credentials instead of restarting
+	// the authorization-code flow. The ErrCodeInvalidClient path is now live
+	// (H20-2: deregistered-client refresh gate) so this placeholder must stay
+	// inert. When client_secret_basic is added, re-add the header only on the
+	// specific path where HTTP Basic auth was attempted.
 	w.WriteHeader(e.Status)
-	_ = json.NewEncoder(w).Encode(openapi.OAuthError{
+	if err := json.NewEncoder(w).Encode(openapi.OAuthError{
 		Error:            e.Code,
 		ErrorDescription: e.Description,
-	})
+	}); err != nil {
+		// WriteHeader was already sent — status cannot be changed.
+		slog.Default().Warn("oidcapi: failed to encode oauth error response", "error", err)
+	}
 }

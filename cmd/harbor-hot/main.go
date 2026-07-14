@@ -5,12 +5,15 @@
 // Its routes are served from the spec-generated OpenAPI handlers
 // (api/openapi/harbor.yaml → internal/gen/openapi), implemented in
 // internal/oidcapi. Today that is /healthz, the OIDC discovery document, and the
-// Authorization Code + PKCE flow (/authorize + /token). The flow's client
-// registry, code store, token signer, grant store, and login/consent are
-// in-memory / stubbed scaffolds for now (see internal/oidc); more endpoints and
-// real backends are added by growing the spec and swapping the interface
-// implementations. The DB-backed registry + grant store live in internal/clients
-// and are wired here when DATABASE_URL is configured (DESIGN §10).
+// Authorization Code + PKCE flow (/authorize + /token).
+//
+// "Stateless" here means the hot path owns no mutable PII state — it does not run
+// enrollment ceremonies and never imports internal/webauthn (see the arch
+// fitness test TestHotPathDoesNotImportMgmtPackages). It MAY read from the
+// regional DB via internal/clients: when DATABASE_URL is configured, the client
+// registry, grant store, session store, and secret loader are DB-backed
+// (DESIGN §10). Without DATABASE_URL it falls back to in-memory dev scaffolds so
+// the flow stays exercisable before real backends are provisioned.
 package main
 
 import (
@@ -21,7 +24,9 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/harbor/harbor/internal/clients"
 	"github.com/harbor/harbor/internal/crypto"
+	"github.com/harbor/harbor/internal/gen/db"
 	"github.com/harbor/harbor/internal/gen/openapi"
 	"github.com/harbor/harbor/internal/httpserver"
 	"github.com/harbor/harbor/internal/oidc"
@@ -43,18 +48,8 @@ func main() {
 		issuer = "http://localhost:" + port
 	}
 
-	// Authorization Code + PKCE flow backends. SCAFFOLD: all in-memory / stubbed
-	// (docs/DESIGN.md §11.2, §7.3) — a demo client + auto-approving login/consent
-	// + unsigned placeholder tokens — so the flow is exercisable before the real
-	// registry, HSM signer, and auth UI land. Swap these implementations, not the
-	// flow logic, to go to production.
-	clients := oidc.NewInMemoryClientRegistry()
-	clients.Put(oidc.Client{
-		ID:            "demo-client",
-		SectorID:      "localhost", // groups redirect URIs for PPID derivation (§3.2)
-		RedirectURIs:  []string{"http://localhost:3000/callback"},
-		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
-	})
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	// DEV-ONLY signing key. SCAFFOLD: the private key is generated in-process and
 	// is NOT backed by the regional HSM (docs/DESIGN.md §7.3). Tokens do not
@@ -63,26 +58,119 @@ func main() {
 	signer, err := crypto.NewLocalSigner()
 	if err != nil {
 		logger.Error("failed to create local signer", "error", err)
+		stop()
+		os.Exit(1) // pool is not yet created at this point — no pool.Close() needed
+	}
+
+	pool, err := clients.ConnectDB(ctx, logger)
+	if err != nil {
+		if ctx.Err() != nil {
+			// SIGINT/SIGTERM arrived during startup (before the server bound).
+			// This is a clean shutdown, not a crash — exit 0 so process managers
+			// (systemd, k8s) don't restart the process.
+			logger.Info("startup cancelled by signal — exiting cleanly", "error", err)
+			stop()
+			os.Exit(0)
+		}
+		logger.Error("database connection failed", "error", err)
+		stop()
 		os.Exit(1)
 	}
-
-	// Demo user for PPIDSessionResolver. SCAFFOLD: the demo user ID is fixed and
-	// the pairwise secret is deterministic — NOT for production. Swap the
-	// FixedAuthSource for a real BFF-session-backed AuthSource and the
-	// InMemorySecretLoader for clients.NewDBSecretLoader once DATABASE_URL lands.
-	demoUserID := "00000000-0000-0000-0000-000000000001"
-	demoSecret := make([]byte, 32)
-	for i := range demoSecret {
-		demoSecret[i] = byte(i + 1)
+	if pool != nil {
+		// defer pool.Close() handles the clean-exit path: main() returns normally
+		// after httpserver.Run returns nil and deferred functions run as usual.
+		// Every os.Exit() path below calls pool.Close() explicitly because
+		// os.Exit skips deferred functions.
+		defer pool.Close()
 	}
-	secretLoader := oidc.NewInMemorySecretLoader()
-	secretLoader.Put(demoUserID, oidc.UserSecret{Region: "us", Secret: demoSecret})
 
-	grantStore := oidc.NewInMemoryGrantStore()
+	// SCAFFOLD: FixedAuthSource is a placeholder for real BFF-session-backed auth
+	// (docs/DESIGN.md §11.1). It hardcodes a single demo user — NOT for
+	// production — and is used in both the DB and in-memory paths until real
+	// session validation lands.
+	const demoUserID = "00000000-0000-0000-0000-000000000001"
+
+	var (
+		clientRegistry oidc.ClientRegistry
+		grantStore     oidc.GrantStore
+		sessionStore   oidc.SessionStore
+		secretLoader   oidc.UserSecretLoader
+	)
+
+	if pool != nil {
+		q := db.New(pool)
+		// SCAFFOLD: dev-only LocalKeyProvider. Swap for the HSM-backed KeyProvider
+		// in production (docs/DESIGN.md §7.3). KEK_SECRET MUST be set when
+		// DATABASE_URL is configured so the pairwise-secret DEKs unwrap correctly —
+		// falling back to a hardcoded dev key against a real DB would let anyone
+		// with the source re-derive every user's pairwise secret, so it is fatal.
+		kekSecret := os.Getenv("KEK_SECRET")
+		if kekSecret == "" {
+			logger.Error("KEK_SECRET must be set when DATABASE_URL is configured")
+			// os.Exit skips deferred functions, so release resources explicitly.
+			// stop() cancels the signal context so any goroutines blocked on
+			// ctx.Done() receive the shutdown signal before pool.Close() drains the
+			// connection pool. This is the inverse of LIFO defer order (pool.Close
+			// first, then stop) but is safe: pgxpool handles a pre-cancelled context
+			// gracefully.
+			stop()
+			pool.Close()
+			os.Exit(1)
+		}
+		keyProvider, err := crypto.NewLocalKeyProvider(kekSecret)
+		if err != nil {
+			logger.Error("failed to create key provider", "error", err)
+			// os.Exit skips deferred functions, so release resources explicitly.
+			stop()
+			pool.Close()
+			os.Exit(1)
+		}
+		clientRegistry = clients.NewDBClientRegistry(q).WithLogger(logger)
+		grantStore = clients.NewDBGrantStore(q)
+		sessionStore = clients.NewDBSessionStoreWithPool(q, pool)
+		secretLoader = clients.NewDBSecretLoader(q, keyProvider, crypto.NewCipher())
+		logger.Info("using DB-backed stores")
+		// SCAFFOLD: authorization codes are still stored in-memory (see the
+		// oidc.NewInMemoryAuthCodeStore wiring below), so a code issued by one
+		// replica cannot be redeemed by another. Warn so this isn't silently
+		// deployed multi-replica (docs/DESIGN.md §4.4).
+		logger.Warn("authorization codes stored in-memory — not suitable for multi-replica deployment")
+		// SCAFFOLD: even in the DB path the subject is still resolved by
+		// FixedAuthSource below, so every /authorize authenticates as the SAME
+		// hardcoded demo user regardless of who is calling. This must be replaced
+		// by real BFF-session-backed auth before any deployment (docs/DESIGN.md §11.1).
+		logger.Warn("SCAFFOLD: FixedAuthSource wired in DB path — /authorize always authenticates as the hardcoded demo user; NOT suitable for deployment (docs/DESIGN.md §11.1)")
+	} else {
+		// SCAFFOLD: in-memory stores for dev/test (DATABASE_URL not set). A demo
+		// client + deterministic demo-user secret keep the Authorization Code +
+		// PKCE flow exercisable before a regional DB is provisioned.
+		logger.Warn("DATABASE_URL not set — using in-memory stores (dev-only SCAFFOLD)")
+		logger.Warn("SCAFFOLD: FixedAuthSource wired — /authorize always authenticates as the hardcoded demo user; NOT for deployment (docs/DESIGN.md §11.1)")
+		inmemClients := oidc.NewInMemoryClientRegistry()
+		inmemClients.Put(oidc.Client{
+			ID:            "demo-client",
+			SectorID:      "localhost", // groups redirect URIs for PPID derivation (§3.2)
+			RedirectURIs:  []string{"http://localhost:3000/callback"},
+			ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
+		})
+		clientRegistry = inmemClients
+
+		demoSecret := make([]byte, 32)
+		for i := range demoSecret {
+			demoSecret[i] = byte(i + 1)
+		}
+		inmemLoader := oidc.NewInMemorySecretLoader()
+		inmemLoader.Put(demoUserID, oidc.UserSecret{Region: "us", Secret: demoSecret})
+		secretLoader = inmemLoader
+
+		grantStore = oidc.NewInMemoryGrantStore()
+		sessionStore = oidc.NewInMemorySessionStore()
+	}
 
 	svc := oidc.NewService(oidc.ServiceConfig{
 		Issuer:  issuer,
-		Clients: clients,
+		Logger:  logger,
+		Clients: clientRegistry,
 		Codes:   oidc.NewInMemoryAuthCodeStore(),
 		Tokens:  oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Sessions: oidc.NewPPIDSessionResolver(oidc.PPIDSessionResolverConfig{
@@ -90,12 +178,8 @@ func main() {
 			Loader: secretLoader,
 			Grants: grantStore,
 		}),
-		// SCAFFOLD: in-memory grant store — swap for clients.NewDBGrantStore(db.New(pool))
-		// once DATABASE_URL wiring lands (docs/DESIGN.md §10, §11.3).
-		Grants: grantStore,
-		// SCAFFOLD: in-memory session store — swap for clients.NewDBSessionStore(db.New(pool))
-		// once DATABASE_URL wiring lands (docs/DESIGN.md §3.5, §10).
-		SessionStore: oidc.NewInMemorySessionStore(),
+		Grants:       grantStore,
+		SessionStore: sessionStore,
 	})
 
 	srv := oidcapi.New(oidcapi.Config{
@@ -105,12 +189,25 @@ func main() {
 	})
 	handler := openapi.HandlerFromMux(srv, http.NewServeMux())
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
 	logger.Info("starting harbor-hot", "port", port, "issuer", issuer)
 	if err := httpserver.Run(ctx, ":"+port, handler, logger); err != nil {
+		if ctx.Err() != nil {
+			// Signal arrived while the server was running — httpserver.Run returned
+			// a non-nil error coincident with context cancellation. Treat as a clean
+			// shutdown so process managers don't restart the process.
+			logger.Info("server stopped by signal — exiting cleanly", "error", err)
+			stop()
+			if pool != nil {
+				pool.Close()
+			}
+			os.Exit(0)
+		}
 		logger.Error("harbor-hot exited with error", "error", err)
+		// os.Exit skips deferred functions, so release resources explicitly.
+		stop()
+		if pool != nil {
+			pool.Close()
+		}
 		os.Exit(1)
 	}
 }

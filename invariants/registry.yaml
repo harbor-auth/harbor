@@ -157,7 +157,7 @@ invariants:
   - id: INV-REFRESH-ROTATION-INVALIDATES-OLD
     title: "A rotated refresh token is immediately invalidated; the old token cannot be reused"
     design_refs: [§3.5, §11.7]
-    description: "After a successful Refresh(), the old session is tombstoned (revoked_at set). Presenting the old token again returns invalid_grant — the hash lookup still finds the row but the revoked check fires, preventing replay."
+    description: "After a successful Refresh(), the old session is tombstoned (revoked_at set). Presenting the old token again returns invalid_grant — the hash lookup still finds the row but the revoked check fires, preventing replay. Accepted TOCTOU: two concurrent Refresh() calls with the same valid token can both pass GetSessionByTokenHash before either calls RotateSession. Both will revoke the old session and create a new one (idempotent revoke + separate new sessions), resulting in two valid successor sessions. This is a known architectural window bounded by the race window of concurrent requests; eliminating it would require a SELECT-FOR-UPDATE or optimistic-locking pattern on the session row. Documented as accepted rather than fixed."
     enforced_by: [internal/oidc:TestRefreshRotationInvalidatesOldToken, internal/oidcapi:TestToken_RefreshInvalidatesOldToken]
 
   - id: INV-REFRESH-ROTATION-SINGLE-USE
@@ -169,8 +169,20 @@ invariants:
   - id: INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE
     title: "Replay of a rotated token fires theft signal that revokes the entire (user, client) session family"
     design_refs: [§3.5, §11.7]
-    description: "When a revoked refresh token is presented, ErrRefreshTokenRevoked is detected and RevokeSessionsByUserClient is called, invalidating every active session for that (user, client) pair — including the legitimately rotated successor token. This detects token theft and forces re-authentication."
-    enforced_by: [internal/oidc:TestRefreshReuseFiresTheftSignal, internal/oidcapi:TestToken_RefreshTheftSignal_RevokesFamily]
+    description: "When a revoked refresh token is presented, ErrRefreshTokenRevoked is detected and RevokeSessionsByUserClient is called, invalidating every active session for that (user, client) pair — including the legitimately rotated successor token. This detects token theft and forces re-authentication. A revoke-side DB failure must NOT become a 5xx or allow the replayed token to succeed. ACCEPTED RISK (bearer-token DoS property): replaying a rotated (revoked) token unconditionally revokes the successor, even if held by the legitimate client. An attacker who obtains only the old rotated token (but not the successor) can force the legitimate holder to re-authenticate. This is the standard security/availability trade-off of stateless rotation — aggressive, scope-limited revocation (user×client only, not user-wide) is preferred over partial revocation that risks leaving a stolen successor token active. See docs/DESIGN.md §3.5."
+    enforced_by: [internal/oidc:TestRefreshReuseFiresTheftSignal, internal/oidcapi:TestToken_RefreshTheftSignal_RevokesFamily, internal/clients:TestDBSessionStoreGetByTokenHash_RevokedAndExpired, internal/oidc:TestChaos_Refresh_FamilyRevokeFails_StillInvalidGrant]
+
+  - id: INV-REFRESH-THEFT-SIGNAL-ZERO-UUID-GUARD
+    title: "signalRefreshReuse guards against zero/empty UserID or empty ClientID suppressing the theft signal"
+    design_refs: [§3.5, §11.7]
+    description: "When GetSessionByTokenHash returns ErrRefreshTokenRevoked with a session whose UserID is empty or the zero-UUID sentinel (NULL pgtype.UUID via uuidToString), or whose ClientID is empty, the family revoke is skipped and an ERROR is logged rather than calling RevokeSessionsByUserClient with an invalid argument. An invalid UserID would match zero rows in the DB; an empty ClientID could match the wrong family. Both silently suppress the theft signal and mask a latent store bug as a no-op. The correct client response is still invalid_grant (not 5xx) so the attacker learns nothing from the guard firing."
+    enforced_by: [internal/oidc:TestChaos_Refresh_SignalRefreshReuse_ZeroUUID]
+
+  - id: INV-CODE-THEFT-SIGNAL-EMPTY-CLIENT-GUARD
+    title: "signalCodeReuse guards against empty ClientID suppressing the code-theft signal"
+    design_refs: [§11.7]
+    description: "When an authorization code with an empty ClientID is replayed (simulating a DBAuthCodeStore bug), signalCodeReuse skips RevokeCodeFamily and emits an ERROR log rather than targeting the wrong code family or matching zero rows — either of which would silently suppress the theft signal and mask a latent store bug as a no-op. Parity with INV-REFRESH-THEFT-SIGNAL-ZERO-UUID-GUARD for the auth-code path. The correct client response is still invalid_grant so the attacker learns nothing from the guard firing."
+    enforced_by: [internal/oidc:TestChaos_Token_SignalCodeReuse_EmptyClientID, internal/oidc:TestChaos_Token_SignalCodeReuse_ConsumePathEmptyClientID]
 
   - id: INV-ENROLL-DEK-FRESH
     title: "Each enrollment generates a fresh DEK; keys are never reused across users"
@@ -189,3 +201,69 @@ invariants:
     design_refs: [§4.4, §5.4, §10]
     description: "A DEK generated at enrollment is wrapped under the regional KEK with region-bound GCM AAD. Unwrapping the same wrapped blob with a different region returns ErrDecryptFailed — the GCM tag cannot authenticate."
     enforced_by: [internal/identity:TestEnrollRegionBound]
+
+  - id: INV-DB-ERROR-NOT-MASKED
+    title: "Transient DB errors propagate as 5xx; never silently masked as invalid_grant or ErrRefreshTokenNotFound"
+    design_refs: [§10, §11.7]
+    description: "A transient DB error (connection reset, timeout, etc.) on a session lookup must propagate to the caller so the HTTP layer returns server_error, not silently collapse to invalid_grant / ErrRefreshTokenNotFound. Masking a DB outage as a client error would reject valid refresh tokens and trigger a mass logout for the duration of the outage."
+    enforced_by: [internal/clients:TestDBSessionStoreGetByTokenHash_DBError, internal/oidc:TestChaos_Refresh_SessionLookupDBError]
+
+  - id: INV-REFRESH-CONSENT-REVOKED
+    title: "Refresh after consent revocation returns invalid_grant (not server_error)"
+    design_refs: [§3.5, §10, §11.7]
+    description: "When FindGrant returns (Grant{}, false, nil) the authorization has been permanently revoked by the user. This must return invalid_grant (RFC 6749 §5.2) so well-behaved clients re-initiate consent rather than retrying indefinitely. Returning server_error for a permanently-gone grant would cause infinite retries and the user could never re-authenticate. Accepted TOCTOU window: if consent is revoked concurrently between FindGrant (Step A) and RotateSession (Step D), access tokens already minted in Step B remain valid until their TTL expires. Eliminating this window would require a distributed lock on the grant during token issuance — an accepted architectural trade-off documented here so reviewers do not mistake it for a bug. The invariant is enforced at the FindGrant level; concurrent revocation is bounded by the access token TTL."
+    enforced_by: [internal/oidc:TestRefreshConsentRevoked, internal/clients:TestDBGrantStoreActiveOnlyAfterRevoke]
+
+  - id: INV-VALIDATE-TOKEN-PARAMS-GATE
+    title: "ValidateTokenParams gates store access; malformed requests never reach the session/code store"
+    design_refs: [§3.1, §3.5, §11.7]
+    description: "ValidateTokenParams is called at the top of both Token() and Refresh() so that a malformed request (empty refresh_token, empty client_id, or unknown grant_type) returns invalid_request or unsupported_grant_type without any store access. Without this gate, an empty refresh_token would compute SHA-256 of zero bytes and fire a real DB round-trip; an unknown grant_type would bypass routing unexpectedly. This is a defense-in-depth gate: oidcapi/token.go also validates grant_type before routing, but the service-layer gate ensures correctness for direct callers and future non-HTTP integrations."
+    enforced_by: [internal/oidc:TestChaos_Refresh_ValidateTokenParams_GatesStoreAccess, internal/oidc:TestChaos_Token_ValidateTokenParams_GatesStoreAccess]
+
+  - id: INV-REFRESH-LOCKOUT-PREVENTION
+    title: "Pre-rotation failures leave the old refresh token valid; no lock-out hazard"
+    design_refs: [§3.5, §11.7]
+    description: "FindGrant (Step A), tokens.Issue (Step B), and new-session-ID generation (Step C) are all called BEFORE RotateSession (Step D — the single commit point). A failure in A, B, or C returns server_error without revoking the existing session, so the client can retry with the same refresh token once the dependency recovers. After RotateSession no fallible operations remain. A failure in Step D (RotateSession) is also handled: RotateSession is atomic — either both the old revocation and new session exist, or neither, so the client can still retry. IMPORTANT: the atomicity guarantee of RotateSession only holds when DBSessionStore.WithPool() has been called (production wiring via cmd/harbor-hot/main.go). Without a pool, RotateSession degrades to sequential best-effort: RevokeSession then CreateSession. A CreateSession failure after a successful RevokeSession produces a lock-out (old token gone, new token not persisted). The production path always wires the pool — the sequential fallback exists only for dev/test. COMMIT ACKNOWLEDGEMENT HAZARD (reduced in H20-1, residual risk remains): RotateSession.Commit() previously ran on the parent ctx. If the client disconnected while COMMIT was in flight, pgx could return context.Canceled even though the DB committed. H20-1 fix: Commit now runs on context.WithoutCancel + a 5 s bounded timeout so a routine client disconnect cannot trigger the lock-out path. RESIDUAL RISK: if the DB commits but the network ACK is lost within the 5 s window (e.g. network partition), Commit still returns an error despite the rotation having committed — the subsequent retry with the old (now-revoked) token fires the theft signal (family lockout). Eliminating this residual window requires a durable outbox pattern (see docs/DESIGN.md §3.5). Note: within Step C, newOpaqueToken() reads from crypto/rand and cannot be independently fault-injected. Its failure behavior (server_error, old token survives) is proven by design parity with newSessionID(), which IS independently tested by TestChaos_Refresh_NewSessionIDFails_PreRotation. H22-1 EXTENSION: A cancelled request context (client disconnect, SIGINT) fires the ctx.Err() pre-check in Refresh() before reaching clients.Lookup and before RotateSession. This path returns server_error and is covered by the no-lockout property: the old token is NOT consumed (verified by TestChaos_Refresh_CancelledContextBeforeLookup)."
+    enforced_by: [internal/oidc:TestChaos_Refresh_GrantLookupFails_PreRotation, internal/oidc:TestChaos_Refresh_TokenSigningFails_PreRotation, internal/oidc:TestChaos_Refresh_RotationFails, internal/oidc:TestChaos_Refresh_NewSessionIDFails_PreRotation, internal/oidc:TestChaos_Refresh_CancelledContextBeforeLookup]
+
+  - id: INV-DB-CLIENT-ERROR-NOT-REDIRECTED
+    title: "DB error during client lookup must not redirect to an unverified URI (open-redirect defence)"
+    design_refs: [§11.7, §7.4]
+    description: "When DBClientRegistry.Lookup encounters a non-ErrNoRows DB error it returns (Client{}, false) so the HTTP layer surfaces server_error rather than redirecting to an unverified redirect_uri. Redirecting before the client_id is proven valid is a classic open-redirect attack vector — a DB outage must never be exploitable as a redirect hijack."
+    enforced_by: [internal/clients:TestDBClientRegistryLookupDBError]
+
+  - id: INV-REFRESH-OFFLINE-ACCESS-GATE
+    title: "Refresh tokens only issued when offline_access scope was consented"
+    design_refs: [§3.5, §11.7]
+    description: "A code exchange without offline_access in the consented scope must not issue a refresh token, regardless of whether a UserID is present. The gate is checked in Token() via scopeHasOfflineAccess() before issueRefreshToken is called — both conditions (offline_access AND non-empty UserID) must be true."
+    enforced_by: [internal/oidc:TestRefreshOfflineAccessGate]
+
+  - id: INV-REFRESH-CLIENT-BINDING
+    title: "Refresh token only redeemable by the client it was issued to"
+    design_refs: [§3.5, §11.7]
+    description: "A refresh token presented by a different client_id than the one recorded at issuance returns invalid_grant. Prevents a compromised RP from using another RP's refresh tokens (ValidateRefreshParams client-binding check)."
+    enforced_by: [internal/oidc:TestRefreshWrongClientRejected]
+
+  - id: INV-REFRESH-CLIENT-EXISTS
+    title: "Refresh token is not redeemable if the issuing client is no longer registered"
+    design_refs: [§3.5, §11.7]
+    description: "After ValidateRefreshParams succeeds, Refresh() re-validates that the session's client_id still exists in the ClientRegistry. A client deregistered after token issuance returns invalid_client (HTTP 401) rather than allowing its refresh tokens to remain redeemable for their full 14-day TTL. Note: ClientRegistry.Lookup is (Client, bool) — a registry outage or a cancelled request context (client disconnect, SIGINT) both cause DBClientRegistry.Lookup to return (Client{}, false), indistinguishable from genuine deregistration. A ctx.Err() pre-check (H22-1) returns server_error for already-cancelled contexts, reducing the false-positive window to a narrow TOCTOU gap. Full re-validation of client status/redirect-URIs on every refresh is not performed (M20-1 accepted limitation)."
+    enforced_by: [internal/oidc:TestRefreshDeregisteredClientRejected, internal/oidcapi:TestToken_DeregisteredClient_InvalidClient, internal/oidc:TestChaos_Refresh_CancelledContextBeforeLookup]
+
+  - id: INV-REFRESH-REGION-PROPAGATED
+    title: "Refresh session carries the user's home region; rotation preserves it"
+    design_refs: [§10, §3.5]
+    description: "The RefreshSession created at code exchange carries the user's home region (recovered from the consent grant via FindGrant). RotateSession copies session.Region to the new session unchanged. An empty Region would violate the user-owned-row contract (DESIGN §10) and propagate forever through every rotation."
+    enforced_by: [internal/oidc:TestRefreshTokenRegionPropagated]
+
+  - id: INV-REFRESH-SCOPE-REFLECTS-GRANT
+    title: "Access token scope on refresh reflects the CURRENT grant scopes, not a stale value"
+    design_refs: [§3.5, §11.7]
+    description: "When Refresh() issues new access/ID tokens via tokens.Issue, the Scope parameter is always computed from the current frozen grant scopes (strings.Join(grant.Scopes)). A grant scope downgrade must be reflected in the returned access token scope — not silently using a cached or stale scope string. Tested by asserting tokens.Scope equals the downgraded grant scope after a scope-downgrade scenario."
+    enforced_by: [internal/oidc:TestRefreshRotationRequiresOfflineAccess]
+
+  - id: INV-REFRESH-ROTATION-REQUIRES-OFFLINE-ACCESS
+    title: "Refresh rotation only occurs when grant still contains offline_access scope"
+    design_refs: [§3.5, §11.7]
+    description: "Before executing Steps C and D (rotation + new refresh token issuance), Refresh() re-checks that the frozen grant's scopes still include offline_access. A grant scope downgrade is handled conservatively: access/ID tokens are returned, no new refresh token is issued, and the old session is NOT revoked (preventing lock-out). Security note: operators who want to permanently stop a client from refreshing must revoke the consent grant entirely — a partial scope removal leaves the existing session valid until TTL expiry (up to 14 days). Matches the Token() issuance gate (scopeHasOfflineAccess)."
+    enforced_by: [internal/oidc:TestRefreshOfflineAccessGate, internal/oidc:TestRefreshRotationRequiresOfflineAccess]

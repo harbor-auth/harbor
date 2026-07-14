@@ -75,17 +75,72 @@ func containsMatching(set map[string]bool, substrs ...string) string {
 	return ""
 }
 
-// TestHotPathDoesNotImportDatabase enforces §4.1/§6.1: the stateless hot path
-// (cmd/harbor-hot) must never pull in a DB driver or the generated DB layer.
-func TestHotPathDoesNotImportDatabase(t *testing.T) {
+// TestHotPathDoesNotImportMgmtPackages enforces §4.1/§6.1: the hot path
+// (cmd/harbor-hot) is stateless in the sense of owning no mutable PII state —
+// it MAY read from the DB via internal/clients (client registry, grant store,
+// session store, secret loader) but must never pull in the management-only
+// WebAuthn enrollment package (internal/webauthn). That package — the
+// registration/authentication ceremonies and their persistence — belongs to
+// cmd/harbor-mgmt exclusively.
+//
+// Note: internal/identity is intentionally NOT forbidden here. It holds the
+// shared PPID derivation and PairwiseSecretAAD helpers that the hot path
+// legitimately depends on (via clients.DBSecretLoader → identity.PairwiseSecretAAD
+// on the /token PPID-resolution path). Forbidding it would contradict the
+// clients-based DB read model that §4.1/§6.1 permit.
+// Note (N10): the original TestHotPathDoesNotImportDatabase — which forbade
+// github.com/jackc/pgx and internal/gen/db from the hot path — was deliberately
+// removed when cmd/harbor-hot gained DB-backed stores via internal/clients
+// (PR #15). The relaxed boundary is: the hot path MUST NOT import the mgmt-only
+// enrollment packages, but it MAY import pgx transitively via internal/clients
+// to read the regional data plane (client registry, grants, sessions, secret
+// loader). This is a security-relevant architectural decision — see
+// docs/DESIGN.md §4.1 ("stateless" = owns no mutable PII state, not "no DB reads")
+// and §10.
+func TestHotPathDoesNotImportMgmtPackages(t *testing.T) {
 	deps := transitiveImports(t, modulePath+"/cmd/harbor-hot")
 
 	if bad := containsMatching(deps,
-		"github.com/jackc/pgx",
-		modulePath+"/internal/gen/db",
+		modulePath+"/internal/webauthn",
 	); bad != "" {
-		t.Errorf("cmd/harbor-hot transitively imports %q — the hot path is STATELESS "+
-			"(§4.1, §6.1) and must not touch a database driver or internal/gen/db", bad)
+		t.Errorf("cmd/harbor-hot transitively imports %q — the hot path must not "+
+			"pull in the mgmt-only WebAuthn enrollment package (§4.1, §6.1): "+
+			"internal/webauthn belongs to cmd/harbor-mgmt", bad)
+	}
+}
+
+// TestOIDCCoreDoesNotImportClients enforces the dependency inversion that keeps
+// internal/oidc a pure, independently-testable core (§1.7): the OIDC flow defines
+// its store INTERFACES (store.go) and must never depend on their DB-backed
+// implementations in internal/clients. If oidc imported clients, the core would
+// transitively pull in pgx + internal/gen/db and could no longer be exercised
+// without a database — collapsing the seam that lets every branch be unit-tested.
+func TestOIDCCoreDoesNotImportClients(t *testing.T) {
+	deps := transitiveImports(t, modulePath+"/internal/oidc")
+
+	if bad := containsMatching(deps,
+		modulePath+"/internal/clients",
+	); bad != "" {
+		t.Errorf("internal/oidc transitively imports %q — the pure OIDC core must not "+
+			"depend on its store implementations (§1.7): clients depends on oidc, never "+
+			"the reverse", bad)
+	}
+}
+
+// TestClientsDoesNotImportWebAuthn keeps internal/clients usable from BOTH the
+// hot path and the mgmt path. clients is the shared DB-adapter layer; if it
+// imported internal/webauthn (the mgmt-only enrollment ceremonies) then the hot
+// path — which legitimately depends on clients (§4.1, §6.1) — would transitively
+// pull in the mgmt-only package and break TestHotPathDoesNotImportMgmtPackages.
+func TestClientsDoesNotImportWebAuthn(t *testing.T) {
+	deps := transitiveImports(t, modulePath+"/internal/clients")
+
+	if bad := containsMatching(deps,
+		modulePath+"/internal/webauthn",
+	); bad != "" {
+		t.Errorf("internal/clients transitively imports %q — the shared DB-adapter layer "+
+			"must stay free of the mgmt-only WebAuthn package so the hot path can import "+
+			"clients without pulling in enrollment code (§4.1, §6.1)", bad)
 	}
 }
 

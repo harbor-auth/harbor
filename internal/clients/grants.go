@@ -136,16 +136,22 @@ func parseUUID(s string) (pgtype.UUID, error) {
 	return u, nil
 }
 
-// uuidToString converts a pgtype.UUID to its canonical string form. Returns the
-// zero UUID string if the value is not valid.
+// uuidToString converts a pgtype.UUID to its canonical lowercase hyphenated
+// string form (e.g. "550e8400-e29b-41d4-a716-446655440000").
+//
+// When u.Valid is false (e.g. a NULL column, a migration bug, or a direct DB
+// write), it returns the zero-UUID sentinel "00000000-0000-0000-0000-000000000000"
+// rather than the empty string that pgtype.UUID.String() would return. This
+// matters because callers such as signalRefreshReuse guard against both the
+// empty string AND the zero-UUID sentinel to detect an invalid field — returning
+// an empty string here would bypass the guard silently. NOT NULL columns in the
+// schema make the invalid path unreachable in normal operation, but the defensive
+// non-empty sentinel makes bugs in test fakes and direct DB writes detectable.
 func uuidToString(u pgtype.UUID) string {
 	if !u.Valid {
 		return "00000000-0000-0000-0000-000000000000"
 	}
-	// pgtype.UUID bytes are the raw 16-byte representation.
-	b := u.Bytes
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
-		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	return u.String()
 }
 
 // timePtrFromPgtz converts a pgtype.Timestamptz to a *time.Time. nil = invalid/zero.

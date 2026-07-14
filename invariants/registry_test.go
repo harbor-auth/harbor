@@ -71,6 +71,9 @@ func TestRegistryInvariantsAreEnforced(t *testing.T) {
 		if len(inv.EnforcedBy) == 0 {
 			t.Errorf("%s: has no enforced_by tests — an invariant with no test is a bug", inv.ID)
 		}
+		if inv.Description == "" {
+			t.Errorf("%s: missing description", inv.ID)
+		}
 
 		// (3) a physical `//harbor:invariant <id>` tag must exist.
 		if !tags[inv.ID] {

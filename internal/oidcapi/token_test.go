@@ -45,11 +45,15 @@ func postToken(t *testing.T, ts *httptest.Server, form url.Values) *http.Respons
 	return res
 }
 
-// assertNoStore fails unless the response forbids caching (docs/DESIGN.md §11.7).
+// assertNoStore fails unless the response forbids caching (docs/DESIGN.md §11.7,
+// RFC 6749 §5.1). Checks both Cache-Control: no-store and Pragma: no-cache.
 func assertNoStore(t *testing.T, res *http.Response) {
 	t.Helper()
 	if cc := res.Header.Get("Cache-Control"); cc != "no-store" {
 		t.Fatalf("Cache-Control = %q, want no-store", cc)
+	}
+	if p := res.Header.Get("Pragma"); p != "no-cache" {
+		t.Fatalf("Pragma = %q, want no-cache (RFC 6749 §5.1)", p)
 	}
 }
 

@@ -106,6 +106,14 @@ func (r *InMemoryClientRegistry) Put(c Client) {
 	r.clients[c.ID] = c
 }
 
+// Delete removes a client registration by ID. A no-op if the client was not
+// registered. Used in tests to simulate deregistration of a client.
+func (r *InMemoryClientRegistry) Delete(clientID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.clients, clientID)
+}
+
 // Lookup implements ClientRegistry.
 func (r *InMemoryClientRegistry) Lookup(_ context.Context, clientID string) (Client, bool) {
 	r.mu.RLock()

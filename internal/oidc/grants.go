@@ -3,6 +3,7 @@ package oidc
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -60,6 +61,8 @@ type GrantStore interface {
 type noopGrantStore struct{}
 
 func (noopGrantStore) FindGrant(_ context.Context, _, _ string) (Grant, bool, error) {
+	// Always returns not-found. See NewService panic guard in service.go for why
+	// this must NOT be paired with a real SessionStore.
 	return Grant{}, false, nil
 }
 func (noopGrantStore) CreateGrant(_ context.Context, _ NewGrant) (Grant, error) {
@@ -73,9 +76,10 @@ func (noopGrantStore) ListGrantsByUser(_ context.Context, _ string) ([]Grant, er
 // InMemoryGrantStore is a dev/test GrantStore. NOT for production — a real store
 // persists grants durably so they survive restarts (internal/clients.DBGrantStore).
 type InMemoryGrantStore struct {
-	mu     sync.Mutex
-	byID   map[string]*Grant
-	byPair map[string]*Grant // key: userID+":"+clientID
+	mu      sync.Mutex
+	byID    map[string]*Grant
+	byPair  map[string]*Grant // key: userID+":"+clientID
+	counter int               // monotonically increasing; never decrements so IDs stay unique even if grants were deleted
 }
 
 // NewInMemoryGrantStore returns an empty in-memory grant store.
@@ -94,26 +98,58 @@ func (s *InMemoryGrantStore) FindGrant(_ context.Context, userID, clientID strin
 	if !ok || g.RevokedAt != nil {
 		return Grant{}, false, nil
 	}
-	return *g, true, nil
+	// Clone Scopes so that caller mutation of the returned slice cannot corrupt
+	// the stored *Grant. Append-only callers are safe without a clone, but
+	// index-based mutation (out.Scopes[0] = "evil") would silently modify the
+	// stored grant without a copy.
+	out := *g
+	out.Scopes = append([]string(nil), g.Scopes...)
+	return out, true, nil
 }
 
 // CreateGrant implements GrantStore. Mints a sequential string ID.
+// If an active grant already exists for the (userID, clientID) pair, it is
+// soft-deleted before the new one is created — mirroring the DB UNIQUE index
+// semantics on (user_id, client_id) for active grants. Without this, the old
+// pointer in byID would become orphaned (FindGrant via byPair would shadow it,
+// but ListGrantsByUser via byID would not, producing inconsistent results).
 func (s *InMemoryGrantStore) CreateGrant(_ context.Context, ng NewGrant) (Grant, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	id := fmt.Sprintf("grant-%d", len(s.byID)+1)
+	// Soft-delete any existing ACTIVE grant for this (user, client) pair so byID
+	// and byPair stay consistent. Only revoke if RevokedAt is nil — byPair can
+	// already point to a previously revoked grant (RevokeGrant mutates the shared
+	// pointer but does not clear byPair).
+	if existing, ok := s.byPair[ng.UserID+":"+ng.ClientID]; ok && existing.RevokedAt == nil {
+		now := time.Now()
+		existing.RevokedAt = &now
+	}
+	// id is a zero-padded monotonically-increasing sequence. Zero-padding
+	// (8 digits) ensures lexicographic sort order matches numeric order for up
+	// to 99_999_999 grants — required for the ListGrantsByUser ID tiebreaker.
+	// Using a dedicated counter (not len(byID)) means IDs stay unique even if a
+	// Delete method is ever added.
+	s.counter++
+	id := fmt.Sprintf("grant-%08d", s.counter)
 	g := &Grant{
 		ID:          id,
 		Region:      ng.Region,
 		UserID:      ng.UserID,
 		ClientID:    ng.ClientID,
 		PairwiseSub: ng.PairwiseSub,
-		Scopes:      ng.Scopes,
+		Scopes:      append([]string(nil), ng.Scopes...), // Clone 1: prevents ng.Scopes mutations from corrupting the stored grant
 		CreatedAt:   time.Now(),
 	}
 	s.byID[id] = g
 	s.byPair[ng.UserID+":"+ng.ClientID] = g
-	return *g, nil
+	// Clone 2: ret := *g copies the Grant struct by value, including the Scopes
+	// slice header — ret.Scopes and g.Scopes would share the same backing array.
+	// Index-mutation by the caller (ret.Scopes[0] = "evil") would silently corrupt
+	// the stored grant. Clone 1 (above in g.Scopes initialisation) protected g from
+	// ng.Scopes; this clone protects g from the returned ret.Scopes.
+	ret := *g
+	ret.Scopes = append([]string(nil), g.Scopes...)
+	return ret, nil
 }
 
 // RevokeGrant implements GrantStore. Soft-deletes by ID.
@@ -136,8 +172,24 @@ func (s *InMemoryGrantStore) ListGrantsByUser(_ context.Context, userID string) 
 	var out []Grant
 	for _, g := range s.byID {
 		if g.UserID == userID && g.RevokedAt == nil {
-			out = append(out, *g)
+			// Clone Scopes for consistency with FindGrant: caller mutation of the
+			// returned slice must not corrupt the stored grant.
+			gc := *g
+			gc.Scopes = append([]string(nil), g.Scopes...)
+			out = append(out, gc)
 		}
 	}
+	// Sort newest first to match the interface contract and DBGrantStore
+	// ordering. byID iteration order is non-deterministic (Go map), so without
+	// this the "connected apps" dashboard order would be unstable.
+	// Tiebreaker on ID (lexicographic descending) stabilises the sort when two
+	// grants share the same CreatedAt timestamp (possible in fast-running tests
+	// where time.Now() has millisecond resolution).
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID > out[j].ID // later sequential ID = newer grant
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
 	return out, nil
 }

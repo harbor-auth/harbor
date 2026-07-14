@@ -3,6 +3,8 @@ package clients
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"sync/atomic"
 
 	"github.com/jackc/pgx/v5"
 
@@ -22,12 +24,30 @@ type rpQuerier interface {
 // without changing the interface.
 type DBClientRegistry struct {
 	q rpQuerier
+	// logger is an atomic.Pointer so WithLogger may be called during setup on a
+	// different goroutine from a concurrent Lookup without a data race.
+	logger atomic.Pointer[slog.Logger]
 }
 
 // NewDBClientRegistry returns a ClientRegistry backed by q. q is typically
-// *db.Queries obtained from a pgx connection pool.
+// *db.Queries obtained from a pgx connection pool. It logs swallowed DB errors
+// via slog.Default(); call WithLogger to route them to the service logger.
 func NewDBClientRegistry(q rpQuerier) *DBClientRegistry {
-	return &DBClientRegistry{q: q}
+	r := &DBClientRegistry{q: q}
+	r.logger.Store(slog.Default())
+	return r
+}
+
+// WithLogger sets the logger used to record the DB errors that Lookup must
+// otherwise swallow (its interface returns no error). Wiring a real logger here
+// is what makes a DB outage diagnosable instead of masquerading as an unknown
+// client. A nil logger is ignored (the slog.Default() set in the constructor is
+// kept). The store is atomic, so this is safe to call concurrently with Lookup.
+func (r *DBClientRegistry) WithLogger(logger *slog.Logger) *DBClientRegistry {
+	if logger != nil {
+		r.logger.Store(logger)
+	}
+	return r
 }
 
 // Lookup implements oidc.ClientRegistry. Returns (Client, false) for an unknown
@@ -40,8 +60,14 @@ func (r *DBClientRegistry) Lookup(ctx context.Context, clientID string) (oidc.Cl
 		if errors.Is(err, pgx.ErrNoRows) {
 			return oidc.Client{}, false
 		}
-		// DB error: return not-found so the caller surfaces server_error rather
-		// than redirecting to an unverified URI (open-redirect defence).
+		// DB error: log it, then return not-found so the caller surfaces
+		// server_error rather than redirecting to an unverified URI (open-redirect
+		// defence). We must not redirect to an unproven URI even during a DB
+		// outage, but the swallowed error is logged so the outage is diagnosable
+		// (a degraded DB otherwise looks identical to an unknown client_id).
+		r.logger.Load().ErrorContext(ctx, "client registry DB lookup failed",
+			slog.String("client_id", clientID),
+			slog.Any("error", err))
 		return oidc.Client{}, false
 	}
 	return rowToClient(row), true

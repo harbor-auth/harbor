@@ -35,6 +35,12 @@ type txBeginner interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
 }
 
+// rotationCommitTimeout is the maximum time allowed for RotateSession's COMMIT
+// to complete on a cancel-isolated context (context.WithoutCancel). This
+// prevents a hung DB from blocking the rotation indefinitely while still
+// outlasting any transient network blip. See RotateSession for rationale.
+const rotationCommitTimeout = 5 * time.Second
+
 // DBSessionStore implements oidc.SessionStore over the sessions table
 // (docs/DESIGN.md §3.5, §10). Each method converts domain types to/from sqlc
 // types; only the token HASH is ever handled here — the plaintext refresh token
@@ -57,18 +63,42 @@ func (s *DBSessionStore) WithPool(p txBeginner) *DBSessionStore {
 	return s
 }
 
+// NewDBSessionStoreWithPool is the production constructor: wraps q for queries
+// and p for atomic single-transaction rotation (RotateSession). Panics if
+// either argument is nil — callers must ensure both are wired before startup.
+func NewDBSessionStoreWithPool(q sessionQuerier, p txBeginner) *DBSessionStore {
+	if q == nil {
+		panic("clients.NewDBSessionStoreWithPool: q must not be nil")
+	}
+	if p == nil {
+		panic("clients.NewDBSessionStoreWithPool: p must not be nil")
+	}
+	return &DBSessionStore{q: q, tx: p}
+}
+
 // Compile-time proof that DBSessionStore implements oidc.SessionStore.
 var _ oidc.SessionStore = (*DBSessionStore)(nil)
 
-// CreateSession implements oidc.SessionStore.
-func (s *DBSessionStore) CreateSession(ctx context.Context, rs oidc.RefreshSession) error {
+// buildCreateSessionParams converts a domain RefreshSession into sqlc
+// CreateSessionParams, parsing the UUIDs and normalising the optional device
+// label. Shared by CreateSession and RotateSession so the two write paths
+// cannot silently diverge.
+func buildCreateSessionParams(rs oidc.RefreshSession) (db.CreateSessionParams, error) {
+	// TODO(grant-fk): when the sessions table gains a grant_id FK column,
+	// parse rs.GrantID here (it is always "" today — see RefreshSession.GrantID).
+	// Runtime assertion: GrantID must be "" until the DB column exists. If this
+	// fires, a caller has set GrantID to a non-empty value without also updating
+	// this function — the value would be silently dropped in CreateSession.
+	if rs.GrantID != "" {
+		return db.CreateSessionParams{}, fmt.Errorf("sessions: GrantID %q is not supported (no grant_id DB column yet — see TODO(grant-fk))", rs.GrantID)
+	}
 	var id pgtype.UUID
 	if err := id.Scan(rs.ID); err != nil {
-		return fmt.Errorf("sessions: parse session ID %q: %w", rs.ID, err)
+		return db.CreateSessionParams{}, fmt.Errorf("sessions: parse session ID %q: %w", rs.ID, err)
 	}
 	var userID pgtype.UUID
 	if err := userID.Scan(rs.UserID); err != nil {
-		return fmt.Errorf("sessions: parse user ID %q: %w", rs.UserID, err)
+		return db.CreateSessionParams{}, fmt.Errorf("sessions: parse user ID %q: %w", rs.UserID, err)
 	}
 	var deviceLabel *string
 	if rs.DeviceLabel != "" {
@@ -77,9 +107,9 @@ func (s *DBSessionStore) CreateSession(ctx context.Context, rs oidc.RefreshSessi
 	}
 	var expiresAt pgtype.Timestamptz
 	if err := expiresAt.Scan(rs.ExpiresAt); err != nil {
-		return fmt.Errorf("sessions: parse expires_at: %w", err)
+		return db.CreateSessionParams{}, fmt.Errorf("sessions: parse expires_at: %w", err)
 	}
-	_, err := s.q.CreateSession(ctx, db.CreateSessionParams{
+	return db.CreateSessionParams{
 		ID:               id,
 		Region:           rs.Region,
 		UserID:           userID,
@@ -87,7 +117,16 @@ func (s *DBSessionStore) CreateSession(ctx context.Context, rs oidc.RefreshSessi
 		DeviceLabel:      deviceLabel,
 		RefreshTokenHash: rs.TokenHash,
 		ExpiresAt:        expiresAt,
-	})
+	}, nil
+}
+
+// CreateSession implements oidc.SessionStore.
+func (s *DBSessionStore) CreateSession(ctx context.Context, rs oidc.RefreshSession) error {
+	params, err := buildCreateSessionParams(rs)
+	if err != nil {
+		return err
+	}
+	_, err = s.q.CreateSession(ctx, params)
 	return err
 }
 
@@ -108,8 +147,15 @@ func (s *DBSessionStore) GetSessionByTokenHash(ctx context.Context, hash []byte)
 		return oidc.RefreshSession{}, fmt.Errorf("sessions: get by hash: %w", err)
 	}
 	sess := rowToRefreshSession(row)
-	// Revoked: return the populated session so the caller can fire the
-	// theft-signal family revoke (INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE).
+	// Revoked check MUST precede expiry check: a rotated token can be both
+	// revoked AND past its TTL (e.g. an old rotated session whose 14-day window
+	// has elapsed). ErrRefreshTokenRevoked must take priority so the theft signal
+	// fires for any replayed rotated token, regardless of TTL — revoking the
+	// whole (user, client) session family is still the correct response even
+	// after natural expiry. Swapping these checks would silently suppress the
+	// theft signal for all expired-but-revoked tokens.
+	// Return the populated session so the caller (signalRefreshReuse) has
+	// the UserID+ClientID needed to revoke the family (INV-REFRESH-THEFT-SIGNAL-FAMILY-REVOKE).
 	if isRevoked(row) {
 		return sess, oidc.ErrRefreshTokenRevoked
 	}
@@ -139,6 +185,11 @@ func (s *DBSessionStore) RevokeSession(ctx context.Context, id string) error {
 func (s *DBSessionStore) RotateSession(ctx context.Context, oldID string, newSession oidc.RefreshSession) error {
 	if s.tx == nil {
 		// No transactor: sequential best-effort (tests, dev without a pool).
+		// PRODUCTION REQUIREMENT: cmd/harbor-hot/main.go MUST call WithPool()
+		// when a DB pool is available. Without a pool, a CreateSession failure
+		// after a successful RevokeSession permanently locks the user out (old
+		// token gone, new token not persisted). The production wiring in main.go
+		// always passes WithPool(pool) — this branch exists only for dev/test.
 		if err := s.RevokeSession(ctx, oldID); err != nil {
 			return fmt.Errorf("sessions: rotate (revoke): %w", err)
 		}
@@ -148,7 +199,14 @@ func (s *DBSessionStore) RotateSession(ctx context.Context, oldID string, newSes
 	if err != nil {
 		return fmt.Errorf("sessions: begin rotation tx: %w", err)
 	}
-	defer txn.Rollback(ctx) //nolint:errcheck // Rollback after Commit is a no-op (returns pgx.ErrTxClosed); unrecoverable from a deferred call.
+	// WithoutCancel drops BOTH the parent's cancellation signal AND its deadline
+	// so Rollback runs even if ctx was cancelled (e.g. SIGINT mid-rotation) or
+	// its deadline has already elapsed. context.WithoutCancel does NOT preserve
+	// the parent deadline — the returned context has no deadline and never expires.
+	// For a best-effort Rollback this is preferable: a deadline-expired parent
+	// would otherwise cancel the Rollback immediately, leaving a dangling txn
+	// that pgxpool must clean up by closing and replacing the connection.
+	defer txn.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck // Rollback after Commit is a no-op (pgx.ErrTxClosed).
 
 	qtx := db.New(txn)
 
@@ -160,36 +218,24 @@ func (s *DBSessionStore) RotateSession(ctx context.Context, oldID string, newSes
 		return fmt.Errorf("sessions: rotate (revoke in tx): %w", err)
 	}
 
-	var newID pgtype.UUID
-	if err := newID.Scan(newSession.ID); err != nil {
-		return fmt.Errorf("sessions: parse new session ID %q: %w", newSession.ID, err)
+	params, err := buildCreateSessionParams(newSession)
+	if err != nil {
+		return fmt.Errorf("sessions: rotate (build params): %w", err)
 	}
-	var userID pgtype.UUID
-	if err := userID.Scan(newSession.UserID); err != nil {
-		return fmt.Errorf("sessions: parse user ID %q: %w", newSession.UserID, err)
-	}
-	var deviceLabel *string
-	if newSession.DeviceLabel != "" {
-		label := newSession.DeviceLabel
-		deviceLabel = &label
-	}
-	var expiresAt pgtype.Timestamptz
-	if err := expiresAt.Scan(newSession.ExpiresAt); err != nil {
-		return fmt.Errorf("sessions: parse expires_at: %w", err)
-	}
-	if _, err := qtx.CreateSession(ctx, db.CreateSessionParams{
-		ID:               newID,
-		Region:           newSession.Region,
-		UserID:           userID,
-		ClientID:         newSession.ClientID,
-		DeviceLabel:      deviceLabel,
-		RefreshTokenHash: newSession.TokenHash,
-		ExpiresAt:        expiresAt,
-	}); err != nil {
+	if _, err := qtx.CreateSession(ctx, params); err != nil {
 		return fmt.Errorf("sessions: rotate (create in tx): %w", err)
 	}
 
-	return txn.Commit(ctx)
+	// Run Commit on a cancel-isolated context with a bounded timeout so a client
+	// disconnect cannot cause a committed rotation to appear as a failure.
+	// Without this guard: if ctx is cancelled while COMMIT is in flight, pgx
+	// returns context.Canceled even if the DB committed — RotateSession returns
+	// error → service.go returns server_error → client retries with the now-
+	// revoked old token → theft-signal → full family lockout. WithoutCancel
+	// breaks that chain; the 5 s timeout prevents a hung DB from blocking forever.
+	commitCtx, commitCancel := context.WithTimeout(context.WithoutCancel(ctx), rotationCommitTimeout)
+	defer commitCancel()
+	return txn.Commit(commitCtx)
 }
 
 // RevokeSessionsByUserClient implements oidc.SessionStore (theft-signal family
@@ -222,9 +268,9 @@ func rowToRefreshSession(row db.Session) oidc.RefreshSession {
 		revokedAt = row.RevokedAt.Time
 	}
 	return oidc.RefreshSession{
-		ID:          row.ID.String(),
+		ID:          uuidToString(row.ID),
 		Region:      row.Region,
-		UserID:      row.UserID.String(),
+		UserID:      uuidToString(row.UserID),
 		ClientID:    row.ClientID,
 		DeviceLabel: label,
 		TokenHash:   row.RefreshTokenHash,

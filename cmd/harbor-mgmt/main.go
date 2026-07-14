@@ -19,8 +19,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/harbor/harbor/internal/clients"
 	"github.com/harbor/harbor/internal/crypto"
 	"github.com/harbor/harbor/internal/gen/db"
@@ -33,9 +31,25 @@ import (
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	// DB-backed stores plug in when DATABASE_URL is configured; otherwise we run
 	// on in-memory dev scaffolds (docs/DESIGN.md §10).
-	pool := connectDB(context.Background(), logger)
+	pool, err := clients.ConnectDB(ctx, logger)
+	if err != nil {
+		if ctx.Err() != nil {
+			// SIGINT/SIGTERM arrived during startup (before the server bound).
+			// This is a clean shutdown, not a crash — exit 0 so process managers
+			// (systemd, k8s) don't restart the process.
+			logger.Info("startup cancelled by signal — exiting cleanly", "error", err)
+			stop()
+			os.Exit(0)
+		}
+		logger.Error("database connection failed", "error", err)
+		stop()
+		os.Exit(1)
+	}
 	if pool != nil {
 		defer pool.Close()
 	}
@@ -61,6 +75,15 @@ func main() {
 	}, store, sessions)
 	if err != nil {
 		logger.Error("failed to configure webauthn service", "error", err)
+		// os.Exit skips deferred functions, so release resources explicitly.
+		// We call stop() first (cancels the context), then pool.Close() —
+		// the opposite of what LIFO defer order would produce (pool first, then
+		// stop). pgxpool handles a pre-cancelled context gracefully. pool may be
+		// nil when DATABASE_URL is not set.
+		stop()
+		if pool != nil {
+			pool.Close()
+		}
 		os.Exit(1)
 	}
 
@@ -68,12 +91,27 @@ func main() {
 	// with an HSM-backed KeyProvider (docs/DESIGN.md §7.3).
 	kmsSecret := getenv("HARBOR_KMS_SECRET", "")
 	if kmsSecret == "" {
+		// When a real DB is wired, enrollment writes user DEKs sealed under this
+		// KMS secret. Falling back to a hardcoded dev key against a real DB would
+		// let anyone with the source re-derive every enrolled user's pairwise
+		// secret, so it is fatal (mirrors the harbor-hot KEK_SECRET guard).
+		if pool != nil {
+			logger.Error("HARBOR_KMS_SECRET must be set when DATABASE_URL is configured — refusing to enroll with a dev key against a real DB")
+			stop()
+			pool.Close()
+			os.Exit(1)
+		}
 		logger.Warn("HARBOR_KMS_SECRET not set — using insecure dev default; NEVER use in production")
 		kmsSecret = "harbor-dev-kms-secret-DO-NOT-USE-IN-PROD"
 	}
 	kp, err := crypto.NewLocalKeyProvider(kmsSecret)
 	if err != nil {
 		logger.Error("failed to create key provider", "error", err)
+		// os.Exit skips deferred functions, so release resources explicitly.
+		stop()
+		if pool != nil {
+			pool.Close()
+		}
 		os.Exit(1)
 	}
 
@@ -95,12 +133,25 @@ func main() {
 	webauthn.RegisterRoutes(mux, svc, false)
 	mux.HandleFunc("POST /users/enroll", enrollHandler(enroller, logger))
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
 	logger.Info("starting harbor-mgmt", "port", port, "rp_id", rpID)
 	if err := httpserver.Run(ctx, ":"+port, mux, logger); err != nil {
+		if ctx.Err() != nil {
+			// Signal arrived while the server was running — httpserver.Run returned
+			// a non-nil error coincident with context cancellation. Treat as a clean
+			// shutdown so process managers don't restart the process.
+			logger.Info("server stopped by signal — exiting cleanly", "error", err)
+			stop()
+			if pool != nil {
+				pool.Close()
+			}
+			os.Exit(0)
+		}
 		logger.Error("harbor-mgmt exited with error", "error", err)
+		// os.Exit skips deferred functions, so release resources explicitly.
+		stop()
+		if pool != nil {
+			pool.Close()
+		}
 		os.Exit(1)
 	}
 }
@@ -157,27 +208,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeErrorJSON(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, jsonError{Code: code, Message: message})
-}
-
-// connectDB opens a pgx connection pool from DATABASE_URL. It returns nil when
-// DATABASE_URL is unset (dev mode: in-memory scaffolds). A configured-but-
-// unreachable database is fatal — fail fast rather than silently dropping data.
-func connectDB(ctx context.Context, logger *slog.Logger) *pgxpool.Pool {
-	url := os.Getenv("DATABASE_URL")
-	if url == "" {
-		return nil
-	}
-	pool, err := pgxpool.New(ctx, url)
-	if err != nil {
-		logger.Error("failed to connect to database", "error", err)
-		os.Exit(1)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		logger.Error("database ping failed", "error", err)
-		os.Exit(1)
-	}
-	logger.Info("connected to database")
-	return pool
 }
 
 // --- env helpers ------------------------------------------------------------
