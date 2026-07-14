@@ -38,10 +38,13 @@ docs/plans/         → future WHAT — intent not yet built
 |---|---|---|---|
 | [envelope-encryption-kms](plans/envelope-encryption-kms.md) | in-progress | §4.4, §7.3, §10 | `internal/crypto/` |
 | [real-token-issuance](plans/real-token-issuance.md) | draft | §3.3, §3.4, §7.3 | `internal/crypto/`, `internal/oidc/`, `api/openapi/harbor.yaml` |
+| [signing-key-rotation](plans/signing-key-rotation.md) | draft | §7.3, §3.5.4, §3.3 | `internal/crypto/`, `cmd/harbor-hot/`, `cmd/harbor-mgmt/` |
+| [token-introspection](plans/token-introspection.md) | draft | §3.3, §3.5, §3.5.2 | `internal/oidcapi/`, `api/openapi/harbor.yaml` |
 | [auth-code-persistence](plans/auth-code-persistence.md) | draft | §4.1, §4.4, §10 | `internal/oidc/`, `internal/clients/`, `cmd/harbor-hot/` |
 | [client-grant-persistence](plans/client-grant-persistence.md) | draft | §3.2, §10 | `internal/oidc/`, `internal/clients/`, `db/queries/` |
 | [user-enrollment](plans/user-enrollment.md) | draft | §11.1, §10, §4.4 | `internal/identity/`, `internal/webauthn/` |
 | [bff-session-middleware](plans/bff-session-middleware.md) | draft | §9, §11.1, §11.2 | `internal/oidc/`, `internal/webauthn/`, `cmd/harbor-mgmt/` |
+| [userinfo-endpoint](plans/userinfo-endpoint.md) | draft | §3.3, §11.4, §3.1 | `internal/oidcapi/`, `api/openapi/harbor.yaml` |
 | [session-ppid-seam](plans/session-ppid-seam.md) | draft | §3.2, §11.2 | `internal/oidc/`, `internal/identity/` |
 | [refresh-token-rotation](plans/refresh-token-rotation.md) | draft | §3.5, §10 | `internal/oidc/`, `internal/clients/`, `db/queries/` |
 | [grant-id-fk](plans/grant-id-fk.md) | draft | §3.5, §10, §11.3 | `db/migrations/`, `internal/clients/`, `internal/oidc/` |

@@ -89,12 +89,12 @@ can land in any order (or simultaneously on separate branches).
 | Phase | Plans | Gate / unlock |
 |---|---|---|
 | **0** | `envelope-encryption-kms` · `real-token-issuance` · `auth-code-persistence` · `client-grant-persistence` | Nothing blocked |
-| **1** | `user-enrollment` | Unblocked once `kms` lands |
-| **2** | `session-ppid-seam` | Unblocked once `user-enrollment` + `client-grant-persistence` + `real-token-issuance` all land |
+| **1** | `user-enrollment` · `signing-key-rotation` · `token-introspection` | `user-enrollment` unblocked by `kms`; `signing-key-rotation` + `token-introspection` unblocked by `real-token-issuance` |
+| **2** | `session-ppid-seam` · `userinfo-endpoint` | `session-ppid-seam` needs `user-enrollment` + `client-grant-persistence` + `real-token-issuance`; `userinfo-endpoint` needs `real-token-issuance` + `user-enrollment` |
 | **3** | `bff-session-middleware` · `grant-id-fk` · `refresh-token-rotation` | All three unblocked once `session-ppid-seam` lands |
 | **4** | `revocation-outbox` | Unblocked once `refresh-token-rotation` + `grant-id-fk` land |
 | **5** | `bloom-filter-revocation` | Unblocked once `revocation-outbox` + `real-token-issuance` land |
-| **6** | `oidf-conformance` | Unblocked once `real-token-issuance` + `auth-code-persistence` + `user-enrollment` land; suite goes fully green only after all phases |
+| **6** | `oidf-conformance` | Unblocked once `real-token-issuance` + `auth-code-persistence` + `user-enrollment` + `session-ppid-seam` land; suite goes fully green only after all phases |
 
 ---
 
@@ -110,17 +110,20 @@ Each row is `(plan, requires)` — `requires` must be in a merged state before
 | `auth-code-persistence` | *(none)* |
 | `client-grant-persistence` | *(none)* |
 | `user-enrollment` | `envelope-encryption-kms` |
+| `signing-key-rotation` | `real-token-issuance` |
+| `token-introspection` | `real-token-issuance` |
+| `userinfo-endpoint` | `real-token-issuance` · `user-enrollment` |
 | `session-ppid-seam` | `user-enrollment` · `client-grant-persistence` · `real-token-issuance` |
 | `bff-session-middleware` | `user-enrollment` · `session-ppid-seam` |
 | `grant-id-fk` | `client-grant-persistence` · `session-ppid-seam` |
 | `refresh-token-rotation` | `real-token-issuance` · `session-ppid-seam` |
 | `revocation-outbox` | `refresh-token-rotation` · `grant-id-fk` |
 | `bloom-filter-revocation` | `real-token-issuance` · `revocation-outbox` |
-| `oidf-conformance` | `real-token-issuance` · `auth-code-persistence` · `user-enrollment` |
+| `oidf-conformance` | `real-token-issuance` · `auth-code-persistence` · `user-enrollment` · `session-ppid-seam` |
 
 ---
 
-## The two critical paths
+## The three critical paths
 
 There are two long chains from roots to the final gate — knowing them tells you
 which plans are on the critical path and can't slip.
@@ -151,6 +154,23 @@ client-grant-persistence
 
 The bloom filter is the emergency kill lever (§3.5); every link in this chain
 must be solid before it can be trusted.
+
+### Critical path C — "Real Login" (most urgent security fix)
+
+The sequence that replaces the `?user_id` impersonation hack in
+`webauthn/handlers.go` — the codebase's single worst security hole today:
+
+```
+envelope-encryption-kms
+  └─► user-enrollment
+         └─► session-ppid-seam
+               └─► bff-session-middleware
+```
+
+Until `bff-session-middleware` lands, any HTTP client can forge any user's
+identity by supplying `?user_id=<arbitrary>`. This path has no blocked
+dependency on `real-token-issuance` — it can be driven independently of the
+token-signing track.
 
 ---
 

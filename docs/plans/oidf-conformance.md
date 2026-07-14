@@ -12,7 +12,10 @@ created: 2026-07-14
 
 > **Dependency order:** depends on **`real-token-issuance`** (the suite requires
 > real signed JWTs), **`auth-code-persistence`** (multi-replica-safe codes),
-> and **`user-enrollment`** (real user identities for the full login ceremony).
+> **`user-enrollment`** (real user identities for the full login ceremony), and
+> **`session-ppid-seam`** (pairwise subjects — the suite explicitly tests
+> pairwise pseudonymous identifiers; PPID derivation must be wired into the
+> login flow before the `pairwise` subject_type tests can pass).
 > This is the **last plan** in the dependency graph — the conformance suite is
 > the integration gate that confirms everything composes correctly end-to-end.
 
