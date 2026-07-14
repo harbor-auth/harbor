@@ -566,6 +566,41 @@ func TestChaos_Token_ValidateTokenParams_GatesStoreAccess(t *testing.T) {
 	if terr3.Code != ErrCodeInvalidRequest {
 		t.Fatalf("empty redirect_uri: want invalid_request, got %q", terr3.Code)
 	}
+
+	// Case 4: empty code_verifier → invalid_request (ValidateTokenParams gate).
+	// Note: for authorization_code, ValidateTokenParams requires all four fields
+	// (code, client_id, redirect_uri, code_verifier); missing any one returns
+	// invalid_request before any store access.
+	_, terr4 := svc.Token(context.Background(), TokenRequest{
+		GrantType:   "authorization_code",
+		Code:        "some-code",
+		ClientID:    "some-client",
+		RedirectURI: "http://localhost/cb",
+		// CodeVerifier intentionally empty
+	})
+	if terr4 == nil {
+		t.Fatal("empty code_verifier: expected error, got nil")
+	}
+	if terr4.Code != ErrCodeInvalidRequest {
+		t.Fatalf("empty code_verifier: want invalid_request, got %q", terr4.Code)
+	}
+
+	// Case 5: unknown grant_type → unsupported_grant_type (symmetry with
+	// TestChaos_Refresh_ValidateTokenParams_GatesStoreAccess Case 3). Using a
+	// device_code grant type that ValidateTokenParams does not handle.
+	_, terr5 := svc.Token(context.Background(), TokenRequest{
+		GrantType:    "urn:ietf:params:oauth:grant-type:device_code",
+		Code:         "some-code",
+		ClientID:     "some-client",
+		RedirectURI:  "http://localhost/cb",
+		CodeVerifier: "some-verifier",
+	})
+	if terr5 == nil {
+		t.Fatal("unknown grant_type: expected error, got nil")
+	}
+	if terr5.Code != ErrCodeUnsupportedGrantType {
+		t.Fatalf("unknown grant_type: want unsupported_grant_type, got %q (ValidateTokenParams should reject unknown grant_type before any store access)", terr5.Code)
+	}
 }
 
 // panicOnAccessAuthCodeStore panics on any method call. Used by
@@ -658,7 +693,8 @@ func TestChaos_Refresh_SignalRefreshReuse_ZeroUUID(t *testing.T) {
 // badSessionFieldsStore always returns ErrRefreshTokenRevoked with a session
 // whose fields are set to the configured (bad) values — simulates a DBSessionStore
 // bug where rowToRefreshSession emits a zero/empty field instead of the stored value.
-// mu protects revokeCallCount against concurrent reads/writes.
+// mu protects revokeCallCount, which records how many times RevokeSessionsByUserClient
+// was called so tests can verify the guard prevented the call (negative assertion).
 type badSessionFieldsStore struct {
 	noopSessionStore
 	mu              sync.Mutex
@@ -757,7 +793,11 @@ type chaosConsumePathCodeStore struct {
 func (s *chaosConsumePathCodeStore) Save(_ context.Context, _ AuthCode) error { return nil }
 
 func (s *chaosConsumePathCodeStore) Peek(_ context.Context, _ string) (AuthCode, bool, bool, error) {
-	return s.peekCode, true, false, nil // not yet consumed — drives Consume-reuse path
+	// The code parameter is deliberately ignored: this store is seeded with a
+	// single peekCode and a single reuseCode, so it returns the correct result
+	// regardless of which code string Token() passes. Both Peek and Consume
+	// receive the same req.Code, so there is no param-mismatch risk here.
+	return s.peekCode, true, false, nil // found, not consumed — drives Consume-reuse path
 }
 
 func (s *chaosConsumePathCodeStore) Consume(_ context.Context, _ string) (ConsumeResult, error) {

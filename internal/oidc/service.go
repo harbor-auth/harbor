@@ -647,6 +647,12 @@ func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession
 	// case ("00000000-...") catches a NULL pgtype.UUID that survived rowToRefreshSession
 	// via uuidToString. Both signal a latent store bug — surface loudly.
 	//
+	// Note on ErrorContext: this call uses the detached ctx (not the original
+	// request ctx), which strips any request-scoped log enrichers (e.g.
+	// request-ID middleware). This is intentional — the guard fires on the
+	// detached context for the same reason the revoke does: request cancellation
+	// must not suppress the log. Request-ID loss is an accepted trade-off.
+	//
 	// Asymmetry note: the zero-UUID sentinel ("00000000-...") specifically
 	// guards against a NULL pgtype.UUID surviving DBSessionStore.rowToRefreshSession
 	// → uuidToString. ClientID is a plain VARCHAR column and is never routed
