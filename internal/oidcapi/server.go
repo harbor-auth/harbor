@@ -106,3 +106,10 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(openapi.Error{Code: code, Message: message})
 }
+
+// PostAdminKeysRotate handles POST /admin/keys/rotate (signing key rotation).
+// STUB — returns 501 Not Implemented until the rotation handler is wired up
+// in a subsequent task. See docs/plans/signing-key-rotation.md.
+func (s *Server) PostAdminKeysRotate(w http.ResponseWriter, r *http.Request) {
+	writeError(w, http.StatusNotImplemented, "not_implemented", "signing key rotation not yet implemented")
+}
