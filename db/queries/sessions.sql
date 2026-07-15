@@ -6,15 +6,22 @@
 SELECT * FROM sessions
 WHERE id = $1;
 
--- GetActiveSession returns a session ONLY when it is still usable — not revoked
--- and not expired. Auth flows (refresh-token rotation; DESIGN §3.5) MUST use
--- this rather than GetSession, which returns revoked/expired rows for
--- admin/audit purposes.
+-- GetActiveSession returns a session ONLY when it is still usable — not revoked,
+-- not expired, and whose underlying grant is still active. Auth flows (refresh-
+-- token rotation; DESIGN §3.5) MUST use this rather than GetSession, which
+-- returns revoked/expired rows for admin/audit purposes.
+--
+-- The LEFT JOIN on grants handles sessions with NULL grant_id (legacy rows
+-- created before grant_id was added). For those rows, grants.revoked_at is NULL
+-- so they pass the filter. Sessions with a grant_id only pass if the grant is
+-- not revoked.
 -- name: GetActiveSession :one
-SELECT * FROM sessions
-WHERE id = $1
-  AND revoked_at IS NULL
-  AND expires_at > now();
+SELECT sessions.* FROM sessions
+LEFT JOIN grants ON sessions.grant_id = grants.id
+WHERE sessions.id = $1
+  AND sessions.revoked_at IS NULL
+  AND sessions.expires_at > now()
+  AND (sessions.grant_id IS NULL OR grants.revoked_at IS NULL);
 
 -- name: ListSessionsByUser :many
 SELECT * FROM sessions
