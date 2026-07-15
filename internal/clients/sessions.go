@@ -27,6 +27,9 @@ type sessionQuerier interface {
 	// (global user logout) path; the hot-path theft-signal uses RevokeSessionsByUserClient.
 	RevokeSessionsByUser(ctx context.Context, userID pgtype.UUID) error
 	RevokeSessionsByUserClient(ctx context.Context, arg db.RevokeSessionsByUserClientParams) error
+	// RevokeSessionsByGrant revokes all active sessions for a specific grant,
+	// enabling per-app revocation without affecting other grants (DESIGN §11.3).
+	RevokeSessionsByGrant(ctx context.Context, grantID pgtype.UUID) error
 }
 
 // txBeginner is satisfied by *pgxpool.Pool and enables atomic rotation via
