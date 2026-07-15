@@ -680,7 +680,7 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 		Region:      session.Region,
 		UserID:      session.UserID,
 		ClientID:    session.ClientID,
-		GrantID:     session.GrantID, // always copies "" (no DB column yet); see TODO(grant-fk) in buildCreateSessionParams
+		GrantID:     session.GrantID,
 		DeviceLabel: session.DeviceLabel,
 		TokenHash:   newHash,
 		ExpiresAt:   s.now().Add(defaultRefreshTTL),
