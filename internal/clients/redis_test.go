@@ -54,7 +54,7 @@ func TestConnectRedis_Success(t *testing.T) {
 	if client == nil {
 		t.Fatal("expected non-nil client")
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }() //nolint:errcheck // test cleanup
 
 	// Verify the connection works
 	if err := client.Ping(ctx).Err(); err != nil {

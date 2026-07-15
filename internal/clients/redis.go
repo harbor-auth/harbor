@@ -24,7 +24,7 @@ func ConnectRedis(ctx context.Context, logger *slog.Logger) (*redis.Client, erro
 	}
 	client := redis.NewClient(opts)
 	if err := client.Ping(ctx).Err(); err != nil {
-		_ = client.Close()
+		_ = client.Close() //nolint:errcheck // Close error on failed ping is benign
 		return nil, fmt.Errorf("redis ping: %w", err)
 	}
 	logger.Info("connected to redis")

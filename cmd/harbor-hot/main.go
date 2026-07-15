@@ -105,7 +105,7 @@ func main() {
 		os.Exit(1)
 	}
 	if redisClient != nil {
-		defer redisClient.Close()
+		defer func() { _ = redisClient.Close() }() //nolint:errcheck // shutdown cleanup
 	}
 
 	// Auth code store: Redis-backed if available, otherwise in-memory fallback.
@@ -149,7 +149,7 @@ func main() {
 			// gracefully.
 			stop()
 			if redisClient != nil {
-				redisClient.Close()
+				_ = redisClient.Close() //nolint:errcheck // shutdown cleanup
 			}
 			pool.Close()
 			os.Exit(1)
@@ -160,7 +160,7 @@ func main() {
 			// os.Exit skips deferred functions, so release resources explicitly.
 			stop()
 			if redisClient != nil {
-				redisClient.Close()
+				_ = redisClient.Close() //nolint:errcheck // shutdown cleanup
 			}
 			pool.Close()
 			os.Exit(1)
@@ -233,7 +233,7 @@ func main() {
 			logger.Info("server stopped by signal — exiting cleanly", "error", err)
 			stop()
 			if redisClient != nil {
-				redisClient.Close()
+				_ = redisClient.Close() //nolint:errcheck // shutdown cleanup
 			}
 			if pool != nil {
 				pool.Close()
@@ -244,7 +244,7 @@ func main() {
 		// os.Exit skips deferred functions, so release resources explicitly.
 		stop()
 		if redisClient != nil {
-			redisClient.Close()
+			_ = redisClient.Close() //nolint:errcheck // shutdown cleanup
 		}
 		if pool != nil {
 			pool.Close()
