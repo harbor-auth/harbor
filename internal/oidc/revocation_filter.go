@@ -7,6 +7,9 @@
 package oidc
 
 import (
+	"context"
+	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/bits-and-blooms/bloom/v3"
@@ -191,3 +194,51 @@ func (f *BloomRevocationFilter) EstimatedCount() uint32 {
 // Compile-time interface checks.
 var _ RevocationFilter = (*InMemoryRevocationFilter)(nil)
 var _ RevocationFilter = (*BloomRevocationFilter)(nil)
+
+// ActiveJTILister lists active (non-expired) revoked JTIs from the database.
+// At wiring time, wrap *clients.DBRevokedJTIStore with an adapter:
+//
+//	type jtiListerAdapter struct{ store *clients.DBRevokedJTIStore }
+//	func (a jtiListerAdapter) ListActiveJTIs(ctx context.Context) ([]string, error) {
+//		rows, err := a.store.ListActive(ctx)
+//		if err != nil { return nil, err }
+//		jtis := make([]string, len(rows))
+//		for i, r := range rows { jtis[i] = r.JTI }
+//		return jtis, nil
+//	}
+type ActiveJTILister interface {
+	ListActiveJTIs(ctx context.Context) ([]string, error)
+}
+
+// RehydrateFilter loads all active revoked JTIs from the database and
+// populates the filter. This MUST be called on startup before accepting
+// traffic to ensure emergency revocations survive replica restarts.
+//
+// On success, returns the number of JTIs loaded. On error, the filter is
+// left unchanged (fail-closed: better to have stale data than crash).
+//
+// Usage (in main or startup hook):
+//
+//	n, err := oidc.RehydrateFilter(ctx, lister, filter, logger)
+//	if err != nil {
+//		logger.Error("failed to rehydrate revocation filter", "error", err)
+//		// Continue with empty filter — tokens will be checked against DB
+//	}
+//	logger.Info("revocation filter rehydrated", "count", n)
+func RehydrateFilter(ctx context.Context, lister ActiveJTILister, filter RevocationFilter, logger *slog.Logger) (int, error) {
+	if lister == nil || filter == nil {
+		return 0, nil
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	jtis, err := lister.ListActiveJTIs(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("rehydrate filter: list active: %w", err)
+	}
+
+	filter.Rehydrate(jtis)
+	logger.Info("revocation filter rehydrated", "count", len(jtis))
+	return len(jtis), nil
+}
