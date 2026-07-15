@@ -8,94 +8,122 @@ import (
 	"time"
 )
 
-// MemorySigningKeyStore is an in-memory SigningKeyStore for local development
-// and unit tests (docs/DESIGN.md §7.3). It is NOT durable — all keys are lost
-// on restart — so the rotation overlap window cannot survive a replica restart.
-// Production deployments MUST use DBSigningKeyStore, which persists key metadata
-// in the signing_keys table so the overlap window survives restarts.
+// Signing key lifecycle states, mirroring the signing_keys table CHECK
+// constraint (docs/DESIGN.md §7.3). Kept as local string literals so the
+// clients package stays decoupled from internal/crypto.
+const (
+	signingKeyStatePending = "pending"
+	signingKeyStateActive  = "active"
+	signingKeyStateRetired = "retired"
+)
+
+// MemSigningKeyStore is an in-memory SigningKeyStore for unit tests and
+// single-replica / local-dev use. It faithfully implements the SigningKeyStore
+// contract (docs/DESIGN.md §7.3) without a database:
 //
-// MemorySigningKeyStore is safe for concurrent use.
-type MemorySigningKeyStore struct {
-	mu   sync.RWMutex
-	byID map[string]*SigningKey // keyed by SigningKey.ID
+//   - Create inserts a new key in 'pending' state.
+//   - GetActive returns the single active key (ErrSigningKeyNotFound if none).
+//   - ListLive returns pending + active keys (retired excluded), in a stable
+//     order (CreatedAt then Kid) for deterministic tests.
+//   - SetState updates state and, using COALESCE semantics, only overwrites a
+//     timestamp when the corresponding pointer is non-nil (so retiring a key
+//     preserves its promoted_at, matching the DB store).
+//   - Retire marks a key retired by kid and stamps retired_at.
+//
+// MemSigningKeyStore is safe for concurrent use.
+type MemSigningKeyStore struct {
+	mu    sync.Mutex
+	keys  map[string]SigningKey // keyed by ID
+	clock func() time.Time
 }
 
-// Compile-time proof that MemorySigningKeyStore implements SigningKeyStore.
-var _ SigningKeyStore = (*MemorySigningKeyStore)(nil)
+// Compile-time proof that MemSigningKeyStore implements SigningKeyStore.
+var _ SigningKeyStore = (*MemSigningKeyStore)(nil)
 
-// NewMemorySigningKeyStore returns an empty in-memory signing key store.
-func NewMemorySigningKeyStore() *MemorySigningKeyStore {
-	return &MemorySigningKeyStore{byID: make(map[string]*SigningKey)}
+// NewMemSigningKeyStore returns an empty in-memory SigningKeyStore using the
+// real wall clock.
+func NewMemSigningKeyStore() *MemSigningKeyStore {
+	return &MemSigningKeyStore{
+		keys:  make(map[string]SigningKey),
+		clock: time.Now,
+	}
 }
 
-// Create implements SigningKeyStore. It inserts a new key in 'pending' state.
-// Returns an error if the ID is empty or if a key with the same ID or kid
-// already exists (mirroring the DB's primary-key and unique-kid constraints).
-func (s *MemorySigningKeyStore) Create(_ context.Context, key NewSigningKey) (SigningKey, error) {
+// WithClock sets a custom time source (for deterministic tests) and returns the
+// store for chaining.
+func (s *MemSigningKeyStore) WithClock(clock func() time.Time) *MemSigningKeyStore {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clock = clock
+	return s
+}
+
+// Create implements SigningKeyStore. The new key enters 'pending' state with
+// CreatedAt set from the store clock. Duplicate ID or kid is rejected.
+func (s *MemSigningKeyStore) Create(_ context.Context, key NewSigningKey) (SigningKey, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if key.ID == "" {
 		return SigningKey{}, fmt.Errorf("signingkeys: create: empty ID")
 	}
-	if _, exists := s.byID[key.ID]; exists {
+	if _, ok := s.keys[key.ID]; ok {
 		return SigningKey{}, fmt.Errorf("signingkeys: create: duplicate ID %q", key.ID)
 	}
-	for _, k := range s.byID {
+	for _, k := range s.keys {
 		if k.Kid == key.Kid {
 			return SigningKey{}, fmt.Errorf("signingkeys: create: duplicate kid %q", key.Kid)
 		}
 	}
 
-	stored := &SigningKey{
+	sk := SigningKey{
 		ID:                key.ID,
 		Kid:               key.Kid,
-		State:             "pending",
+		State:             signingKeyStatePending,
 		PublicKeyBytes:    key.PublicKeyBytes,
 		PrivateKeyWrapped: key.PrivateKeyWrapped,
 		Region:            key.Region,
-		CreatedAt:         time.Now(),
+		CreatedAt:         s.clock(),
 	}
-	s.byID[key.ID] = stored
-	return *stored, nil
+	s.keys[sk.ID] = sk
+	return sk, nil
 }
 
-// GetByKid implements SigningKeyStore. Returns ErrSigningKeyNotFound if no key
-// exists with that kid.
-func (s *MemorySigningKeyStore) GetByKid(_ context.Context, kid string) (SigningKey, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, k := range s.byID {
+// GetByKid implements SigningKeyStore.
+func (s *MemSigningKeyStore) GetByKid(_ context.Context, kid string) (SigningKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, k := range s.keys {
 		if k.Kid == kid {
-			return *k, nil
+			return k, nil
 		}
 	}
 	return SigningKey{}, ErrSigningKeyNotFound
 }
 
-// GetActive implements SigningKeyStore. Returns the active signing key, or
-// ErrSigningKeyNotFound if none is active.
-func (s *MemorySigningKeyStore) GetActive(_ context.Context) (SigningKey, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, k := range s.byID {
-		if k.State == "active" {
-			return *k, nil
+// GetActive implements SigningKeyStore. Returns ErrSigningKeyNotFound when no
+// key is in the active state.
+func (s *MemSigningKeyStore) GetActive(_ context.Context) (SigningKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, k := range s.keys {
+		if k.State == signingKeyStateActive {
+			return k, nil
 		}
 	}
 	return SigningKey{}, ErrSigningKeyNotFound
 }
 
-// ListLive implements SigningKeyStore. It returns all pending and active keys
-// (the set published in JWKS), sorted by CreatedAt then Kid for deterministic
-// output. Retired keys are excluded.
-func (s *MemorySigningKeyStore) ListLive(_ context.Context) ([]SigningKey, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+// ListLive implements SigningKeyStore. Returns pending + active keys (retired
+// excluded) sorted by CreatedAt then Kid for deterministic output.
+func (s *MemSigningKeyStore) ListLive(_ context.Context) ([]SigningKey, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	var out []SigningKey
-	for _, k := range s.byID {
-		if k.State == "pending" || k.State == "active" {
-			out = append(out, *k)
+	for _, k := range s.keys {
+		if k.State == signingKeyStatePending || k.State == signingKeyStateActive {
+			out = append(out, k)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -107,46 +135,45 @@ func (s *MemorySigningKeyStore) ListLive(_ context.Context) ([]SigningKey, error
 	return out, nil
 }
 
-// SetState implements SigningKeyStore. It updates the key's state and replaces
-// its promoted_at / retired_at timestamps with the supplied values (nil clears
-// the timestamp), matching DBSigningKeyStore.SetState. Returns
-// ErrSigningKeyNotFound if no key has the given ID.
-func (s *MemorySigningKeyStore) SetState(_ context.Context, id string, state string, promotedAt, retiredAt *time.Time) (SigningKey, error) {
+// SetState implements SigningKeyStore. It updates the key's state and, using
+// COALESCE semantics, only overwrites promoted_at / retired_at when the
+// corresponding argument is non-nil. Returns ErrSigningKeyNotFound if no key
+// has the given id.
+func (s *MemSigningKeyStore) SetState(_ context.Context, id string, state string, promotedAt, retiredAt *time.Time) (SigningKey, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	k, ok := s.byID[id]
+
+	k, ok := s.keys[id]
 	if !ok {
 		return SigningKey{}, ErrSigningKeyNotFound
 	}
 	k.State = state
-	k.PromotedAt = copyTimePtr(promotedAt)
-	k.RetiredAt = copyTimePtr(retiredAt)
-	return *k, nil
+	if promotedAt != nil {
+		t := *promotedAt
+		k.PromotedAt = &t
+	}
+	if retiredAt != nil {
+		t := *retiredAt
+		k.RetiredAt = &t
+	}
+	s.keys[id] = k
+	return k, nil
 }
 
 // Retire implements SigningKeyStore. It marks the key with the given kid as
-// retired and stamps retired_at. Returns ErrSigningKeyNotFound if no key has
-// that kid.
-func (s *MemorySigningKeyStore) Retire(_ context.Context, kid string) (SigningKey, error) {
+// retired and stamps retired_at from the store clock. Returns
+// ErrSigningKeyNotFound if no key has the given kid.
+func (s *MemSigningKeyStore) Retire(_ context.Context, kid string) (SigningKey, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, k := range s.byID {
+	for id, k := range s.keys {
 		if k.Kid == kid {
-			now := time.Now()
-			k.State = "retired"
+			now := s.clock()
+			k.State = signingKeyStateRetired
 			k.RetiredAt = &now
-			return *k, nil
+			s.keys[id] = k
+			return k, nil
 		}
 	}
 	return SigningKey{}, ErrSigningKeyNotFound
-}
-
-// copyTimePtr returns a deep copy of a *time.Time so stored timestamps never
-// alias a caller-owned pointer.
-func copyTimePtr(t *time.Time) *time.Time {
-	if t == nil {
-		return nil
-	}
-	v := *t
-	return &v
 }
