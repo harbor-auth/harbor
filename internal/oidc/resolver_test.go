@@ -233,17 +233,23 @@ func TestPPIDSessionResolverSubNotRawUserID(t *testing.T) {
 
 // --- Additional error path tests ---
 
-// errGrantStore returns fixed errors from FindGrant and CreateGrant.
+// errGrantStore returns fixed values/errors from each GrantStore method so
+// tests can drive both the first-consent path and the scope-upgrade
+// (revoke+create) error paths. found/foundGrant control what FindGrant
+// returns; revokeErr/createErr inject failures at each step of the upgrade.
 type errGrantStore struct {
-	findErr   error
-	createErr error
+	findErr    error
+	foundGrant Grant
+	found      bool
+	revokeErr  error
+	createErr  error
 }
 
 func (s errGrantStore) FindGrant(_ context.Context, _, _ string) (Grant, bool, error) {
 	if s.findErr != nil {
 		return Grant{}, false, s.findErr
 	}
-	return Grant{}, false, nil
+	return s.foundGrant, s.found, nil
 }
 
 func (s errGrantStore) CreateGrant(_ context.Context, _ NewGrant) (Grant, error) {
@@ -251,7 +257,7 @@ func (s errGrantStore) CreateGrant(_ context.Context, _ NewGrant) (Grant, error)
 }
 
 func (s errGrantStore) RevokeGrant(_ context.Context, _ string) error {
-	return nil
+	return s.revokeErr
 }
 
 func (s errGrantStore) ListGrantsByUser(_ context.Context, _ string) ([]Grant, error) {
@@ -297,6 +303,65 @@ func TestPPIDSessionResolverCreateGrantError(t *testing.T) {
 	}
 	if sub != "" || approved {
 		t.Fatalf("expected empty non-approved subject, got sub=%q approved=%v", sub, approved)
+	}
+}
+
+// TestPPIDSessionResolverScopeUpgradeRevokeError verifies the resolver fails
+// closed when RevokeGrant errors partway through a scope upgrade — the caller
+// must get an empty subject and the error, never the frozen PairwiseSub.
+func TestPPIDSessionResolverScopeUpgradeRevokeError(t *testing.T) {
+	const userID = "00000000-0000-0000-0000-000000000001"
+	loader := NewInMemorySecretLoader()
+	loader.Put(userID, UserSecret{Region: "us", Secret: resolverTestSecret()})
+
+	// FindGrant returns an active grant with ["openid"] scopes.
+	// RevokeGrant returns an error — Resolve must fail closed.
+	r := NewPPIDSessionResolver(PPIDSessionResolverConfig{
+		Auth:   NewFixedAuthSource(userID),
+		Loader: loader,
+		Grants: errGrantStore{
+			found:      true,
+			foundGrant: Grant{ID: "g1", UserID: userID, ClientID: "rp-a", PairwiseSub: "stable-ppid", Scopes: []string{"openid"}},
+			revokeErr:  errors.New("DB connection lost"),
+		},
+	})
+
+	sub, _, approved, err := r.Resolve(context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid offline_access")
+	if err == nil {
+		t.Fatal("expected error when RevokeGrant fails during scope upgrade")
+	}
+	if sub != "" || approved {
+		t.Fatalf("must fail closed: sub=%q approved=%v", sub, approved)
+	}
+}
+
+// TestPPIDSessionResolverScopeUpgradeCreateAfterRevokeError verifies the
+// resolver fails closed when RevokeGrant succeeds but the subsequent
+// CreateGrant errors — the user is left with no active grant, but the caller
+// gets an error (no code is issued) and can safely retry.
+func TestPPIDSessionResolverScopeUpgradeCreateAfterRevokeError(t *testing.T) {
+	const userID = "00000000-0000-0000-0000-000000000001"
+	loader := NewInMemorySecretLoader()
+	loader.Put(userID, UserSecret{Region: "us", Secret: resolverTestSecret()})
+
+	// FindGrant returns an active grant with ["openid"] scopes.
+	// RevokeGrant succeeds but CreateGrant fails — Resolve must fail closed.
+	r := NewPPIDSessionResolver(PPIDSessionResolverConfig{
+		Auth:   NewFixedAuthSource(userID),
+		Loader: loader,
+		Grants: errGrantStore{
+			found:      true,
+			foundGrant: Grant{ID: "g1", UserID: userID, ClientID: "rp-a", PairwiseSub: "stable-ppid", Scopes: []string{"openid"}},
+			createErr:  errors.New("unique constraint violation"),
+		},
+	})
+
+	sub, _, approved, err := r.Resolve(context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid offline_access")
+	if err == nil {
+		t.Fatal("expected error when CreateGrant fails after RevokeGrant succeeds during scope upgrade")
+	}
+	if sub != "" || approved {
+		t.Fatalf("must fail closed: sub=%q approved=%v", sub, approved)
 	}
 }
 

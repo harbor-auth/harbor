@@ -224,17 +224,23 @@ func hasNewScopes(requested, existing []string) bool {
 
 // unionScopes returns the union of existing and requested scopes: existing
 // scopes first (order preserved), then any scopes from requested that are not
-// already in existing (in the order they appear in requested).
+// already in existing (in the order they appear in requested). Duplicates
+// within either input are collapsed — the set is updated as each scope is
+// appended, so a malformed requested string (e.g. "openid openid") cannot
+// produce a grant with repeated scopes.
 func unionScopes(existing, requested []string) []string {
-	set := make(map[string]bool, len(existing))
-	result := make([]string, len(existing))
-	copy(result, existing)
+	set := make(map[string]bool, len(existing)+len(requested))
+	result := make([]string, 0, len(existing)+len(requested))
 	for _, s := range existing {
-		set[s] = true
+		if !set[s] {
+			result = append(result, s)
+			set[s] = true
+		}
 	}
 	for _, s := range requested {
 		if !set[s] {
 			result = append(result, s)
+			set[s] = true
 		}
 	}
 	return result
