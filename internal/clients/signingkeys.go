@@ -26,6 +26,26 @@ type SigningKey struct {
 	RetiredAt         *time.Time // when state changed to 'retired'
 }
 
+// Getter methods to satisfy crypto.SigningKeyRecord interface.
+
+// GetID returns the key's UUID.
+func (k SigningKey) GetID() string { return k.ID }
+
+// GetKid returns the key identifier.
+func (k SigningKey) GetKid() string { return k.Kid }
+
+// GetState returns the key's lifecycle state.
+func (k SigningKey) GetState() string { return k.State }
+
+// GetCreatedAt returns when the key was created.
+func (k SigningKey) GetCreatedAt() time.Time { return k.CreatedAt }
+
+// GetPromotedAt returns when the key was promoted to active.
+func (k SigningKey) GetPromotedAt() *time.Time { return k.PromotedAt }
+
+// GetRetiredAt returns when the key was retired.
+func (k SigningKey) GetRetiredAt() *time.Time { return k.RetiredAt }
+
 // NewSigningKey is the input for creating a new signing key.
 type NewSigningKey struct {
 	ID                string
