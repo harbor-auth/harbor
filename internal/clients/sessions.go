@@ -254,6 +254,18 @@ func (s *DBSessionStore) RevokeSessionsByUserClient(ctx context.Context, userID,
 	})
 }
 
+// RevokeSessionsByGrant implements oidc.SessionStore (per-app revocation;
+// DESIGN §11.3). Revokes all active sessions for a specific grant, enabling
+// users to disconnect a single app without affecting other grants.
+// The partial index idx_sessions_grant_id (migration 0006) makes this O(log n).
+func (s *DBSessionStore) RevokeSessionsByGrant(ctx context.Context, grantID string) error {
+	var gid pgtype.UUID
+	if err := gid.Scan(grantID); err != nil {
+		return fmt.Errorf("sessions: parse grant ID %q: %w", grantID, err)
+	}
+	return s.q.RevokeSessionsByGrant(ctx, gid)
+}
+
 // rowToRefreshSession converts a sqlc Session row to the domain type.
 func rowToRefreshSession(row db.Session) oidc.RefreshSession {
 	var label string
