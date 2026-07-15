@@ -27,7 +27,7 @@ type RefreshSession struct {
 	ID          string // UUID string
 	Region      string // user's home jurisdiction (§5)
 	UserID      string // internal user UUID
-	GrantID     string // associated consent grant UUID — always "" until a DB column is added (no persistence yet). The copy-through in Refresh() (newSession.GrantID = session.GrantID) is a placeholder.
+	GrantID     string // associated consent grant UUID; persisted via the grant_id FK column (migration 0006). Empty for legacy sessions created before the column was added.
 	ClientID    string // the RP this session belongs to
 	DeviceLabel string // optional: UA string / device name
 	TokenHash   []byte // SHA-256 of the opaque plaintext — NEVER the plaintext
