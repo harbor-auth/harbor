@@ -37,7 +37,17 @@ func NewDBUserPersister(q userQuerier) *DBUserPersister {
 // enrollment record to the users table. The caller (identity.Enroller) has
 // already encrypted dek_wrapped and pairwise_secret; this method only
 // forwards the opaque bytes — no secret material is inspected or logged here.
+//
+// recovery_required (REQ-005) is enforced by the users table's NOT NULL
+// DEFAULT true (migration 0006): every enrollment INSERT records
+// recovery_required=true. Because the CreateUser query intentionally does not
+// expose that column, we fail closed if a caller ever hands us a record that
+// claims recovery is NOT required — enrollment must never create a user who
+// has already bypassed recovery setup.
 func (p *DBUserPersister) PersistUser(ctx context.Context, r identity.UserRecord) error {
+	if !r.RecoveryRequired {
+		return fmt.Errorf("clients: PersistUser: enrollment must set recovery_required=true (REQ-005)")
+	}
 	var id pgtype.UUID
 	if err := id.Scan(r.ID); err != nil {
 		return fmt.Errorf("clients: PersistUser: invalid user ID %q: %w", r.ID, err)
