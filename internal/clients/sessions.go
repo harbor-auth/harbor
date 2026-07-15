@@ -284,6 +284,7 @@ func rowToRefreshSession(row db.Session) oidc.RefreshSession {
 		Region:      row.Region,
 		UserID:      uuidToString(row.UserID),
 		ClientID:    row.ClientID,
+		GrantID:     uuidToString(row.GrantID),
 		DeviceLabel: label,
 		TokenHash:   row.RefreshTokenHash,
 		ExpiresAt:   expiresAt,
