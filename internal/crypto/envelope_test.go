@@ -24,6 +24,7 @@ func TestGenerateDEKNeverZero(t *testing.T) {
 
 // TestEncryptUniqueNonces verifies that two encryptions of identical plaintext
 // differ (unique CSPRNG nonces per call).
+//
 //harbor:invariant INV-DEK-CSPRNG
 func TestEncryptUniqueNonces(t *testing.T) {
 	dek, err := GenerateDEK()

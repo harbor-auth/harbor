@@ -84,7 +84,7 @@ func (c *countingSigner) Sign(data []byte) ([]byte, error) {
 	}
 	return c.real.Sign(data)
 }
-func (c *countingSigner) KeyID() string       { return c.real.KeyID() }
+func (c *countingSigner) KeyID() string         { return c.real.KeyID() }
 func (c *countingSigner) PublicJWK() crypto.JWK { return c.real.PublicJWK() }
 
 //harbor:invariant INV-JWT-SUB-IS-PPID
@@ -405,12 +405,12 @@ func fixedGoldenKey(t *testing.T, dHex string) *ecdsa.PrivateKey {
 }
 
 type jwtGoldenVectors struct {
-	FixedKeyDHex       string `json:"fixed_key_d_hex"`
-	ExpectedKid        string `json:"expected_kid"`
-	ExpectedX          string `json:"expected_x"`
-	ExpectedY          string `json:"expected_y"`
-	IDTokenHeaderB64   string `json:"id_token_header_b64"`
-	IDTokenPayloadB64  string `json:"id_token_payload_b64"`
+	FixedKeyDHex        string `json:"fixed_key_d_hex"`
+	ExpectedKid         string `json:"expected_kid"`
+	ExpectedX           string `json:"expected_x"`
+	ExpectedY           string `json:"expected_y"`
+	IDTokenHeaderB64    string `json:"id_token_header_b64"`
+	IDTokenPayloadB64   string `json:"id_token_payload_b64"`
 	FrozenSignedIDToken string `json:"frozen_signed_id_token"`
 }
 

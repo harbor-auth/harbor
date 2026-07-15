@@ -277,4 +277,3 @@ func TestPPIDSessionResolverSecretLoaderGenericError(t *testing.T) {
 		t.Fatalf("expected empty non-approved subject, got sub=%q approved=%v", sub, approved)
 	}
 }
-

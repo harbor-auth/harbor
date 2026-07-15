@@ -230,7 +230,7 @@ func (noopSessionStore) CreateSession(context.Context, RefreshSession) error { r
 func (noopSessionStore) GetSessionByTokenHash(context.Context, []byte) (RefreshSession, error) {
 	return RefreshSession{}, ErrRefreshTokenNotFound
 }
-func (noopSessionStore) RevokeSession(context.Context, string) error { return nil }
+func (noopSessionStore) RevokeSession(context.Context, string) error                 { return nil }
 func (noopSessionStore) RotateSession(context.Context, string, RefreshSession) error { return nil }
 func (noopSessionStore) RevokeSessionsByUserClient(context.Context, string, string) error {
 	return nil

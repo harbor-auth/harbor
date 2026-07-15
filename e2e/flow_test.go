@@ -317,7 +317,10 @@ func TestAuthorizeTokenRefreshFlow(t *testing.T) {
 	tokenResp := postToken(t, code, verifier, demoRedirectURI)
 	defer tokenResp.Body.Close()
 	if tokenResp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(tokenResp.Body)
+		body, readErr := io.ReadAll(tokenResp.Body)
+		if readErr != nil {
+			t.Fatalf("POST %s (authorization_code) = %d, want 200 (body read error: %v)", tokenPath, tokenResp.StatusCode, readErr)
+		}
 		t.Fatalf("POST %s (authorization_code) = %d, want 200\n%s", tokenPath, tokenResp.StatusCode, body)
 	}
 	assertNoStore(t, tokenResp)
@@ -350,7 +353,10 @@ func TestAuthorizeTokenRefreshFlow(t *testing.T) {
 	refreshResp := postRefreshToken(t, tok1.RefreshToken)
 	defer refreshResp.Body.Close()
 	if refreshResp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(refreshResp.Body)
+		body, readErr := io.ReadAll(refreshResp.Body)
+		if readErr != nil {
+			t.Fatalf("POST %s (refresh_token) = %d, want 200 (body read error: %v)", tokenPath, refreshResp.StatusCode, readErr)
+		}
 		t.Fatalf("POST %s (refresh_token) = %d, want 200\n%s", tokenPath, refreshResp.StatusCode, body)
 	}
 	assertNoStore(t, refreshResp)
@@ -389,13 +395,15 @@ func TestAuthorizeTokenRefreshFlow(t *testing.T) {
 	}
 	assertNoStore(t, replayResp)
 	var errBody map[string]any
-	replayBytes, _ := io.ReadAll(replayResp.Body)
-	if err := json.Unmarshal(replayBytes, &errBody); err == nil {
-		if ec, _ := errBody["error"].(string); ec != "invalid_grant" {
-			t.Errorf("old refresh_token error = %q, want invalid_grant (must not leak which check failed)", ec)
+	replayBytes, err := io.ReadAll(replayResp.Body)
+	if err == nil {
+		if jsonErr := json.Unmarshal(replayBytes, &errBody); jsonErr == nil {
+			if ec, _ := errBody["error"].(string); ec != "invalid_grant" {
+				t.Errorf("old refresh_token error = %q, want invalid_grant (must not leak which check failed)", ec)
+			}
+		} else {
+			t.Logf("replay error body not JSON (%s); status 400 already asserted", replayBytes)
 		}
-	} else {
-		t.Logf("replay error body not JSON (%s); status 400 already asserted", replayBytes)
 	}
 }
 
@@ -414,13 +422,15 @@ func TestRefreshInvalidTokenIsInvalidGrant(t *testing.T) {
 	}
 	assertNoStore(t, resp)
 	var errBody map[string]any
-	body, _ := io.ReadAll(resp.Body)
-	if err := json.Unmarshal(body, &errBody); err == nil {
-		if ec, _ := errBody["error"].(string); ec != "invalid_grant" {
-			t.Errorf("bogus refresh_token error = %q, want invalid_grant", ec)
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr == nil {
+		if err := json.Unmarshal(body, &errBody); err == nil {
+			if ec, _ := errBody["error"].(string); ec != "invalid_grant" {
+				t.Errorf("bogus refresh_token error = %q, want invalid_grant", ec)
+			}
+		} else {
+			t.Logf("bogus refresh error body not JSON (%s); status 400 already asserted", body)
 		}
-	} else {
-		t.Logf("bogus refresh error body not JSON (%s); status 400 already asserted", body)
 	}
 }
 
