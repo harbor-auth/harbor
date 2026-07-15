@@ -129,6 +129,81 @@ func TestPPIDSessionResolverGrantReuse(t *testing.T) {
 	}
 }
 
+// TestPPIDSessionResolverScopeExpansion verifies that re-consenting with a
+// superset of scopes (e.g. adding offline_access) upgrades the grant without
+// changing the stable PPID. This is the root-cause fix for the e2e
+// TestAuthorizeTokenRefreshFlow CI failure: test 1 creates a grant with
+// "openid" only; test 2 re-authorizes with "openid offline_access" — the
+// grant must be upgraded so Refresh() sees offline_access in grant.Scopes.
+func TestPPIDSessionResolverScopeExpansion(t *testing.T) {
+	const userID = "00000000-0000-0000-0000-000000000001"
+	r, grants := newTestResolver(t, userID, resolverTestSecret())
+	client := resolverTestClient("rp-a", "rp-a.example.com")
+
+	// First consent: openid only.
+	sub1, _, _, err := r.Resolve(context.Background(), client, "openid")
+	if err != nil {
+		t.Fatalf("first Resolve: %v", err)
+	}
+
+	// Second consent: openid + offline_access (scope upgrade).
+	sub2, _, _, err := r.Resolve(context.Background(), client, "openid offline_access")
+	if err != nil {
+		t.Fatalf("second Resolve (scope upgrade): %v", err)
+	}
+
+	// PPID must be stable across re-authorizations.
+	if sub1 != sub2 {
+		t.Fatalf("PPID changed across scope upgrade: %q != %q", sub1, sub2)
+	}
+
+	// The grant must now include offline_access.
+	list, err := grants.ListGrantsByUser(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("ListGrantsByUser: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected exactly one active grant after scope upgrade, got %d", len(list))
+	}
+	scopeSet := make(map[string]bool, len(list[0].Scopes))
+	for _, s := range list[0].Scopes {
+		scopeSet[s] = true
+	}
+	if !scopeSet["offline_access"] {
+		t.Fatalf("upgraded grant must contain offline_access; got scopes = %v", list[0].Scopes)
+	}
+	if !scopeSet["openid"] {
+		t.Fatalf("upgraded grant must retain openid; got scopes = %v", list[0].Scopes)
+	}
+}
+
+// TestPPIDSessionResolverScopeExpansionPreservesGrantCount verifies that a
+// scope upgrade produces exactly one active grant (the old one is revoked and
+// a new one is created — net count stays at 1, not 2).
+func TestPPIDSessionResolverScopeExpansionPreservesGrantCount(t *testing.T) {
+	const userID = "00000000-0000-0000-0000-000000000001"
+	r, grants := newTestResolver(t, userID, resolverTestSecret())
+	client := resolverTestClient("rp-a", "rp-a.example.com")
+
+	// Three resolve calls, each adding a new scope.
+	for _, scope := range []string{"openid", "openid profile", "openid profile offline_access"} {
+		if _, _, _, err := r.Resolve(context.Background(), client, scope); err != nil {
+			t.Fatalf("Resolve(%q): %v", scope, err)
+		}
+	}
+
+	list, err := grants.ListGrantsByUser(context.Background(), userID)
+	if err != nil {
+		t.Fatalf("ListGrantsByUser: %v", err)
+	}
+	if len(list) != 1 {
+		t.Fatalf("expected exactly one active grant after 3 upgrades, got %d", len(list))
+	}
+	if len(list[0].Scopes) != 3 {
+		t.Fatalf("expected 3 scopes after full expansion, got %v", list[0].Scopes)
+	}
+}
+
 func TestPPIDSessionResolverNoSectorFailsClosed(t *testing.T) {
 	const userID = "00000000-0000-0000-0000-000000000001"
 	r, _ := newTestResolver(t, userID, resolverTestSecret())
