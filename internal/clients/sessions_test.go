@@ -583,6 +583,45 @@ func TestDBSessionStoreRevokeSessionsByGrant(t *testing.T) {
 	}
 }
 
+// TestDBSessionStoreCreateSession_EmptyGrantID verifies that CreateSession
+// correctly handles an empty GrantID (maps to SQL NULL) and that the round-trip
+// via rowToRefreshSession yields an empty string back (not the zero-UUID sentinel).
+func TestDBSessionStoreCreateSession_EmptyGrantID(t *testing.T) {
+	q := newFakeSessionQuerier()
+	store := NewDBSessionStore(q)
+	ctx := context.Background()
+
+	hash := []byte("sha256-empty-grant-test-32-bytes-")
+	rs := oidc.RefreshSession{
+		ID:        "00000000-0000-0000-0000-000000000901",
+		Region:    sessTestRegion,
+		UserID:    sessTestUserID,
+		ClientID:  sessTestClientID,
+		GrantID:   "", // empty = legacy session without grant_id
+		TokenHash: hash,
+		ExpiresAt: time.Now().Add(14 * 24 * time.Hour),
+	}
+
+	if err := store.CreateSession(ctx, rs); err != nil {
+		t.Fatalf("CreateSession with empty GrantID: %v", err)
+	}
+
+	// Verify the grant_id was stored as NULL (Valid=false).
+	row := q.byID[rs.ID]
+	if row.GrantID.Valid {
+		t.Fatalf("expected GrantID to be NULL (Valid=false), got Valid=true with value %q", row.GrantID.String())
+	}
+
+	// Verify round-trip: GetSessionByTokenHash should return empty GrantID.
+	got, err := store.GetSessionByTokenHash(ctx, hash)
+	if err != nil {
+		t.Fatalf("GetSessionByTokenHash: %v", err)
+	}
+	if got.GrantID != "" {
+		t.Fatalf("expected GrantID to be empty string after round-trip, got %q", got.GrantID)
+	}
+}
+
 // TestDBSessionStoreRevokeSessionsByUserClient_IgnoresGrantID verifies that
 // RevokeSessionsByUserClient revokes ALL sessions for (user, client) regardless
 // of their grant_id values — the theft-signal must revoke the entire family.

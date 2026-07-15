@@ -95,9 +95,13 @@ func buildCreateSessionParams(rs oidc.RefreshSession) (db.CreateSessionParams, e
 	if err := userID.Scan(rs.UserID); err != nil {
 		return db.CreateSessionParams{}, fmt.Errorf("sessions: parse user ID %q: %w", rs.UserID, err)
 	}
+	// Empty GrantID maps to SQL NULL (pgtype.UUID{Valid:false}) for backward
+	// compatibility with sessions created before the grant_id column existed.
 	var grantID pgtype.UUID
-	if err := grantID.Scan(rs.GrantID); err != nil {
-		return db.CreateSessionParams{}, fmt.Errorf("sessions: parse grant ID %q: %w", rs.GrantID, err)
+	if rs.GrantID != "" {
+		if err := grantID.Scan(rs.GrantID); err != nil {
+			return db.CreateSessionParams{}, fmt.Errorf("sessions: parse grant ID %q: %w", rs.GrantID, err)
+		}
 	}
 	var deviceLabel *string
 	if rs.DeviceLabel != "" {
@@ -284,7 +288,7 @@ func rowToRefreshSession(row db.Session) oidc.RefreshSession {
 		Region:      row.Region,
 		UserID:      uuidToString(row.UserID),
 		ClientID:    row.ClientID,
-		GrantID:     uuidToString(row.GrantID),
+		GrantID:     nullableUUIDToString(row.GrantID),
 		DeviceLabel: label,
 		TokenHash:   row.RefreshTokenHash,
 		ExpiresAt:   expiresAt,
@@ -295,4 +299,16 @@ func rowToRefreshSession(row db.Session) oidc.RefreshSession {
 // isRevoked reports whether a db.Session row has been revoked.
 func isRevoked(row db.Session) bool {
 	return row.RevokedAt.Valid
+}
+
+// nullableUUIDToString converts a pgtype.UUID to string, returning empty
+// string for NULL/invalid UUIDs. This is the inverse of the empty-string
+// handling in buildCreateSessionParams: empty string → NULL → empty string.
+// Used for nullable FK columns like grant_id where NULL is a valid state
+// (legacy rows created before the column was added).
+func nullableUUIDToString(u pgtype.UUID) string {
+	if !u.Valid {
+		return ""
+	}
+	return u.String()
 }
