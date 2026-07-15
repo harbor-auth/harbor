@@ -23,6 +23,16 @@ type Querier interface {
 	CreateGrant(ctx context.Context, arg CreateGrantParams) (Grant, error)
 	CreateMFAFactor(ctx context.Context, arg CreateMFAFactorParams) (MfaFactor, error)
 	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
+	// Queries for the signing_keys table (JWKS kid rotation; DESIGN §7.3, §3.5.4).
+	// The query IS the contract (DESIGN §1.3): `sqlc generate` (via @codegen)
+	// produces typed Go — never hand-write DB types.
+	//
+	// Key lifecycle: pending → active → retired. Exactly one key can be active
+	// at any time (the signer). Pending keys are published in JWKS (giving RPs
+	// time to cache) but not yet signing. Retired keys are removed from JWKS.
+	// Creates a new signing key in 'pending' state. The key will be promoted to
+	// 'active' after the grace period (allowing RP JWKS cache refresh).
+	CreateSigningKey(ctx context.Context, arg CreateSigningKeyParams) (SigningKey, error)
 	// Queries for the users table (DESIGN §10). The query IS the contract (DESIGN
 	// §1.3): `sqlc generate` (via @codegen) produces typed Go — never hand-write DB
 	// types. All secrets (dek_wrapped, pairwise_secret) are stored as envelope-
@@ -44,6 +54,9 @@ type Querier interface {
 	// so they pass the filter. Sessions with a grant_id only pass if the grant is
 	// not revoked.
 	GetActiveSession(ctx context.Context, id pgtype.UUID) (Session, error)
+	// Returns the single active signing key used for signing new tokens.
+	// The partial unique index idx_signing_keys_one_active guarantees at most one.
+	GetActiveSigningKey(ctx context.Context) (SigningKey, error)
 	// Queries for the credentials table (passkeys + optional password; DESIGN §10,
 	// §3.1). The query IS the contract (DESIGN §1.3): `sqlc generate` (via @codegen)
 	// produces typed Go — never hand-write DB types.
@@ -72,18 +85,29 @@ type Querier interface {
 	// theft (revoked row found) from expiry from a fully-valid row. The UNIQUE index
 	// added in migration 0004 guarantees at most one row per hash value.
 	GetSessionByHash(ctx context.Context, refreshTokenHash []byte) (Session, error)
+	// Retrieves a signing key by its kid (key identifier). Used for token
+	// verification when the kid is known from the JWT header.
+	GetSigningKeyByKid(ctx context.Context, kid string) (SigningKey, error)
 	GetUser(ctx context.Context, id pgtype.UUID) (User, error)
 	// ListAuditEventsByUser powers the dashboard audit-log viewer (DESIGN §9).
 	// Newest-first with limit/offset paging, served by idx_audit_events_user_time.
 	ListAuditEventsByUser(ctx context.Context, arg ListAuditEventsByUserParams) ([]AuditEvent, error)
 	ListCredentialsByUser(ctx context.Context, userID pgtype.UUID) ([]Credential, error)
 	ListGrantsByUser(ctx context.Context, userID pgtype.UUID) ([]Grant, error)
+	// Returns all keys that should appear in the JWKS endpoint: pending (new keys
+	// awaiting promotion) and active (the current signer). Retired keys are
+	// excluded — tokens signed by retired keys will fail verification.
+	ListLiveSigningKeys(ctx context.Context) ([]SigningKey, error)
 	ListMFAFactorsByUser(ctx context.Context, userID pgtype.UUID) ([]MfaFactor, error)
 	ListRelyingParties(ctx context.Context) ([]RelyingParty, error)
 	ListSessionsByUser(ctx context.Context, userID pgtype.UUID) ([]Session, error)
 	// MarkMFAFactorUsed burns a one-time factor (e.g. a recovery code) so it can't
 	// be replayed. Only flips unused → used, so a double-spend is a no-op.
 	MarkMFAFactorUsed(ctx context.Context, id pgtype.UUID) error
+	// Convenience query to retire a key by kid. Sets state to 'retired' and
+	// retired_at to now(). Used during scheduled rotation (after overlap window)
+	// or emergency rotation (immediate).
+	RetireSigningKey(ctx context.Context, kid string) (SigningKey, error)
 	RevokeGrant(ctx context.Context, id pgtype.UUID) error
 	RevokeSession(ctx context.Context, id pgtype.UUID) error
 	// RevokeSessionsByGrant revokes every active session for a specific grant —
@@ -110,6 +134,10 @@ type Querier interface {
 	// update strictly increasing: an equal or regressed counter is a clone signal
 	// and is a no-op here (the caller treats zero rows affected as a failure).
 	UpdateCredentialSignCount(ctx context.Context, arg UpdateCredentialSignCountParams) error
+	// Promotes a key from pending → active or active → retired. The caller must
+	// set promoted_at when promoting to active, and retired_at when retiring.
+	// The CHECK constraint signing_keys_state_timestamps enforces invariants.
+	UpdateSigningKeyState(ctx context.Context, arg UpdateSigningKeyStateParams) (SigningKey, error)
 	UpsertRelyingParty(ctx context.Context, arg UpsertRelyingPartyParams) (RelyingParty, error)
 }
 
