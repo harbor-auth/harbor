@@ -34,10 +34,15 @@ type Querier interface {
 	DeleteExpiredSessions(ctx context.Context) error
 	DeleteMFAFactor(ctx context.Context, id pgtype.UUID) error
 	FindGrantByUserClient(ctx context.Context, arg FindGrantByUserClientParams) (Grant, error)
-	// GetActiveSession returns a session ONLY when it is still usable — not revoked
-	// and not expired. Auth flows (refresh-token rotation; DESIGN §3.5) MUST use
-	// this rather than GetSession, which returns revoked/expired rows for
-	// admin/audit purposes.
+	// GetActiveSession returns a session ONLY when it is still usable — not revoked,
+	// not expired, and whose underlying grant is still active. Auth flows (refresh-
+	// token rotation; DESIGN §3.5) MUST use this rather than GetSession, which
+	// returns revoked/expired rows for admin/audit purposes.
+	//
+	// The LEFT JOIN on grants handles sessions with NULL grant_id (legacy rows
+	// created before grant_id was added). For those rows, grants.revoked_at is NULL
+	// so they pass the filter. Sessions with a grant_id only pass if the grant is
+	// not revoked.
 	GetActiveSession(ctx context.Context, id pgtype.UUID) (Session, error)
 	// Queries for the credentials table (passkeys + optional password; DESIGN §10,
 	// §3.1). The query IS the contract (DESIGN §1.3): `sqlc generate` (via @codegen)
