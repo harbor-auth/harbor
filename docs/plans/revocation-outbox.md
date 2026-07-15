@@ -1,9 +1,9 @@
 ---
 title: Revocation outbox (durable theft-signal delivery)
-status: draft
+status: implemented
 design_refs: [§3.5, §3.5.2, §10]
 targets: [internal/oidc/, internal/clients/, db/migrations/, db/queries/]
-promoted_to: null
+promoted_to: docs/features/revocation-outbox.md
 openspec: changes/revocation-outbox
 created: 2026-07-14
 ---
@@ -157,14 +157,35 @@ plan).
 
 ## Implementation checklist
 
-- [ ] Write migration `0004_revocation_outbox.{up,down}.sql`
-- [ ] Write `db/queries/revocation_outbox.sql` (Enqueue, FetchPending, MarkDelivered)
-- [ ] Run `sqlc generate`
-- [ ] Define `RevocationOutbox` interface in `internal/oidc/store.go`
-- [ ] Implement `InMemoryRevocationOutbox` for tests
-- [ ] Implement `DBRevocationOutbox` in `internal/clients/`
-- [ ] Wire outbox into `signalRefreshReuse` and `signalCodeReuse`
-- [ ] Add `RevocationWorker` goroutine in `cmd/harbor-hot/main.go`
-- [ ] Add chaos test: sink failure → outbox.Enqueue called
-- [ ] `go test -race ./...` passes
-- [ ] `@validate` passes
+- [x] Write migration `0006_revocation_outbox.{up,down}.sql`
+- [x] Write `db/queries/revocation_outbox.sql` (Enqueue, FetchPending, MarkDelivered, IncrementRetry, MarkFailed)
+- [x] Run `sqlc generate`
+- [x] Define `RevocationOutbox` interface + `OutboxEntry` type in `internal/oidc/service.go`
+- [x] Implement `DBRevocationOutbox` in `internal/clients/revocation_outbox.go`
+- [x] Wire outbox into `signalRefreshReuse` and `signalCodeReuse` (remove `TODO(security)`)
+- [x] Add `RevocationWorker` goroutine in `internal/oidc/worker.go`, started in `cmd/harbor-hot/main.go`
+- [x] Add chaos test: sink failure → outbox.Enqueue called
+- [x] `go test -race ./...` passes
+- [x] `@validate` passes
+
+## As-built notes (divergences from the draft above)
+
+- **Migration number is `0006`**, not `0004` — it landed after the auth-code and
+  session migrations that were merged in the interim.
+- **The `RevocationOutbox` interface + `OutboxEntry` domain type live in
+  `internal/oidc/service.go`, not `store.go`** — they must be in the `oidc`
+  package (not `internal/clients`) because `clients` imports `oidc`; defining
+  them there avoids a circular import. A default `noopRevocationOutbox` is the
+  fallback when no outbox is wired (dev/test).
+- **No standalone `InMemoryRevocationOutbox`** — tests use a `recordingOutbox`
+  fake (in `internal/oidc/chaos_test.go`) that records `Enqueue` calls, plus the
+  `mockOutboxQuerier`/`mockSessionStore` fakes in
+  `internal/clients/revocation_outbox_test.go` for the `DeliverPending` retry/
+  TTL/idempotency paths.
+- **`RevocationWorker` lives in `internal/oidc/worker.go`** and reaches the
+  concrete `DBRevocationOutbox.DeliverPending` via the `OutboxDeliverer`
+  interface (again to avoid the `clients → oidc` import cycle). It is started as
+  a background goroutine in `cmd/harbor-hot/main.go` and shuts down on context
+  cancellation.
+- **Durability invariant registered** as `INV-DURABLE-REVOCATION` in
+  `invariants/registry.yaml`.

@@ -645,7 +645,7 @@ func TestChaos_Token_ValidateTokenParams_GatesStoreAccess(t *testing.T) {
 // The client response must remain invalid_grant regardless — the durability of
 // the side-effect is independent of what the attacker sees.
 //
-//harbor:invariant INV-REVOCATION-OUTBOX-DURABLE
+//harbor:invariant INV-DURABLE-REVOCATION
 func TestChaos_Refresh_OutboxEnqueuesWhenDownstreamFails(t *testing.T) {
 	// Seed a session and rotate it legitimately so the original token is revoked.
 	innerStore := NewInMemorySessionStore()
@@ -713,7 +713,7 @@ func TestChaos_Refresh_OutboxEnqueuesWhenDownstreamFails(t *testing.T) {
 // authorization code is replayed AND the inline RevokeCodeFamily fails, the
 // code-reuse signal is still durably enqueued to the outbox for worker retry.
 //
-//harbor:invariant INV-REVOCATION-OUTBOX-DURABLE
+//harbor:invariant INV-DURABLE-REVOCATION
 func TestChaos_Token_OutboxEnqueuesWhenDownstreamFails(t *testing.T) {
 	const codeVal = "chaos-outbox-code-reuse"
 
