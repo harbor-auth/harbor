@@ -9,8 +9,7 @@ package oidc
 import (
 	"sync"
 
-	// Bloom filter for production implementation (subsequent task).
-	_ "github.com/bits-and-blooms/bloom/v3"
+	"github.com/bits-and-blooms/bloom/v3"
 )
 
 // RevocationFilter provides in-process emergency JWT revocation checks.
@@ -104,5 +103,91 @@ func (f *InMemoryRevocationFilter) Clear() {
 	f.jtis = make(map[string]struct{})
 }
 
-// Compile-time interface check.
+// BloomRevocationFilter wraps a bloom filter with thread-safe access for
+// production use. Uses bloom.NewWithEstimates for optimal sizing based on
+// expected capacity and target false-positive rate.
+//
+// IMPORTANT: Standard bloom filters do NOT support removal. The Remove method
+// is a no-op. For production use with removal support, use a counting bloom
+// filter or accept that removed JTIs remain in the filter until rehydration.
+type BloomRevocationFilter struct {
+	mu     sync.RWMutex
+	filter *bloom.BloomFilter
+
+	// Configuration for rebuilding the filter on Clear/Rehydrate.
+	capacity uint
+	fpRate   float64
+}
+
+// DefaultBloomCapacity is the default expected number of revoked JTIs.
+// 10,000 active revocations with 1/1M FP rate requires ~240KB.
+const DefaultBloomCapacity = 10000
+
+// DefaultBloomFPRate is the default false-positive rate (1 in 1,000,000).
+const DefaultBloomFPRate = 0.000001
+
+// NewBloomRevocationFilter creates a new bloom filter with the given capacity
+// and false-positive rate. Use DefaultBloomCapacity and DefaultBloomFPRate
+// for standard production configuration.
+func NewBloomRevocationFilter(capacity uint, fpRate float64) *BloomRevocationFilter {
+	return &BloomRevocationFilter{
+		filter:   bloom.NewWithEstimates(capacity, fpRate),
+		capacity: capacity,
+		fpRate:   fpRate,
+	}
+}
+
+// MightContain returns true if the JTI might be revoked. Uses read lock for
+// concurrent access (~100ns overhead).
+func (f *BloomRevocationFilter) MightContain(jti string) bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.filter.TestString(jti)
+}
+
+// Add marks a JTI as revoked. Uses write lock.
+func (f *BloomRevocationFilter) Add(jti string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.filter.AddString(jti)
+}
+
+// Remove is a no-op for standard bloom filters (they don't support removal).
+// The JTI will remain in the filter until the next Clear+Rehydrate cycle.
+// This is acceptable because false positives only trigger a DB lookup, and
+// expired JTIs are garbage-collected from the DB anyway.
+func (f *BloomRevocationFilter) Remove(jti string) {
+	// No-op: standard bloom filters cannot remove elements.
+	// The filter will be rebuilt on the next rehydration cycle.
+}
+
+// Rehydrate clears the filter and repopulates it with the given JTIs.
+// This is called on startup and periodically to remove stale entries.
+func (f *BloomRevocationFilter) Rehydrate(jtis []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// Create a fresh filter to remove any stale entries.
+	f.filter = bloom.NewWithEstimates(f.capacity, f.fpRate)
+	for _, jti := range jtis {
+		f.filter.AddString(jti)
+	}
+}
+
+// Clear resets the filter to empty state.
+func (f *BloomRevocationFilter) Clear() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.filter = bloom.NewWithEstimates(f.capacity, f.fpRate)
+}
+
+// EstimatedCount returns the approximate number of elements in the filter.
+// This is useful for monitoring and debugging.
+func (f *BloomRevocationFilter) EstimatedCount() uint32 {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.filter.ApproximatedSize()
+}
+
+// Compile-time interface checks.
 var _ RevocationFilter = (*InMemoryRevocationFilter)(nil)
+var _ RevocationFilter = (*BloomRevocationFilter)(nil)
