@@ -24,9 +24,9 @@ ORDER BY created_at DESC;
 
 -- name: CreateSession :one
 INSERT INTO sessions (
-    id, region, user_id, client_id, device_label, refresh_token_hash, expires_at
+    id, region, user_id, client_id, grant_id, device_label, refresh_token_hash, expires_at
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7
+    $1, $2, $3, $4, $5, $6, $7, $8
 )
 RETURNING *;
 
@@ -53,6 +53,17 @@ UPDATE sessions
 SET revoked_at = now()
 WHERE user_id = $1
   AND client_id = $2
+  AND revoked_at IS NULL;
+
+-- RevokeSessionsByGrant revokes every active session for a specific grant —
+-- used when a user revokes a connected app (DESIGN §11.3). Scoped to a single
+-- grant so revoking one app connection does not affect other grants for the
+-- same (user, client) pair. The partial index idx_sessions_grant_id (migration
+-- 0006) makes this fast.
+-- name: RevokeSessionsByGrant :exec
+UPDATE sessions
+SET revoked_at = now()
+WHERE grant_id = $1
   AND revoked_at IS NULL;
 
 -- DeleteExpiredSessions reaps rows whose refresh token has expired — background
