@@ -129,12 +129,15 @@ func NewPPIDSessionResolver(cfg PPIDSessionResolverConfig) *PPIDSessionResolver 
 // Resolve runs the login + consent step and returns the per-RP PPID:
 //
 //  1. Authenticate the user (real user_id).
-//  2. Load + decrypt the user's pairwise secret (fail closed).
-//  3. Look up an existing consent grant for (userID, client).
-//     - found: return the frozen grant.PairwiseSub directly — stable across
-//     calls, no re-derivation (§3.2.3).
-//     - not found (first consent): derive sub = DerivePPID(secret, sector, uid)
-//     and record a new grant carrying that sub + the consented scopes.
+//  2. Look up an existing consent grant for (userID, client).
+//     - found: if the requested scope is a superset of the frozen grant scopes,
+//     revoke + re-create the grant with the union of scopes (preserving
+//     PairwiseSub), then return the stable sub. Otherwise return the frozen
+//     grant.PairwiseSub directly — stable across calls, no re-derivation
+//     (§3.2.3).
+//     - not found (first consent): load + decrypt the user's pairwise secret
+//     (fail closed), derive sub = DerivePPID(secret, sector, uid), and record
+//     a new grant carrying that sub + the consented scopes.
 //
 // The resolved sub flows unchanged through /authorize → code → /token into the
 // token's sub claim.
@@ -144,23 +147,46 @@ func (r *PPIDSessionResolver) Resolve(ctx context.Context, client Client, scope 
 		return "", "", false, err
 	}
 
-	us, err := r.loader.LoadUserSecret(ctx, userID)
-	if err != nil {
-		// Fail closed: never fall back to userID as the subject.
-		return "", "", false, err
-	}
-
 	grant, found, err := r.grants.FindGrant(ctx, userID, client.ID)
 	if err != nil {
 		return "", "", false, err
 	}
 	if found {
+		// If the new request includes scopes beyond those in the existing grant
+		// (e.g. offline_access on re-consent), upgrade the grant to the union.
+		// The PairwiseSub is preserved — PPID must be stable across
+		// re-authorizations for the same (user, client) pair (§3.2.3).
+		// We revoke-then-create rather than update-in-place because GrantStore
+		// has no UpdateScopes method, and the DB has no ON CONFLICT clause on
+		// (user_id, client_id) — an explicit revoke keeps byPair/DB consistent.
+		requested := strings.Fields(scope)
+		if hasNewScopes(requested, grant.Scopes) {
+			if err := r.grants.RevokeGrant(ctx, grant.ID); err != nil {
+				return "", "", false, err
+			}
+			if _, err := r.grants.CreateGrant(ctx, NewGrant{
+				Region:      grant.Region,
+				UserID:      userID,
+				ClientID:    client.ID,
+				PairwiseSub: grant.PairwiseSub,
+				Scopes:      unionScopes(grant.Scopes, requested),
+			}); err != nil {
+				return "", "", false, err
+			}
+		}
 		return grant.PairwiseSub, userID, true, nil
 	}
 
-	// First consent: derive the PPID now. The sector_id groups the RP's redirect
-	// URIs for pairwise derivation (§3.2); without it we cannot produce a
-	// non-correlating sub, so we fail closed rather than guess.
+	// First consent: load + decrypt the user's pairwise secret (fail closed —
+	// never fall back to userID as the subject), then derive the PPID.
+	us, err := r.loader.LoadUserSecret(ctx, userID)
+	if err != nil {
+		return "", "", false, err
+	}
+
+	// The sector_id groups the RP's redirect URIs for pairwise derivation (§3.2);
+	// without it we cannot produce a non-correlating sub, so we fail closed
+	// rather than guess.
 	if client.SectorID == "" {
 		return "", "", false, fmt.Errorf("session: client %q has no sector_id", client.ID)
 	}
@@ -180,4 +206,36 @@ func (r *PPIDSessionResolver) Resolve(ctx context.Context, client Client, scope 
 	}
 
 	return sub, userID, true, nil
+}
+
+// hasNewScopes reports whether any scope in requested is absent from existing.
+func hasNewScopes(requested, existing []string) bool {
+	set := make(map[string]bool, len(existing))
+	for _, s := range existing {
+		set[s] = true
+	}
+	for _, s := range requested {
+		if !set[s] {
+			return true
+		}
+	}
+	return false
+}
+
+// unionScopes returns the union of existing and requested scopes: existing
+// scopes first (order preserved), then any scopes from requested that are not
+// already in existing (in the order they appear in requested).
+func unionScopes(existing, requested []string) []string {
+	set := make(map[string]bool, len(existing))
+	result := make([]string, len(existing))
+	copy(result, existing)
+	for _, s := range existing {
+		set[s] = true
+	}
+	for _, s := range requested {
+		if !set[s] {
+			result = append(result, s)
+		}
+	}
+	return result
 }
