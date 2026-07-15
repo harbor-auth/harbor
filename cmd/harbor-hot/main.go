@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/harbor/harbor/internal/clients"
 	"github.com/harbor/harbor/internal/crypto"
@@ -84,6 +85,39 @@ func main() {
 		defer pool.Close()
 	}
 
+	// Connect to Redis for auth code storage (docs/DESIGN.md §4.4).
+	// Returns (nil, nil) when REDIS_URL is unset — falls back to in-memory.
+	redisClient, err := clients.ConnectRedis(ctx, logger)
+	if err != nil {
+		if ctx.Err() != nil {
+			logger.Info("startup cancelled by signal — exiting cleanly", "error", err)
+			stop()
+			if pool != nil {
+				pool.Close()
+			}
+			os.Exit(0)
+		}
+		logger.Error("redis connection failed", "error", err)
+		stop()
+		if pool != nil {
+			pool.Close()
+		}
+		os.Exit(1)
+	}
+	if redisClient != nil {
+		defer redisClient.Close()
+	}
+
+	// Auth code store: Redis-backed if available, otherwise in-memory fallback.
+	var authCodeStore oidc.AuthCodeStore
+	if redisClient != nil {
+		authCodeStore = clients.NewRedisAuthCodeStore(redisClient, 60*time.Second)
+		logger.Info("using Redis-backed auth code store")
+	} else {
+		authCodeStore = oidc.NewInMemoryAuthCodeStore()
+		logger.Warn("REDIS_URL not set — using in-memory auth code store (not suitable for multi-replica deployment)")
+	}
+
 	// SCAFFOLD: FixedAuthSource is a placeholder for real BFF-session-backed auth
 	// (docs/DESIGN.md §11.1). It hardcodes a single demo user — NOT for
 	// production — and is used in both the DB and in-memory paths until real
@@ -114,6 +148,9 @@ func main() {
 			// first, then stop) but is safe: pgxpool handles a pre-cancelled context
 			// gracefully.
 			stop()
+			if redisClient != nil {
+				redisClient.Close()
+			}
 			pool.Close()
 			os.Exit(1)
 		}
@@ -122,6 +159,9 @@ func main() {
 			logger.Error("failed to create key provider", "error", err)
 			// os.Exit skips deferred functions, so release resources explicitly.
 			stop()
+			if redisClient != nil {
+				redisClient.Close()
+			}
 			pool.Close()
 			os.Exit(1)
 		}
@@ -130,11 +170,6 @@ func main() {
 		sessionStore = clients.NewDBSessionStoreWithPool(q, pool)
 		secretLoader = clients.NewDBSecretLoader(q, keyProvider, crypto.NewCipher())
 		logger.Info("using DB-backed stores")
-		// SCAFFOLD: authorization codes are still stored in-memory (see the
-		// oidc.NewInMemoryAuthCodeStore wiring below), so a code issued by one
-		// replica cannot be redeemed by another. Warn so this isn't silently
-		// deployed multi-replica (docs/DESIGN.md §4.4).
-		logger.Warn("authorization codes stored in-memory — not suitable for multi-replica deployment")
 		// SCAFFOLD: even in the DB path the subject is still resolved by
 		// FixedAuthSource below, so every /authorize authenticates as the SAME
 		// hardcoded demo user regardless of who is calling. This must be replaced
@@ -171,7 +206,7 @@ func main() {
 		Issuer:  issuer,
 		Logger:  logger,
 		Clients: clientRegistry,
-		Codes:   oidc.NewInMemoryAuthCodeStore(),
+		Codes:   authCodeStore,
 		Tokens:  oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Sessions: oidc.NewPPIDSessionResolver(oidc.PPIDSessionResolverConfig{
 			Auth:   oidc.NewFixedAuthSource(demoUserID),
@@ -197,6 +232,9 @@ func main() {
 			// shutdown so process managers don't restart the process.
 			logger.Info("server stopped by signal — exiting cleanly", "error", err)
 			stop()
+			if redisClient != nil {
+				redisClient.Close()
+			}
 			if pool != nil {
 				pool.Close()
 			}
@@ -205,6 +243,9 @@ func main() {
 		logger.Error("harbor-hot exited with error", "error", err)
 		// os.Exit skips deferred functions, so release resources explicitly.
 		stop()
+		if redisClient != nil {
+			redisClient.Close()
+		}
 		if pool != nil {
 			pool.Close()
 		}
