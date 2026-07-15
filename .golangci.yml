@@ -45,6 +45,8 @@ linters:
         - (net/http.ResponseWriter).Write
         - (*encoding/json.Encoder).Encode
         - (io.ReadCloser).Close
+        - (github.com/redis/go-redis/v9.Client).Close
+        - (*github.com/redis/go-redis/v9.Client).Close
 
   exclusions:
     # Skip linting auto-generated protobuf/gRPC stubs — they use `_ =
