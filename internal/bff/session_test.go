@@ -189,3 +189,54 @@ func TestInMemoryBFFSessionStore_DeleteNonexistent(t *testing.T) {
 		t.Errorf("Delete(nonexistent) = %v, want nil", err)
 	}
 }
+
+func TestInMemoryBFFSessionStore_ConcurrentAccess(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+
+	const numGoroutines = 50
+	const numOpsPerGoroutine = 20
+
+	// Create initial sessions
+	for i := 0; i < numGoroutines; i++ {
+		record := BFFSessionRecord{
+			RequestID: "req-" + string(rune('A'+i)),
+			State:     "state",
+			ExpiresAt: time.Now().Add(5 * time.Minute),
+		}
+		if err := store.Create(ctx, record); err != nil {
+			t.Fatalf("Create failed: %v", err)
+		}
+	}
+
+	// Run concurrent operations
+	done := make(chan bool, numGoroutines)
+	for i := 0; i < numGoroutines; i++ {
+		go func(id int) {
+			defer func() { done <- true }()
+			reqID := "req-" + string(rune('A'+id))
+			for j := 0; j < numOpsPerGoroutine; j++ {
+				// Mix of Get and SetUser operations
+				if j%2 == 0 {
+					_, _ = store.Get(ctx, reqID)
+				} else {
+					_ = store.SetUser(ctx, reqID, "user-"+string(rune('0'+j%10)))
+				}
+			}
+		}(i)
+	}
+
+	// Wait for all goroutines to complete
+	for i := 0; i < numGoroutines; i++ {
+		<-done
+	}
+
+	// Verify data integrity - sessions should still be retrievable
+	for i := 0; i < numGoroutines; i++ {
+		reqID := "req-" + string(rune('A'+i))
+		_, err := store.Get(ctx, reqID)
+		if err != nil {
+			t.Errorf("Get(%s) after concurrent access failed: %v", reqID, err)
+		}
+	}
+}
