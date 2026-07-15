@@ -300,6 +300,125 @@ func TestDeliverPending_TTLExceeded_MarksAsFailed(t *testing.T) {
 	}
 }
 
+// TestDeliverPending_IdempotentDelivery verifies that delivering the same
+// outbox entry twice succeeds without error. This is the property that lets the
+// inline best-effort revoke (in signalRefreshReuse) and the background worker
+// both fire for the same signal without harm: RevokeSessionsByUserClient is
+// idempotent, so a duplicate delivery is a no-op on the second pass. Without
+// this guarantee, the enqueue-first-then-inline pattern in service.go would
+// double-revoke and could surface spurious errors.
+func TestDeliverPending_IdempotentDelivery(t *testing.T) {
+	userUUID := mustParseUUID(t, "550e8400-e29b-41d4-a716-446655440000")
+	entryUUID := mustParseUUID(t, "660e8400-e29b-41d4-a716-446655440001")
+
+	now := time.Now()
+	mock := &mockOutboxQuerier{
+		fetchPendingFunc: func(ctx context.Context, limit int32) ([]db.RevocationOutbox, error) {
+			return []db.RevocationOutbox{{
+				ID:            entryUUID,
+				Reason:        "refresh_reuse",
+				UserID:        userUUID,
+				ClientID:      "test-client",
+				Status:        "pending",
+				RetryCount:    0,
+				NextAttemptAt: pgtype.Timestamptz{Time: now, Valid: true},
+				CreatedAt:     pgtype.Timestamptz{Time: now, Valid: true},
+			}}, nil
+		},
+	}
+	sink := &mockSessionStore{}
+	outbox := NewDBRevocationOutbox(mock, nil).WithNow(func() time.Time { return now })
+
+	// Deliver the same entry twice (simulating inline + worker, or two worker
+	// ticks racing on the same pending row). Both cycles must succeed.
+	for i := 0; i < 2; i++ {
+		if err := outbox.DeliverPending(context.Background(), sink); err != nil {
+			t.Fatalf("DeliverPending() cycle %d error = %v", i, err)
+		}
+	}
+
+	if len(sink.revokeCalls) != 2 {
+		t.Fatalf("expected 2 idempotent revoke calls, got %d", len(sink.revokeCalls))
+	}
+	if len(mock.markDeliveredCalls) != 2 {
+		t.Fatalf("expected 2 markDelivered calls, got %d", len(mock.markDeliveredCalls))
+	}
+	// No retries or dead-letters on the happy path.
+	if len(mock.incrementRetryCalls) != 0 {
+		t.Fatalf("expected 0 retry increments, got %d", len(mock.incrementRetryCalls))
+	}
+	if len(mock.markFailedCalls) != 0 {
+		t.Fatalf("expected 0 markFailed calls, got %d", len(mock.markFailedCalls))
+	}
+}
+
+// TestDeliverPending_EventuallySucceedsAfterRetries verifies the core durability
+// promise of the outbox: a signal whose inline delivery failed is retried by the
+// worker across polling cycles and eventually succeeds. The first two delivery
+// attempts fail (scheduling a retry each time); the third succeeds and marks the
+// entry delivered.
+func TestDeliverPending_EventuallySucceedsAfterRetries(t *testing.T) {
+	userUUID := mustParseUUID(t, "550e8400-e29b-41d4-a716-446655440000")
+	entryUUID := mustParseUUID(t, "660e8400-e29b-41d4-a716-446655440001")
+
+	now := time.Now()
+
+	// retryCount mirrors what IncrementRevocationRetry would persist between
+	// polling cycles, so each FetchPending reflects the growing retry count.
+	retryCount := int32(0)
+	mock := &mockOutboxQuerier{
+		fetchPendingFunc: func(ctx context.Context, limit int32) ([]db.RevocationOutbox, error) {
+			return []db.RevocationOutbox{{
+				ID:            entryUUID,
+				Reason:        "refresh_reuse",
+				UserID:        userUUID,
+				ClientID:      "test-client",
+				Status:        "pending",
+				RetryCount:    retryCount,
+				NextAttemptAt: pgtype.Timestamptz{Time: now, Valid: true},
+				CreatedAt:     pgtype.Timestamptz{Time: now, Valid: true},
+			}}, nil
+		},
+		incrementRetryFunc: func(ctx context.Context, arg db.IncrementRevocationRetryParams) error {
+			retryCount++
+			return nil
+		},
+	}
+
+	// Fail the first two delivery attempts, succeed on the third.
+	attempts := 0
+	sink := &mockSessionStore{
+		revokeFunc: func(ctx context.Context, userID, clientID string) error {
+			attempts++
+			if attempts < 3 {
+				return errors.New("transient DB error")
+			}
+			return nil
+		},
+	}
+	outbox := NewDBRevocationOutbox(mock, nil).WithNow(func() time.Time { return now })
+
+	// Three polling cycles: two fail (retry scheduled), the third succeeds.
+	for i := 0; i < 3; i++ {
+		if err := outbox.DeliverPending(context.Background(), sink); err != nil {
+			t.Fatalf("DeliverPending() cycle %d error = %v", i, err)
+		}
+	}
+
+	if attempts != 3 {
+		t.Fatalf("expected 3 revoke attempts, got %d", attempts)
+	}
+	if len(mock.incrementRetryCalls) != 2 {
+		t.Fatalf("expected 2 retry increments before success, got %d", len(mock.incrementRetryCalls))
+	}
+	if len(mock.markDeliveredCalls) != 1 {
+		t.Fatalf("expected 1 markDelivered call after eventual success, got %d", len(mock.markDeliveredCalls))
+	}
+	if len(mock.markFailedCalls) != 0 {
+		t.Fatalf("entry succeeded before TTL — expected 0 markFailed calls, got %d", len(mock.markFailedCalls))
+	}
+}
+
 func TestComputeNextAttempt_ExponentialBackoff(t *testing.T) {
 	now := time.Now()
 
