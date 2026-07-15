@@ -36,6 +36,9 @@ type Server struct {
 	bffSessions   bff.BFFSessionStore
 	loginURL      *url.URL // parsed at construction; nil if BFF not configured
 	bffSessionTTL time.Duration
+	// rotator drives POST /admin/keys/rotate (§7.3, §3.5.4). May be nil, in
+	// which case the rotate endpoint reports 501 Not Implemented.
+	rotator *crypto.KeyRotator
 }
 
 // Config holds the settings needed to serve the OIDC surface.
@@ -50,6 +53,7 @@ type Config struct {
 	// the active signer; additional entries support rotation overlap (§7.3).
 	// May be empty for discovery-only tests (served as {"keys":[]}).
 	Signers []crypto.Signer
+<<<<<<< HEAD
 	// BFFSessions is the BFF session store. When non-nil, /authorize creates a
 	// BFF session and redirects to LoginURL rather than issuing a code directly.
 	BFFSessions bff.BFFSessionStore
@@ -58,6 +62,9 @@ type Config struct {
 	LoginURL string
 	// BFFSessionTTL overrides DefaultBFFSessionTTL when non-zero.
 	BFFSessionTTL time.Duration
+	// Rotator drives POST /admin/keys/rotate (§7.3, §3.5.4). May be nil, in
+	// which case the rotate endpoint reports 501 Not Implemented.
+	Rotator *crypto.KeyRotator
 }
 
 // New returns a Server that serves the generated OpenAPI contract. The JWKS
@@ -91,6 +98,7 @@ func New(cfg Config) *Server {
 		bffSessions:   cfg.BFFSessions,
 		loginURL:      parsedLoginURL,
 		bffSessionTTL: ttl,
+		rotator:       cfg.Rotator,
 	}
 }
 
@@ -105,11 +113,4 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(openapi.Error{Code: code, Message: message})
-}
-
-// PostAdminKeysRotate handles POST /admin/keys/rotate (signing key rotation).
-// STUB — returns 501 Not Implemented until the rotation handler is wired up
-// in a subsequent task. See docs/plans/signing-key-rotation.md.
-func (s *Server) PostAdminKeysRotate(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not_implemented", "signing key rotation not yet implemented")
 }
