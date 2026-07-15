@@ -188,6 +188,7 @@ const (
 	sessTestUserID   = "00000000-0000-0000-0000-000000000001"
 	sessTestClientID = "test-rp"
 	sessTestRegion   = "us"
+	sessTestGrantID  = "00000000-0000-0000-0000-000000000099"
 )
 
 func buildTestSession(t *testing.T, id, userID string, hash []byte, ttl time.Duration) oidc.RefreshSession {
@@ -197,6 +198,7 @@ func buildTestSession(t *testing.T, id, userID string, hash []byte, ttl time.Dur
 		Region:    sessTestRegion,
 		UserID:    userID,
 		ClientID:  sessTestClientID,
+		GrantID:   sessTestGrantID,
 		TokenHash: hash,
 		ExpiresAt: time.Now().Add(ttl),
 	}
@@ -261,6 +263,7 @@ func TestDBSessionStoreScopedRevoke(t *testing.T) {
 		Region:    sessTestRegion,
 		UserID:    sessTestUserID,
 		ClientID:  otherClientID,
+		GrantID:   sessTestGrantID,
 		TokenHash: []byte{0xff},
 		ExpiresAt: time.Now().Add(14 * 24 * time.Hour),
 	}
