@@ -256,3 +256,4 @@ func (noopSessionStore) RotateSession(context.Context, string, RefreshSession) e
 func (noopSessionStore) RevokeSessionsByUserClient(context.Context, string, string) error {
 	return nil
 }
+func (noopSessionStore) RevokeSessionsByGrant(context.Context, string) error { return nil }
