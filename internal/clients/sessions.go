@@ -84,14 +84,6 @@ var _ oidc.SessionStore = (*DBSessionStore)(nil)
 // label. Shared by CreateSession and RotateSession so the two write paths
 // cannot silently diverge.
 func buildCreateSessionParams(rs oidc.RefreshSession) (db.CreateSessionParams, error) {
-	// TODO(grant-fk): when the sessions table gains a grant_id FK column,
-	// parse rs.GrantID here (it is always "" today — see RefreshSession.GrantID).
-	// Runtime assertion: GrantID must be "" until the DB column exists. If this
-	// fires, a caller has set GrantID to a non-empty value without also updating
-	// this function — the value would be silently dropped in CreateSession.
-	if rs.GrantID != "" {
-		return db.CreateSessionParams{}, fmt.Errorf("sessions: GrantID %q is not supported (no grant_id DB column yet — see TODO(grant-fk))", rs.GrantID)
-	}
 	var id pgtype.UUID
 	if err := id.Scan(rs.ID); err != nil {
 		return db.CreateSessionParams{}, fmt.Errorf("sessions: parse session ID %q: %w", rs.ID, err)
@@ -99,6 +91,10 @@ func buildCreateSessionParams(rs oidc.RefreshSession) (db.CreateSessionParams, e
 	var userID pgtype.UUID
 	if err := userID.Scan(rs.UserID); err != nil {
 		return db.CreateSessionParams{}, fmt.Errorf("sessions: parse user ID %q: %w", rs.UserID, err)
+	}
+	var grantID pgtype.UUID
+	if err := grantID.Scan(rs.GrantID); err != nil {
+		return db.CreateSessionParams{}, fmt.Errorf("sessions: parse grant ID %q: %w", rs.GrantID, err)
 	}
 	var deviceLabel *string
 	if rs.DeviceLabel != "" {
@@ -114,6 +110,7 @@ func buildCreateSessionParams(rs oidc.RefreshSession) (db.CreateSessionParams, e
 		Region:           rs.Region,
 		UserID:           userID,
 		ClientID:         rs.ClientID,
+		GrantID:          grantID,
 		DeviceLabel:      deviceLabel,
 		RefreshTokenHash: rs.TokenHash,
 		ExpiresAt:        expiresAt,
