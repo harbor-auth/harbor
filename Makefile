@@ -66,7 +66,7 @@ REQUIRE = _require() { if command -v "$$1" >/dev/null 2>&1; then return 0; fi; i
 
 .PHONY: help build build-static test test-race test-cover test-integration \
         generate generate-check validate docs-check migrate migrate-down migrate-status \
-        conformance load-test agent-check tamper-check coverage-ratchet clean
+        e2e conformance load-test agent-check tamper-check coverage-ratchet clean
 
 ## ---------------------------------------------------------------------------
 ## Help
@@ -219,24 +219,18 @@ migrate-status: ## Show the current migration version (needs DATABASE_URL)
 ## harness is an informative skip. But when the harness IS present, a missing
 ## required binary (docker / k6) FAILS CLOSED — you asked to run it and can't.
 ##
-## `conformance` (§1.8 Stage 7) FIRST runs the in-repo e2e OIDC harness (F8:
-## e2e/docker-compose.yml + `go test -tags=e2e ./e2e/...`) as a fast composed-
-## flow smoke gate, THEN the full OIDF OP + WebAuthn suites via the conformance/
-## harness (run-plan.sh -> assert-pass.sh, plus the manual run-webauthn.sh gate).
-## Both blocks FAIL CLOSED when their harness is present but docker is missing.
-## CI runs this via a dedicated Docker-enabled `e2e` job (see
-## .github/workflows/ci.yml).
+## `e2e` (F8) runs the in-repo OIDC e2e harness (e2e/docker-compose.yml +
+## `go test -tags=e2e ./e2e/...`) — the fast composed-flow smoke gate run on
+## every PR by CI's Docker-enabled `e2e` job.
+##
+## `conformance` (§1.8 Stage 7) is the full release gate: it FIRST runs `make
+## e2e` and THEN the OIDF OP + WebAuthn suites via the conformance/ harness
+## (run-plan.sh -> assert-pass.sh + manual run-webauthn.sh). Requires a
+## prebuilt OIDF suite image (CONFORMANCE_SUITE_IMAGE). Both blocks FAIL CLOSED
+## when their harness is present but docker is missing.
 
-conformance: ## Run OIDC OP + WebAuthn conformance suites (release gate, §1.8 Stage 7)
-	@echo '==> conformance: OIDC OP + WebAuthn suites (must pass to release)'
-	@echo '==> conformance: [F8] e2e OIDC harness (authorize->token->JWKS + §11.7 negatives)'
-	@# The compose service defines a /healthz healthcheck, so
-	@# `docker compose up -d --wait` blocks until harbor-hot is READY (not merely
-	@# running). The cold `go run` compile is covered by the healthcheck's
-	@# start_period, so --wait is the readiness gate — no external poll needed.
-	@# --wait-timeout 180 is chosen to exceed the healthcheck's worst case in
-	@# e2e/docker-compose.yml (start_period 120s + retries 10 × interval 3s ≈
-	@# 150s); keep the two in sync if either changes.
+e2e: ## Run F8 Go e2e tests (authorize→token→JWKS + §11.7 negatives) against a live harbor-hot
+	@echo '==> e2e: [F8] composed OIDC harness (authorize->token->JWKS + §11.7 negatives)'
 	@$(REQUIRE); if _require docker 'https://docs.docker.com/get-docker/ (or: nix develop)'; then \
 		echo '  bringing up e2e/docker-compose.yml (harbor-hot on :8080)'; \
 		trap 'docker compose -f e2e/docker-compose.yml down -v >/dev/null 2>&1 || true' EXIT; \
@@ -245,6 +239,9 @@ conformance: ## Run OIDC OP + WebAuthn conformance suites (release gate, §1.8 S
 		echo '  running go test -tags=e2e ./e2e/...'; \
 		HARBOR_E2E_BASE_URL=http://localhost:8080 $(GO) test -tags=e2e ./e2e/...; \
 	fi
+
+conformance: e2e ## Run OIDC OP + WebAuthn conformance suites (release gate, §1.8 Stage 7)
+	@echo '==> conformance: OIDC OP + WebAuthn suites (must pass to release)'
 	@echo '==> conformance: OIDF OP + WebAuthn suites'
 	@# Present-harness branch is FAIL-CLOSED (mirrors the e2e block): no `|| exit 0`.
 	@# The OIDC OP run (run-plan.sh -> assert-pass.sh) and the WebAuthn gate

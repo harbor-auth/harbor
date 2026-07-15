@@ -132,11 +132,13 @@ jobs:
             exit 1
           fi
 
-  # e2e — Foundation F8: the composed OIDC conformance harness wired into the
-  # §1.8 Stage-7 gate. Runs `make conformance` in the pinned toolchain with
-  # Docker so authorize→token→JWKS + the §11.7 negatives are exercised against a
-  # live harbor-hot on every PR. No continue-on-error: a failing assembled flow
-  # fails the job directly (this IS the conformance gate).
+  # e2e — Foundation F8: the composed OIDC harness run on every PR.
+  # Runs `make e2e` (docker-compose + `go test -tags=e2e ./e2e/...`) in the
+  # pinned toolchain, exercising authorize→token→JWKS + the §11.7 negatives
+  # against a live harbor-hot. `make conformance` (the full OIDF OP certification
+  # suite) is the manual release gate and requires a prebuilt OIDF image
+  # (CONFORMANCE_SUITE_IMAGE) — it is not run in PR CI.
+  # No continue-on-error: a failing assembled flow fails the job directly.
   e2e:
     runs-on: ubuntu-latest
     steps:
@@ -151,7 +153,6 @@ jobs:
         uses: DeterminateSystems/magic-nix-cache-action@v8
 
       # Docker + docker compose are preinstalled on GitHub-hosted ubuntu runners.
-      # This runs the SAME Stage-7 command as local, which now includes the F8
-      # e2e harness (e2e/docker-compose.yml + `go test -tags=e2e ./e2e/...`).
-      - name: Run e2e OIDC conformance harness (F8)
-        run: nix develop -c make conformance
+      # Runs the F8 Go e2e tests only (not the full OIDF certification suite).
+      - name: Run e2e OIDC harness (F8)
+        run: nix develop -c make e2e
