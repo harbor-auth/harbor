@@ -73,6 +73,11 @@ type SessionStore interface {
 	// RevokeSessionsByUserClient revokes every active session for a
 	// (userID, clientID) pairing — the theft-signal family revoke (§3.5, §11.7).
 	RevokeSessionsByUserClient(ctx context.Context, userID, clientID string) error
+
+	// RevokeSessionsByGrant revokes every active session for a specific grant,
+	// enabling the §11.3 user-initiated disconnect flow where a user can revoke
+	// access to a single connected app without affecting other grants.
+	RevokeSessionsByGrant(ctx context.Context, grantID string) error
 }
 
 // sessionEntry is a stored session plus its revoked flag (in-memory store).
