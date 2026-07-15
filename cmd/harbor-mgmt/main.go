@@ -26,6 +26,7 @@ import (
 	"github.com/harbor/harbor/internal/gen/db"
 	"github.com/harbor/harbor/internal/httpserver"
 	"github.com/harbor/harbor/internal/identity"
+	"github.com/harbor/harbor/internal/mgmtapi"
 )
 
 // defaultPort is the cold-path listen port (docs/DESIGN.md §4.2); harbor-hot
@@ -88,19 +89,27 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 	// Wire the enrollment stack when we have both a database and a KEK secret.
 	// Absent either, we run in a reduced dev-scaffold mode that still answers
 	// health checks — a missing dependency must never crash liveness.
-	enroller, err := buildEnroller(pool, cfg)
+	enrollerImpl, err := buildEnroller(pool, cfg)
 	if err != nil {
 		return fmt.Errorf("wire enrollment: %w", err)
 	}
-	if enroller != nil {
+	if enrollerImpl != nil {
 		logger.Info("enrollment wired (database + KEK present)")
 	} else {
 		logger.Warn("enrollment unavailable: set DATABASE_URL and HARBOR_KEK_SECRET to enable")
 	}
 
-	// Health/liveness mux shared with harbor-hot. Enrollment routes are added
-	// on top of this mux in later tasks.
+	// Health/liveness mux shared with harbor-hot, plus the cold-path routes
+	// (POST /enroll). A nil Enroller (dev-scaffold mode) leaves /enroll wired but
+	// returning 503, so a missing DB/KEK never affects liveness. Assigning
+	// through the interface var keeps it a true nil (not a typed-nil pointer
+	// boxed in a non-nil interface).
 	mux := httpserver.NewHealthMux()
+	var enroller mgmtapi.Enroller
+	if enrollerImpl != nil {
+		enroller = enrollerImpl
+	}
+	mgmtapi.New(enroller, logger).Routes(mux)
 
 	addr := ":" + cfg.port
 	return httpserver.Run(ctx, addr, mux, logger)
