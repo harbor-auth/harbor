@@ -22,7 +22,7 @@ Use the **FIDO Alliance FIDO2 / WebAuthn conformance test tools** against the pa
 
 ## How to run (intended)
 
-`make conformance` FIRST runs the in-repo **e2e OIDC harness** (Foundation F8: `e2e/docker-compose.yml` + `go test -tags=e2e ./e2e/...`) as a fast composed-flow smoke gate — authorize→token→JWKS plus the **§11.7 negatives** (PKCE mismatch ⇒ `invalid_grant`, unregistered `redirect_uri` rejected) against a **live harbor-hot** — BEFORE the full OIDF OP + WebAuthn suites below. CI runs this via a dedicated Docker-enabled **`e2e`** job (`nix develop -c make conformance`), so the assembled flow is exercised on every PR.
+`make conformance` FIRST runs the in-repo **e2e OIDC harness** (Foundation F8: `e2e/docker-compose.yml` + `go test -tags=e2e ./e2e/...`) as a fast composed-flow smoke gate — authorize→token→JWKS plus the **§11.7 negatives** (PKCE mismatch ⇒ `invalid_grant`, unregistered `redirect_uri` rejected) against a **live harbor-hot** — BEFORE the full OIDF OP + WebAuthn suites below. CI runs the F8 harness via a dedicated Docker-enabled **`e2e`** job (`nix develop -c make e2e`), so the assembled flow is exercised on every PR.
 
 Beyond that smoke gate, `make conformance` runs the **full OIDF OP suite headless** via the `conformance/` harness and asserts **all required modules pass** — non-zero exit on any required failure (honest red). The harness lives in `conformance/` (see `conformance/README.md`):
 
