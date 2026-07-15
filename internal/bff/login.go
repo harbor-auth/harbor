@@ -16,6 +16,10 @@ type WebAuthnService interface {
 	// BeginLogin starts an assertion for a known user. Returns assertion options
 	// and an opaque session key to be echoed back via cookie.
 	BeginLogin(ctx context.Context, userID []byte) (*protocol.CredentialAssertion, string, error)
+	// FinishLogin completes the assertion ceremony. The sessionKey is the opaque
+	// key returned by BeginLogin (echoed via cookie). Returns the authenticated
+	// user's internal ID on success.
+	FinishLogin(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (userID string, err error)
 }
 
 // UserResolver looks up a user's WebAuthn user handle ([]byte) from the BFF
@@ -140,4 +144,99 @@ func setWebAuthnSessionCookie(w http.ResponseWriter, key string) {
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   300, // 5 min — matches the session store TTL
 	})
+}
+
+func readWebAuthnSessionCookie(r *http.Request) string {
+	cookie, err := r.Cookie(webauthnSessionCookieName)
+	if err != nil {
+		return ""
+	}
+	return cookie.Value
+}
+
+func clearWebAuthnSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     webauthnSessionCookieName,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   -1,
+	})
+}
+
+// FinishLogin handles POST /login/complete.
+//
+// Flow:
+//  1. Read __Host-harbor-bff cookie (CSRF binding)
+//  2. Validate request_id matches BFF session
+//  3. Parse and validate WebAuthn assertion response from request body
+//  4. Call webauthn.FinishLogin
+//  5. Write authenticated user_id to BFF session via SetUser
+//  6. Redirect to /authorize/complete?request_id=<id>
+func (h *LoginHandler) FinishLogin(w http.ResponseWriter, r *http.Request) {
+	// Read BFF cookie for CSRF binding
+	requestID := ReadBFFCookie(r)
+	if requestID == "" {
+		writeLoginError(w, http.StatusBadRequest, "invalid_request", "missing BFF session cookie")
+		return
+	}
+
+	// Read WebAuthn session cookie
+	sessionKey := readWebAuthnSessionCookie(r)
+	if sessionKey == "" {
+		writeLoginError(w, http.StatusBadRequest, "invalid_request", "missing WebAuthn session cookie")
+		return
+	}
+
+	// Validate BFF session exists
+	_, err := h.sessions.Get(r.Context(), requestID)
+	if err != nil {
+		if errors.Is(err, ErrBFFSessionNotFound) || errors.Is(err, ErrBFFSessionExpired) {
+			writeLoginError(w, http.StatusBadRequest, "session_expired", "session not found or expired")
+			return
+		}
+		writeLoginError(w, http.StatusInternalServerError, "server_error", "could not retrieve session")
+		return
+	}
+
+	// Parse the WebAuthn assertion response from the request body
+	parsedResponse, err := protocol.ParseCredentialRequestResponseBody(r.Body)
+	if err != nil {
+		writeLoginError(w, http.StatusBadRequest, "invalid_request", "could not parse assertion response")
+		return
+	}
+
+	// Delegate to the core logic
+	h.FinishLoginWithParsedData(w, r, parsedResponse)
+}
+
+// FinishLoginWithParsedData completes the login flow with pre-parsed assertion data.
+// This is separated from FinishLogin to enable testing without constructing valid
+// WebAuthn assertion payloads.
+func (h *LoginHandler) FinishLoginWithParsedData(w http.ResponseWriter, r *http.Request, parsedResponse *protocol.ParsedCredentialAssertionData) {
+	requestID := ReadBFFCookie(r)
+	sessionKey := readWebAuthnSessionCookie(r)
+
+	// Finish the WebAuthn assertion
+	userID, err := h.webauthn.FinishLogin(r.Context(), sessionKey, parsedResponse)
+	if err != nil {
+		// Don't leak details — collapse to generic error
+		writeLoginError(w, http.StatusUnauthorized, "authentication_failed", "passkey verification failed")
+		return
+	}
+
+	// Write the authenticated user_id to the BFF session
+	if err := h.sessions.SetUser(r.Context(), requestID, userID); err != nil {
+		writeLoginError(w, http.StatusInternalServerError, "server_error", "could not update session")
+		return
+	}
+
+	// Clear the WebAuthn session cookie (one-time use)
+	clearWebAuthnSessionCookie(w)
+
+	// Redirect to /authorize/complete with request_id
+	redirectURL := "/authorize/complete?request_id=" + requestID
+	http.Redirect(w, r, redirectURL, http.StatusFound)
 }
