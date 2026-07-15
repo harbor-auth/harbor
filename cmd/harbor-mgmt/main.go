@@ -132,7 +132,7 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 	// WebAuthn passkey registration: wired when RP config is present. The
 	// enrollment session store bridges POST /enroll → register/begin/finish so
 	// the user handle is read from a secure cookie, not a query param.
-	if err := wireWebAuthn(mux, cfg, enrollmentSessions, logger); err != nil {
+	if err := wireWebAuthn(mux, cfg, pool, enrollmentSessions, logger); err != nil {
 		logger.Warn("webauthn unavailable", "error", err)
 	} else if cfg.webauthnRPID != "" {
 		logger.Info("webauthn wired", "rp_id", cfg.webauthnRPID)
@@ -167,7 +167,7 @@ func buildEnroller(pool *pgxpool.Pool, cfg config) (*identity.Enroller, error) {
 // is present. It uses an in-memory credential store (dev-scaffold) and bridges
 // the enrollment session store so registration ceremonies read the user handle
 // from the enrollment cookie instead of the insecure query param.
-func wireWebAuthn(mux *http.ServeMux, cfg config, enrollmentSessions mgmtapi.EnrollmentSessionStore, logger *slog.Logger) error {
+func wireWebAuthn(mux *http.ServeMux, cfg config, pool *pgxpool.Pool, enrollmentSessions mgmtapi.EnrollmentSessionStore, logger *slog.Logger) error {
 	if cfg.webauthnRPID == "" {
 		return fmt.Errorf("WEBAUTHN_RP_ID not set")
 	}
@@ -176,8 +176,14 @@ func wireWebAuthn(mux *http.ServeMux, cfg config, enrollmentSessions mgmtapi.Enr
 		RPDisplayName: cfg.webauthnRPName,
 		RPOrigins:     []string{cfg.webauthnOrigin},
 	}
-	// In-memory stores for dev-scaffold; production will wire DB-backed stores.
-	credStore := webauthn.NewInMemoryStore()
+	// Credential store: DB-backed with atomic first-passkey activation via the
+	// pool when a database is present; otherwise an in-memory dev-scaffold.
+	var credStore webauthn.Store
+	if pool != nil {
+		credStore = webauthn.NewDBStore(db.New(pool)).WithPool(pool)
+	} else {
+		credStore = webauthn.NewInMemoryStore()
+	}
 	sessionStore := webauthn.NewInMemorySessionStore()
 	svc, err := webauthn.NewService(waCfg, credStore, sessionStore)
 	if err != nil {

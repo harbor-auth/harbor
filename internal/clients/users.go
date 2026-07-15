@@ -44,6 +44,13 @@ func NewDBUserPersister(q userQuerier) *DBUserPersister {
 // expose that column, we fail closed if a caller ever hands us a record that
 // claims recovery is NOT required — enrollment must never create a user who
 // has already bypassed recovery setup.
+//
+// The new user is written with status "pending" (design decision 3, §11.1): a
+// user is not usable until they register their first passkey. That final step
+// flips the row to "active" atomically alongside the credential insert — see
+// webauthn.DBStore.AddCredentialAndActivateUser. A crash between enrollment and
+// passkey registration therefore leaves a harmless "pending" row, never a
+// usable account with no credential.
 func (p *DBUserPersister) PersistUser(ctx context.Context, r identity.UserRecord) error {
 	if !r.RecoveryRequired {
 		return fmt.Errorf("clients: PersistUser: enrollment must set recovery_required=true (REQ-005)")
@@ -53,9 +60,11 @@ func (p *DBUserPersister) PersistUser(ctx context.Context, r identity.UserRecord
 		return fmt.Errorf("clients: PersistUser: invalid user ID %q: %w", r.ID, err)
 	}
 	_, err := p.q.CreateUser(ctx, db.CreateUserParams{
-		ID:             id,
-		Region:         r.Region,
-		Status:         "active",
+		ID:     id,
+		Region: r.Region,
+		// "pending" until first-passkey registration activates the account
+		// atomically (design decision 3, §11.1).
+		Status:         "pending",
 		DekWrapped:     r.DekWrapped,
 		PairwiseSecret: r.PairwiseSecret,
 	})

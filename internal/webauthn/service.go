@@ -85,7 +85,11 @@ func (s *Service) FinishRegistration(ctx context.Context, userID []byte, session
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.AddCredential(ctx, userID, *cred); err != nil {
+	// First-passkey registration completes enrollment: persist the credential
+	// and flip the user from "pending" to "active" atomically (design decision 3,
+	// §11.1). A DB-backed store does both in one transaction and rolls back on
+	// any failure, so we never leave a half-enrolled account.
+	if err := s.store.AddCredentialAndActivateUser(ctx, userID, *cred); err != nil {
 		return nil, err
 	}
 	return cred, nil

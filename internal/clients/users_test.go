@@ -55,9 +55,10 @@ func TestDBUserPersisterPersistsUser(t *testing.T) {
 	if stored.Region != "eu-1" {
 		t.Errorf("Region: got %q, want eu-1", stored.Region)
 	}
-	// Enrollment always writes an active user (DESIGN §10).
-	if stored.Status != "active" {
-		t.Errorf("Status: got %q, want active", stored.Status)
+	// Enrollment writes a PENDING user (design decision 3, §11.1); the account
+	// is flipped to "active" atomically with the first passkey registration.
+	if stored.Status != "pending" {
+		t.Errorf("Status: got %q, want pending", stored.Status)
 	}
 	// Sealed secrets must be forwarded verbatim — no re-encoding, no truncation.
 	if string(stored.DekWrapped) != "wrapped-dek" {
