@@ -50,10 +50,33 @@ type RevocationSink interface {
 	RevokeCodeFamily(ctx context.Context, code AuthCode) error
 }
 
+// OutboxEntry is the domain type for a revocation signal queued in the outbox.
+// Defined here (not in internal/clients) to avoid circular imports.
+type OutboxEntry struct {
+	Reason   string // "refresh_reuse" | "code_reuse"
+	UserID   string
+	ClientID string
+	GrantID  string // may be empty if grant-id-fk is not yet wired
+}
+
+// RevocationOutbox enqueues durable revocation signals via the transactional
+// outbox pattern (docs/plans/revocation-outbox.md, DESIGN §3.5). The background
+// worker (RevocationWorker) polls DeliverPending to retry failed deliveries.
+type RevocationOutbox interface {
+	// Enqueue inserts a revocation signal into the outbox for durable delivery.
+	Enqueue(ctx context.Context, entry OutboxEntry) error
+}
+
 // noopRevocationSink is the default when no sink is wired.
 type noopRevocationSink struct{}
 
 func (noopRevocationSink) RevokeCodeFamily(context.Context, AuthCode) error { return nil }
+
+// noopRevocationOutbox is the default when no outbox is wired (dev/test only).
+// In production, wire DBRevocationOutbox for durable theft-signal delivery.
+type noopRevocationOutbox struct{}
+
+func (noopRevocationOutbox) Enqueue(context.Context, OutboxEntry) error { return nil }
 
 // RecordingRevocationSink records revoked code families in memory. Useful for
 // tests and dev wiring that want to assert the theft signal fired.
@@ -98,9 +121,10 @@ type ServiceConfig struct {
 	Codes        AuthCodeStore
 	Tokens       TokenIssuer
 	Sessions     SessionResolver
-	SessionStore SessionStore // optional; defaults to noopSessionStore (no refresh tokens)
-	Grants       GrantStore   // optional; defaults to noopGrantStore
-	Revocations  RevocationSink
+	SessionStore SessionStore     // optional; defaults to noopSessionStore (no refresh tokens)
+	Grants       GrantStore       // optional; defaults to noopGrantStore
+	Revocations  RevocationSink   // optional; defaults to noopRevocationSink
+	Outbox       RevocationOutbox // optional; defaults to noopRevocationOutbox (no durable delivery)
 	Logger       *slog.Logger
 	NewCode      func() (string, error)
 	NewSessionID func() (string, error) // optional; defaults to uuid.NewString
@@ -120,6 +144,7 @@ type Service struct {
 	sessionStore SessionStore
 	grants       GrantStore
 	revocations  RevocationSink
+	outbox       RevocationOutbox
 	logger       *slog.Logger
 	newCode      func() (string, error)
 	newSessionID func() (string, error)
@@ -138,6 +163,7 @@ func NewService(cfg ServiceConfig) *Service {
 		sessionStore: cfg.SessionStore,
 		grants:       cfg.Grants,
 		revocations:  cfg.Revocations,
+		outbox:       cfg.Outbox,
 		logger:       cfg.Logger,
 		newCode:      cfg.NewCode,
 		newSessionID: cfg.NewSessionID,
@@ -152,6 +178,9 @@ func NewService(cfg ServiceConfig) *Service {
 	}
 	if svc.revocations == nil {
 		svc.revocations = noopRevocationSink{}
+	}
+	if svc.outbox == nil {
+		svc.outbox = noopRevocationOutbox{}
 	}
 	if svc.logger == nil {
 		svc.logger = slog.Default()
@@ -732,6 +761,11 @@ const zeroUUID = "00000000-0000-0000-0000-000000000000"
 // and logs the event. PII constraint (§6.5.7): only client_id + the error are
 // logged — never UserID, GrantID, or the token/hash.
 //
+// Durable delivery: the revocation signal is enqueued to the outbox FIRST so
+// that even if the inline attempt fails, the background worker will retry.
+// This eliminates the window where a transient failure silently drops the
+// revocation signal (docs/plans/revocation-outbox.md, DESIGN §3.5).
+//
 // Self-enforcing context isolation: the first thing this function does is
 // bind a 10 s timeout on a cancel-detached context
 // (context.WithTimeout(context.WithoutCancel(ctx), 10s)) so the family revoke
@@ -769,6 +803,24 @@ func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession
 			slog.String("session_id", session.ID))
 		return
 	}
+
+	// Enqueue to durable outbox FIRST — guarantees delivery even if inline fails.
+	// Note: we do NOT mark as delivered on inline success; the background worker
+	// will re-deliver, but RevokeSessionsByUserClient is idempotent so double-
+	// revocation is harmless. This simplifies the interface (no return ID needed).
+	if err := s.outbox.Enqueue(ctx, OutboxEntry{
+		Reason:   "refresh_reuse",
+		UserID:   session.UserID,
+		ClientID: session.ClientID,
+		GrantID:  session.GrantID,
+	}); err != nil {
+		s.logger.ErrorContext(ctx, "refresh-reuse signal: outbox enqueue failed — falling back to inline-only",
+			slog.String("client_id", session.ClientID),
+			slog.Any("error", err))
+		// Continue to inline attempt even if enqueue fails.
+	}
+
+	// Inline best-effort attempt (immediate revocation when possible).
 	if err := s.sessionStore.RevokeSessionsByUserClient(ctx, session.UserID, session.ClientID); err != nil {
 		s.logger.ErrorContext(ctx, "refresh-family revocation failed after reuse detected",
 			slog.String("client_id", session.ClientID),
@@ -786,13 +838,14 @@ func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession
 // PII constraint (§6.5.7): only client_id + the error value are logged.
 // Never log Subject (PPID), Code (a secret), or Nonce.
 //
+// Durable delivery: the revocation signal is enqueued to the outbox FIRST so
+// that even if the inline attempt fails, the background worker will retry.
+// This eliminates the window where a transient failure silently drops the
+// revocation signal (docs/plans/revocation-outbox.md, DESIGN §3.5).
+//
 // Self-enforcing context isolation: mirrors signalRefreshReuse — the function
 // immediately detaches from the caller's context so code-family revocation
 // completes even on client disconnect or SIGINT. Callers pass the raw ctx.
-//
-// TODO(security): route revocation through a durable outbox so a transient
-// failure is retried, not merely alerted (the in-process best-effort signal
-// is the correct interim handling, not the final design).
 func (s *Service) signalCodeReuse(ctx context.Context, code AuthCode) {
 	// Detach and bound: context.WithoutCancel ensures client disconnect does not
 	// abort RevokeCodeFamily; the explicit 10 s timeout caps the worst-case
@@ -818,6 +871,29 @@ func (s *Service) signalCodeReuse(ctx context.Context, code AuthCode) {
 		s.logger.ErrorContext(ctx, "code-reuse signal: code has empty ClientID — family revoke skipped (latent store bug)")
 		return
 	}
+
+	// Enqueue to durable outbox FIRST — guarantees delivery even if inline fails.
+	// Note: code-reuse signals use UserID from the AuthCode for outbox tracking,
+	// but the actual revocation is done via RevokeCodeFamily which may use
+	// different lookup logic depending on the RevocationSink implementation.
+	// Guard: codes without a UserID (e.g. stubSessionResolver in tests) cannot
+	// be tracked durably — they get inline-only revocation.
+	if code.UserID != "" {
+		// Note: we do NOT mark as delivered on inline success; the background worker
+		// will re-deliver, but revocation is idempotent so this is harmless.
+		if err := s.outbox.Enqueue(ctx, OutboxEntry{
+			Reason:   "code_reuse",
+			UserID:   code.UserID,
+			ClientID: code.ClientID,
+		}); err != nil {
+			s.logger.ErrorContext(ctx, "code-reuse signal: outbox enqueue failed — falling back to inline-only",
+				slog.String("client_id", code.ClientID),
+				slog.Any("error", err))
+			// Continue to inline attempt even if enqueue fails.
+		}
+	}
+
+	// Inline best-effort attempt (immediate revocation when possible).
 	if err := s.revocations.RevokeCodeFamily(ctx, code); err != nil {
 		s.logger.ErrorContext(ctx, "code-family revocation failed after reuse detected",
 			slog.String("client_id", code.ClientID),

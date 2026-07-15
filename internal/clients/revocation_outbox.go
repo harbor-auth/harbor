@@ -44,10 +44,10 @@ type outboxQuerier interface {
 	MarkRevocationFailed(ctx context.Context, id pgtype.UUID) error
 }
 
-// OutboxEntry is the domain type for a revocation signal queued in the outbox.
-// It maps 1:1 with db.RevocationOutbox but keeps the oidc package free of sqlc
-// types (same pattern as RefreshSession in sessions.go).
-type OutboxEntry struct {
+// StoredOutboxEntry is the full representation of a revocation signal stored
+// in the outbox, including DB-managed fields like ID, Status, RetryCount, etc.
+// This is used internally by DBRevocationOutbox for DeliverPending processing.
+type StoredOutboxEntry struct {
 	ID            string
 	Reason        string // "refresh_reuse" | "code_reuse"
 	UserID        string
@@ -57,22 +57,6 @@ type OutboxEntry struct {
 	RetryCount    int
 	NextAttemptAt time.Time
 	CreatedAt     time.Time
-}
-
-// RevocationOutbox enqueues and delivers durable revocation signals via the
-// transactional outbox pattern (docs/plans/revocation-outbox.md, DESIGN §3.5).
-type RevocationOutbox interface {
-	// Enqueue inserts a revocation signal into the outbox for durable delivery.
-	// Called by signalRefreshReuse/signalCodeReuse after (or instead of) the
-	// inline best-effort attempt.
-	Enqueue(ctx context.Context, entry OutboxEntry) error
-
-	// DeliverPending fetches pending revocations and attempts delivery via the
-	// provided RevocationSink. Successfully delivered entries are marked
-	// 'delivered'; failed entries have their retry_count incremented and
-	// next_attempt_at set according to exponential backoff. Entries past the
-	// 24h TTL are marked 'failed' (dead-letter).
-	DeliverPending(ctx context.Context, sink oidc.SessionStore) error
 }
 
 // DBRevocationOutbox implements RevocationOutbox over the revocation_outbox
@@ -98,11 +82,11 @@ func (o *DBRevocationOutbox) WithNow(now func() time.Time) *DBRevocationOutbox {
 	return o
 }
 
-// Compile-time proof that DBRevocationOutbox implements RevocationOutbox.
-var _ RevocationOutbox = (*DBRevocationOutbox)(nil)
+// Compile-time proof that DBRevocationOutbox implements oidc.RevocationOutbox.
+var _ oidc.RevocationOutbox = (*DBRevocationOutbox)(nil)
 
-// Enqueue implements RevocationOutbox.
-func (o *DBRevocationOutbox) Enqueue(ctx context.Context, entry OutboxEntry) error {
+// Enqueue implements oidc.RevocationOutbox.
+func (o *DBRevocationOutbox) Enqueue(ctx context.Context, entry oidc.OutboxEntry) error {
 	var userID pgtype.UUID
 	if err := userID.Scan(entry.UserID); err != nil {
 		return fmt.Errorf("revocation_outbox: parse user ID %q: %w", entry.UserID, err)
@@ -137,7 +121,7 @@ func (o *DBRevocationOutbox) DeliverPending(ctx context.Context, sink oidc.Sessi
 
 	now := o.now()
 	for _, row := range rows {
-		entry := rowToOutboxEntry(row)
+		entry := rowToStoredOutboxEntry(row)
 
 		// TTL check: if the entry is older than 24h, mark it as permanently failed.
 		if now.Sub(entry.CreatedAt) > outboxTTL {
@@ -204,8 +188,8 @@ func computeNextAttempt(now time.Time, retryCount int) time.Time {
 	return now.Add(retryDelays[idx])
 }
 
-// rowToOutboxEntry converts a sqlc RevocationOutbox row to the domain type.
-func rowToOutboxEntry(row db.RevocationOutbox) OutboxEntry {
+// rowToStoredOutboxEntry converts a sqlc RevocationOutbox row to the domain type.
+func rowToStoredOutboxEntry(row db.RevocationOutbox) StoredOutboxEntry {
 	var nextAttemptAt, createdAt time.Time
 	if row.NextAttemptAt.Valid {
 		nextAttemptAt = row.NextAttemptAt.Time
@@ -213,7 +197,7 @@ func rowToOutboxEntry(row db.RevocationOutbox) OutboxEntry {
 	if row.CreatedAt.Valid {
 		createdAt = row.CreatedAt.Time
 	}
-	return OutboxEntry{
+	return StoredOutboxEntry{
 		ID:            uuidToString(row.ID),
 		Reason:        row.Reason,
 		UserID:        uuidToString(row.UserID),

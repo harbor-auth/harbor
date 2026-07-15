@@ -99,7 +99,7 @@ func TestEnqueue_Success(t *testing.T) {
 	mock := &mockOutboxQuerier{}
 	outbox := NewDBRevocationOutbox(mock, nil)
 
-	entry := OutboxEntry{
+	entry := oidc.OutboxEntry{
 		Reason:   "refresh_reuse",
 		UserID:   "550e8400-e29b-41d4-a716-446655440000",
 		ClientID: "test-client",
@@ -127,7 +127,7 @@ func TestEnqueue_InvalidUserID(t *testing.T) {
 	mock := &mockOutboxQuerier{}
 	outbox := NewDBRevocationOutbox(mock, nil)
 
-	entry := OutboxEntry{
+	entry := oidc.OutboxEntry{
 		Reason:   "refresh_reuse",
 		UserID:   "not-a-uuid",
 		ClientID: "test-client",
@@ -143,7 +143,7 @@ func TestEnqueue_WithGrantID(t *testing.T) {
 	mock := &mockOutboxQuerier{}
 	outbox := NewDBRevocationOutbox(mock, nil)
 
-	entry := OutboxEntry{
+	entry := oidc.OutboxEntry{
 		Reason:   "code_reuse",
 		UserID:   "550e8400-e29b-41d4-a716-446655440000",
 		ClientID: "test-client",
