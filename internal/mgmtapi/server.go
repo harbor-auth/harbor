@@ -24,6 +24,11 @@ type Server struct {
 	// (no DATABASE_URL / HARBOR_KEK_SECRET); PostEnroll then returns 503 rather
 	// than panicking, so the binary still serves liveness.
 	enroller Enroller
+	// sessions, when non-nil, stores the enrollment→passkey handoff: after a
+	// successful POST /enroll the new user's handle is saved under a fresh key
+	// and returned as an HttpOnly cookie for the registration ceremony to read
+	// (docs/DESIGN.md §9, §11.1). Nil leaves the cookie unset (dev-scaffold mode).
+	sessions EnrollmentSessionStore
 	logger   *slog.Logger
 }
 
@@ -35,6 +40,15 @@ func New(enroller Enroller, logger *slog.Logger) *Server {
 		logger = slog.Default()
 	}
 	return &Server{enroller: enroller, logger: logger}
+}
+
+// WithEnrollmentSessions attaches the enrollment session store used to bridge
+// POST /enroll and the passkey registration ceremony. When set, a successful
+// enrollment returns an HttpOnly cookie carrying the session key. A nil store
+// leaves the cookie unset. Returns s for chaining.
+func (s *Server) WithEnrollmentSessions(sessions EnrollmentSessionStore) *Server {
+	s.sessions = sessions
+	return s
 }
 
 // Routes registers harbor-mgmt's cold-path routes on mux. It is additive: the

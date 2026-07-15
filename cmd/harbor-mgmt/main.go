@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -27,6 +28,7 @@ import (
 	"github.com/harbor/harbor/internal/httpserver"
 	"github.com/harbor/harbor/internal/identity"
 	"github.com/harbor/harbor/internal/mgmtapi"
+	"github.com/harbor/harbor/internal/webauthn"
 )
 
 // defaultPort is the cold-path listen port (docs/DESIGN.md §4.2); harbor-hot
@@ -41,6 +43,12 @@ type config struct {
 	// kekSecret is the dev-only KEK secret (HARBOR_KEK_SECRET) used by the
 	// software key provider. Enrollment is disabled when it is empty.
 	kekSecret string
+	// webauthnRPID is the Relying Party ID for passkey ceremonies (WEBAUTHN_RP_ID).
+	webauthnRPID string
+	// webauthnRPName is the human-facing RP name (WEBAUTHN_RP_NAME).
+	webauthnRPName string
+	// webauthnOrigin is the allowed origin for ceremonies (WEBAUTHN_ORIGIN).
+	webauthnOrigin string
 }
 
 // loadConfig reads harbor-mgmt's settings from the environment, applying the
@@ -51,8 +59,11 @@ func loadConfig() config {
 		port = defaultPort
 	}
 	return config{
-		port:      port,
-		kekSecret: os.Getenv("HARBOR_KEK_SECRET"),
+		port:           port,
+		kekSecret:      os.Getenv("HARBOR_KEK_SECRET"),
+		webauthnRPID:   os.Getenv("WEBAUTHN_RP_ID"),
+		webauthnRPName: os.Getenv("WEBAUTHN_RP_NAME"),
+		webauthnOrigin: os.Getenv("WEBAUTHN_ORIGIN"),
 	}
 }
 
@@ -99,6 +110,11 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 		logger.Warn("enrollment unavailable: set DATABASE_URL and HARBOR_KEK_SECRET to enable")
 	}
 
+	// Enrollment session store: bridges POST /enroll and the passkey registration
+	// ceremony so the user handle comes from a server-side session, not a client-
+	// supplied IDOR-prone query param (docs/DESIGN.md §9, §11.1).
+	enrollmentSessions := mgmtapi.NewInMemoryEnrollmentSessionStore()
+
 	// Health/liveness mux shared with harbor-hot, plus the cold-path routes
 	// (POST /enroll). A nil Enroller (dev-scaffold mode) leaves /enroll wired but
 	// returning 503, so a missing DB/KEK never affects liveness. Assigning
@@ -109,7 +125,18 @@ func run(ctx context.Context, cfg config, logger *slog.Logger) error {
 	if enrollerImpl != nil {
 		enroller = enrollerImpl
 	}
-	mgmtapi.New(enroller, logger).Routes(mux)
+	mgmtapi.New(enroller, logger).
+		WithEnrollmentSessions(enrollmentSessions).
+		Routes(mux)
+
+	// WebAuthn passkey registration: wired when RP config is present. The
+	// enrollment session store bridges POST /enroll → register/begin/finish so
+	// the user handle is read from a secure cookie, not a query param.
+	if err := wireWebAuthn(mux, cfg, enrollmentSessions, logger); err != nil {
+		logger.Warn("webauthn unavailable", "error", err)
+	} else if cfg.webauthnRPID != "" {
+		logger.Info("webauthn wired", "rp_id", cfg.webauthnRPID)
+	}
 
 	addr := ":" + cfg.port
 	return httpserver.Run(ctx, addr, mux, logger)
@@ -134,4 +161,35 @@ func buildEnroller(pool *pgxpool.Pool, cfg config) (*identity.Enroller, error) {
 	queries := db.New(pool)
 	persister := clients.NewDBUserPersister(queries)
 	return identity.NewEnroller(keys, crypto.NewCipher(), persister), nil
+}
+
+// wireWebAuthn registers the passkey ceremony routes on mux when the RP config
+// is present. It uses an in-memory credential store (dev-scaffold) and bridges
+// the enrollment session store so registration ceremonies read the user handle
+// from the enrollment cookie instead of the insecure query param.
+func wireWebAuthn(mux *http.ServeMux, cfg config, enrollmentSessions mgmtapi.EnrollmentSessionStore, logger *slog.Logger) error {
+	if cfg.webauthnRPID == "" {
+		return fmt.Errorf("WEBAUTHN_RP_ID not set")
+	}
+	waCfg := webauthn.Config{
+		RPID:          cfg.webauthnRPID,
+		RPDisplayName: cfg.webauthnRPName,
+		RPOrigins:     []string{cfg.webauthnOrigin},
+	}
+	// In-memory stores for dev-scaffold; production will wire DB-backed stores.
+	credStore := webauthn.NewInMemoryStore()
+	sessionStore := webauthn.NewInMemorySessionStore()
+	svc, err := webauthn.NewService(waCfg, credStore, sessionStore)
+	if err != nil {
+		return fmt.Errorf("webauthn service: %w", err)
+	}
+	// allowInsecureUserID=false: the production default refuses the IDOR path.
+	// The enrollment session store provides the secure alternative.
+	handler := webauthn.NewHandler(svc, false).
+		WithEnrollmentSessions(enrollmentSessions)
+	mux.HandleFunc("POST /webauthn/register/begin", handler.BeginRegistration)
+	mux.HandleFunc("POST /webauthn/register/finish", handler.FinishRegistration)
+	mux.HandleFunc("POST /webauthn/login/begin", handler.BeginLogin)
+	mux.HandleFunc("POST /webauthn/login/finish", handler.FinishLogin)
+	return nil
 }

@@ -337,6 +337,79 @@ func TestHandler_FinishLogin_InvalidUserIDEncoding(t *testing.T) {
 	}
 }
 
+// fakeEnrollmentSessionStore is an in-memory enrollment session store for tests.
+type fakeEnrollmentSessionStore struct {
+	userHandle []byte
+	err        error
+}
+
+func (f *fakeEnrollmentSessionStore) UserHandle(_ context.Context, _ string) ([]byte, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.userHandle, nil
+}
+
+// TestHandler_EnrollmentSession_ReadsUserHandle verifies that when an enrollment
+// session store is wired and the enrollment cookie is present, the handler reads
+// the user handle from the store instead of requiring the insecure query param.
+func TestHandler_EnrollmentSession_ReadsUserHandle(t *testing.T) {
+	store := NewInMemoryStore()
+	store.PutUser(NewUser([]byte("enrolled-user"), "user@example.com", "User", nil))
+	sessions := NewInMemorySessionStore()
+	svc, err := NewService(testConfig(), store, sessions)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	// Wire the handler with an enrollment session store that returns "enrolled-user".
+	fakeEnroll := &fakeEnrollmentSessionStore{userHandle: []byte("enrolled-user")}
+	handler := NewHandler(svc, false).WithEnrollmentSessions(fakeEnroll)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /webauthn/register/begin", handler.BeginRegistration)
+
+	// No user_id query param — the handler should read from the enrollment cookie.
+	req := httptest.NewRequest(http.MethodPost, "/webauthn/register/begin", nil)
+	req.AddCookie(&http.Cookie{Name: enrollmentCookieName, Value: "session-key"})
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	// Should succeed (200) because the enrollment session provides the user handle.
+	if rec.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Result().StatusCode, rec.Body.String())
+	}
+}
+
+// TestHandler_EnrollmentSession_FallbackTo501 verifies that when the enrollment
+// cookie is absent and allowInsecureUserID is false, the handler returns 501.
+func TestHandler_EnrollmentSession_FallbackTo501(t *testing.T) {
+	store := NewInMemoryStore()
+	store.PutUser(NewUser([]byte("user"), "u@e.com", "U", nil))
+	sessions := NewInMemorySessionStore()
+	svc, err := NewService(testConfig(), store, sessions)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	// Enrollment session store wired, but no cookie present.
+	fakeEnroll := &fakeEnrollmentSessionStore{userHandle: []byte("user")}
+	handler := NewHandler(svc, false).WithEnrollmentSessions(fakeEnroll)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /webauthn/register/begin", handler.BeginRegistration)
+
+	req := httptest.NewRequest(http.MethodPost, "/webauthn/register/begin", nil)
+	// No enrollment cookie set.
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	// Should fall through to 501 because no cookie and insecure path disabled.
+	if rec.Result().StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Result().StatusCode)
+	}
+}
+
 func TestHandler_FinishLogin_InvalidBody(t *testing.T) {
 	// Need a valid session to get past session validation and test body parsing.
 	store := NewInMemoryStore()

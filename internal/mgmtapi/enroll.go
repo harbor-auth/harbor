@@ -4,8 +4,19 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/google/uuid"
 	"github.com/harbor/harbor/internal/region"
 )
+
+// parseUUIDToBytes converts a UUID string to its 16-byte binary representation
+// for use as a WebAuthn user handle.
+func parseUUIDToBytes(s string) ([]byte, error) {
+	id, err := uuid.Parse(s)
+	if err != nil {
+		return nil, err
+	}
+	return id[:], nil
+}
 
 // maxEnrollBody caps the enrollment request body. The body carries only a
 // region string, so a few KB is far beyond any legitimate request and stops a
@@ -71,6 +82,40 @@ func (s *Server) PostEnroll(w http.ResponseWriter, r *http.Request) {
 		s.logger.ErrorContext(r.Context(), "enrollment failed", "error", err)
 		s.writeError(w, http.StatusInternalServerError, "server_error", "enrollment failed")
 		return
+	}
+
+	// When an enrollment session store is wired, save the new user's handle and
+	// set an HttpOnly cookie so the passkey registration ceremony can bind to
+	// this user WITHOUT a client-supplied user_id (docs/DESIGN.md §9, §11.1).
+	if s.sessions != nil {
+		key, err := NewEnrollmentSessionKey()
+		if err != nil {
+			s.logger.ErrorContext(r.Context(), "generate enrollment session key failed", "error", err)
+			s.writeError(w, http.StatusInternalServerError, "server_error", "enrollment failed")
+			return
+		}
+		// The user handle for WebAuthn is the raw UUID bytes. Parse the UUID string
+		// returned by Enroll and use its byte representation.
+		userHandle, err := parseUUIDToBytes(res.UserID)
+		if err != nil {
+			s.logger.ErrorContext(r.Context(), "parse user ID failed", "error", err)
+			s.writeError(w, http.StatusInternalServerError, "server_error", "enrollment failed")
+			return
+		}
+		if err := s.sessions.Save(r.Context(), key, userHandle); err != nil {
+			s.logger.ErrorContext(r.Context(), "save enrollment session failed", "error", err)
+			s.writeError(w, http.StatusInternalServerError, "server_error", "enrollment failed")
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     EnrollmentSessionCookieName,
+			Value:    key,
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteStrictMode,
+			MaxAge:   600, // 10 min — matches the session store TTL.
+		})
 	}
 
 	s.writeJSON(w, http.StatusCreated, enrollResponse{
