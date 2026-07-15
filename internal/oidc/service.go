@@ -468,6 +468,7 @@ func (s *Service) issueRefreshToken(ctx context.Context, tokens *IssuedTokens, c
 		Region:    grant.Region,
 		UserID:    code.UserID,
 		ClientID:  code.ClientID,
+		GrantID:   grant.ID,
 		TokenHash: hash,
 		ExpiresAt: s.now().Add(defaultRefreshTTL),
 		AuthTime:  code.AuthTime.Unix(),
