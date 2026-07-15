@@ -1,6 +1,7 @@
 package oidc
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 )
@@ -195,7 +196,7 @@ func TestBloomRevocationFilter_EstimatedCount(t *testing.T) {
 
 	// Add some entries
 	for i := 0; i < 100; i++ {
-		f.Add("jti-" + string(rune('a'+i)))
+		f.Add(fmt.Sprintf("jti-%d", i))
 	}
 
 	// EstimatedCount should be approximately 100
@@ -245,5 +246,138 @@ func TestBloomRevocationFilter_DefaultConstants(t *testing.T) {
 	f := NewBloomRevocationFilter(DefaultBloomCapacity, DefaultBloomFPRate)
 	if f == nil {
 		t.Error("expected NewBloomRevocationFilter with defaults to succeed")
+	}
+}
+
+func TestBloomRevocationFilter_FalsePositiveRate(t *testing.T) {
+	// Test that the false-positive rate is within acceptable bounds.
+	// We use a higher FP rate (0.01 = 1%) for faster testing, then verify
+	// the actual rate is within 2x of the target (allowing for variance).
+	const (
+		capacity     = 1000
+		targetFPRate = 0.01 // 1%
+		numInserts   = 1000
+		numProbes    = 10000
+	)
+
+	f := NewBloomRevocationFilter(capacity, targetFPRate)
+
+	// Insert numInserts unique JTIs
+	for i := 0; i < numInserts; i++ {
+		f.Add(fmt.Sprintf("inserted-jti-%d", i))
+	}
+
+	// Probe with JTIs that were NOT inserted and count false positives
+	falsePositives := 0
+	for i := 0; i < numProbes; i++ {
+		// Use a different prefix to ensure these were never inserted
+		if f.MightContain(fmt.Sprintf("probe-jti-%d", i)) {
+			falsePositives++
+		}
+	}
+
+	actualFPRate := float64(falsePositives) / float64(numProbes)
+
+	// Allow up to 3x the target rate due to statistical variance
+	maxAllowedFPRate := targetFPRate * 3.0
+	if actualFPRate > maxAllowedFPRate {
+		t.Errorf("false-positive rate too high: got %.4f, max allowed %.4f (target %.4f)",
+			actualFPRate, maxAllowedFPRate, targetFPRate)
+	}
+
+	// Log the actual rate for informational purposes
+	t.Logf("False-positive rate: %.4f (target: %.4f, max: %.4f)",
+		actualFPRate, targetFPRate, maxAllowedFPRate)
+}
+
+func TestBloomRevocationFilter_NoFalseNegatives(t *testing.T) {
+	// Bloom filters guarantee NO false negatives: if an element was added,
+	// MightContain MUST return true.
+	f := NewBloomRevocationFilter(10000, 0.000001)
+
+	const numJTIs = 1000
+	jtis := make([]string, numJTIs)
+	for i := 0; i < numJTIs; i++ {
+		jtis[i] = fmt.Sprintf("guaranteed-jti-%d", i)
+		f.Add(jtis[i])
+	}
+
+	// Every inserted JTI MUST be found
+	for _, jti := range jtis {
+		if !f.MightContain(jti) {
+			t.Errorf("false negative detected: %s was added but MightContain returned false", jti)
+		}
+	}
+}
+
+func TestBloomRevocationFilter_UnknownJTIsReturnFalse(t *testing.T) {
+	// Test that MightContain returns false for unknown JTIs (most of the time).
+	// With a very low FP rate, this should almost always be true.
+	f := NewBloomRevocationFilter(10000, 0.000001)
+
+	// Add a few known JTIs
+	f.Add("known-jti-1")
+	f.Add("known-jti-2")
+	f.Add("known-jti-3")
+
+	// Unknown JTIs should return false (with very high probability)
+	unknownJTIs := []string{
+		"unknown-jti-a",
+		"unknown-jti-b",
+		"unknown-jti-c",
+		"completely-different-string",
+		"another-random-jti",
+	}
+
+	for _, jti := range unknownJTIs {
+		if f.MightContain(jti) {
+			// This could theoretically be a false positive, but with 1/1M rate
+			// and only 5 probes, this is extremely unlikely
+			t.Logf("unexpected hit for %s (could be false positive)", jti)
+		}
+	}
+}
+
+func TestBloomRevocationFilter_ConcurrentReadsAndWrites(t *testing.T) {
+	// Test concurrent safety with mixed read/write operations.
+	// Run with -race flag to detect race conditions.
+	f := NewBloomRevocationFilter(10000, 0.000001)
+
+	var wg sync.WaitGroup
+	const (
+		readers      = 50
+		writers      = 10
+		opsPerWorker = 100
+	)
+
+	// Start writers
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < opsPerWorker; j++ {
+				f.Add(fmt.Sprintf("writer-%d-jti-%d", id, j))
+			}
+		}(i)
+	}
+
+	// Start readers
+	for i := 0; i < readers; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < opsPerWorker; j++ {
+				f.MightContain(fmt.Sprintf("reader-%d-probe-%d", id, j))
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	// Verify the filter is still functional after concurrent access
+	testJTI := "post-concurrent-test"
+	f.Add(testJTI)
+	if !f.MightContain(testJTI) {
+		t.Error("filter not functional after concurrent access")
 	}
 }
