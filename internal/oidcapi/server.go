@@ -39,6 +39,13 @@ type Server struct {
 	// rotator drives POST /admin/keys/rotate (§7.3, §3.5.4). May be nil, in
 	// which case the rotate endpoint reports 501 Not Implemented.
 	rotator *crypto.KeyRotator
+
+	// Emergency JWT revocation (docs/DESIGN.md §3.5). All three may be nil in
+	// discovery-only tests, in which case POST /admin/revoke-jwt returns 503.
+	revoked    RevokedJTIStore
+	filter     oidc.RevocationFilter
+	publisher  RevocationPublisher
+	revChannel string
 }
 
 // Config holds the settings needed to serve the OIDC surface.
@@ -64,6 +71,19 @@ type Config struct {
 	// Rotator drives POST /admin/keys/rotate (§7.3, §3.5.4). May be nil, in
 	// which case the rotate endpoint reports 501 Not Implemented.
 	Rotator *crypto.KeyRotator
+	// RevokedJTIStore persists emergency JWT revocations (docs/DESIGN.md §3.5).
+	// May be nil, in which case POST /admin/revoke-jwt returns 503.
+	RevokedJTIStore RevokedJTIStore
+	// RevocationFilter is this replica's in-process bloom filter. When set, a
+	// successful revocation is applied locally for immediate effect. May be nil.
+	RevocationFilter oidc.RevocationFilter
+	// RevocationPublisher broadcasts revoked JTIs to sibling replicas via Redis
+	// pub/sub. May be nil (single-replica dev) — propagation then relies on
+	// periodic rehydration from the revoked_jtis table.
+	RevocationPublisher RevocationPublisher
+	// RevocationChannel is the Redis pub/sub channel for revocations. Defaults
+	// to "revocation_channel" when empty.
+	RevocationChannel string
 }
 
 // New returns a Server that serves the generated OpenAPI contract. The JWKS
@@ -89,6 +109,10 @@ func New(cfg Config) *Server {
 			parsedLoginURL = nil
 		}
 	}
+	channel := cfg.RevocationChannel
+	if channel == "" {
+		channel = defaultRevocationChannel
+	}
 	return &Server{
 		issuer:        cfg.Issuer,
 		svc:           cfg.Service,
@@ -98,6 +122,10 @@ func New(cfg Config) *Server {
 		loginURL:      parsedLoginURL,
 		bffSessionTTL: ttl,
 		rotator:       cfg.Rotator,
+		revoked:       cfg.RevokedJTIStore,
+		filter:        cfg.RevocationFilter,
+		publisher:     cfg.RevocationPublisher,
+		revChannel:    channel,
 	}
 }
 
