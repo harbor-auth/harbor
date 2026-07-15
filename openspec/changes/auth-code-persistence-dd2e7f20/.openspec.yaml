@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-07-20
+goal: Replace the in-memory AuthCodeStore with a Redis-backed store (SET NX EX +
+  Lua atomic Consume) for multi-replica-safe authorization codes
