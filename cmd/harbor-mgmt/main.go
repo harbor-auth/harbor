@@ -189,13 +189,10 @@ func wireWebAuthn(mux *http.ServeMux, cfg config, pool *pgxpool.Pool, enrollment
 	if err != nil {
 		return fmt.Errorf("webauthn service: %w", err)
 	}
-	// allowInsecureUserID=false: the production default refuses the IDOR path.
-	// The enrollment session store provides the secure alternative.
-	handler := webauthn.NewHandler(svc, false).
+	// The enrollment session store is the only way to resolve a ceremony's user
+	// handle — there is no client-supplied user_id (IDOR) path (docs/DESIGN.md §9).
+	handler := webauthn.NewHandler(svc).
 		WithEnrollmentSessions(enrollmentSessions)
-	mux.HandleFunc("POST /webauthn/register/begin", handler.BeginRegistration)
-	mux.HandleFunc("POST /webauthn/register/finish", handler.FinishRegistration)
-	mux.HandleFunc("POST /webauthn/login/begin", handler.BeginLogin)
-	mux.HandleFunc("POST /webauthn/login/finish", handler.FinishLogin)
+	handler.RegisterRoutes(mux)
 	return nil
 }
