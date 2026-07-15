@@ -3,11 +3,13 @@ module github.com/harbor/harbor
 go 1.25.0
 
 require (
+	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/getkin/kin-openapi v0.140.0
 	github.com/go-webauthn/webauthn v0.17.4
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/oapi-codegen/runtime v1.4.2
+	github.com/redis/go-redis/v9 v9.21.0
 	golang.org/x/crypto v0.52.0
 	google.golang.org/grpc v1.82.0
 	google.golang.org/protobuf v1.36.11
