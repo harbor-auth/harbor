@@ -61,7 +61,9 @@ func getFreePort(t *testing.T) int {
 		t.Fatalf("failed to get free port: %v", err)
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
-	_ = ln.Close()
+	if err := ln.Close(); err != nil {
+		t.Fatalf("failed to close port listener: %v", err)
+	}
 	return port
 }
 
@@ -115,7 +117,11 @@ func TestRun_AddressInUse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to bind port: %v", err)
 	}
-	defer func() { _ = ln.Close() }()
+	defer func() {
+		if err := ln.Close(); err != nil {
+			t.Errorf("failed to close listener: %v", err)
+		}
+	}()
 
 	addr := ln.Addr().String()
 	ctx := context.Background()
@@ -169,7 +175,10 @@ func TestRun_ServesRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET / failed: %v", err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
 	_ = resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -197,4 +206,3 @@ func waitForServer(t *testing.T, url string, timeout time.Duration) error {
 	}
 	return context.DeadlineExceeded
 }
-

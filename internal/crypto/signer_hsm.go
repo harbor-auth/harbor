@@ -20,4 +20,4 @@ var _ Signer = hsmSigner{}
 
 func (hsmSigner) Sign(_ []byte) ([]byte, error) { return nil, ErrHSMNotImplemented }
 func (hsmSigner) KeyID() string                 { return "" }
-func (hsmSigner) PublicJWK() JWK                 { return JWK{} }
+func (hsmSigner) PublicJWK() JWK                { return JWK{} }

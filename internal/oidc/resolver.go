@@ -132,9 +132,9 @@ func NewPPIDSessionResolver(cfg PPIDSessionResolverConfig) *PPIDSessionResolver 
 //  2. Load + decrypt the user's pairwise secret (fail closed).
 //  3. Look up an existing consent grant for (userID, client).
 //     - found: return the frozen grant.PairwiseSub directly — stable across
-//       calls, no re-derivation (§3.2.3).
+//     calls, no re-derivation (§3.2.3).
 //     - not found (first consent): derive sub = DerivePPID(secret, sector, uid)
-//       and record a new grant carrying that sub + the consented scopes.
+//     and record a new grant carrying that sub + the consented scopes.
 //
 // The resolved sub flows unchanged through /authorize → code → /token into the
 // token's sub claim.
