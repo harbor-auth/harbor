@@ -197,6 +197,19 @@ func (s *InMemorySessionStore) RevokeSessionsByUserClient(_ context.Context, use
 	return nil
 }
 
+// RevokeSessionsByGrant implements SessionStore (per-grant revoke for §11.3 disconnect flow).
+func (s *InMemorySessionStore) RevokeSessionsByGrant(_ context.Context, grantID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range s.byID {
+		if e.s.GrantID == grantID {
+			e.revoked = true
+			e.s.RevokedAt = time.Now()
+		}
+	}
+	return nil
+}
+
 // hashRefreshToken returns the SHA-256 digest of plaintext. Only the digest is
 // persisted — the plaintext is ephemeral (docs/DESIGN.md §7.4).
 func hashRefreshToken(plaintext []byte) []byte {
