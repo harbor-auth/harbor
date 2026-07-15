@@ -1,0 +1,71 @@
+# syntax=docker/dockerfile:1
+# Harbor — Weft Agent Environment (Go toolchain)
+#
+# KEY RULES for Weft custom Dockerfiles:
+#   1. No apt-get (port 80 blocked in BuildKit sandbox; use HTTPS/443 only).
+#   2. Do NOT use FROM weft-agent-base as the final base.
+#   3. Do NOT set USER agent, ENTRYPOINT, or CMD — Weft auto-compose adds them.
+#   4. Pre-create /build owned by agent so recompose "mkdir -p /build" is a
+#      no-op even when Weft's auto-compose runs as the agent user.
+#
+# Note on GOPATH: the golang:* Docker image sets GOPATH=/go (not ~/go).
+# Binaries from `go install` land in /go/bin, NOT /root/go/bin.
+
+# ── Stage 1: Install Go dev tools ────────────────────────────────────────────
+FROM golang:1.25.0-bookworm AS go-tools
+
+# Go tool installs — binaries land in /go/bin (GOPATH=/go in the golang image)
+RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.4
+RUN go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+RUN go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.27.0
+RUN go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.4.1
+
+# golangci-lint — official pre-built binary (faster + avoids Go 1.25 compat issues)
+# The cluster is amd64 (confirmed via kubectl get nodes).
+RUN curl -fsSL \
+    "https://github.com/golangci/golangci-lint/releases/download/v1.64.6/golangci-lint-1.64.6-linux-amd64.tar.gz" \
+    | tar -xz --strip-components=1 -C /usr/local/bin \
+      "golangci-lint-1.64.6-linux-amd64/golangci-lint"
+
+# buf — official binary release
+RUN curl -fsSL \
+    "https://github.com/bufbuild/buf/releases/latest/download/buf-Linux-x86_64" \
+    -o /usr/local/bin/buf && chmod +x /usr/local/bin/buf
+
+# ── Stage 2: Weft base (named source for COPY only) ─────────────────────────
+FROM ghcr.io/reillyse/weft-agent-base:latest AS weft-base
+
+# ── Stage 3: Final runtime image ─────────────────────────────────────────────
+FROM golang:1.25.0-bookworm
+
+# Go toolchain (already in golang base; copying from go-tools stage ensures
+# same version even if the base image gets updated)
+COPY --from=go-tools /usr/local/go /usr/local/go
+
+# Harbor dev tools — binaries are in /go/bin (GOPATH=/go) in the builder stage
+COPY --from=go-tools /go/bin/protoc-gen-go      /usr/local/bin/
+COPY --from=go-tools /go/bin/protoc-gen-go-grpc /usr/local/bin/
+COPY --from=go-tools /go/bin/sqlc               /usr/local/bin/
+COPY --from=go-tools /go/bin/oapi-codegen       /usr/local/bin/
+COPY --from=go-tools /usr/local/bin/golangci-lint /usr/local/bin/
+COPY --from=go-tools /usr/local/bin/buf         /usr/local/bin/
+
+# Weft infrastructure — ALL required; Weft only auto-composes codebuff-lite.
+COPY --from=weft-base /app                            /app
+COPY --from=weft-base /usr/local/bin/weft-agent       /usr/local/bin/weft-agent
+COPY --from=weft-base /usr/local/bin/hippo            /usr/local/bin/hippo
+COPY --from=weft-base /usr/local/lib/codebuff-modules /usr/local/lib/codebuff-modules
+
+ENV PATH="/usr/local/go/bin:${PATH}"
+ENV NODE_PATH=/usr/local/lib/codebuff-modules
+
+# Create agent user (uid 1001) and pre-create /build owned by agent.
+# This makes Weft's auto-compose "RUN mkdir -p /build && ln -s ..." work
+# even when it runs as the agent user in recompose builds.
+RUN groupadd -g 1001 agent && \
+    useradd -u 1001 -g agent -s /bin/bash -m agent && \
+    mkdir -p /build && chown agent:agent /build && \
+    mkdir -p /workspace && \
+    chown -R agent:agent /workspace /home/agent /app
+
+# Do NOT add USER agent, ENTRYPOINT, or CMD — Weft auto-compose sets them.
