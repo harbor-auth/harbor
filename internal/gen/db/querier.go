@@ -63,6 +63,10 @@ type Querier interface {
 	// has passed (respecting exponential backoff).
 	FetchPendingRevocations(ctx context.Context, limit int32) ([]RevocationOutbox, error)
 	FindGrantByUserClient(ctx context.Context, arg FindGrantByUserClientParams) (Grant, error)
+	// GCExpiredRevokedJTIs deletes entries for JWTs that have expired — their JTIs
+	// no longer need revocation (the JWT itself is invalid). Run nightly as
+	// background cleanup, off the hot path.
+	GCExpiredRevokedJTIs(ctx context.Context) error
 	// GetActiveSession returns a session ONLY when it is still usable — not revoked,
 	// not expired, and whose underlying grant is still active. Auth flows (refresh-
 	// token rotation; DESIGN §3.5) MUST use this rather than GetSession, which
@@ -97,6 +101,10 @@ type Querier interface {
 	GetRelyingParty(ctx context.Context, clientID string) (RelyingParty, error)
 	// Get a single revocation entry by ID (for debugging/admin).
 	GetRevocation(ctx context.Context, id pgtype.UUID) (RevocationOutbox, error)
+	// GetRevokedJTI checks if a specific JTI is revoked. Used for introspection
+	// fallback when the bloom filter returns a hit (confirms true positive vs
+	// false positive).
+	GetRevokedJTI(ctx context.Context, jti string) (RevokedJti, error)
 	// Queries for the sessions table (opaque, rotating, one-time-use refresh
 	// tokens; DESIGN §3.5, §10). The query IS the contract (DESIGN §1.3):
 	// `sqlc generate` (via @codegen) produces typed Go — never hand-write DB types.
@@ -114,6 +122,20 @@ type Querier interface {
 	// Called when delivery fails but retries remain. The caller computes
 	// next_attempt_at based on the retry policy (5s, 30s, 5m, 30m, 1h cap).
 	IncrementRevocationRetry(ctx context.Context, arg IncrementRevocationRetryParams) error
+	// Queries for the revoked_jtis table (emergency JWT revocation via bloom filter;
+	// DESIGN §3.5). The query IS the contract (DESIGN §1.3): `sqlc generate` (via
+	// @codegen) produces typed Go — never hand-write DB types.
+	//
+	// This table is the persistent source of truth for revoked JTIs. The in-process
+	// bloom filter is rehydrated from ListActive on startup and kept in sync via
+	// Redis pub/sub.
+	// InsertRevokedJTI upserts a revoked JTI. On conflict (re-revocation of same
+	// JTI), update reason/expires_at to latest values. This is idempotent so
+	// retries and duplicate pub/sub messages are safe.
+	InsertRevokedJTI(ctx context.Context, arg InsertRevokedJTIParams) (RevokedJti, error)
+	// ListActiveRevokedJTIs returns all JTIs that are still within their JWT's
+	// original expiry window. Used to rehydrate the bloom filter on startup.
+	ListActiveRevokedJTIs(ctx context.Context) ([]RevokedJti, error)
 	// ListAuditEventsByUser powers the dashboard audit-log viewer (DESIGN §9).
 	// Newest-first with limit/offset paging, served by idx_audit_events_user_time.
 	ListAuditEventsByUser(ctx context.Context, arg ListAuditEventsByUserParams) ([]AuditEvent, error)
