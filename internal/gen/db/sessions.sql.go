@@ -13,11 +13,11 @@ import (
 
 const createSession = `-- name: CreateSession :one
 INSERT INTO sessions (
-    id, region, user_id, client_id, device_label, refresh_token_hash, expires_at
+    id, region, user_id, client_id, grant_id, device_label, refresh_token_hash, expires_at
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7
+    $1, $2, $3, $4, $5, $6, $7, $8
 )
-RETURNING id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id
+RETURNING id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id, grant_id
 `
 
 type CreateSessionParams struct {
@@ -25,6 +25,7 @@ type CreateSessionParams struct {
 	Region           string             `json:"region"`
 	UserID           pgtype.UUID        `json:"user_id"`
 	ClientID         string             `json:"client_id"`
+	GrantID          pgtype.UUID        `json:"grant_id"`
 	DeviceLabel      *string            `json:"device_label"`
 	RefreshTokenHash []byte             `json:"refresh_token_hash"`
 	ExpiresAt        pgtype.Timestamptz `json:"expires_at"`
@@ -36,6 +37,7 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		arg.Region,
 		arg.UserID,
 		arg.ClientID,
+		arg.GrantID,
 		arg.DeviceLabel,
 		arg.RefreshTokenHash,
 		arg.ExpiresAt,
@@ -51,6 +53,7 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		&i.ExpiresAt,
 		&i.RevokedAt,
 		&i.ClientID,
+		&i.GrantID,
 	)
 	return i, err
 }
@@ -68,7 +71,7 @@ func (q *Queries) DeleteExpiredSessions(ctx context.Context) error {
 }
 
 const getActiveSession = `-- name: GetActiveSession :one
-SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id FROM sessions
+SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id, grant_id FROM sessions
 WHERE id = $1
   AND revoked_at IS NULL
   AND expires_at > now()
@@ -91,13 +94,14 @@ func (q *Queries) GetActiveSession(ctx context.Context, id pgtype.UUID) (Session
 		&i.ExpiresAt,
 		&i.RevokedAt,
 		&i.ClientID,
+		&i.GrantID,
 	)
 	return i, err
 }
 
 const getSession = `-- name: GetSession :one
 
-SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id FROM sessions
+SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id, grant_id FROM sessions
 WHERE id = $1
 `
 
@@ -117,12 +121,13 @@ func (q *Queries) GetSession(ctx context.Context, id pgtype.UUID) (Session, erro
 		&i.ExpiresAt,
 		&i.RevokedAt,
 		&i.ClientID,
+		&i.GrantID,
 	)
 	return i, err
 }
 
 const getSessionByHash = `-- name: GetSessionByHash :one
-SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id FROM sessions
+SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id, grant_id FROM sessions
 WHERE refresh_token_hash = $1
 `
 
@@ -143,12 +148,13 @@ func (q *Queries) GetSessionByHash(ctx context.Context, refreshTokenHash []byte)
 		&i.ExpiresAt,
 		&i.RevokedAt,
 		&i.ClientID,
+		&i.GrantID,
 	)
 	return i, err
 }
 
 const listSessionsByUser = `-- name: ListSessionsByUser :many
-SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id FROM sessions
+SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id, grant_id FROM sessions
 WHERE user_id = $1
   AND revoked_at IS NULL
 ORDER BY created_at DESC
@@ -173,6 +179,7 @@ func (q *Queries) ListSessionsByUser(ctx context.Context, userID pgtype.UUID) ([
 			&i.ExpiresAt,
 			&i.RevokedAt,
 			&i.ClientID,
+			&i.GrantID,
 		); err != nil {
 			return nil, err
 		}
@@ -193,6 +200,23 @@ WHERE id = $1
 
 func (q *Queries) RevokeSession(ctx context.Context, id pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, revokeSession, id)
+	return err
+}
+
+const revokeSessionsByGrant = `-- name: RevokeSessionsByGrant :exec
+UPDATE sessions
+SET revoked_at = now()
+WHERE grant_id = $1
+  AND revoked_at IS NULL
+`
+
+// RevokeSessionsByGrant revokes every active session for a specific grant —
+// used when a user revokes a connected app (DESIGN §11.3). Scoped to a single
+// grant so revoking one app connection does not affect other grants for the
+// same (user, client) pair. The partial index idx_sessions_grant_id (migration
+// 0006) makes this fast.
+func (q *Queries) RevokeSessionsByGrant(ctx context.Context, grantID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, revokeSessionsByGrant, grantID)
 	return err
 }
 

@@ -81,6 +81,12 @@ type Querier interface {
 	MarkMFAFactorUsed(ctx context.Context, id pgtype.UUID) error
 	RevokeGrant(ctx context.Context, id pgtype.UUID) error
 	RevokeSession(ctx context.Context, id pgtype.UUID) error
+	// RevokeSessionsByGrant revokes every active session for a specific grant —
+	// used when a user revokes a connected app (DESIGN §11.3). Scoped to a single
+	// grant so revoking one app connection does not affect other grants for the
+	// same (user, client) pair. The partial index idx_sessions_grant_id (migration
+	// 0006) makes this fast.
+	RevokeSessionsByGrant(ctx context.Context, grantID pgtype.UUID) error
 	// RevokeSessionsByUser revokes every active session for a user (e.g. "sign out
 	// everywhere", or a forced logout on credential change; DESIGN §9).
 	RevokeSessionsByUser(ctx context.Context, userID pgtype.UUID) error
