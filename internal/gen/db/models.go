@@ -61,6 +61,18 @@ type RelyingParty struct {
 	ScopesAllowed []string `json:"scopes_allowed"`
 }
 
+type RevocationOutbox struct {
+	ID            pgtype.UUID        `json:"id"`
+	Reason        string             `json:"reason"`
+	UserID        pgtype.UUID        `json:"user_id"`
+	ClientID      string             `json:"client_id"`
+	GrantID       pgtype.UUID        `json:"grant_id"`
+	Status        string             `json:"status"`
+	RetryCount    int32              `json:"retry_count"`
+	NextAttemptAt pgtype.Timestamptz `json:"next_attempt_at"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+}
+
 type Session struct {
 	ID               pgtype.UUID        `json:"id"`
 	Region           string             `json:"region"`
