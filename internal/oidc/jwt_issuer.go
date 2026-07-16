@@ -28,6 +28,7 @@ type idTokenClaims struct {
 	Issuer   string `json:"iss"`
 	Subject  string `json:"sub"`
 	Audience string `json:"aud"`
+	Azp      string `json:"azp"` // authorized party — equals client_id when aud is single-valued (OIDC Core §2)
 	Expiry   int64  `json:"exp"`
 	IssuedAt int64  `json:"iat"`
 	AuthTime int64  `json:"auth_time"`
@@ -94,6 +95,7 @@ func (j *JWTIssuer) Issue(_ context.Context, p IssueParams) (IssuedTokens, error
 		Issuer:   p.Issuer,
 		Subject:  p.Subject,
 		Audience: p.ClientID,
+		Azp:      p.ClientID, // OIDC Core §2: azp = client_id when aud is single-valued
 		Expiry:   now.Add(idTokenTTLSeconds * time.Second).Unix(),
 		IssuedAt: now.Unix(),
 		AuthTime: p.AuthTime,

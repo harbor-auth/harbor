@@ -121,7 +121,7 @@ func TestJWTIssuerNoPII(t *testing.T) {
 		t.Fatalf("Issue: %v", err)
 	}
 
-	allowedID := map[string]bool{"iss": true, "sub": true, "aud": true, "exp": true, "iat": true, "auth_time": true, "nonce": true, "jti": true}
+	allowedID := map[string]bool{"iss": true, "sub": true, "aud": true, "azp": true, "exp": true, "iat": true, "auth_time": true, "nonce": true, "jti": true}
 	allowedAccess := map[string]bool{"iss": true, "sub": true, "aud": true, "exp": true, "iat": true, "scope": true, "jti": true}
 	forbidden := []string{"email", "name", "given_name", "family_name", "phone_number", "address"}
 
@@ -359,6 +359,36 @@ func TestJWTIssuerIDTokenSignerError(t *testing.T) {
 	}
 }
 
+// TestJWTIssuerAzpPresent verifies that the id_token contains the azp claim
+// set to the client_id per OIDC Core §2.
+func TestJWTIssuerAzpPresent(t *testing.T) {
+	signer := newTestSigner(t)
+	iss := NewJWTIssuer(JWTIssuerConfig{Signer: signer, Now: fixedNow})
+	p := testIssueParams()
+	tokens, err := iss.Issue(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	// Extract azp from id_token.
+	_, idPayload, _, err := parseCompactJWT(tokens.IDToken)
+	if err != nil {
+		t.Fatalf("parse id_token: %v", err)
+	}
+	var idClaims map[string]any
+	if err := json.Unmarshal(idPayload, &idClaims); err != nil {
+		t.Fatalf("unmarshal id_token claims: %v", err)
+	}
+	azp, ok := idClaims["azp"].(string)
+	if !ok || azp == "" {
+		t.Fatal("id_token missing required azp claim")
+	}
+	// Verify azp matches client_id.
+	if azp != p.ClientID {
+		t.Fatalf("azp = %q, want client_id %q", azp, p.ClientID)
+	}
+}
+
 // TestJWTIssuerAuthTimePresent verifies that the id_token contains the auth_time
 // claim as a Unix timestamp integer per OIDC Core §2.
 func TestJWTIssuerAuthTimePresent(t *testing.T) {
@@ -580,7 +610,13 @@ func TestJWTGoldenVectors(t *testing.T) {
 	} else if int64(authTime) != fixedNow().Unix() {
 		t.Fatalf("auth_time = %v, want %v", int64(authTime), fixedNow().Unix())
 	}
-	// Compare deterministic claims (all except jti and auth_time which are verified separately).
+	// Verify azp is present and matches client_id.
+	if azp, ok := currentClaims["azp"].(string); !ok || azp == "" {
+		t.Fatal("current id_token missing required azp claim")
+	} else if azp != testIssueParams().ClientID {
+		t.Fatalf("azp = %q, want client_id %q", azp, testIssueParams().ClientID)
+	}
+	// Compare deterministic claims (all except jti, auth_time, and azp which are verified separately).
 	for _, claim := range []string{"iss", "sub", "aud", "exp", "iat", "nonce"} {
 		frozenVal, frozenOK := frozenClaims[claim]
 		currentVal, currentOK := currentClaims[claim]
