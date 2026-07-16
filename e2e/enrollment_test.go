@@ -80,7 +80,11 @@ func openDB(t *testing.T) *pgx.Conn {
 	if err != nil {
 		t.Skipf("cannot connect to HARBOR_E2E_DATABASE_URL: %v — skipping", err)
 	}
-	t.Cleanup(func() { _ = conn.Close(context.Background()) })
+	t.Cleanup(func() {
+		if err := conn.Close(context.Background()); err != nil {
+			t.Logf("close db connection: %v", err)
+		}
+	})
 	return conn
 }
 
@@ -101,13 +105,19 @@ func jarClient(t *testing.T) *http.Client {
 // tests to mean anything) but skips if harbor-mgmt is unreachable entirely.
 func enroll(t *testing.T, client *http.Client) (userID, region string) {
 	t.Helper()
-	body, _ := json.Marshal(map[string]string{"region": enrollRegion()})
+	body, err := json.Marshal(map[string]string{"region": enrollRegion()})
+	if err != nil {
+		t.Fatalf("marshal enroll body: %v", err)
+	}
 	resp, err := client.Post(mgmtBaseURL()+enrollPath, "application/json", strings.NewReader(string(body)))
 	if err != nil {
 		t.Skipf("harbor-mgmt unreachable at %s: %v — skipping enrollment e2e", mgmtBaseURL(), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read enroll response: %v", err)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if resp.StatusCode == http.StatusServiceUnavailable {
 			t.Skipf("POST /enroll = 503 (enrollment not wired: set DATABASE_URL + HARBOR_KEK_SECRET) — skipping")
@@ -223,13 +233,19 @@ func TestEnrollmentPerCallIsIndependent(t *testing.T) {
 // and returns no profile PII (docs/DESIGN.md §5, §6.5). This is the black-box
 // proxy for "no PII in logs": the response is the only caller-visible surface.
 func TestEnrollmentResponseHasNoPII(t *testing.T) {
-	body, _ := json.Marshal(map[string]string{"region": enrollRegion()})
+	body, err := json.Marshal(map[string]string{"region": enrollRegion()})
+	if err != nil {
+		t.Fatalf("marshal enroll body: %v", err)
+	}
 	resp, err := http.Post(mgmtBaseURL()+enrollPath, "application/json", strings.NewReader(string(body)))
 	if err != nil {
 		t.Skipf("harbor-mgmt unreachable at %s: %v — skipping", mgmtBaseURL(), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, _ := io.ReadAll(resp.Body)
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read enroll response: %v", err)
+	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		t.Skip("POST /enroll = 503 (enrollment not wired) — skipping")
 	}
@@ -361,7 +377,11 @@ func registerPasskey(t *testing.T, client *http.Client) bool {
 		t.Logf("register/begin = %d (ceremony not wired)", beginResp.StatusCode)
 		return false
 	}
-	beginBody, _ := io.ReadAll(beginResp.Body)
+	beginBody, err := io.ReadAll(beginResp.Body)
+	if err != nil {
+		t.Logf("read register/begin body: %v", err)
+		return false
+	}
 
 	var opts struct {
 		PublicKey struct {
@@ -396,7 +416,11 @@ func registerPasskey(t *testing.T, client *http.Client) bool {
 		return false
 	}
 	defer func() { _ = finishResp.Body.Close() }()
-	finishBody, _ := io.ReadAll(finishResp.Body)
+	finishBody, err := io.ReadAll(finishResp.Body)
+	if err != nil {
+		t.Logf("read register/finish body: %v", err)
+		return false
+	}
 	if finishResp.StatusCode < 200 || finishResp.StatusCode >= 300 {
 		t.Logf("register/finish = %d (likely origin/RP mismatch on this stack)\n%s", finishResp.StatusCode, finishBody)
 		return false
