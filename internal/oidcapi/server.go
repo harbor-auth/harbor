@@ -61,3 +61,15 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(openapi.Error{Code: code, Message: message})
 }
+
+// GetUserInfo implements the OIDC UserInfo endpoint (OIDC Core §5.3).
+// TODO(userinfo): implement token validation and claims retrieval.
+func (s *Server) GetUserInfo(w http.ResponseWriter, r *http.Request) {
+	// Stub: return 501 Not Implemented until the handler is wired.
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotImplemented)
+	_ = json.NewEncoder(w).Encode(openapi.OAuthError{
+		Error:            "server_error",
+		ErrorDescription: "userinfo endpoint not yet implemented",
+	})
+}
