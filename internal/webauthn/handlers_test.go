@@ -106,7 +106,7 @@ func TestHandler_BeginRegistration_UnknownUser(t *testing.T) {
 // ceremony's user (the insecure user_id query param has been removed), so every
 // endpoint refuses the request with 501 — even when a legacy user_id param is
 // supplied (docs/DESIGN.md §9 — IDOR defense).
-func TestHandler_NoEnrollmentStore_Returns501(t *testing.T) {
+func TestHandler_UserIDPath_DisabledByDefault(t *testing.T) {
 	svc, _ := newTestService(t)
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, svc) // no enrollment sessions wired
@@ -139,6 +139,20 @@ func TestHandler_MissingEnrollmentCookie_Returns501(t *testing.T) {
 	}
 }
 
+// TestHandler_BeginRegistration_MissingUserID covers the register/begin path
+// when no enrollment cookie is present. In the enrollment-session model the
+// cookie is the user identity (the removed user_id param has no replacement),
+// so a missing cookie makes the user handle unresolvable → 501.
+func TestHandler_BeginRegistration_MissingUserID(t *testing.T) {
+	mux := newCeremonyMux(t, demoHandle())
+	req := httptest.NewRequest(http.MethodPost, "/webauthn/register/begin", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Result().StatusCode)
+	}
+}
+
 // The enrollment cookie is present but the session is expired/unknown (store
 // returns an error) → 501.
 func TestHandler_ExpiredEnrollmentSession_Returns501(t *testing.T) {
@@ -148,6 +162,33 @@ func TestHandler_ExpiredEnrollmentSession_Returns501(t *testing.T) {
 	handler.RegisterRoutes(mux)
 
 	req := enrollReq(http.MethodPost, "/webauthn/register/begin", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Result().StatusCode)
+	}
+}
+
+// TestHandler_FinishRegistration_MissingUserID covers register/finish when no
+// enrollment cookie is present → 501 (user identity unresolvable).
+func TestHandler_FinishRegistration_MissingUserID(t *testing.T) {
+	mux := newCeremonyMux(t, demoHandle())
+	req := httptest.NewRequest(http.MethodPost, "/webauthn/register/finish", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Result().StatusCode)
+	}
+}
+
+// TestHandler_FinishRegistration_InvalidUserIDEncoding covers register/finish
+// when the enrollment session is expired/invalid → 501.
+func TestHandler_FinishRegistration_InvalidUserIDEncoding(t *testing.T) {
+	svc, _ := newTestService(t)
+	handler := NewHandler(svc).WithEnrollmentSessions(&fakeEnrollmentSessionStore{err: errors.New("session expired")})
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+	req := enrollReq(http.MethodPost, "/webauthn/register/finish", strings.NewReader("{}"))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Result().StatusCode != http.StatusNotImplemented {
@@ -289,6 +330,38 @@ func TestHandler_BeginLogin_OK(t *testing.T) {
 	}
 }
 
+// TestHandler_BeginLogin_MissingUserID covers login/begin when no enrollment
+// cookie is present → 501 (user identity unresolvable).
+func TestHandler_BeginLogin_MissingUserID(t *testing.T) {
+	mux := muxWithCreds(t)
+	req := httptest.NewRequest(http.MethodPost, "/webauthn/login/begin", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Result().StatusCode)
+	}
+}
+
+// TestHandler_BeginLogin_InvalidUserIDEncoding covers login/begin when the
+// enrollment session is expired/invalid → 501.
+func TestHandler_BeginLogin_InvalidUserIDEncoding(t *testing.T) {
+	store := NewInMemoryStore()
+	store.PutUser(NewUser(demoHandle(), "demo@harbor.local", "Demo", []gowebauthn.Credential{{ID: []byte("cred-1"), PublicKey: []byte("pk")}}))
+	svc, err := NewService(testConfig(), store, NewInMemorySessionStore())
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	handler := NewHandler(svc).WithEnrollmentSessions(&fakeEnrollmentSessionStore{err: errors.New("session expired")})
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+	req := enrollReq(http.MethodPost, "/webauthn/login/begin", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Result().StatusCode)
+	}
+}
+
 func TestHandler_BeginLogin_UnknownUser(t *testing.T) {
 	mux := newCeremonyMux(t, []byte("nobody"))
 	req := enrollReq(http.MethodPost, "/webauthn/login/begin", nil)
@@ -310,6 +383,33 @@ func TestHandler_BeginLogin_UserWithNoCredentials(t *testing.T) {
 	// A user with no credentials cannot begin login — this maps to 400.
 	if rec.Result().StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Result().StatusCode)
+	}
+}
+
+// TestHandler_FinishLogin_MissingUserID covers login/finish when no enrollment
+// cookie is present → 501 (user identity unresolvable).
+func TestHandler_FinishLogin_MissingUserID(t *testing.T) {
+	mux := newCeremonyMux(t, demoHandle())
+	req := httptest.NewRequest(http.MethodPost, "/webauthn/login/finish", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Result().StatusCode)
+	}
+}
+
+// TestHandler_FinishLogin_InvalidUserIDEncoding covers login/finish when the
+// enrollment session is expired/invalid → 501.
+func TestHandler_FinishLogin_InvalidUserIDEncoding(t *testing.T) {
+	svc, _ := newTestService(t)
+	handler := NewHandler(svc).WithEnrollmentSessions(&fakeEnrollmentSessionStore{err: errors.New("session expired")})
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+	req := enrollReq(http.MethodPost, "/webauthn/login/finish", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Result().StatusCode)
 	}
 }
 
