@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/harbor/harbor/internal/crypto"
 	"github.com/harbor/harbor/internal/gen/openapi"
 	"github.com/harbor/harbor/internal/oidc"
 )
@@ -35,14 +36,23 @@ func newFlowServer(t *testing.T) *httptest.Server {
 		RedirectURIs:  []string{testRedirectURI},
 		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
 	})
+	// Use a real signer so /userinfo can verify access tokens.
+	signer, err := crypto.NewLocalSigner()
+	if err != nil {
+		t.Fatalf("NewLocalSigner: %v", err)
+	}
 	svc := oidc.NewService(oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    oidc.NewInMemoryAuthCodeStore(),
-		Tokens:   oidc.NewPlaceholderIssuer(),
+		Tokens:   oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
 	})
-	srv := New(Config{Issuer: "https://eu.harbor.id", Service: svc})
+	srv := New(Config{
+		Issuer:  "https://eu.harbor.id",
+		Service: svc,
+		Signers: []crypto.Signer{signer},
+	})
 	h := openapi.HandlerFromMux(srv, http.NewServeMux())
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)

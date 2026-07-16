@@ -25,12 +25,17 @@ type jwtHeader struct {
 
 // idTokenClaims are the claims for an OIDC ID token. nonce is omitted when empty.
 type idTokenClaims struct {
-	Issuer   string `json:"iss"`
-	Subject  string `json:"sub"`
-	Audience string `json:"aud"`
-	Expiry   int64  `json:"exp"`
-	IssuedAt int64  `json:"iat"`
-	Nonce    string `json:"nonce,omitempty"`
+	Issuer   string   `json:"iss"`
+	Subject  string   `json:"sub"`
+	Audience string   `json:"aud"`
+	Azp      string   `json:"azp"` // authorized party — equals client_id when aud is single-valued (OIDC Core §2)
+	Expiry   int64    `json:"exp"`
+	IssuedAt int64    `json:"iat"`
+	AuthTime int64    `json:"auth_time"`
+	ACR      string   `json:"acr,omitempty"` // authentication context class reference (OIDC Core §2)
+	AMR      []string `json:"amr,omitempty"` // authentication methods references (OIDC Core §2)
+	Nonce    string   `json:"nonce,omitempty"`
+	JTI      string   `json:"jti"`
 }
 
 // accessTokenClaims are the claims for an access token (RFC 9068 JWT profile).
@@ -79,18 +84,27 @@ func NewJWTIssuer(cfg JWTIssuerConfig) *JWTIssuer {
 //harbor:invariant INV-JWT-NO-PII
 func (j *JWTIssuer) Issue(_ context.Context, p IssueParams) (IssuedTokens, error) {
 	now := j.now()
-	jti, err := newJTI()
+	idTokenJTI, err := newJTI()
 	if err != nil {
-		return IssuedTokens{}, fmt.Errorf("jwt: generate jti: %w", err)
+		return IssuedTokens{}, fmt.Errorf("jwt: generate id_token jti: %w", err)
+	}
+	accessTokenJTI, err := newJTI()
+	if err != nil {
+		return IssuedTokens{}, fmt.Errorf("jwt: generate access_token jti: %w", err)
 	}
 
 	idToken, err := j.signJWT("JWT", idTokenClaims{
 		Issuer:   p.Issuer,
 		Subject:  p.Subject,
 		Audience: p.ClientID,
+		Azp:      p.ClientID, // OIDC Core §2: azp = client_id when aud is single-valued
 		Expiry:   now.Add(idTokenTTLSeconds * time.Second).Unix(),
 		IssuedAt: now.Unix(),
+		AuthTime: p.AuthTime,
+		ACR:      p.ACR,
+		AMR:      p.AMR,
 		Nonce:    p.Nonce,
+		JTI:      idTokenJTI,
 	})
 	if err != nil {
 		return IssuedTokens{}, fmt.Errorf("jwt: sign ID token: %w", err)
@@ -103,7 +117,7 @@ func (j *JWTIssuer) Issue(_ context.Context, p IssueParams) (IssuedTokens, error
 		Expiry:   now.Add(accessTokenTTLSeconds * time.Second).Unix(),
 		IssuedAt: now.Unix(),
 		Scope:    p.Scope,
-		JTI:      jti,
+		JTI:      accessTokenJTI,
 	})
 	if err != nil {
 		return IssuedTokens{}, fmt.Errorf("jwt: sign access token: %w", err)

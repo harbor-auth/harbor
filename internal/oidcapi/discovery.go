@@ -30,10 +30,12 @@ func (s *Server) GetOpenIDConfiguration(w http.ResponseWriter, _ *http.Request) 
 // pairwise subjects only (§3.2) and asymmetric signing only (§7).
 func (s *Server) metadata() openapi.OpenIDProviderMetadata {
 	base := strings.TrimRight(s.issuer, "/")
+	userinfoEndpoint := base + "/userinfo"
 	return openapi.OpenIDProviderMetadata{
 		Issuer:                 base,
 		AuthorizationEndpoint:  base + "/authorize",
 		TokenEndpoint:          base + "/token",
+		UserinfoEndpoint:       &userinfoEndpoint,
 		JwksUri:                base + "/jwks.json",
 		ResponseTypesSupported: []string{"code"},
 		SubjectTypesSupported: []openapi.OpenIDProviderMetadataSubjectTypesSupported{
@@ -55,5 +57,15 @@ func (s *Server) metadata() openapi.OpenIDProviderMetadata {
 		CodeChallengeMethodsSupported: []openapi.OpenIDProviderMetadataCodeChallengeMethodsSupported{
 			openapi.OpenIDProviderMetadataCodeChallengeMethodsSupportedS256,
 		},
+		// Claims Harbor may assert. Privacy claims (email/email_verified) are
+		// emitted only when the matching scope was granted (§3.2, §3.3).
+		ClaimsSupported: []string{
+			"sub", "iss", "aud", "azp", "exp", "iat",
+			"auth_time", "acr", "amr", "nonce", "jti",
+			"email", "email_verified",
+		},
+		// Public-client provider: PKCE replaces a client secret, so the token
+		// endpoint requires no client authentication (§3.1).
+		TokenEndpointAuthMethodsSupported: []string{"none"},
 	}
 }

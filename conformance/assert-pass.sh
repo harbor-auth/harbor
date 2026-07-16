@@ -10,9 +10,24 @@
 #
 # WARNING is treated as acceptable (it is advisory in the OIDF suite); FAILED,
 # REVIEW, INTERRUPTED, SKIPPED, or any unknown status fail the gate.
+#
+# As of the oidf-conformance feature landing (real ES256-signed tokens; jti,
+# auth_time, azp, acr, amr claims; /userinfo; full discovery metadata),
+# harbor-hot is expected to PASS the OIDC Basic OP certification plan. To keep
+# the gate honest — and to stop a silently-skipped plan from reporting a hollow
+# "0 failures" — REQUIRED_MODULES lists core modules that MUST be present AND
+# PASSED/WARNING. A required module that is absent or non-passing fails the gate.
 set -euo pipefail
 
 RESULTS="${1:-conformance/out/results.json}"
+
+# Core OIDC Basic OP certification modules that harbor-hot must now pass. These
+# exercise the features delivered by the oidf-conformance feature: discovery,
+# the code+PKCE flow, asymmetric id_token signing, and /userinfo. Override with
+# a space-separated REQUIRED_MODULES env var (empty string disables the check —
+# e.g. when running a narrower plan locally).
+DEFAULT_REQUIRED_MODULES='oidcc-server oidcc-userinfo-get oidcc-idtoken-signature oidcc-scope-profile'
+REQUIRED_MODULES="${REQUIRED_MODULES-$DEFAULT_REQUIRED_MODULES}"
 
 fail() { printf '==> conformance: FAIL — %s\n' "$*" >&2; exit 1; }
 
@@ -41,6 +56,27 @@ if [ "$module_count" -gt 0 ]; then
     jq -r '.modules[] | select((.status|ascii_upcase) as $s | ($s != "PASSED" and $s != "WARNING")) | "    - \(.testName): \(.status)"' "$RESULTS" >&2
     fail "$bad of $module_count OIDF modules did not pass"
   fi
+
+  # Fail-closed presence check: every REQUIRED module must appear with a
+  # PASSED/WARNING status. This blocks a plan that quietly skipped the core
+  # certification modules from reporting a hollow pass (§1.7 anti-Goodhart).
+  # Match is prefix-based (startswith) because the OIDF export testName may
+  # include variant qualifiers (e.g. "oidcc-server-variant-foo").
+  missing=''
+  for mod in $REQUIRED_MODULES; do
+    present_ok="$(jq -r --arg m "$mod" \
+      '[.modules[] | select(.testName | startswith($m)) | select((.status|ascii_upcase) as $s | ($s == "PASSED" or $s == "WARNING"))] | length' \
+      "$RESULTS")"
+    if [ "$present_ok" -eq 0 ]; then
+      missing="$missing $mod"
+    fi
+  done
+  if [ -n "$missing" ]; then
+    printf '  required modules missing or not PASSED/WARNING:\n' >&2
+    for mod in $missing; do printf '    - %s\n' "$mod" >&2; done
+    fail "required OIDF module(s) did not pass:$missing"
+  fi
+
   printf '==> conformance: PASS — %s OIDF modules all PASSED/WARNING (%s)\n' "$module_count" "$RESULTS"
   exit 0
 fi

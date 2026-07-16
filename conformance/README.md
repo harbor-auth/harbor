@@ -9,7 +9,7 @@ config-around a failure — fix the implementation to conform.**
 
 | Stage | Script | Gate |
 |---|---|---|
-| OIDC OP certification | `run-plan.sh` → `assert-pass.sh` | **Blocking** — the OpenID Foundation suite drives harbor-hot through the OIDC OP test plan headlessly; `assert-pass.sh` fails on any non-`PASSED`/`WARNING` module (honest red). |
+| OIDC OP certification | `run-plan.sh` → `assert-pass.sh` | **Blocking** — the OpenID Foundation suite drives harbor-hot through the OIDC OP test plan headlessly; `assert-pass.sh` fails on any non-`PASSED`/`WARNING` module AND on any absent/failing `REQUIRED_MODULES` core module. |
 | WebAuthn / FIDO2 | `run-webauthn.sh` | **Manual (GUI) + automated substitute** — the FIDO Alliance FIDO2 tools are GUI-only (manual pre-release step); the automated `internal/webauthn` ceremony tests are run **fail-closed (blocking)** when the package is present. |
 
 ## Files
@@ -63,9 +63,40 @@ same host. `host.docker.internal` is wired to the host gateway via `extra_hosts`
 | `HARBOR_ISSUER` | `http://host.docker.internal:8080` | Issuer the suite drives. |
 | `PLAN` | `oidcc-basic-certification-test-plan` | OIDF test plan name. |
 
-## Why it is RED today
+## Conformance status
 
-harbor-hot is an in-memory scaffold (unsigned placeholder tokens), so the OIDF
-OP suite cannot yet PASS. That is intentional: the gate is honest red until
-harbor-hot reaches real OIDC compliance (asymmetric-signed tokens, pairwise
-subjects). The e2e smoke gate (`e2e/`) still passes.
+harbor-hot now issues **real ES256-signed tokens** (pairwise `sub`), so the
+OIDC **Basic OP** certification plan is expected to **PASS**. The
+`oidf-conformance` feature delivered the claims and endpoints the suite checks.
+
+### Now passing (asserted by `assert-pass.sh` via `REQUIRED_MODULES`)
+
+| Area | What the suite verifies | Delivered by |
+|---|---|---|
+| Discovery | `userinfo_endpoint`, `claims_supported`, `token_endpoint_auth_methods_supported: [none]`, pairwise-only, `S256`-only, asymmetric-only | `internal/oidcapi/discovery.go` |
+| Authorization Code + PKCE | code+`S256` flow, exact `redirect_uri`, single-use codes | `internal/oidcapi/authorize.go`, `internal/oidc` |
+| id_token | asymmetric signature (`ES256`), `iss`/`sub`/`aud`/`exp`/`iat` + `jti`, `auth_time`, `azp`, `acr`, `amr`, `nonce` | `internal/oidc/jwt_issuer.go` |
+| UserInfo | Bearer-authenticated `GET /userinfo` returning the pairwise `sub` | `internal/oidcapi/userinfo.go` |
+
+The core modules that MUST pass are pinned in `assert-pass.sh`
+(`DEFAULT_REQUIRED_MODULES`): `oidcc-server`, `oidcc-userinfo-get`,
+`oidcc-idtoken-signature`, `oidcc-scope-profile`. Override with the
+`REQUIRED_MODULES` env var for a narrower local plan.
+
+### Still out of scope / expected to fail
+
+These are **not** part of the Basic OP plan Harbor certifies against and are
+deliberately unsupported by design — do not add them to `REQUIRED_MODULES`:
+
+- **Dynamic Client Registration** — Harbor uses a curated client registry
+  (DESIGN §3.1); RPs are provisioned out-of-band, not self-registered.
+- **Implicit / Hybrid / ROPC flows** — OAuth 2.1: Authorization Code + refresh
+  only (DESIGN §3.1).
+- **`request`/`request_uri` (JAR/PAR)** — not yet implemented.
+- **`client_secret_*` token-endpoint auth** — Harbor is a public-client provider;
+  PKCE replaces a client secret (`token_endpoint_auth_methods_supported: [none]`).
+- **WebAuthn / FIDO2** — the FIDO Alliance tools are GUI-only (manual
+  pre-release step); the automated `internal/webauthn` ceremony tests are the
+  blocking substitute (see `run-webauthn.sh`).
+
+The fast e2e smoke gate (`e2e/`) runs first and must also pass.

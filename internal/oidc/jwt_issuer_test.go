@@ -32,6 +32,9 @@ func testIssueParams() IssueParams {
 		ClientID: "demo-client",
 		Scope:    "openid profile",
 		Nonce:    "n-0S6_WzA2Mj",
+		AuthTime: fixedNow().Unix(),
+		ACR:      "urn:harbor:ac:webauthn",
+		AMR:      []string{"hwk", "user"},
 	}
 }
 
@@ -120,7 +123,7 @@ func TestJWTIssuerNoPII(t *testing.T) {
 		t.Fatalf("Issue: %v", err)
 	}
 
-	allowedID := map[string]bool{"iss": true, "sub": true, "aud": true, "exp": true, "iat": true, "nonce": true}
+	allowedID := map[string]bool{"iss": true, "sub": true, "aud": true, "azp": true, "exp": true, "iat": true, "auth_time": true, "acr": true, "amr": true, "nonce": true, "jti": true}
 	allowedAccess := map[string]bool{"iss": true, "sub": true, "aud": true, "exp": true, "iat": true, "scope": true, "jti": true}
 	forbidden := []string{"email", "name", "given_name", "family_name", "phone_number", "address"}
 
@@ -358,6 +361,190 @@ func TestJWTIssuerIDTokenSignerError(t *testing.T) {
 	}
 }
 
+// TestJWTIssuerAcrAmrPresent verifies that the id_token contains the acr and amr
+// claims per OIDC Core §2.
+func TestJWTIssuerAcrAmrPresent(t *testing.T) {
+	signer := newTestSigner(t)
+	iss := NewJWTIssuer(JWTIssuerConfig{Signer: signer, Now: fixedNow})
+	p := testIssueParams()
+	tokens, err := iss.Issue(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	// Extract acr and amr from id_token.
+	_, idPayload, _, err := parseCompactJWT(tokens.IDToken)
+	if err != nil {
+		t.Fatalf("parse id_token: %v", err)
+	}
+	var idClaims map[string]any
+	if err := json.Unmarshal(idPayload, &idClaims); err != nil {
+		t.Fatalf("unmarshal id_token claims: %v", err)
+	}
+
+	// Verify acr claim.
+	acr, ok := idClaims["acr"].(string)
+	if !ok || acr == "" {
+		t.Fatal("id_token missing required acr claim")
+	}
+	if acr != p.ACR {
+		t.Fatalf("acr = %q, want %q", acr, p.ACR)
+	}
+
+	// Verify amr claim.
+	amrRaw, ok := idClaims["amr"].([]any)
+	if !ok || len(amrRaw) == 0 {
+		t.Fatal("id_token missing required amr claim")
+	}
+	var amr []string
+	for _, v := range amrRaw {
+		s, ok := v.(string)
+		if !ok {
+			t.Fatalf("amr contains non-string value: %v", v)
+		}
+		amr = append(amr, s)
+	}
+	if len(amr) != len(p.AMR) {
+		t.Fatalf("amr = %v, want %v", amr, p.AMR)
+	}
+	for i, v := range amr {
+		if v != p.AMR[i] {
+			t.Fatalf("amr[%d] = %q, want %q", i, v, p.AMR[i])
+		}
+	}
+}
+
+// TestJWTIssuerAcrAmrOmittedWhenEmpty verifies that acr and amr are omitted when empty.
+func TestJWTIssuerAcrAmrOmittedWhenEmpty(t *testing.T) {
+	signer := newTestSigner(t)
+	iss := NewJWTIssuer(JWTIssuerConfig{Signer: signer, Now: fixedNow})
+	p := testIssueParams()
+	p.ACR = ""
+	p.AMR = nil
+	tokens, err := iss.Issue(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	_, payload, _, err := parseCompactJWT(tokens.IDToken)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := claims["acr"]; ok {
+		t.Fatal("empty acr should be omitted from ID token claims")
+	}
+	if _, ok := claims["amr"]; ok {
+		t.Fatal("empty amr should be omitted from ID token claims")
+	}
+}
+
+// TestJWTIssuerAzpPresent verifies that the id_token contains the azp claim
+// set to the client_id per OIDC Core §2.
+func TestJWTIssuerAzpPresent(t *testing.T) {
+	signer := newTestSigner(t)
+	iss := NewJWTIssuer(JWTIssuerConfig{Signer: signer, Now: fixedNow})
+	p := testIssueParams()
+	tokens, err := iss.Issue(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	// Extract azp from id_token.
+	_, idPayload, _, err := parseCompactJWT(tokens.IDToken)
+	if err != nil {
+		t.Fatalf("parse id_token: %v", err)
+	}
+	var idClaims map[string]any
+	if err := json.Unmarshal(idPayload, &idClaims); err != nil {
+		t.Fatalf("unmarshal id_token claims: %v", err)
+	}
+	azp, ok := idClaims["azp"].(string)
+	if !ok || azp == "" {
+		t.Fatal("id_token missing required azp claim")
+	}
+	// Verify azp matches client_id.
+	if azp != p.ClientID {
+		t.Fatalf("azp = %q, want client_id %q", azp, p.ClientID)
+	}
+}
+
+// TestJWTIssuerAuthTimePresent verifies that the id_token contains the auth_time
+// claim as a Unix timestamp integer per OIDC Core §2.
+func TestJWTIssuerAuthTimePresent(t *testing.T) {
+	signer := newTestSigner(t)
+	iss := NewJWTIssuer(JWTIssuerConfig{Signer: signer, Now: fixedNow})
+	p := testIssueParams()
+	tokens, err := iss.Issue(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	// Extract auth_time from id_token.
+	_, idPayload, _, err := parseCompactJWT(tokens.IDToken)
+	if err != nil {
+		t.Fatalf("parse id_token: %v", err)
+	}
+	var idClaims map[string]any
+	if err := json.Unmarshal(idPayload, &idClaims); err != nil {
+		t.Fatalf("unmarshal id_token claims: %v", err)
+	}
+	authTime, ok := idClaims["auth_time"].(float64)
+	if !ok {
+		t.Fatal("id_token missing required auth_time claim")
+	}
+	// Verify auth_time matches what was passed in IssueParams.
+	if int64(authTime) != p.AuthTime {
+		t.Fatalf("auth_time = %v, want %v", int64(authTime), p.AuthTime)
+	}
+}
+
+// TestJWTIssuerJTIPresent verifies that both id_token and access_token contain
+// unique jti claims for OIDF conformance and bloom filter revocation support.
+func TestJWTIssuerJTIPresent(t *testing.T) {
+	signer := newTestSigner(t)
+	iss := NewJWTIssuer(JWTIssuerConfig{Signer: signer, Now: fixedNow})
+	tokens, err := iss.Issue(context.Background(), testIssueParams())
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	// Extract jti from id_token.
+	_, idPayload, _, err := parseCompactJWT(tokens.IDToken)
+	if err != nil {
+		t.Fatalf("parse id_token: %v", err)
+	}
+	var idClaims map[string]any
+	if err := json.Unmarshal(idPayload, &idClaims); err != nil {
+		t.Fatalf("unmarshal id_token claims: %v", err)
+	}
+	idJTI, ok := idClaims["jti"].(string)
+	if !ok || idJTI == "" {
+		t.Fatal("id_token missing required jti claim")
+	}
+
+	// Extract jti from access_token.
+	_, accessPayload, _, err := parseCompactJWT(tokens.AccessToken)
+	if err != nil {
+		t.Fatalf("parse access_token: %v", err)
+	}
+	var accessClaims map[string]any
+	if err := json.Unmarshal(accessPayload, &accessClaims); err != nil {
+		t.Fatalf("unmarshal access_token claims: %v", err)
+	}
+	accessJTI, ok := accessClaims["jti"].(string)
+	if !ok || accessJTI == "" {
+		t.Fatal("access_token missing required jti claim")
+	}
+
+	// Verify id_token and access_token have different jti values.
+	if idJTI == accessJTI {
+		t.Fatalf("id_token and access_token have same jti %q; each should be unique", idJTI)
+	}
+}
+
 func TestJWTIssuerNonceOmittedWhenEmpty(t *testing.T) {
 	signer := newTestSigner(t)
 	iss := NewJWTIssuer(JWTIssuerConfig{Signer: signer, Now: fixedNow})
@@ -415,10 +602,11 @@ type jwtGoldenVectors struct {
 }
 
 // TestJWTGoldenVectors freezes the deterministic parts of issuance (kid, JWK
-// x/y, ID-token header + payload base64) by byte-equality, and verifies a
-// pre-signed frozen JWT against the fixed public key. It never re-signs the
-// frozen token (ES256 signatures are non-deterministic), so the frozen token
-// must be produced once and pasted into testdata/jwt_vectors.json.
+// x/y, ID-token header) by byte-equality, and verifies a pre-signed frozen JWT
+// against the fixed public key. The payload is compared claim-by-claim since
+// the jti claim is non-deterministic (random UUID per issuance). It never
+// re-signs the frozen token (ES256 signatures are non-deterministic), so the
+// frozen token must be produced once and pasted into testdata/jwt_vectors.json.
 //
 //harbor:invariant INV-JWKS-KID-MATCH
 func TestJWTGoldenVectors(t *testing.T) {
@@ -476,12 +664,65 @@ func TestJWTGoldenVectors(t *testing.T) {
 	if idParts[0] != v.IDTokenHeaderB64 {
 		t.Fatalf("id header b64 = %s, want frozen %s", idParts[0], v.IDTokenHeaderB64)
 	}
-	if idParts[1] != v.IDTokenPayloadB64 {
-		t.Fatalf("id payload b64 = %s, want frozen %s", idParts[1], v.IDTokenPayloadB64)
+
+	// Compare payload claims individually (jti is non-deterministic).
+	// Decode frozen payload and current payload, compare all claims except jti.
+	frozenPayload, err := base64.RawURLEncoding.DecodeString(v.IDTokenPayloadB64)
+	if err != nil {
+		t.Fatalf("decode frozen payload: %v", err)
+	}
+	currentPayload, err := base64.RawURLEncoding.DecodeString(idParts[1])
+	if err != nil {
+		t.Fatalf("decode current payload: %v", err)
+	}
+	var frozenClaims, currentClaims map[string]any
+	if err := json.Unmarshal(frozenPayload, &frozenClaims); err != nil {
+		t.Fatalf("unmarshal frozen claims: %v", err)
+	}
+	if err := json.Unmarshal(currentPayload, &currentClaims); err != nil {
+		t.Fatalf("unmarshal current claims: %v", err)
+	}
+	// Verify jti is present and non-empty in current token.
+	if jti, ok := currentClaims["jti"].(string); !ok || jti == "" {
+		t.Fatal("current id_token missing required jti claim")
+	}
+	// Verify auth_time is present and matches the expected value.
+	if authTime, ok := currentClaims["auth_time"].(float64); !ok {
+		t.Fatal("current id_token missing required auth_time claim")
+	} else if int64(authTime) != fixedNow().Unix() {
+		t.Fatalf("auth_time = %v, want %v", int64(authTime), fixedNow().Unix())
+	}
+	// Verify azp is present and matches client_id.
+	if azp, ok := currentClaims["azp"].(string); !ok || azp == "" {
+		t.Fatal("current id_token missing required azp claim")
+	} else if azp != testIssueParams().ClientID {
+		t.Fatalf("azp = %q, want client_id %q", azp, testIssueParams().ClientID)
+	}
+	// Verify acr is present and matches expected value.
+	if acr, ok := currentClaims["acr"].(string); !ok || acr == "" {
+		t.Fatal("current id_token missing required acr claim")
+	} else if acr != testIssueParams().ACR {
+		t.Fatalf("acr = %q, want %q", acr, testIssueParams().ACR)
+	}
+	// Verify amr is present.
+	if amr, ok := currentClaims["amr"].([]any); !ok || len(amr) == 0 {
+		t.Fatal("current id_token missing required amr claim")
+	}
+	// Compare deterministic claims (all except jti, auth_time, azp, acr, amr which are verified separately).
+	for _, claim := range []string{"iss", "sub", "aud", "exp", "iat", "nonce"} {
+		frozenVal, frozenOK := frozenClaims[claim]
+		currentVal, currentOK := currentClaims[claim]
+		if frozenOK != currentOK {
+			t.Fatalf("claim %q presence mismatch: frozen=%v, current=%v", claim, frozenOK, currentOK)
+		}
+		if frozenOK && frozenVal != currentVal {
+			t.Fatalf("claim %q value mismatch: frozen=%v, current=%v", claim, frozenVal, currentVal)
+		}
 	}
 
-	// Verify the FROZEN pre-signed token (never re-sign): it must verify, and
-	// its header/payload must byte-match the frozen deterministic parts.
+	// Verify the FROZEN pre-signed token (never re-sign): it must verify.
+	// Note: The frozen token was created before jti was added to id_tokens,
+	// so it does not contain a jti claim. We still verify its signature.
 	frozenParts := strings.Split(v.FrozenSignedIDToken, ".")
 	if len(frozenParts) != 3 {
 		t.Fatalf("frozen token malformed")
