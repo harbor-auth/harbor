@@ -42,13 +42,15 @@ type AuthCode struct {
 	ClientID            string
 	RedirectURI         string
 	Scope               string
-	Subject             string // PPID the RP will see (docs/DESIGN.md §3.2)
-	UserID              string // internal user UUID; needed to bind a refresh session (§3.5)
+	Subject             string   // PPID the RP will see (docs/DESIGN.md §3.2)
+	UserID              string   // internal user UUID; needed to bind a refresh session (§3.5)
 	Nonce               string
 	CodeChallenge       string
 	CodeChallengeMethod string
 	ExpiresAt           time.Time
 	AuthTime            time.Time // when the user authenticated (OIDC Core §2)
+	ACR                 string    // authentication context class reference (OIDC Core §2)
+	AMR                 []string  // authentication methods references (OIDC Core §2)
 }
 
 // ConsumeStatus is the outcome of AuthCodeStore.Consume.

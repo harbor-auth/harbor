@@ -26,6 +26,8 @@ func validAuthCode(now time.Time) AuthCode {
 		CodeChallengeMethod: "S256",
 		ExpiresAt:           now.Add(time.Minute),
 		AuthTime:            now,
+		ACR:                 "urn:harbor:ac:webauthn",
+		AMR:                 []string{"hwk", "user"},
 	}
 }
 

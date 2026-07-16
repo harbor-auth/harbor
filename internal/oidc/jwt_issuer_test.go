@@ -33,6 +33,8 @@ func testIssueParams() IssueParams {
 		Scope:    "openid profile",
 		Nonce:    "n-0S6_WzA2Mj",
 		AuthTime: fixedNow().Unix(),
+		ACR:      "urn:harbor:ac:webauthn",
+		AMR:      []string{"hwk", "user"},
 	}
 }
 
@@ -121,7 +123,7 @@ func TestJWTIssuerNoPII(t *testing.T) {
 		t.Fatalf("Issue: %v", err)
 	}
 
-	allowedID := map[string]bool{"iss": true, "sub": true, "aud": true, "azp": true, "exp": true, "iat": true, "auth_time": true, "nonce": true, "jti": true}
+	allowedID := map[string]bool{"iss": true, "sub": true, "aud": true, "azp": true, "exp": true, "iat": true, "auth_time": true, "acr": true, "amr": true, "nonce": true, "jti": true}
 	allowedAccess := map[string]bool{"iss": true, "sub": true, "aud": true, "exp": true, "iat": true, "scope": true, "jti": true}
 	forbidden := []string{"email", "name", "given_name", "family_name", "phone_number", "address"}
 
@@ -356,6 +358,86 @@ func TestJWTIssuerIDTokenSignerError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ID token") {
 		t.Fatalf("error should mention 'ID token', got: %v", err)
+	}
+}
+
+// TestJWTIssuerAcrAmrPresent verifies that the id_token contains the acr and amr
+// claims per OIDC Core §2.
+func TestJWTIssuerAcrAmrPresent(t *testing.T) {
+	signer := newTestSigner(t)
+	iss := NewJWTIssuer(JWTIssuerConfig{Signer: signer, Now: fixedNow})
+	p := testIssueParams()
+	tokens, err := iss.Issue(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	// Extract acr and amr from id_token.
+	_, idPayload, _, err := parseCompactJWT(tokens.IDToken)
+	if err != nil {
+		t.Fatalf("parse id_token: %v", err)
+	}
+	var idClaims map[string]any
+	if err := json.Unmarshal(idPayload, &idClaims); err != nil {
+		t.Fatalf("unmarshal id_token claims: %v", err)
+	}
+
+	// Verify acr claim.
+	acr, ok := idClaims["acr"].(string)
+	if !ok || acr == "" {
+		t.Fatal("id_token missing required acr claim")
+	}
+	if acr != p.ACR {
+		t.Fatalf("acr = %q, want %q", acr, p.ACR)
+	}
+
+	// Verify amr claim.
+	amrRaw, ok := idClaims["amr"].([]any)
+	if !ok || len(amrRaw) == 0 {
+		t.Fatal("id_token missing required amr claim")
+	}
+	var amr []string
+	for _, v := range amrRaw {
+		s, ok := v.(string)
+		if !ok {
+			t.Fatalf("amr contains non-string value: %v", v)
+		}
+		amr = append(amr, s)
+	}
+	if len(amr) != len(p.AMR) {
+		t.Fatalf("amr = %v, want %v", amr, p.AMR)
+	}
+	for i, v := range amr {
+		if v != p.AMR[i] {
+			t.Fatalf("amr[%d] = %q, want %q", i, v, p.AMR[i])
+		}
+	}
+}
+
+// TestJWTIssuerAcrAmrOmittedWhenEmpty verifies that acr and amr are omitted when empty.
+func TestJWTIssuerAcrAmrOmittedWhenEmpty(t *testing.T) {
+	signer := newTestSigner(t)
+	iss := NewJWTIssuer(JWTIssuerConfig{Signer: signer, Now: fixedNow})
+	p := testIssueParams()
+	p.ACR = ""
+	p.AMR = nil
+	tokens, err := iss.Issue(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	_, payload, _, err := parseCompactJWT(tokens.IDToken)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := claims["acr"]; ok {
+		t.Fatal("empty acr should be omitted from ID token claims")
+	}
+	if _, ok := claims["amr"]; ok {
+		t.Fatal("empty amr should be omitted from ID token claims")
 	}
 }
 
@@ -616,7 +698,17 @@ func TestJWTGoldenVectors(t *testing.T) {
 	} else if azp != testIssueParams().ClientID {
 		t.Fatalf("azp = %q, want client_id %q", azp, testIssueParams().ClientID)
 	}
-	// Compare deterministic claims (all except jti, auth_time, and azp which are verified separately).
+	// Verify acr is present and matches expected value.
+	if acr, ok := currentClaims["acr"].(string); !ok || acr == "" {
+		t.Fatal("current id_token missing required acr claim")
+	} else if acr != testIssueParams().ACR {
+		t.Fatalf("acr = %q, want %q", acr, testIssueParams().ACR)
+	}
+	// Verify amr is present.
+	if amr, ok := currentClaims["amr"].([]any); !ok || len(amr) == 0 {
+		t.Fatal("current id_token missing required amr claim")
+	}
+	// Compare deterministic claims (all except jti, auth_time, azp, acr, amr which are verified separately).
 	for _, claim := range []string{"iss", "sub", "aud", "exp", "iat", "nonce"} {
 		frozenVal, frozenOK := frozenClaims[claim]
 		currentVal, currentOK := currentClaims[claim]

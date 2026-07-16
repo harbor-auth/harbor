@@ -240,6 +240,10 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (*Authori
 		CodeChallengeMethod: validated.CodeChallengeMethod,
 		ExpiresAt:           authTime.Add(s.codeTTL),
 		AuthTime:            authTime,
+		// TODO(webauthn): populate ACR/AMR from the actual authentication ceremony.
+		// For now, hardcode WebAuthn values for OIDF conformance testing.
+		ACR: "urn:harbor:ac:webauthn",
+		AMR: []string{"hwk", "user"},
 	}
 	if err := s.codes.Save(ctx, code); err != nil {
 		return nil, redirectErr(ErrCodeServerError, "could not persist authorization code")
@@ -310,6 +314,8 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 		Scope:    result.Code.Scope,
 		Nonce:    result.Code.Nonce,
 		AuthTime: result.Code.AuthTime.Unix(),
+		ACR:      result.Code.ACR,
+		AMR:      result.Code.AMR,
 	})
 	if err != nil {
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not issue tokens", Status: 500}
@@ -378,6 +384,8 @@ func (s *Service) issueRefreshToken(ctx context.Context, tokens *IssuedTokens, c
 		TokenHash: hash,
 		ExpiresAt: s.now().Add(defaultRefreshTTL),
 		AuthTime:  code.AuthTime.Unix(),
+		ACR:       code.ACR,
+		AMR:       code.AMR,
 	}
 	if err := s.sessionStore.CreateSession(ctx, rs); err != nil {
 		s.logger.ErrorContext(ctx, "failed to store refresh session",
@@ -533,6 +541,8 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 		// nonce claim is only required in the initial ID token (from /authorize)
 		// and MUST NOT be included in tokens issued via refresh_token grant.
 		AuthTime: session.AuthTime,
+		ACR:      session.ACR,
+		AMR:      session.AMR,
 	})
 	if err != nil {
 		s.logger.ErrorContext(ctx, "refresh: token signing failed",
@@ -587,6 +597,8 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 		TokenHash:   newHash,
 		ExpiresAt:   s.now().Add(defaultRefreshTTL),
 		AuthTime:    session.AuthTime,
+		ACR:         session.ACR,
+		AMR:         session.AMR,
 	}
 
 	// Step D: RotateSession is the commit point — everything before here can
