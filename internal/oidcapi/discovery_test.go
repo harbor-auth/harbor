@@ -37,12 +37,42 @@ func TestGetOpenIDConfiguration_EndpointsFromIssuer(t *testing.T) {
 		"issuer":                 "https://eu.harbor.id",
 		"authorization_endpoint": "https://eu.harbor.id/authorize",
 		"token_endpoint":         "https://eu.harbor.id/token",
+		"userinfo_endpoint":      "https://eu.harbor.id/userinfo",
 		"jwks_uri":               "https://eu.harbor.id/jwks.json",
 	}
 	for k, v := range want {
 		if doc[k] != v {
 			t.Fatalf("%s = %v, want %q", k, doc[k], v)
 		}
+	}
+}
+
+// OIDF requires the discovery document to advertise the claims the OP may
+// assert. `sub` is the minimum; email claims are gated by scope at issuance.
+func TestGetOpenIDConfiguration_ClaimsSupported(t *testing.T) {
+	doc := decodeDiscovery(t, "https://eu.harbor.id")
+	claims := toStrings(t, doc["claims_supported"])
+	if len(claims) == 0 {
+		t.Fatal("claims_supported is empty")
+	}
+	set := make(map[string]bool, len(claims))
+	for _, c := range claims {
+		set[c] = true
+	}
+	for _, want := range []string{"sub", "iss", "aud", "exp", "iat", "email", "email_verified"} {
+		if !set[want] {
+			t.Fatalf("claims_supported = %v, must include %q", claims, want)
+		}
+	}
+}
+
+// Public-client provider (DESIGN §3.1): token endpoint auth is `none` only —
+// PKCE replaces a client secret. `client_secret_*` must never be advertised.
+func TestGetOpenIDConfiguration_TokenEndpointAuthNoneOnly(t *testing.T) {
+	doc := decodeDiscovery(t, "https://eu.harbor.id")
+	methods := toStrings(t, doc["token_endpoint_auth_methods_supported"])
+	if len(methods) != 1 || methods[0] != "none" {
+		t.Fatalf("token_endpoint_auth_methods_supported = %v, want [none]", methods)
 	}
 }
 

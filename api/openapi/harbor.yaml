@@ -271,6 +271,8 @@ components:
         - grant_types_supported
         - scopes_supported
         - code_challenge_methods_supported
+        - claims_supported
+        - token_endpoint_auth_methods_supported
       properties:
         issuer:
           type: string
@@ -330,6 +332,39 @@ components:
             type: string
             enum: ["S256"]
           example: ["S256"]
+        claims_supported:
+          type: array
+          description: >-
+            Claims Harbor may assert in the id_token / UserInfo response. Privacy
+            claims (`email`, `email_verified`) are only emitted when the matching
+            scope was granted (DESIGN §3.2, §3.3).
+          items:
+            type: string
+          example:
+            [
+              "sub",
+              "iss",
+              "aud",
+              "azp",
+              "exp",
+              "iat",
+              "auth_time",
+              "acr",
+              "amr",
+              "nonce",
+              "jti",
+              "email",
+              "email_verified",
+            ]
+        token_endpoint_auth_methods_supported:
+          type: array
+          description: >-
+            Harbor is a public-client provider — PKCE replaces a client secret,
+            so the token endpoint requires no client authentication (`none`)
+            (DESIGN §3.1).
+          items:
+            type: string
+          example: ["none"]
     TokenResponse:
       type: object
       description: Successful token response (RFC 6749 §5.1 + OIDC id_token).
