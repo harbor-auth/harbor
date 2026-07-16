@@ -5,8 +5,8 @@ import "context"
 // IssueParams are the inputs to minting tokens for a successful code exchange.
 type IssueParams struct {
 	Issuer   string
-	Subject  string   // PPID (docs/DESIGN.md §3.2)
-	ClientID string   // becomes the token `aud`
+	Subject  string // PPID (docs/DESIGN.md §3.2)
+	ClientID string // becomes the token `aud`
 	Scope    string
 	Nonce    string   // bound into the id_token later
 	AuthTime int64    // Unix timestamp when user authenticated (OIDC Core §2)
