@@ -1,0 +1,19 @@
+# Service: harbor-mgmt. ClusterIP and DELIBERATELY cluster-internal only —
+# there is NO Ingress for mgmt. The NetworkPolicy additionally restricts which
+# pods may even open this port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "harbor.fullname" . }}-mgmt
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.mgmt.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "harbor.mgmt.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

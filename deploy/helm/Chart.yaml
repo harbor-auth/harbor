@@ -1,0 +1,19 @@
+apiVersion: v2
+name: harbor
+description: Harbor — privacy-first OIDC identity provider (hot + mgmt path)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - oidc
+  - identity
+  - authentication
+  - webauthn
+  - passkeys
+icon: https://avatars.githubusercontent.com/harbor-auth
+home: https://github.com/harbor-auth/harbor
+sources:
+  - https://github.com/harbor-auth/harbor
+maintainers:
+  - name: harbor-auth
+    url: https://github.com/harbor-auth

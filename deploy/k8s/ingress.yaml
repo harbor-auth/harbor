@@ -1,0 +1,41 @@
+# Ingress: exposes ONLY harbor-hot to the internet. harbor-mgmt is intentionally
+# absent — it must never be publicly routable (see service-mgmt.yaml).
+#
+# The host here MUST match ISSUER in configmap-hot.yaml, or the OIDC discovery
+# document will advertise endpoints under a different origin than clients reach.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: harbor-hot
+  namespace: harbor
+  labels:
+    app.kubernetes.io/name: harbor-hot
+    app.kubernetes.io/part-of: harbor
+  annotations:
+    # Force TLS: an OIDC issuer over plaintext leaks codes/tokens.
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    # Keep proxy timeouts tight — hot-path requests are fast; a hung upstream
+    # should fail quickly rather than pin a connection.
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "5"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "30"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - auth.example.com
+      # SCAFFOLD: provision this cert (e.g. via cert-manager) — the Secret must
+      # exist before the Ingress can terminate TLS.
+      secretName: harbor-tls
+  rules:
+    - host: auth.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: harbor-hot
+                port:
+                  number: 80

@@ -1,0 +1,18 @@
+# Service: harbor-hot. ClusterIP — public exposure is via the Ingress, not the
+# Service itself. Fronts the HPA-scaled replica set.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "harbor.fullname" . }}-hot
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.hot.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "harbor.hot.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

@@ -1,0 +1,56 @@
+# NetworkPolicy: harbor-hot is internet-facing via Ingress but should only
+# receive traffic FROM the Ingress controller, not from arbitrary cluster pods.
+# Egress is locked to only what hot actually needs: Redis (auth-code store),
+# Postgres (clients/grants/sessions), and DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: harbor-hot
+  namespace: harbor
+  labels:
+    app.kubernetes.io/name: harbor-hot
+    app.kubernetes.io/part-of: harbor
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: harbor-hot
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        # Allow traffic from the nginx ingress controller namespace.
+        # SCAFFOLD: adjust the namespaceSelector labels to match your nginx
+        # ingress controller's actual namespace labels (commonly
+        # kubernetes.io/metadata.name: ingress-nginx).
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    # DNS (kube-dns / CoreDNS).
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Redis — auth-code TTL store. REQUIRED for multi-replica (see REDIS_URL).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis
+      ports:
+        - port: 6379
+          protocol: TCP
+    # Regional PostgreSQL.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+      ports:
+        - port: 5432
+          protocol: TCP

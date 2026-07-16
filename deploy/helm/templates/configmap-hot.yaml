@@ -1,0 +1,14 @@
+# Non-sensitive config for harbor-hot. Kept out of the Secret so it can be
+# reviewed/diffed in plaintext and edited without touching credentials.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "harbor.fullname" . }}-hot-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.hot.labels" . | nindent 4 }}
+data:
+  PORT: {{ .Values.hot.port | quote }}
+  # ISSUER anchors the OIDC discovery document. MUST be the public HTTPS URL
+  # clients reach (matches the Ingress host).
+  ISSUER: {{ .Values.hot.issuer | quote }}

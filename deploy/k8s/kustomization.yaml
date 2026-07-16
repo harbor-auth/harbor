@@ -1,0 +1,50 @@
+# Minimal example Kustomization for a single-region self-hosted Harbor.
+#
+# Apply with:  kubectl apply -k deploy/k8s/
+#
+# Resources are listed roughly in dependency order (namespace first, then
+# config/secrets the workloads consume, then the workloads, then the network
+# surfaces and policies). Kustomize/kubectl handle ordering itself, but the
+# ordering here documents intent.
+#
+# SCAFFOLD: for a real deployment, layer this as a base and add per-environment
+# overlays (image digests via `images:`, replica counts, real hostnames, and
+# secrets sourced from a secrets manager rather than the placeholder Secrets).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: harbor
+
+# Apply the shared part-of label to every resource, but NOT to selectors —
+# selector fields (Deployment/Service/PDB matchLabels) are immutable, so
+# includeSelectors:false avoids mutating them on re-apply. (Replaces the
+# deprecated commonLabels.)
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: harbor
+    includeSelectors: false
+
+resources:
+  # Namespace
+  - namespace.yaml
+  # Identity (consumed by the Deployments below)
+  - serviceaccounts.yaml
+  # Config & secrets (consumed by the Deployments below)
+  - configmap-hot.yaml
+  - configmap-mgmt.yaml
+  - secret-hot.yaml
+  - secret-mgmt.yaml
+  # Workloads
+  - deployment-hot.yaml
+  - deployment-mgmt.yaml
+  # Service surfaces
+  - service-hot.yaml
+  - service-mgmt.yaml
+  - ingress.yaml
+  # Scaling & availability
+  - hpa-hot.yaml
+  - pdb-hot.yaml
+  - pdb-mgmt.yaml
+  # Network isolation
+  - networkpolicy-hot.yaml
+  - networkpolicy-mgmt.yaml

@@ -132,6 +132,18 @@ jobs:
             exit 1
           fi
 
+  # helm-lint — validates the Helm chart on every PR. Helm is pre-installed on
+  # ubuntu-latest runners so no Nix shell is needed. Runs independently of the
+  # Nix-based checks so a chart syntax error doesn't block the Go test output.
+  helm-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint Helm chart
+        run: helm lint deploy/helm/
+
   # e2e — Foundation F8: the composed OIDC harness run on every PR.
   # Runs `make e2e` (docker-compose + `go test -tags=e2e ./e2e/...`) in the
   # pinned toolchain, exercising authorize→token→JWKS + the §11.7 negatives

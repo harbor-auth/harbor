@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: harbor
+  labels:
+    app.kubernetes.io/part-of: harbor
+    # Pod Security Standards: enforce the 'restricted' profile namespace-wide so
+    # workloads must run non-root, drop all capabilities, use RuntimeDefault
+    # seccomp, and disallow privilege escalation (the securityContexts in the
+    # Deployments already comply). enforce blocks non-compliant pods; audit/warn
+    # surface violations in logs and kubectl output.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
