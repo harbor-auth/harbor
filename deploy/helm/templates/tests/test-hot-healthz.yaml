@@ -1,0 +1,66 @@
+# Helm test: harbor-hot connectivity smoke check.
+#
+# `helm test <release>` renders and runs Pods carrying the `helm.sh/hook: test`
+# annotation, then reports pass/fail from each Pod's exit code. This Pod GETs
+# harbor-hot's /healthz through its in-cluster ClusterIP Service, proving that
+# (a) the Service resolves, (b) at least one hot replica is Ready, and
+# (c) the health endpoint returns 2xx. It is a liveness/wiring check, NOT a
+# functional OIDC test.
+#
+# hook-delete-policy:
+#   before-hook-creation — delete a stale test Pod from a previous run first
+#                          (so `helm test` is repeatable).
+#   hook-succeeded       — clean up on success, but LEAVE a failed Pod around so
+#                          its logs can be inspected (`kubectl logs`).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "harbor.fullname" . }}-test-hot-healthz
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.hot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  # Reuse the hot binary's ServiceAccount; like the workload it has no K8s API
+  # token mounted (this test never talks to the API server).
+  serviceAccountName: {{ include "harbor.hot.serviceAccountName" . }}
+  automountServiceAccountToken: false
+  # Pod-level securityContext — complies with the namespace's Pod Security
+  # Standards 'restricted' profile so the test Pod isn't rejected by admission.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: curl
+      # Pinned, minimal curl image — no shell required.
+      image: curlimages/curl:8.6.0
+      imagePullPolicy: IfNotPresent
+      # --fail turns a non-2xx response into a non-zero exit (test failure).
+      # Hitting the Service FQDN exercises real cluster DNS + Service routing.
+      command:
+        - curl
+        - --fail
+        - --silent
+        - --show-error
+        - --max-time
+        - "5"
+        - http://{{ include "harbor.fullname" . }}-hot.{{ .Release.Namespace }}.svc.cluster.local/healthz
+      resources:
+        requests:
+          cpu: 100m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 32Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL

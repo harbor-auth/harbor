@@ -58,3 +58,9 @@ SCAFFOLD REMINDERS — do NOT run this in production until these are addressed:
     mgmt.replicaCount to 1 until the store is DB-backed
     (docs/plans/user-enrollment.md).
 {{- end }}
+
+----------------------------------------------------------------------------
+Run the connectivity smoke tests (hits /healthz on both binaries via their
+in-cluster Services):
+
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}
