@@ -20,13 +20,24 @@
   inputs = {
     # Pinned to a stable channel; `nix flake update` refreshes flake.lock.
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
-    flake-utils.url = "github:numtide/flake-utils";
+    # flake-utils intentionally NOT used — inlining eachDefaultSystem eliminates
+    # 2 extra GitHub tarball fetches (flake-utils + systems) that were causing
+    # intermittent 503 CI failures on api.github.com.
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = import nixpkgs { inherit system; };
+  outputs = { self, nixpkgs }:
+    let
+      # Inline replacement for flake-utils.lib.eachDefaultSystem.
+      # Maps f over the four platforms Harbor supports and returns an attrset
+      # keyed by system name — identical shape to what eachDefaultSystem produced.
+      supportedSystems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+      forAllSystems = f: builtins.listToAttrs
+        (map (system: { name = system; value = f system; }) supportedSystems);
+    in
+    {
+      devShells = forAllSystems (system:
+        let
+          pkgs = import nixpkgs { inherit system; };
 
         # go.mod declares `go 1.25.0` (required by grpc v1.82+, webauthn v0.17+,
         # pgx v5.10+, golang.org/x/* v0.52+). The nix shell provides go_1_24 as
@@ -98,7 +109,7 @@
         ];
       in
       {
-        devShells.default = pkgs.mkShell {
+        default = pkgs.mkShell {
           buildInputs = toolchain ++ optionalTools;
 
           # spectral (@stoplight/spectral-cli) was REMOVED from nixpkgs (it is no
@@ -127,4 +138,5 @@
           '';
         };
       });
+    };
 }
