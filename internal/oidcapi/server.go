@@ -21,6 +21,10 @@ type Server struct {
 	issuer    string
 	svc       *oidc.Service
 	jwksBytes []byte
+	// signers are the public signing keys used to verify inbound access tokens
+	// on the /userinfo endpoint. The first is the active signer; additional
+	// entries support rotation overlap (§7.3).
+	signers []crypto.Signer
 }
 
 // Config holds the settings needed to serve the OIDC surface.
@@ -46,7 +50,7 @@ func New(cfg Config) *Server {
 		// rather than panic or 500 if it somehow does.
 		jwksBytes = []byte(`{"keys":[]}`)
 	}
-	return &Server{issuer: cfg.Issuer, svc: cfg.Service, jwksBytes: jwksBytes}
+	return &Server{issuer: cfg.Issuer, svc: cfg.Service, jwksBytes: jwksBytes, signers: cfg.Signers}
 }
 
 // Compile-time proof that Server satisfies the generated contract. If the spec
@@ -60,16 +64,4 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(openapi.Error{Code: code, Message: message})
-}
-
-// GetUserInfo implements the OIDC UserInfo endpoint (OIDC Core §5.3).
-// TODO(userinfo): implement token validation and claims retrieval.
-func (s *Server) GetUserInfo(w http.ResponseWriter, r *http.Request) {
-	// Stub: return 501 Not Implemented until the handler is wired.
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusNotImplemented)
-	_ = json.NewEncoder(w).Encode(openapi.OAuthError{
-		Error:            "server_error",
-		ErrorDescription: "userinfo endpoint not yet implemented",
-	})
 }
