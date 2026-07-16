@@ -2,7 +2,8 @@ package webauthn
 
 import (
 	"context"
-	"encoding/base64"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,22 +12,59 @@ import (
 	gowebauthn "github.com/go-webauthn/webauthn/webauthn"
 )
 
-func newTestMux(t *testing.T) *http.ServeMux {
+// testEnrollKey is an arbitrary enrollment session key value; the fake store
+// ignores the key and returns its configured user handle.
+const testEnrollKey = "test-enroll-key"
+
+// fakeEnrollmentSessionStore is an in-memory enrollment session store for tests.
+// It resolves every key to userHandle (or returns err, simulating an expired or
+// unknown session).
+type fakeEnrollmentSessionStore struct {
+	userHandle []byte
+	err        error
+}
+
+func (f *fakeEnrollmentSessionStore) UserHandle(_ context.Context, _ string) ([]byte, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.userHandle, nil
+}
+
+// enrollReq builds a ceremony request carrying the enrollment session cookie so
+// the handler resolves the user handle from the (fake) enrollment store — the
+// production path that replaced the insecure user_id query param.
+func enrollReq(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.AddCookie(&http.Cookie{Name: enrollmentCookieName, Value: testEnrollKey})
+	return req
+}
+
+// newCeremonyMux returns a mux whose handler resolves the ceremony user handle
+// (via the enrollment cookie) to userHandle. The service is built by
+// newTestService, whose store contains the "demo-user" account (no credentials).
+func newCeremonyMux(t *testing.T, userHandle []byte) *http.ServeMux {
 	t.Helper()
 	svc, _ := newTestService(t)
+	return muxForService(svc, userHandle)
+}
+
+// muxForService wires handler routes for svc with an enrollment store resolving
+// to userHandle.
+func muxForService(svc *Service, userHandle []byte) *http.ServeMux {
+	handler := NewHandler(svc).WithEnrollmentSessions(&fakeEnrollmentSessionStore{userHandle: userHandle})
 	mux := http.NewServeMux()
-	// Tests exercise the dev-only client-supplied user_id path, so enable it.
-	RegisterRoutes(mux, svc, true)
+	handler.RegisterRoutes(mux)
 	return mux
 }
 
-func demoUserParam() string {
-	return base64.RawURLEncoding.EncodeToString([]byte("demo-user"))
-}
+func demoHandle() []byte { return []byte("demo-user") }
+
+// --- registration -----------------------------------------------------------
 
 func TestHandler_BeginRegistration_OK(t *testing.T) {
-	mux := newTestMux(t)
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/register/begin?user_id="+demoUserParam(), nil)
+	mux := newCeremonyMux(t, demoHandle())
+	req := enrollReq(http.MethodPost, "/webauthn/register/begin", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -53,9 +91,8 @@ func TestHandler_BeginRegistration_OK(t *testing.T) {
 }
 
 func TestHandler_BeginRegistration_UnknownUser(t *testing.T) {
-	mux := newTestMux(t)
-	userID := base64.RawURLEncoding.EncodeToString([]byte("nobody"))
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/register/begin?user_id="+userID, nil)
+	mux := newCeremonyMux(t, []byte("nobody"))
+	req := enrollReq(http.MethodPost, "/webauthn/register/begin", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	// Unknown user is deliberately indistinguishable from a bad request (400) to
@@ -65,23 +102,14 @@ func TestHandler_BeginRegistration_UnknownUser(t *testing.T) {
 	}
 }
 
-func TestHandler_BeginRegistration_MissingUserID(t *testing.T) {
-	mux := newTestMux(t)
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/register/begin", nil)
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Result().StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Result().StatusCode)
-	}
-}
-
-// CRITICAL: with the insecure user_id path disabled (production default), every
-// ceremony endpoint refuses the request with 501 and never reads the
-// client-supplied user_id (docs/DESIGN.md §9 — IDOR defense).
+// CRITICAL: with no enrollment session store wired there is NO way to name the
+// ceremony's user (the insecure user_id query param has been removed), so every
+// endpoint refuses the request with 501 — even when a legacy user_id param is
+// supplied (docs/DESIGN.md §9 — IDOR defense).
 func TestHandler_UserIDPath_DisabledByDefault(t *testing.T) {
 	svc, _ := newTestService(t)
 	mux := http.NewServeMux()
-	RegisterRoutes(mux, svc, false)
+	RegisterRoutes(mux, svc) // no enrollment sessions wired
 
 	for _, path := range []string{
 		"/webauthn/register/begin",
@@ -89,7 +117,8 @@ func TestHandler_UserIDPath_DisabledByDefault(t *testing.T) {
 		"/webauthn/login/begin",
 		"/webauthn/login/finish",
 	} {
-		req := httptest.NewRequest(http.MethodPost, path+"?user_id="+demoUserParam(), strings.NewReader("{}"))
+		// Include a legacy user_id query param to prove it is ignored.
+		req := httptest.NewRequest(http.MethodPost, path+"?user_id=ZGVtby11c2Vy", strings.NewReader("{}"))
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
 		if rec.Result().StatusCode != http.StatusNotImplemented {
@@ -98,20 +127,89 @@ func TestHandler_UserIDPath_DisabledByDefault(t *testing.T) {
 	}
 }
 
-func TestHandler_FinishRegistration_NoCookie(t *testing.T) {
-	mux := newTestMux(t)
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/register/finish?user_id="+demoUserParam(), strings.NewReader("{}"))
+// A store is wired but no enrollment cookie is present → 501: the ceremony has
+// no authenticated user to bind to.
+func TestHandler_MissingEnrollmentCookie_Returns501(t *testing.T) {
+	mux := newCeremonyMux(t, demoHandle())
+	req := httptest.NewRequest(http.MethodPost, "/webauthn/register/begin", nil) // no cookie
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
-	// No session cookie present → 400 session_expired.
+	if rec.Result().StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Result().StatusCode)
+	}
+}
+
+// TestHandler_BeginRegistration_MissingUserID covers the register/begin path
+// when no enrollment cookie is present. In the enrollment-session model the
+// cookie is the user identity (the removed user_id param has no replacement),
+// so a missing cookie makes the user handle unresolvable → 501.
+func TestHandler_BeginRegistration_MissingUserID(t *testing.T) {
+	mux := newCeremonyMux(t, demoHandle())
+	req := httptest.NewRequest(http.MethodPost, "/webauthn/register/begin", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Result().StatusCode)
+	}
+}
+
+// The enrollment cookie is present but the session is expired/unknown (store
+// returns an error) → 501.
+func TestHandler_ExpiredEnrollmentSession_Returns501(t *testing.T) {
+	svc, _ := newTestService(t)
+	handler := NewHandler(svc).WithEnrollmentSessions(&fakeEnrollmentSessionStore{err: errors.New("expired")})
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+
+	req := enrollReq(http.MethodPost, "/webauthn/register/begin", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Result().StatusCode)
+	}
+}
+
+// TestHandler_FinishRegistration_MissingUserID covers register/finish when no
+// enrollment cookie is present → 501 (user identity unresolvable).
+func TestHandler_FinishRegistration_MissingUserID(t *testing.T) {
+	mux := newCeremonyMux(t, demoHandle())
+	req := httptest.NewRequest(http.MethodPost, "/webauthn/register/finish", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Result().StatusCode)
+	}
+}
+
+// TestHandler_FinishRegistration_InvalidUserIDEncoding covers register/finish
+// when the enrollment session is expired/invalid → 501.
+func TestHandler_FinishRegistration_InvalidUserIDEncoding(t *testing.T) {
+	svc, _ := newTestService(t)
+	handler := NewHandler(svc).WithEnrollmentSessions(&fakeEnrollmentSessionStore{err: errors.New("session expired")})
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+	req := enrollReq(http.MethodPost, "/webauthn/register/finish", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Result().StatusCode)
+	}
+}
+
+func TestHandler_FinishRegistration_NoCookie(t *testing.T) {
+	mux := newCeremonyMux(t, demoHandle())
+	req := enrollReq(http.MethodPost, "/webauthn/register/finish", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	// No WebAuthn session cookie present → 400 session_expired.
 	if rec.Result().StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Result().StatusCode)
 	}
 }
 
 func TestHandler_FinishRegistration_InvalidSession(t *testing.T) {
-	mux := newTestMux(t)
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/register/finish?user_id="+demoUserParam(), strings.NewReader("{}"))
+	mux := newCeremonyMux(t, demoHandle())
+	req := enrollReq(http.MethodPost, "/webauthn/register/finish", strings.NewReader("{}"))
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "nonexistent-key"})
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -122,9 +220,8 @@ func TestHandler_FinishRegistration_InvalidSession(t *testing.T) {
 }
 
 func TestHandler_FinishRegistration_UnknownUser(t *testing.T) {
-	mux := newTestMux(t)
-	userID := base64.RawURLEncoding.EncodeToString([]byte("nobody"))
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/register/finish?user_id="+userID, strings.NewReader("{}"))
+	mux := newCeremonyMux(t, []byte("nobody"))
+	req := enrollReq(http.MethodPost, "/webauthn/register/finish", strings.NewReader("{}"))
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "some-key"})
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -135,33 +232,10 @@ func TestHandler_FinishRegistration_UnknownUser(t *testing.T) {
 	}
 }
 
-func TestHandler_FinishRegistration_MissingUserID(t *testing.T) {
-	mux := newTestMux(t)
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/register/finish", strings.NewReader("{}"))
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "some-key"})
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Result().StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Result().StatusCode)
-	}
-}
-
-func TestHandler_FinishRegistration_InvalidUserIDEncoding(t *testing.T) {
-	mux := newTestMux(t)
-	// Use invalid base64 encoding.
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/register/finish?user_id=!!invalid!!", strings.NewReader("{}"))
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "some-key"})
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Result().StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Result().StatusCode)
-	}
-}
-
 func TestHandler_FinishRegistration_InvalidBody(t *testing.T) {
 	// Need a valid session to get past session validation and test body parsing.
 	store := NewInMemoryStore()
-	store.PutUser(NewUser([]byte("demo-user"), "demo@harbor.local", "Demo", nil))
+	store.PutUser(NewUser(demoHandle(), "demo@harbor.local", "Demo", nil))
 	sessions := NewInMemorySessionStore()
 	svc, err := NewService(testConfig(), store, sessions)
 	if err != nil {
@@ -169,16 +243,15 @@ func TestHandler_FinishRegistration_InvalidBody(t *testing.T) {
 	}
 
 	// Start a registration ceremony to get a valid session key.
-	_, sessionKey, err := svc.BeginRegistration(context.Background(), []byte("demo-user"))
+	_, sessionKey, err := svc.BeginRegistration(context.Background(), demoHandle())
 	if err != nil {
 		t.Fatalf("BeginRegistration: %v", err)
 	}
 
-	mux := http.NewServeMux()
-	RegisterRoutes(mux, svc, true)
+	mux := muxForService(svc, demoHandle())
 
 	// Send invalid JSON body.
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/register/finish?user_id="+demoUserParam(), strings.NewReader("not-json"))
+	req := enrollReq(http.MethodPost, "/webauthn/register/finish", strings.NewReader("not-json"))
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sessionKey})
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -188,24 +261,50 @@ func TestHandler_FinishRegistration_InvalidBody(t *testing.T) {
 	}
 }
 
-// newTestMuxWithCreds returns a mux with a service whose store has a user with
-// credentials enrolled (required for BeginLogin to succeed).
-func newTestMuxWithCreds(t *testing.T) *http.ServeMux {
+// TestHandler_EnrollmentSession_ReadsUserHandle verifies that when an enrollment
+// session store is wired and the enrollment cookie is present, the handler reads
+// the user handle from the store and drives the ceremony for that user.
+func TestHandler_EnrollmentSession_ReadsUserHandle(t *testing.T) {
+	store := NewInMemoryStore()
+	store.PutUser(NewUser([]byte("enrolled-user"), "user@example.com", "User", nil))
+	sessions := NewInMemorySessionStore()
+	svc, err := NewService(testConfig(), store, sessions)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	handler := NewHandler(svc).WithEnrollmentSessions(&fakeEnrollmentSessionStore{userHandle: []byte("enrolled-user")})
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+
+	req := enrollReq(http.MethodPost, "/webauthn/register/begin", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Result().StatusCode, rec.Body.String())
+	}
+}
+
+// --- login ------------------------------------------------------------------
+
+// muxWithCreds returns a mux whose service store has "demo-user" WITH a
+// credential enrolled (required for BeginLogin to succeed), resolving the
+// enrollment cookie to that user.
+func muxWithCreds(t *testing.T) *http.ServeMux {
 	t.Helper()
 	store := NewInMemoryStore()
-	store.PutUser(NewUser([]byte("demo-user"), "demo@harbor.local", "Demo", []gowebauthn.Credential{{ID: []byte("cred-1"), PublicKey: []byte("pk")}}))
+	store.PutUser(NewUser(demoHandle(), "demo@harbor.local", "Demo", []gowebauthn.Credential{{ID: []byte("cred-1"), PublicKey: []byte("pk")}}))
 	svc, err := NewService(testConfig(), store, NewInMemorySessionStore())
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	mux := http.NewServeMux()
-	RegisterRoutes(mux, svc, true)
-	return mux
+	return muxForService(svc, demoHandle())
 }
 
 func TestHandler_BeginLogin_OK(t *testing.T) {
-	mux := newTestMuxWithCreds(t)
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/login/begin?user_id="+demoUserParam(), nil)
+	mux := muxWithCreds(t)
+	req := enrollReq(http.MethodPost, "/webauthn/login/begin", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -231,10 +330,41 @@ func TestHandler_BeginLogin_OK(t *testing.T) {
 	}
 }
 
+// TestHandler_BeginLogin_MissingUserID covers login/begin when no enrollment
+// cookie is present → 501 (user identity unresolvable).
+func TestHandler_BeginLogin_MissingUserID(t *testing.T) {
+	mux := muxWithCreds(t)
+	req := httptest.NewRequest(http.MethodPost, "/webauthn/login/begin", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Result().StatusCode)
+	}
+}
+
+// TestHandler_BeginLogin_InvalidUserIDEncoding covers login/begin when the
+// enrollment session is expired/invalid → 501.
+func TestHandler_BeginLogin_InvalidUserIDEncoding(t *testing.T) {
+	store := NewInMemoryStore()
+	store.PutUser(NewUser(demoHandle(), "demo@harbor.local", "Demo", []gowebauthn.Credential{{ID: []byte("cred-1"), PublicKey: []byte("pk")}}))
+	svc, err := NewService(testConfig(), store, NewInMemorySessionStore())
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	handler := NewHandler(svc).WithEnrollmentSessions(&fakeEnrollmentSessionStore{err: errors.New("session expired")})
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+	req := enrollReq(http.MethodPost, "/webauthn/login/begin", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Result().StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Result().StatusCode)
+	}
+}
+
 func TestHandler_BeginLogin_UnknownUser(t *testing.T) {
-	mux := newTestMux(t)
-	userID := base64.RawURLEncoding.EncodeToString([]byte("nobody"))
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/login/begin?user_id="+userID, nil)
+	mux := newCeremonyMux(t, []byte("nobody"))
+	req := enrollReq(http.MethodPost, "/webauthn/login/begin", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	// Unknown user is deliberately indistinguishable from a bad request (400) to
@@ -245,9 +375,9 @@ func TestHandler_BeginLogin_UnknownUser(t *testing.T) {
 }
 
 func TestHandler_BeginLogin_UserWithNoCredentials(t *testing.T) {
-	// The demo user in newTestMux has no credentials enrolled.
-	mux := newTestMux(t)
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/login/begin?user_id="+demoUserParam(), nil)
+	// The demo user in newTestService has no credentials enrolled.
+	mux := newCeremonyMux(t, demoHandle())
+	req := enrollReq(http.MethodPost, "/webauthn/login/begin", nil)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	// A user with no credentials cannot begin login — this maps to 400.
@@ -256,41 +386,47 @@ func TestHandler_BeginLogin_UserWithNoCredentials(t *testing.T) {
 	}
 }
 
-func TestHandler_BeginLogin_MissingUserID(t *testing.T) {
-	mux := newTestMux(t)
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/login/begin", nil)
+// TestHandler_FinishLogin_MissingUserID covers login/finish when no enrollment
+// cookie is present → 501 (user identity unresolvable).
+func TestHandler_FinishLogin_MissingUserID(t *testing.T) {
+	mux := newCeremonyMux(t, demoHandle())
+	req := httptest.NewRequest(http.MethodPost, "/webauthn/login/finish", strings.NewReader("{}"))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
-	if rec.Result().StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Result().StatusCode)
+	if rec.Result().StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Result().StatusCode)
 	}
 }
 
-func TestHandler_BeginLogin_InvalidUserIDEncoding(t *testing.T) {
-	mux := newTestMux(t)
-	// Use invalid base64 encoding.
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/login/begin?user_id=!!invalid!!", nil)
+// TestHandler_FinishLogin_InvalidUserIDEncoding covers login/finish when the
+// enrollment session is expired/invalid → 501.
+func TestHandler_FinishLogin_InvalidUserIDEncoding(t *testing.T) {
+	svc, _ := newTestService(t)
+	handler := NewHandler(svc).WithEnrollmentSessions(&fakeEnrollmentSessionStore{err: errors.New("session expired")})
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+	req := enrollReq(http.MethodPost, "/webauthn/login/finish", strings.NewReader("{}"))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
-	if rec.Result().StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Result().StatusCode)
+	if rec.Result().StatusCode != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501", rec.Result().StatusCode)
 	}
 }
 
 func TestHandler_FinishLogin_NoCookie(t *testing.T) {
-	mux := newTestMux(t)
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/login/finish?user_id="+demoUserParam(), strings.NewReader("{}"))
+	mux := newCeremonyMux(t, demoHandle())
+	req := enrollReq(http.MethodPost, "/webauthn/login/finish", strings.NewReader("{}"))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
-	// No session cookie present → 400 session_expired.
+	// No WebAuthn session cookie present → 400 session_expired.
 	if rec.Result().StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400", rec.Result().StatusCode)
 	}
 }
 
 func TestHandler_FinishLogin_InvalidSession(t *testing.T) {
-	mux := newTestMux(t)
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/login/finish?user_id="+demoUserParam(), strings.NewReader("{}"))
+	mux := newCeremonyMux(t, demoHandle())
+	req := enrollReq(http.MethodPost, "/webauthn/login/finish", strings.NewReader("{}"))
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "nonexistent-key"})
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -301,9 +437,8 @@ func TestHandler_FinishLogin_InvalidSession(t *testing.T) {
 }
 
 func TestHandler_FinishLogin_UnknownUser(t *testing.T) {
-	mux := newTestMux(t)
-	userID := base64.RawURLEncoding.EncodeToString([]byte("nobody"))
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/login/finish?user_id="+userID, strings.NewReader("{}"))
+	mux := newCeremonyMux(t, []byte("nobody"))
+	req := enrollReq(http.MethodPost, "/webauthn/login/finish", strings.NewReader("{}"))
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "some-key"})
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -314,33 +449,10 @@ func TestHandler_FinishLogin_UnknownUser(t *testing.T) {
 	}
 }
 
-func TestHandler_FinishLogin_MissingUserID(t *testing.T) {
-	mux := newTestMux(t)
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/login/finish", strings.NewReader("{}"))
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "some-key"})
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Result().StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Result().StatusCode)
-	}
-}
-
-func TestHandler_FinishLogin_InvalidUserIDEncoding(t *testing.T) {
-	mux := newTestMux(t)
-	// Use invalid base64 encoding.
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/login/finish?user_id=!!invalid!!", strings.NewReader("{}"))
-	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: "some-key"})
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-	if rec.Result().StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Result().StatusCode)
-	}
-}
-
 func TestHandler_FinishLogin_InvalidBody(t *testing.T) {
 	// Need a valid session to get past session validation and test body parsing.
 	store := NewInMemoryStore()
-	store.PutUser(NewUser([]byte("demo-user"), "demo@harbor.local", "Demo", []gowebauthn.Credential{{ID: []byte("cred-1"), PublicKey: []byte("pk")}}))
+	store.PutUser(NewUser(demoHandle(), "demo@harbor.local", "Demo", []gowebauthn.Credential{{ID: []byte("cred-1"), PublicKey: []byte("pk")}}))
 	sessions := NewInMemorySessionStore()
 	svc, err := NewService(testConfig(), store, sessions)
 	if err != nil {
@@ -348,16 +460,15 @@ func TestHandler_FinishLogin_InvalidBody(t *testing.T) {
 	}
 
 	// Start a login ceremony to get a valid session key.
-	_, sessionKey, err := svc.BeginLogin(context.Background(), []byte("demo-user"))
+	_, sessionKey, err := svc.BeginLogin(context.Background(), demoHandle())
 	if err != nil {
 		t.Fatalf("BeginLogin: %v", err)
 	}
 
-	mux := http.NewServeMux()
-	RegisterRoutes(mux, svc, true)
+	mux := muxForService(svc, demoHandle())
 
 	// Send invalid JSON body.
-	req := httptest.NewRequest(http.MethodPost, "/webauthn/login/finish?user_id="+demoUserParam(), strings.NewReader("not-json"))
+	req := enrollReq(http.MethodPost, "/webauthn/login/finish", strings.NewReader("not-json"))
 	req.AddCookie(&http.Cookie{Name: sessionCookieName, Value: sessionKey})
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)

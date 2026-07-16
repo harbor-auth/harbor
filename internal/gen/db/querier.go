@@ -89,6 +89,9 @@ type Querier interface {
 	// single RP so a compromised token at one RP does not force re-auth at others.
 	// The partial index idx_sessions_user_client (migration 0005) makes this fast.
 	RevokeSessionsByUserClient(ctx context.Context, arg RevokeSessionsByUserClientParams) error
+	// Marks a user as having completed account recovery setup (REQ-005).
+	// Called after the user enrolls their recovery credential(s).
+	SetRecoveryComplete(ctx context.Context, id pgtype.UUID) error
 	SetUserStatus(ctx context.Context, arg SetUserStatusParams) error
 	// UpdateCredentialSignCount advances a passkey's signature counter after an
 	// assertion — a monotonically increasing counter is how WebAuthn detects a

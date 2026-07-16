@@ -19,3 +19,10 @@ WHERE id = $1;
 UPDATE users
 SET status = $2
 WHERE id = $1;
+
+-- name: SetRecoveryComplete :exec
+-- Marks a user as having completed account recovery setup (REQ-005).
+-- Called after the user enrolls their recovery credential(s).
+UPDATE users
+SET recovery_required = false
+WHERE id = $1;

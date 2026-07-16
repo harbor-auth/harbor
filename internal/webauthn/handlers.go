@@ -1,7 +1,7 @@
 package webauthn
 
 import (
-	"encoding/base64"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -13,20 +13,51 @@ import (
 // same-site requests (docs/DESIGN.md §9).
 const sessionCookieName = "harbor_webauthn_session"
 
+// EnrollmentSessionStore resolves the user handle from the enrollment session
+// cookie set by POST /enroll. It is injected from internal/mgmtapi so this
+// package stays decoupled from the enrollment implementation.
+type EnrollmentSessionStore interface {
+	UserHandle(ctx context.Context, key string) ([]byte, error)
+}
+
+// enrollmentCookieName is the cookie carrying the enrollment session key. It
+// MUST match mgmtapi.EnrollmentSessionCookieName — the packages are decoupled,
+// so the value is duplicated and kept in sync deliberately.
+const enrollmentCookieName = "harbor_enrollment_session"
+
 // Handler serves the passkey ceremony endpoints. Keep it thin: it parses the
 // request, delegates to Service, and shapes the response.
 type Handler struct {
 	svc *Service
-	// allowInsecureUserID enables the DEV-ONLY path that reads the WebAuthn user
-	// handle from a client-supplied `user_id` query param. It MUST be false in
-	// production — see userIDFromRequest (docs/DESIGN.md §9).
-	allowInsecureUserID bool
+	// enrollmentSessions resolves the WebAuthn user handle from the enrollment
+	// session cookie set by POST /enroll — the ONLY supported way to drive a
+	// ceremony (§11.1). When nil (or unresolved), every ceremony is refused with
+	// 501: Harbor deliberately has no client-supplied user_id seam, which would
+	// be an IDOR (docs/DESIGN.md §9).
+	enrollmentSessions EnrollmentSessionStore
 }
 
-// NewHandler returns a Handler for the given Service. allowInsecureUserID gates
-// the dev-only client-supplied user_id path and must be false in production.
-func NewHandler(svc *Service, allowInsecureUserID bool) *Handler {
-	return &Handler{svc: svc, allowInsecureUserID: allowInsecureUserID}
+// NewHandler returns a Handler for the given Service. Attach an enrollment
+// session store with WithEnrollmentSessions so ceremonies can resolve the user
+// handle from the enrollment cookie; without one every ceremony returns 501.
+func NewHandler(svc *Service) *Handler {
+	return &Handler{svc: svc}
+}
+
+// WithEnrollmentSessions attaches the enrollment session store so registration
+// ceremonies can read the user handle from the enrollment cookie (set by POST
+// /enroll) instead of requiring the insecure query param. Returns h for chaining.
+func (h *Handler) WithEnrollmentSessions(store EnrollmentSessionStore) *Handler {
+	h.enrollmentSessions = store
+	return h
+}
+
+// RegisterRoutes mounts the four ceremony endpoints on mux using a fresh Handler
+// with no enrollment session store — every ceremony is refused with 501 until
+// WithEnrollmentSessions is attached. Prefer (*Handler).RegisterRoutes when you
+// need to wire enrollment sessions (the production path).
+func RegisterRoutes(mux *http.ServeMux, svc *Service) {
+	NewHandler(svc).RegisterRoutes(mux)
 }
 
 // RegisterRoutes mounts the four ceremony endpoints on mux:
@@ -35,10 +66,7 @@ func NewHandler(svc *Service, allowInsecureUserID bool) *Handler {
 //	POST /webauthn/register/finish
 //	POST /webauthn/login/begin
 //	POST /webauthn/login/finish
-//
-// allowInsecureUserID gates the dev-only user_id path (must be false in prod).
-func RegisterRoutes(mux *http.ServeMux, svc *Service, allowInsecureUserID bool) {
-	h := NewHandler(svc, allowInsecureUserID)
+func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /webauthn/register/begin", h.BeginRegistration)
 	mux.HandleFunc("POST /webauthn/register/finish", h.FinishRegistration)
 	mux.HandleFunc("POST /webauthn/login/begin", h.BeginLogin)
@@ -113,33 +141,26 @@ func (h *Handler) FinishLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, statusOK{Status: "authenticated"})
 }
 
-// userIDFromRequest extracts the WebAuthn user handle.
+// userIDFromRequest extracts the WebAuthn user handle for a ceremony from the
+// enrollment session cookie (harbor_enrollment_session) set by POST /enroll —
+// the only supported path (§11.1). There is deliberately NO client-supplied
+// user_id: letting a caller name the ceremony's user is an IDOR (docs/DESIGN.md
+// §9). When no valid enrollment session is present the request is refused with
+// 501 Not Implemented, since no other authenticated seam exists yet.
 //
-// SCAFFOLD: the identity is read from the base64url `user_id` query parameter,
-// which lets ANY caller drive a ceremony as ANY user — an IDOR. In production
-// the identity MUST come from the authenticated dashboard session (the signed-in
-// subject), never from a client-supplied value. That path is therefore gated
-// behind allowInsecureUserID: when it is false (the default / production) we
-// refuse the request with 501 rather than trust the query param. This is a
-// deliberate placeholder until the BFF session middleware lands
-// (docs/DESIGN.md §9). On failure it writes the response and returns ok=false.
+// On failure it writes the response and returns ok=false.
 func (h *Handler) userIDFromRequest(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
-	if !h.allowInsecureUserID {
-		writeErrorCode(w, http.StatusNotImplemented, "not_implemented",
-			"passkey ceremonies require an authenticated session")
-		return nil, false
+	if h.enrollmentSessions != nil {
+		if c, err := r.Cookie(enrollmentCookieName); err == nil && c.Value != "" {
+			userID, err := h.enrollmentSessions.UserHandle(r.Context(), c.Value)
+			if err == nil && len(userID) > 0 {
+				return userID, true
+			}
+		}
 	}
-	raw := r.URL.Query().Get("user_id")
-	if raw == "" {
-		writeErrorCode(w, http.StatusBadRequest, "invalid_request", "missing user_id")
-		return nil, false
-	}
-	userID, err := base64.RawURLEncoding.DecodeString(raw)
-	if err != nil || len(userID) == 0 {
-		writeErrorCode(w, http.StatusBadRequest, "invalid_request", "invalid user_id encoding")
-		return nil, false
-	}
-	return userID, true
+	writeErrorCode(w, http.StatusNotImplemented, "not_implemented",
+		"passkey ceremonies require an authenticated session")
+	return nil, false
 }
 
 // --- response helpers -------------------------------------------------------

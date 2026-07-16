@@ -19,6 +19,10 @@ type UserRecord struct {
 	Region         string // validated region string
 	DekWrapped     []byte // KeyProvider.WrapDEK output
 	PairwiseSecret []byte // Cipher.Encrypt(dek, rawSecret, aad) output
+	// RecoveryRequired records whether the user must complete account recovery
+	// setup before normal use (REQ-005). Enrollment always sets this true — a
+	// freshly enrolled user has no recovery credential yet.
+	RecoveryRequired bool
 }
 
 // UserPersister writes a UserRecord to durable storage. The single-method
@@ -99,6 +103,8 @@ func (e *Enroller) Enroll(ctx context.Context, rawRegion string) (EnrollResult, 
 		Region:         string(r),
 		DekWrapped:     dekWrapped,
 		PairwiseSecret: encPS,
+		// A newly enrolled user has not yet set up account recovery (REQ-005).
+		RecoveryRequired: true,
 	}
 	if err := e.persist.PersistUser(ctx, rec); err != nil {
 		return EnrollResult{}, fmt.Errorf("identity: persist user: %w", err)

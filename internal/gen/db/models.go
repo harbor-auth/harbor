@@ -74,10 +74,11 @@ type Session struct {
 }
 
 type User struct {
-	ID             pgtype.UUID        `json:"id"`
-	Region         string             `json:"region"`
-	Status         string             `json:"status"`
-	DekWrapped     []byte             `json:"dek_wrapped"`
-	PairwiseSecret []byte             `json:"pairwise_secret"`
-	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	ID               pgtype.UUID        `json:"id"`
+	Region           string             `json:"region"`
+	Status           string             `json:"status"`
+	DekWrapped       []byte             `json:"dek_wrapped"`
+	PairwiseSecret   []byte             `json:"pairwise_secret"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	RecoveryRequired bool               `json:"recovery_required"`
 }

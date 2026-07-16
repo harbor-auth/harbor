@@ -80,6 +80,26 @@ func TestEnrollSuccess(t *testing.T) {
 	if len(r.PairwiseSecret) == 0 {
 		t.Fatal("PairwiseSecret must not be empty")
 	}
+	if !r.RecoveryRequired {
+		t.Fatal("RecoveryRequired must be true for a freshly enrolled user (REQ-005)")
+	}
+}
+
+// TestEnrollRecordsRecoveryRequired verifies that every enrollment records
+// recovery_required=true, so a newly created user is forced through account
+// recovery setup before normal use (REQ-005).
+func TestEnrollRecordsRecoveryRequired(t *testing.T) {
+	p := &fakePersister{}
+	e := newTestEnroller(t, p)
+	if _, err := e.Enroll(context.Background(), "US"); err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+	if len(p.records) != 1 {
+		t.Fatalf("persister got %d records, want 1", len(p.records))
+	}
+	if !p.records[0].RecoveryRequired {
+		t.Fatal("enrollment must record RecoveryRequired=true")
+	}
 }
 
 func TestEnrollInvalidRegion(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 
 	gowebauthn "github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	db "github.com/harbor/harbor/internal/gen/db"
@@ -22,15 +23,40 @@ type dbStoreQuerier interface {
 	UpdateCredentialSignCount(ctx context.Context, arg db.UpdateCredentialSignCountParams) error
 }
 
+// txBeginner is satisfied by *pgxpool.Pool. It enables the atomic
+// credential-create + user-activate path in AddCredentialAndActivateUser. A nil
+// beginner disables the transaction (dev/test best-effort fallback).
+type txBeginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
+// activationQuerier is the sqlc surface the atomic activation path writes
+// through. Both the production *db.Queries and a per-transaction db.New(tx)
+// satisfy it, so the same logic runs inside or outside a transaction.
+type activationQuerier interface {
+	CreateCredential(ctx context.Context, arg db.CreateCredentialParams) (db.Credential, error)
+	SetUserStatus(ctx context.Context, arg db.SetUserStatusParams) error
+}
+
 // DBStore implements Store backed by the sqlc queries over Postgres. It is
 // safe for concurrent use (all state is in the database).
 type DBStore struct {
-	q dbStoreQuerier
+	q  dbStoreQuerier
+	tx txBeginner // nil → non-atomic best-effort fallback (dev/test without a pool)
 }
 
 // NewDBStore returns a DBStore backed by the given querier.
 func NewDBStore(q dbStoreQuerier) *DBStore {
 	return &DBStore{q: q}
+}
+
+// WithPool enables atomic first-passkey enrollment: AddCredentialAndActivateUser
+// then runs the credential insert and the pending→active status flip inside a
+// single transaction on the given pool (production wiring). Without a pool it
+// falls back to a best-effort sequential path (dev/test). Returns s for chaining.
+func (s *DBStore) WithPool(p txBeginner) *DBStore {
+	s.tx = p
+	return s
 }
 
 // GetUser implements Store: fetches the user row and all their passkeys, then
@@ -68,18 +94,76 @@ func (s *DBStore) AddCredential(ctx context.Context, userID []byte, cred gowebau
 	if err != nil {
 		return ErrUserNotFound
 	}
-	credID := uuid.New()
-	_, err = s.q.CreateCredential(ctx, db.CreateCredentialParams{
-		ID:             pgtype.UUID{Bytes: credID, Valid: true},
-		Region:         row.Region,
+	_, err = s.q.CreateCredential(ctx, credentialParams(uid, row.Region, cred))
+	return err
+}
+
+// AddCredentialAndActivateUser implements Store: it atomically persists the
+// user's first passkey AND flips their status from "pending" to "active"
+// (design decision 3, §11.1). When a pool is wired (WithPool) both writes run in
+// a single transaction and roll back together on any failure, so enrollment can
+// never leave a user "pending" with a credential, nor "active" with none.
+func (s *DBStore) AddCredentialAndActivateUser(ctx context.Context, userID []byte, cred gowebauthn.Credential) error {
+	uid, err := parseWebAuthnUserID(userID)
+	if err != nil {
+		return ErrUserNotFound
+	}
+	row, err := s.q.GetUser(ctx, uid)
+	if err != nil {
+		return ErrUserNotFound
+	}
+
+	// No pool: best-effort sequential fallback (dev/test). When the querier can
+	// also set status we still activate; otherwise we only add the credential.
+	if s.tx == nil {
+		if act, ok := s.q.(activationQuerier); ok {
+			return createCredentialAndActivate(ctx, act, uid, row.Region, cred)
+		}
+		_, err = s.q.CreateCredential(ctx, credentialParams(uid, row.Region, cred))
+		return err
+	}
+
+	txn, err := s.tx.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("webauthn/store_db: begin activation tx: %w", err)
+	}
+	// Rollback is a no-op after Commit. WithoutCancel ensures the rollback still
+	// runs if ctx was cancelled mid-flight, mirroring
+	// clients.DBSessionStore.RotateSession.
+	defer txn.Rollback(context.WithoutCancel(ctx)) //nolint:errcheck // best-effort rollback; no-op after commit.
+
+	if err := createCredentialAndActivate(ctx, db.New(txn), uid, row.Region, cred); err != nil {
+		return err
+	}
+	return txn.Commit(ctx)
+}
+
+// createCredentialAndActivate performs the two enrollment-completing writes
+// against q: insert the passkey, then activate the user. Shared by the
+// transactional and fallback paths so they cannot diverge.
+func createCredentialAndActivate(ctx context.Context, q activationQuerier, uid pgtype.UUID, region string, cred gowebauthn.Credential) error {
+	if _, err := q.CreateCredential(ctx, credentialParams(uid, region, cred)); err != nil {
+		return fmt.Errorf("webauthn/store_db: create credential: %w", err)
+	}
+	if err := q.SetUserStatus(ctx, db.SetUserStatusParams{ID: uid, Status: "active"}); err != nil {
+		return fmt.Errorf("webauthn/store_db: activate user: %w", err)
+	}
+	return nil
+}
+
+// credentialParams builds the sqlc params for inserting a passkey. The
+// credential's own primary key is a fresh UUID; region is the user's own region.
+func credentialParams(uid pgtype.UUID, region string, cred gowebauthn.Credential) db.CreateCredentialParams {
+	return db.CreateCredentialParams{
+		ID:             pgtype.UUID{Bytes: uuid.New(), Valid: true},
+		Region:         region,
 		UserID:         uid,
 		Type:           "passkey",
 		WebauthnCredID: cred.ID,
 		WebauthnPubkey: cred.PublicKey,
 		WebauthnAaguid: cred.Authenticator.AAGUID,
 		SignCount:      int64(cred.Authenticator.SignCount),
-	})
-	return err
+	}
 }
 
 // UpdateCredential implements Store: advances the signature counter for an

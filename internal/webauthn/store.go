@@ -31,8 +31,15 @@ type Store interface {
 	// GetUser returns the user and their enrolled credentials, or
 	// ErrUserNotFound.
 	GetUser(ctx context.Context, userID []byte) (User, error)
-	// AddCredential appends a newly-registered passkey to the user.
+	// AddCredential appends a newly-registered passkey to the user (used when a
+	// user who is ALREADY active enrolls an additional passkey).
 	AddCredential(ctx context.Context, userID []byte, cred gowebauthn.Credential) error
+	// AddCredentialAndActivateUser atomically persists the user's FIRST passkey
+	// AND flips their status from "pending" to "active" (design decision 3,
+	// §11.1). Database-backed implementations MUST perform both writes in a
+	// single transaction and roll back on any failure, so enrollment can never
+	// leave a user "pending" with a credential, nor "active" with none.
+	AddCredentialAndActivateUser(ctx context.Context, userID []byte, cred gowebauthn.Credential) error
 	// UpdateCredential persists changes to an existing passkey — notably the
 	// advanced signature counter after a successful assertion (WebAuthn clone
 	// detection, docs/DESIGN.md §3.1).
@@ -90,6 +97,13 @@ func (s *InMemoryStore) AddCredential(_ context.Context, userID []byte, cred gow
 	user.credentials = append(user.credentials, cred)
 	s.users[string(userID)] = user
 	return nil
+}
+
+// AddCredentialAndActivateUser implements Store. The in-memory User has no
+// status column, so "activation" is implicit: this simply adds the credential.
+// The atomic pending→active flip is a database concern — see DBStore.
+func (s *InMemoryStore) AddCredentialAndActivateUser(ctx context.Context, userID []byte, cred gowebauthn.Credential) error {
+	return s.AddCredential(ctx, userID, cred)
 }
 
 // UpdateCredential implements Store: replaces the stored credential whose ID

@@ -18,7 +18,7 @@ INSERT INTO users (
 ) VALUES (
     $1, $2, $3, $4, $5
 )
-RETURNING id, region, status, dek_wrapped, pairwise_secret, created_at
+RETURNING id, region, status, dek_wrapped, pairwise_secret, created_at, recovery_required
 `
 
 type CreateUserParams struct {
@@ -49,12 +49,13 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.DekWrapped,
 		&i.PairwiseSecret,
 		&i.CreatedAt,
+		&i.RecoveryRequired,
 	)
 	return i, err
 }
 
 const getUser = `-- name: GetUser :one
-SELECT id, region, status, dek_wrapped, pairwise_secret, created_at FROM users
+SELECT id, region, status, dek_wrapped, pairwise_secret, created_at, recovery_required FROM users
 WHERE id = $1
 `
 
@@ -68,8 +69,22 @@ func (q *Queries) GetUser(ctx context.Context, id pgtype.UUID) (User, error) {
 		&i.DekWrapped,
 		&i.PairwiseSecret,
 		&i.CreatedAt,
+		&i.RecoveryRequired,
 	)
 	return i, err
+}
+
+const setRecoveryComplete = `-- name: SetRecoveryComplete :exec
+UPDATE users
+SET recovery_required = false
+WHERE id = $1
+`
+
+// Marks a user as having completed account recovery setup (REQ-005).
+// Called after the user enrolls their recovery credential(s).
+func (q *Queries) SetRecoveryComplete(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, setRecoveryComplete, id)
+	return err
 }
 
 const setUserStatus = `-- name: SetUserStatus :exec

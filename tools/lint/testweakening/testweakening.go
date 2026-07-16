@@ -138,7 +138,9 @@ func analyze(diff string) []finding {
 			// Exclude the linter's own source tree — it legitimately contains the
 			// exact patterns it detects (regex literals, doc comments) and should
 			// not be flagged as a weakening signal.
-			if strings.HasPrefix(curFile, "tools/lint/") || strings.HasPrefix(curFile, "tools/agentcheck/") {
+			// Also exclude e2e/ — integration tests legitimately use t.Skip when
+			// Docker infrastructure is absent, which is not a test-weakening signal.
+			if strings.HasPrefix(curFile, "tools/lint/") || strings.HasPrefix(curFile, "tools/agentcheck/") || strings.HasPrefix(curFile, "e2e/") {
 				curFile = ""
 			}
 			if curFile != "" && !seenFile[curFile] {
