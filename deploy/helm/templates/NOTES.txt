@@ -1,0 +1,66 @@
+Harbor {{ .Chart.AppVersion }} has been deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+OIDC issuer:      {{ .Values.hot.issuer }}
+Discovery doc:    {{ .Values.hot.issuer }}/.well-known/openid-configuration
+JWKS:             {{ .Values.hot.issuer }}/jwks.json
+
+Components:
+  - harbor-hot  ({{ .Values.hot.replicaCount }} replica floor)  — public OIDC hot path (port {{ .Values.hot.port }})
+  - harbor-mgmt ({{ .Values.mgmt.replicaCount }} replicas)       — cluster-internal enrollment/passkey (port {{ .Values.mgmt.port }})
+
+Check the hot-path Service:
+  kubectl -n {{ .Release.Namespace }} get svc {{ include "harbor.fullname" . }}-hot
+
+{{- if .Values.ingress.enabled }}
+
+The hot path is exposed via Ingress at: https://{{ .Values.ingress.host }}
+{{- if ne .Values.ingress.host (regexReplaceAll "^https?://" .Values.hot.issuer "") }}
+
+  ⚠️  WARNING: ingress.host ({{ .Values.ingress.host }}) does NOT match hot.issuer
+      ({{ .Values.hot.issuer }}). OIDC discovery will advertise endpoints under a
+      different origin than clients reach. Align them before going live.
+{{- end }}
+{{- end }}
+
+----------------------------------------------------------------------------
+SCAFFOLD REMINDERS — do NOT run this in production until these are addressed:
+----------------------------------------------------------------------------
+{{- if not .Values.hot.secrets.existingSecret }}
+{{- if or (not .Values.hot.secrets.databaseUrl) (not .Values.hot.secrets.kekSecret) }}
+  ✗ harbor-hot secrets are empty. Set hot.secrets.databaseUrl and
+    hot.secrets.kekSecret, or point hot.secrets.existingSecret at a
+    secrets-manager-provisioned Secret. harbor-hot will FAIL to start with an
+    unset KEK_SECRET when DATABASE_URL is set.
+{{- end }}
+{{- if and (gt (int .Values.hot.replicaCount) 1) (not .Values.hot.secrets.redisUrl) }}
+  ✗ hot.replicaCount is {{ .Values.hot.replicaCount }} but hot.secrets.redisUrl is empty.
+    Auth codes will live in-process and cross-replica /token exchanges will
+    FAIL. Set hot.secrets.redisUrl (or scale to 1 replica).
+{{- end }}
+{{- end }}
+{{- if not .Values.mgmt.secrets.existingSecret }}
+{{- if or (not .Values.mgmt.secrets.databaseUrl) (not .Values.mgmt.secrets.kekSecret) }}
+  ✗ harbor-mgmt secrets are empty. Set mgmt.secrets.databaseUrl and
+    mgmt.secrets.kekSecret, or use mgmt.secrets.existingSecret.
+{{- end }}
+{{- end }}
+{{- if eq .Values.global.image.tag "latest" }}
+  ✗ global.image.tag is "latest" — pin an immutable @sha256 digest
+    (hot.image.digest / mgmt.image.digest) so rollbacks and re-pulls are safe.
+{{- end }}
+{{- if .Values.ingress.enabled }}
+  ✗ Ensure the TLS Secret "{{ .Values.ingress.tlsSecretName }}" exists (e.g. via
+    cert-manager) — the Ingress cannot terminate TLS without it.
+{{- end }}
+{{- if gt (int .Values.mgmt.replicaCount) 1 }}
+  ✗ mgmt.replicaCount is {{ .Values.mgmt.replicaCount }} but the WebAuthn ceremony store is
+    in-memory. Passkey ceremonies break across pods/restarts. Set
+    mgmt.replicaCount to 1 until the store is DB-backed
+    (docs/plans/user-enrollment.md).
+{{- end }}
+
+----------------------------------------------------------------------------
+Run the connectivity smoke tests (hits /healthz on both binaries via their
+in-cluster Services):
+
+  helm test {{ .Release.Name }} -n {{ .Release.Namespace }}

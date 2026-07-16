@@ -23,3 +23,6 @@ conformance/out/
 *.swp
 .idea/
 .vscode/
+
+# Agent session logs (hippo memory / prompt traces — internal, not for commits)
+debug/

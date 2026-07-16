@@ -1,0 +1,37 @@
+{{- if .Values.ingress.enabled }}
+# Ingress: exposes ONLY harbor-hot to the internet. harbor-mgmt is intentionally
+# absent — it must never be publicly routable.
+#
+# The host here MUST match hot.issuer, or the OIDC discovery document will
+# advertise endpoints under a different origin than clients reach.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "harbor.fullname" . }}-hot
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.hot.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      # SCAFFOLD: provision this cert (e.g. via cert-manager) — the Secret must
+      # exist before the Ingress can terminate TLS.
+      secretName: {{ .Values.ingress.tlsSecretName }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "harbor.fullname" . }}-hot
+                port:
+                  number: 80
+{{- end }}

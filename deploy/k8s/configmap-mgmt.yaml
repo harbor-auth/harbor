@@ -1,0 +1,21 @@
+# Non-sensitive config for harbor-mgmt.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: harbor-mgmt-config
+  namespace: harbor
+  labels:
+    app.kubernetes.io/name: harbor-mgmt
+    app.kubernetes.io/part-of: harbor
+data:
+  PORT: "8081"
+  # WebAuthn Relying Party config (docs/DESIGN.md §3.1).
+  #   RP_ID    — effective domain (no scheme/port). Passkeys are scoped to
+  #              this; it MUST be a registrable suffix of the origin below.
+  #   ORIGIN   — the fully-qualified site permitted to run ceremonies. This is
+  #              the dashboard/BFF origin, NOT the issuer. REPLACE example.com
+  #              with your real domain.
+  #   RP_NAME  — human-facing Relying Party name shown in browser passkey prompts.
+  WEBAUTHN_RP_ID: "example.com"
+  WEBAUTHN_RP_NAME: "Harbor"
+  WEBAUTHN_ORIGIN: "https://dashboard.example.com"

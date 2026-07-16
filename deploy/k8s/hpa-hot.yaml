@@ -1,0 +1,38 @@
+# HPA: scales the stateless hot path with load. Floor of 3 keeps the zone
+# spread meaningful (one per AZ) even at idle; ceiling of 20 caps blast radius
+# and cost. Scales on both CPU and memory so a leak or GC pressure also triggers
+# scale-out, not just CPU.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: harbor-hot
+  namespace: harbor
+  labels:
+    app.kubernetes.io/name: harbor-hot
+    app.kubernetes.io/part-of: harbor
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: harbor-hot
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      # Scale in slowly to avoid thrashing under bursty auth traffic.
+      stabilizationWindowSeconds: 300
+    scaleUp:
+      stabilizationWindowSeconds: 0

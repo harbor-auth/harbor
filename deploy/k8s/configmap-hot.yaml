@@ -1,0 +1,16 @@
+# Non-sensitive config for harbor-hot. Kept out of the Secret so it can be
+# reviewed/diffed in plaintext and edited without touching credentials.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: harbor-hot-config
+  namespace: harbor
+  labels:
+    app.kubernetes.io/name: harbor-hot
+    app.kubernetes.io/part-of: harbor
+data:
+  PORT: "8080"
+  # ISSUER anchors the OIDC discovery document (docs/DESIGN.md §3.4). MUST be
+  # the public HTTPS URL clients reach (matches the Ingress host below), and
+  # MUST be per-region in a multi-region deployment.
+  ISSUER: "https://auth.example.com"

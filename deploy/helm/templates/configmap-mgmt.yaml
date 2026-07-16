@@ -1,0 +1,18 @@
+# Non-sensitive config for harbor-mgmt.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "harbor.fullname" . }}-mgmt-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.mgmt.labels" . | nindent 4 }}
+data:
+  PORT: {{ .Values.mgmt.port | quote }}
+  # WebAuthn Relying Party config.
+  #   RP_ID   — effective domain (no scheme/port). MUST be a registrable suffix
+  #             of the origin below.
+  #   ORIGIN  — fully-qualified dashboard/BFF origin permitted to run ceremonies.
+  #   RP_NAME — human-facing Relying Party name shown in passkey prompts.
+  WEBAUTHN_RP_ID: {{ .Values.mgmt.webauthn.rpId | quote }}
+  WEBAUTHN_RP_NAME: {{ .Values.mgmt.webauthn.rpName | quote }}
+  WEBAUTHN_ORIGIN: {{ .Values.mgmt.webauthn.rpOrigin | quote }}

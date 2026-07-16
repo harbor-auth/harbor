@@ -1,0 +1,39 @@
+{{- if .Values.hot.hpa.enabled }}
+# HPA: scales the stateless hot path with load. Floor keeps the zone spread
+# meaningful (one per AZ) even at idle; ceiling caps blast radius and cost.
+# Scales on both CPU and memory so a leak or GC pressure also triggers
+# scale-out, not just CPU.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "harbor.fullname" . }}-hot
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.hot.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "harbor.fullname" . }}-hot
+  minReplicas: {{ .Values.hot.hpa.minReplicas }}
+  maxReplicas: {{ .Values.hot.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.hot.hpa.targetCPUUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.hot.hpa.targetMemoryUtilizationPercentage }}
+  behavior:
+    scaleDown:
+      # Scale in slowly to avoid thrashing under bursty auth traffic.
+      stabilizationWindowSeconds: {{ .Values.hot.hpa.scaleDownStabilizationWindowSeconds }}
+    scaleUp:
+      stabilizationWindowSeconds: 0
+{{- end }}

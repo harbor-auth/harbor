@@ -1,0 +1,15 @@
+{{- if .Values.namespace.create }}
+# Namespace with Pod Security Standards enforced namespace-wide so workloads
+# must run non-root, drop all capabilities, use RuntimeDefault seccomp, and
+# disallow privilege escalation. The Deployment securityContexts already comply.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.labels" . | nindent 4 }}
+    pod-security.kubernetes.io/enforce: {{ .Values.namespace.podSecurityProfile }}
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: {{ .Values.namespace.podSecurityProfile }}
+    pod-security.kubernetes.io/warn: {{ .Values.namespace.podSecurityProfile }}
+{{- end }}

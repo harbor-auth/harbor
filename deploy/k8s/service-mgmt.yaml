@@ -1,0 +1,23 @@
+# Service: harbor-mgmt. ClusterIP and DELIBERATELY cluster-internal only —
+# there is NO Ingress for mgmt. Enrollment / passkey ceremonies / dashboard BFF
+# must be reached through the trusted in-cluster path (e.g. the dashboard
+# front-end calling it server-side), never directly from the internet. The
+# NetworkPolicy (networkpolicy-mgmt.yaml) additionally restricts which pods may
+# even open this port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: harbor-mgmt
+  namespace: harbor
+  labels:
+    app.kubernetes.io/name: harbor-mgmt
+    app.kubernetes.io/part-of: harbor
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: harbor-mgmt
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP

@@ -1,0 +1,19 @@
+# Service: harbor-hot. ClusterIP — public exposure is via the Ingress
+# (ingress.yaml), not the Service itself. Fronts the HPA-scaled replica set.
+apiVersion: v1
+kind: Service
+metadata:
+  name: harbor-hot
+  namespace: harbor
+  labels:
+    app.kubernetes.io/name: harbor-hot
+    app.kubernetes.io/part-of: harbor
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: harbor-hot
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
