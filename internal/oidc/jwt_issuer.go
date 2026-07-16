@@ -30,6 +30,7 @@ type idTokenClaims struct {
 	Audience string `json:"aud"`
 	Expiry   int64  `json:"exp"`
 	IssuedAt int64  `json:"iat"`
+	AuthTime int64  `json:"auth_time"`
 	Nonce    string `json:"nonce,omitempty"`
 	JTI      string `json:"jti"`
 }
@@ -95,6 +96,7 @@ func (j *JWTIssuer) Issue(_ context.Context, p IssueParams) (IssuedTokens, error
 		Audience: p.ClientID,
 		Expiry:   now.Add(idTokenTTLSeconds * time.Second).Unix(),
 		IssuedAt: now.Unix(),
+		AuthTime: p.AuthTime,
 		Nonce:    p.Nonce,
 		JTI:      idTokenJTI,
 	})

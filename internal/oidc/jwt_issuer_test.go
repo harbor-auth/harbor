@@ -32,6 +32,7 @@ func testIssueParams() IssueParams {
 		ClientID: "demo-client",
 		Scope:    "openid profile",
 		Nonce:    "n-0S6_WzA2Mj",
+		AuthTime: fixedNow().Unix(),
 	}
 }
 
@@ -120,7 +121,7 @@ func TestJWTIssuerNoPII(t *testing.T) {
 		t.Fatalf("Issue: %v", err)
 	}
 
-	allowedID := map[string]bool{"iss": true, "sub": true, "aud": true, "exp": true, "iat": true, "nonce": true, "jti": true}
+	allowedID := map[string]bool{"iss": true, "sub": true, "aud": true, "exp": true, "iat": true, "auth_time": true, "nonce": true, "jti": true}
 	allowedAccess := map[string]bool{"iss": true, "sub": true, "aud": true, "exp": true, "iat": true, "scope": true, "jti": true}
 	forbidden := []string{"email", "name", "given_name", "family_name", "phone_number", "address"}
 
@@ -358,6 +359,36 @@ func TestJWTIssuerIDTokenSignerError(t *testing.T) {
 	}
 }
 
+// TestJWTIssuerAuthTimePresent verifies that the id_token contains the auth_time
+// claim as a Unix timestamp integer per OIDC Core §2.
+func TestJWTIssuerAuthTimePresent(t *testing.T) {
+	signer := newTestSigner(t)
+	iss := NewJWTIssuer(JWTIssuerConfig{Signer: signer, Now: fixedNow})
+	p := testIssueParams()
+	tokens, err := iss.Issue(context.Background(), p)
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+
+	// Extract auth_time from id_token.
+	_, idPayload, _, err := parseCompactJWT(tokens.IDToken)
+	if err != nil {
+		t.Fatalf("parse id_token: %v", err)
+	}
+	var idClaims map[string]any
+	if err := json.Unmarshal(idPayload, &idClaims); err != nil {
+		t.Fatalf("unmarshal id_token claims: %v", err)
+	}
+	authTime, ok := idClaims["auth_time"].(float64)
+	if !ok {
+		t.Fatal("id_token missing required auth_time claim")
+	}
+	// Verify auth_time matches what was passed in IssueParams.
+	if int64(authTime) != p.AuthTime {
+		t.Fatalf("auth_time = %v, want %v", int64(authTime), p.AuthTime)
+	}
+}
+
 // TestJWTIssuerJTIPresent verifies that both id_token and access_token contain
 // unique jti claims for OIDF conformance and bloom filter revocation support.
 func TestJWTIssuerJTIPresent(t *testing.T) {
@@ -543,7 +574,13 @@ func TestJWTGoldenVectors(t *testing.T) {
 	if jti, ok := currentClaims["jti"].(string); !ok || jti == "" {
 		t.Fatal("current id_token missing required jti claim")
 	}
-	// Compare deterministic claims (all except jti).
+	// Verify auth_time is present and matches the expected value.
+	if authTime, ok := currentClaims["auth_time"].(float64); !ok {
+		t.Fatal("current id_token missing required auth_time claim")
+	} else if int64(authTime) != fixedNow().Unix() {
+		t.Fatalf("auth_time = %v, want %v", int64(authTime), fixedNow().Unix())
+	}
+	// Compare deterministic claims (all except jti and auth_time which are verified separately).
 	for _, claim := range []string{"iss", "sub", "aud", "exp", "iat", "nonce"} {
 		frozenVal, frozenOK := frozenClaims[claim]
 		currentVal, currentOK := currentClaims[claim]

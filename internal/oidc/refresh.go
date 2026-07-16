@@ -33,6 +33,7 @@ type RefreshSession struct {
 	TokenHash   []byte // SHA-256 of the opaque plaintext — NEVER the plaintext
 	ExpiresAt   time.Time
 	RevokedAt   time.Time // zero when active; non-zero once the session is revoked
+	AuthTime    int64     // Unix timestamp when user originally authenticated (OIDC Core §2)
 }
 
 // ErrRefreshTokenNotFound is returned by SessionStore when no active session

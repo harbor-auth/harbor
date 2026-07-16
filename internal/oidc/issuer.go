@@ -9,6 +9,7 @@ type IssueParams struct {
 	ClientID string // becomes the token `aud`
 	Scope    string
 	Nonce    string // bound into the id_token later
+	AuthTime int64  // Unix timestamp when user authenticated (OIDC Core §2)
 }
 
 // IssuedTokens is the result of a successful token issuance.

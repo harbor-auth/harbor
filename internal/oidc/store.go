@@ -48,6 +48,7 @@ type AuthCode struct {
 	CodeChallenge       string
 	CodeChallengeMethod string
 	ExpiresAt           time.Time
+	AuthTime            time.Time // when the user authenticated (OIDC Core §2)
 }
 
 // ConsumeStatus is the outcome of AuthCodeStore.Consume.
