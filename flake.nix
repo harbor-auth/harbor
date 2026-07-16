@@ -56,12 +56,28 @@
           buildGo124Module = pkgs.buildGoModule.override { go = goToolchain; };
         };
 
+        # sqlc is pinned to v1.30.0 explicitly rather than taken from the
+        # nixos-25.05 channel (which ships v1.29.0). This prevents codegen drift
+        # when developers upgrade their local sqlc: CI and local always regenerate
+        # identical output. Hashes sourced from nixpkgs commit 0820e12e1ccb
+        # ("sqlc: 1.29.0 -> 1.30.0"). Bump this when upgrading local sqlc.
+        sqlcPinned = pkgs.sqlc.overrideAttrs (old: rec {
+          version = "1.30.0";
+          src = pkgs.fetchFromGitHub {
+            owner = "sqlc-dev";
+            repo = "sqlc";
+            tag = "v${version}";
+            hash = "sha256-ns0FIGu+aOuRFBYHrAqWUiYCwHE5XQqlR3AFKy5lq4E=";
+          };
+          vendorHash = "sha256-jivqXwuq6wbNQFW8BlBZIKBLpIotA2MMR5iywODycpY=";
+        });
+
         # The pinned toolchain — one list, mirrored by the Makefile's install
         # hints. Every tool the fail-closed Makefile requires lives here.
         toolchain = [
           goToolchain
           golangciLint                  # @validate: lint (rebuilt with goToolchain, see above)
-          pkgs.sqlc                     # @codegen: sqlc generate
+          sqlcPinned                    # @codegen: sqlc generate — pinned to v1.30.0 (see above)
           pkgs.oapi-codegen             # @codegen: OpenAPI -> Go stubs
           pkgs.buf                      # @codegen/@validate: proto gen + lint
           pkgs.go-migrate               # @db-migrate: schema migrations (`migrate`) — nixpkgs renamed golang-migrate -> go-migrate
