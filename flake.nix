@@ -20,13 +20,24 @@
   inputs = {
     # Pinned to a stable channel; `nix flake update` refreshes flake.lock.
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
-    flake-utils.url = "github:numtide/flake-utils";
+    # flake-utils intentionally NOT used — inlining eachDefaultSystem eliminates
+    # 2 extra GitHub tarball fetches (flake-utils + systems) that were causing
+    # intermittent 503 CI failures on api.github.com.
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = import nixpkgs { inherit system; };
+  outputs = { self, nixpkgs }:
+    let
+      # Inline replacement for flake-utils.lib.eachDefaultSystem.
+      # Maps f over the four platforms Harbor supports and returns an attrset
+      # keyed by system name — identical shape to what eachDefaultSystem produced.
+      supportedSystems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+      forAllSystems = f: builtins.listToAttrs
+        (map (system: { name = system; value = f system; }) supportedSystems);
+    in
+    {
+      devShells = forAllSystems (system:
+        let
+          pkgs = import nixpkgs { inherit system; };
 
         # go.mod declares `go 1.25.0` (required by grpc v1.82+, webauthn v0.17+,
         # pgx v5.10+, golang.org/x/* v0.52+). The nix shell provides go_1_24 as
@@ -56,12 +67,28 @@
           buildGo124Module = pkgs.buildGoModule.override { go = goToolchain; };
         };
 
+        # sqlc is pinned to v1.30.0 explicitly rather than taken from the
+        # nixos-25.05 channel (which ships v1.29.0). This prevents codegen drift
+        # when developers upgrade their local sqlc: CI and local always regenerate
+        # identical output. Hashes sourced from nixpkgs commit 0820e12e1ccb
+        # ("sqlc: 1.29.0 -> 1.30.0"). Bump this when upgrading local sqlc.
+        sqlcPinned = pkgs.sqlc.overrideAttrs (old: rec {
+          version = "1.30.0";
+          src = pkgs.fetchFromGitHub {
+            owner = "sqlc-dev";
+            repo = "sqlc";
+            tag = "v${version}";
+            hash = "sha256-ns0FIGu+aOuRFBYHrAqWUiYCwHE5XQqlR3AFKy5lq4E=";
+          };
+          vendorHash = "sha256-jivqXwuq6wbNQFW8BlBZIKBLpIotA2MMR5iywODycpY=";
+        });
+
         # The pinned toolchain — one list, mirrored by the Makefile's install
         # hints. Every tool the fail-closed Makefile requires lives here.
         toolchain = [
           goToolchain
           golangciLint                  # @validate: lint (rebuilt with goToolchain, see above)
-          pkgs.sqlc                     # @codegen: sqlc generate
+          sqlcPinned                    # @codegen: sqlc generate — pinned to v1.30.0 (see above)
           pkgs.oapi-codegen             # @codegen: OpenAPI -> Go stubs
           pkgs.buf                      # @codegen/@validate: proto gen + lint
           pkgs.go-migrate               # @db-migrate: schema migrations (`migrate`) — nixpkgs renamed golang-migrate -> go-migrate
@@ -82,7 +109,7 @@
         ];
       in
       {
-        devShells.default = pkgs.mkShell {
+        default = pkgs.mkShell {
           buildInputs = toolchain ++ optionalTools;
 
           # spectral (@stoplight/spectral-cli) was REMOVED from nixpkgs (it is no
@@ -111,4 +138,5 @@
           '';
         };
       });
+    };
 }
