@@ -179,7 +179,7 @@ func main() {
 	mux := httpserver.NewHealthMux()
 	// Passkey ceremony endpoints. userIDFromRequest returns 501 until the BFF
 	// session middleware lands (docs/DESIGN.md §9) — production-safe default.
-	webauthn.RegisterRoutes(mux, svc, false)
+	webauthn.RegisterRoutes(mux, svc)
 	mux.HandleFunc("POST /users/enroll", enrollHandler(enroller, logger))
 
 	// BFF login endpoints (docs/plans/bff-session-middleware.md §11.2 step 2).
