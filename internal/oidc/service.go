@@ -197,6 +197,93 @@ type AuthorizeResult struct {
 	State       string
 }
 
+// AuthorizeWithUserRequest is the input for AuthorizeWithUser, used by the BFF
+// flow to issue a code after the user has already authenticated via passkey.
+type AuthorizeWithUserRequest struct {
+	ClientID            string
+	RedirectURI         string
+	Scope               string
+	State               string
+	Nonce               string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	// UserID is the authenticated user's internal ID from the BFF session.
+	UserID string
+}
+
+// ValidateAuthorizeRequest validates an /authorize request without running login/consent
+// or issuing a code. This is used by the BFF flow to validate the request before
+// creating a BFF session and redirecting to the login UI.
+//
+// On success, returns the validated request data needed to create a BFF session.
+// On failure, returns an *AuthorizeError whose Channel tells the HTTP layer whether
+// it is safe to redirect (docs/DESIGN.md §11.7).
+func (s *Service) ValidateAuthorizeRequest(ctx context.Context, req AuthorizeRequest) (*ValidatedAuthorize, *AuthorizeError) {
+	var client *Client
+	if c, ok := s.clients.Lookup(ctx, req.ClientID); ok {
+		client = &c
+	}
+	return ValidateAuthorize(req, client)
+}
+
+// AuthorizeWithUser issues a code for a pre-authenticated user (BFF flow).
+// This is called by /authorize/complete after the passkey ceremony has set the
+// user_id in the BFF session. It runs the SessionResolver with the known user_id
+// to derive the PPID and record consent.
+//
+// On any validation failure it returns an *AuthorizeError whose Channel tells
+// the HTTP layer whether it is safe to redirect (docs/DESIGN.md §11.7).
+func (s *Service) AuthorizeWithUser(ctx context.Context, req AuthorizeWithUserRequest) (*AuthorizeResult, *AuthorizeError) {
+	var client *Client
+	if c, ok := s.clients.Lookup(ctx, req.ClientID); ok {
+		client = &c
+	}
+	if client == nil {
+		return nil, &AuthorizeError{
+			Code:        ErrCodeUnauthorizedClient,
+			Description: "unknown client",
+			Channel:     ChannelErrorPage,
+		}
+	}
+
+	// The user is already authenticated — run the session resolver to derive PPID
+	// and record consent. The resolver uses the user_id from the BFF session.
+	subject, _, approved, err := s.sessions.Resolve(ctx, *client, req.Scope)
+	if err != nil {
+		return nil, redirectErr(ErrCodeServerError, "login could not be completed")
+	}
+	if !approved {
+		return nil, redirectErr(ErrCodeAccessDenied, "the user did not grant consent")
+	}
+
+	codeStr, err := s.newCode()
+	if err != nil {
+		return nil, redirectErr(ErrCodeServerError, "could not issue authorization code")
+	}
+
+	code := AuthCode{
+		Code:                codeStr,
+		ClientID:            req.ClientID,
+		RedirectURI:         req.RedirectURI,
+		Scope:               req.Scope,
+		Subject:             subject,
+		UserID:              req.UserID,
+		Nonce:               req.Nonce,
+		CodeChallenge:       req.CodeChallenge,
+		CodeChallengeMethod: req.CodeChallengeMethod,
+		ExpiresAt:           s.now().Add(s.codeTTL),
+	}
+	if err := s.codes.Save(ctx, code); err != nil {
+		return nil, redirectErr(ErrCodeServerError, "could not persist authorization code")
+	}
+
+	return &AuthorizeResult{
+		RedirectURI: req.RedirectURI,
+		Code:        codeStr,
+		State:       req.State,
+	}, nil
+}
+
 // Authorize validates the request, runs the (stubbed) login/consent step, then
 // issues and stores a single-use authorization code. On any validation failure
 // it returns an *AuthorizeError whose Channel tells the HTTP layer whether it is

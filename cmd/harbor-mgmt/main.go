@@ -1,198 +1,315 @@
-// Command harbor-mgmt is Harbor's management / dashboard cold-path binary
-// (docs/DESIGN.md §4.2, §8): dashboard/BFF, enrollment, consent, audit, admin.
-// It shares the tiny HTTP wiring in internal/httpserver with harbor-hot and,
-// unlike the stateless hot path, owns the write-side database connection used
-// for real user enrollment (§11.1).
+// Command harbor-mgmt is the management / dashboard cold-path binary
+// (docs/DESIGN.md §4.1, §8). It serves the dashboard/BFF, enrollment, consent,
+// audit and admin surfaces.
 //
-// This is the binary skeleton: it loads config from the environment, wires the
-// enrollment stack (pgx pool → db.Queries → KEK key provider + cipher →
-// identity.Enroller), and exposes GET /healthz. The enrollment HTTP routes are
-// layered on in later tasks; a missing dependency must never take down liveness,
-// so the binary still answers health checks in the reduced dev-scaffold mode.
+// Today it exposes the liveness probe, the passkey (WebAuthn) registration and
+// assertion ceremonies, and the user-enrollment endpoint (docs/DESIGN.md §11.1).
+// The ceremony store and session store are in-memory scaffolds; the sqlc-backed
+// stores plug in behind the same interfaces once DATABASE_URL is wired.
 package main
 
 import (
 	"context"
-	"fmt"
+	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
+	"github.com/harbor/harbor/internal/bff"
 	"github.com/harbor/harbor/internal/clients"
 	"github.com/harbor/harbor/internal/crypto"
 	"github.com/harbor/harbor/internal/gen/db"
 	"github.com/harbor/harbor/internal/httpserver"
 	"github.com/harbor/harbor/internal/identity"
-	"github.com/harbor/harbor/internal/mgmtapi"
+	"github.com/harbor/harbor/internal/region"
 	"github.com/harbor/harbor/internal/webauthn"
 )
 
-// defaultPort is the cold-path listen port (docs/DESIGN.md §4.2); harbor-hot
-// owns 8080. Override with PORT.
-const defaultPort = "8081"
-
-// config holds the environment-derived settings for harbor-mgmt. DATABASE_URL
-// is read inside clients.ConnectDB, so it is intentionally not duplicated here.
-type config struct {
-	// port is the listen port (PORT, default 8081).
-	port string
-	// kekSecret is the dev-only KEK secret (HARBOR_KEK_SECRET) used by the
-	// software key provider. Enrollment is disabled when it is empty.
-	kekSecret string
-	// webauthnRPID is the Relying Party ID for passkey ceremonies (WEBAUTHN_RP_ID).
-	webauthnRPID string
-	// webauthnRPName is the human-facing RP name (WEBAUTHN_RP_NAME).
-	webauthnRPName string
-	// webauthnOrigin is the allowed origin for ceremonies (WEBAUTHN_ORIGIN).
-	webauthnOrigin string
-}
-
-// loadConfig reads harbor-mgmt's settings from the environment, applying the
-// default port when PORT is unset.
-func loadConfig() config {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = defaultPort
-	}
-	return config{
-		port:           port,
-		kekSecret:      os.Getenv("HARBOR_KEK_SECRET"),
-		webauthnRPID:   os.Getenv("WEBAUTHN_RP_ID"),
-		webauthnRPName: os.Getenv("WEBAUTHN_RP_NAME"),
-		webauthnOrigin: os.Getenv("WEBAUTHN_ORIGIN"),
-	}
-}
+// bffSessionTTL is the lifetime of BFF session records (docs/plans/
+// bff-session-middleware.md — 5 min, matching the PKCE state lifetime).
+const bffSessionTTL = 5 * time.Minute
 
 func main() {
-	// Structured, PII-free logging consistent with docs/DESIGN.md §6.5.
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	// SIGINT/SIGTERM cancels ctx, which httpserver.Run turns into a graceful
-	// shutdown.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, loadConfig(), logger); err != nil {
-		logger.Error("harbor-mgmt exited with error", "error", err)
-		os.Exit(1)
-	}
-}
-
-// run wires the dependencies and serves until ctx is cancelled. It is separate
-// from main so it can return errors (and be exercised by tests) instead of
-// calling os.Exit directly.
-func run(ctx context.Context, cfg config, logger *slog.Logger) error {
-	// Cold-path DB connection (write side): user enrollment persists here.
-	// ConnectDB returns (nil, nil) when DATABASE_URL is unset — the dev-scaffold
-	// path — so the binary still serves /healthz without a database.
+	// DB-backed stores plug in when DATABASE_URL is configured; otherwise we run
+	// on in-memory dev scaffolds (docs/DESIGN.md §10).
 	pool, err := clients.ConnectDB(ctx, logger)
 	if err != nil {
-		return fmt.Errorf("connect database: %w", err)
+		if ctx.Err() != nil {
+			// SIGINT/SIGTERM arrived during startup (before the server bound).
+			// This is a clean shutdown, not a crash — exit 0 so process managers
+			// (systemd, k8s) don't restart the process.
+			logger.Info("startup cancelled by signal — exiting cleanly", "error", err)
+			stop()
+			os.Exit(0)
+		}
+		logger.Error("database connection failed", "error", err)
+		stop()
+		os.Exit(1)
 	}
 	if pool != nil {
 		defer pool.Close()
 	}
 
-	// Wire the enrollment stack when we have both a database and a KEK secret.
-	// Absent either, we run in a reduced dev-scaffold mode that still answers
-	// health checks — a missing dependency must never crash liveness.
-	enrollerImpl, err := buildEnroller(pool, cfg)
+	// BFF session store: Redis for multi-replica safety when REDIS_URL is set,
+	// otherwise an in-memory dev scaffold (docs/plans/bff-session-middleware.md).
+	// A configured-but-unreachable Redis is fatal — mirrors the ConnectDB guard
+	// so a prod misconfiguration surfaces at startup rather than silently
+	// falling back to a store that isn't shared across replicas.
+	redisClient, err := clients.ConnectRedis(ctx, logger)
 	if err != nil {
-		return fmt.Errorf("wire enrollment: %w", err)
+		if ctx.Err() != nil {
+			logger.Info("startup cancelled by signal — exiting cleanly", "error", err)
+			stop()
+			if pool != nil {
+				pool.Close()
+			}
+			os.Exit(0)
+		}
+		logger.Error("redis connection failed", "error", err)
+		stop()
+		if pool != nil {
+			pool.Close()
+		}
+		os.Exit(1) //nolint:gocritic // pool already closed above
 	}
-	if enrollerImpl != nil {
-		logger.Info("enrollment wired (database + KEK present)")
+	if redisClient != nil {
+		defer func() {
+			if err := redisClient.Close(); err != nil {
+				logger.Warn("redis close error", "error", err)
+			}
+		}()
+	}
+
+	var bffStore bff.BFFSessionStore
+	if redisClient != nil {
+		bffStore = bff.NewRedisBFFSessionStore(redisClient, bffSessionTTL)
 	} else {
-		logger.Warn("enrollment unavailable: set DATABASE_URL and HARBOR_KEK_SECRET to enable")
+		logger.Warn("REDIS_URL not set — using in-memory BFF session store (dev only; not shared across replicas)")
+		bffStore = bff.NewInMemoryBFFSessionStore()
 	}
 
-	// Enrollment session store: bridges POST /enroll and the passkey registration
-	// ceremony so the user handle comes from a server-side session, not a client-
-	// supplied IDOR-prone query param (docs/DESIGN.md §9, §11.1).
-	enrollmentSessions := mgmtapi.NewInMemoryEnrollmentSessionStore()
+	port := getenv("PORT", "8081")
 
-	// Health/liveness mux shared with harbor-hot, plus the cold-path routes
-	// (POST /enroll). A nil Enroller (dev-scaffold mode) leaves /enroll wired but
-	// returning 503, so a missing DB/KEK never affects liveness. Assigning
-	// through the interface var keeps it a true nil (not a typed-nil pointer
-	// boxed in a non-nil interface).
-	mux := httpserver.NewHealthMux()
-	var enroller mgmtapi.Enroller
-	if enrollerImpl != nil {
-		enroller = enrollerImpl
-	}
-	mgmtapi.New(enroller, logger).
-		WithEnrollmentSessions(enrollmentSessions).
-		Routes(mux)
+	// Relying Party config (docs/DESIGN.md §3.1). RP ID is the effective domain
+	// (no scheme/port); origins are the fully-qualified sites permitted to run
+	// ceremonies. Defaults target local dev.
+	rpID := getenv("WEBAUTHN_RP_ID", "localhost")
+	rpDisplayName := getenv("WEBAUTHN_RP_DISPLAY_NAME", "Harbor")
+	rpOrigins := splitAndTrim(getenv("WEBAUTHN_RP_ORIGINS", "http://localhost:"+port))
 
-	// WebAuthn passkey registration: wired when RP config is present. The
-	// enrollment session store bridges POST /enroll → register/begin/finish so
-	// the user handle is read from a secure cookie, not a query param.
-	if err := wireWebAuthn(mux, cfg, pool, enrollmentSessions, logger); err != nil {
-		logger.Warn("webauthn unavailable", "error", err)
-	} else if cfg.webauthnRPID != "" {
-		logger.Info("webauthn wired", "rp_id", cfg.webauthnRPID)
-	}
+	// Dev ceremony stores (in-memory). Replace with sqlc-backed implementations
+	// once DATABASE_URL is wired (see docs/plans/user-enrollment.md).
+	store := webauthn.NewInMemoryStore()
+	sessions := webauthn.NewInMemorySessionStore()
 
-	addr := ":" + cfg.port
-	return httpserver.Run(ctx, addr, mux, logger)
-}
-
-// buildEnroller constructs the identity.Enroller from the DB pool and KEK
-// secret, or returns (nil, nil) when either is absent (dev-scaffold mode).
-// Isolating the wiring keeps run() readable and the dependency graph explicit:
-// pool → db.Queries → DBUserPersister, plus the dev KEK provider and cipher.
-func buildEnroller(pool *pgxpool.Pool, cfg config) (*identity.Enroller, error) {
-	if pool == nil || cfg.kekSecret == "" {
-		return nil, nil
-	}
-
-	// NewLocalKeyProvider is DEV-ONLY (software-derived KEK, not HSM-backed) and
-	// logs a loud warning on construction — see docs/DESIGN.md §7.3.
-	keys, err := crypto.NewLocalKeyProvider(cfg.kekSecret)
+	svc, err := webauthn.NewService(webauthn.Config{
+		RPID:          rpID,
+		RPDisplayName: rpDisplayName,
+		RPOrigins:     rpOrigins,
+	}, store, sessions)
 	if err != nil {
-		return nil, fmt.Errorf("key provider: %w", err)
+		logger.Error("failed to configure webauthn service", "error", err)
+		// os.Exit skips deferred functions, so release resources explicitly.
+		// We call stop() first (cancels the context), then pool.Close() —
+		// the opposite of what LIFO defer order would produce (pool first, then
+		// stop). pgxpool handles a pre-cancelled context gracefully. pool may be
+		// nil when DATABASE_URL is not set.
+		stop()
+		if pool != nil {
+			pool.Close()
+		}
+		if redisClient != nil {
+			if err := redisClient.Close(); err != nil {
+				logger.Warn("redis close error on exit", "error", err)
+			}
+		}
+		os.Exit(1)
 	}
 
-	queries := db.New(pool)
-	persister := clients.NewDBUserPersister(queries)
-	return identity.NewEnroller(keys, crypto.NewCipher(), persister), nil
-}
+	// Key provider for enrollment. Production wiring replaces localKeyProvider
+	// with an HSM-backed KeyProvider (docs/DESIGN.md §7.3).
+	kmsSecret := getenv("HARBOR_KMS_SECRET", "")
+	if kmsSecret == "" {
+		// When a real DB is wired, enrollment writes user DEKs sealed under this
+		// KMS secret. Falling back to a hardcoded dev key against a real DB would
+		// let anyone with the source re-derive every enrolled user's pairwise
+		// secret, so it is fatal (mirrors the harbor-hot KEK_SECRET guard).
+		if pool != nil {
+			logger.Error("HARBOR_KMS_SECRET must be set when DATABASE_URL is configured — refusing to enroll with a dev key against a real DB")
+			stop()
+			pool.Close()
+			if redisClient != nil {
+				if err := redisClient.Close(); err != nil {
+					logger.Warn("redis close error on exit", "error", err)
+				}
+			}
+			os.Exit(1)
+		}
+		logger.Warn("HARBOR_KMS_SECRET not set — using insecure dev default; NEVER use in production")
+		kmsSecret = "harbor-dev-kms-secret-DO-NOT-USE-IN-PROD"
+	}
+	kp, err := crypto.NewLocalKeyProvider(kmsSecret)
+	if err != nil {
+		logger.Error("failed to create key provider", "error", err)
+		// os.Exit skips deferred functions, so release resources explicitly.
+		stop()
+		if pool != nil {
+			pool.Close()
+		}
+		if redisClient != nil {
+			if err := redisClient.Close(); err != nil {
+				logger.Warn("redis close error on exit", "error", err)
+			}
+		}
+		os.Exit(1)
+	}
 
-// wireWebAuthn registers the passkey ceremony routes on mux when the RP config
-// is present. It uses an in-memory credential store (dev-scaffold) and bridges
-// the enrollment session store so registration ceremonies read the user handle
-// from the enrollment cookie instead of the insecure query param.
-func wireWebAuthn(mux *http.ServeMux, cfg config, pool *pgxpool.Pool, enrollmentSessions mgmtapi.EnrollmentSessionStore, logger *slog.Logger) error {
-	if cfg.webauthnRPID == "" {
-		return fmt.Errorf("WEBAUTHN_RP_ID not set")
-	}
-	waCfg := webauthn.Config{
-		RPID:          cfg.webauthnRPID,
-		RPDisplayName: cfg.webauthnRPName,
-		RPOrigins:     []string{cfg.webauthnOrigin},
-	}
-	// Credential store: DB-backed with atomic first-passkey activation via the
-	// pool when a database is present; otherwise an in-memory dev-scaffold.
-	var credStore webauthn.Store
+	// PersistUser target: a real sqlc-backed UserPersister when DATABASE_URL is
+	// configured, otherwise the no-op scaffold that drops enrollments (dev only;
+	// docs/DESIGN.md §10).
+	var persister identity.UserPersister
 	if pool != nil {
-		credStore = webauthn.NewDBStore(db.New(pool)).WithPool(pool)
+		persister = clients.NewDBUserPersister(db.New(pool))
 	} else {
-		credStore = webauthn.NewInMemoryStore()
+		logger.Warn("DATABASE_URL not set — enrollments will not be persisted (dev mode)")
+		persister = &noopUserPersister{logger: logger}
 	}
-	sessionStore := webauthn.NewInMemorySessionStore()
-	svc, err := webauthn.NewService(waCfg, credStore, sessionStore)
-	if err != nil {
-		return fmt.Errorf("webauthn service: %w", err)
+	enroller := identity.NewEnroller(kp, crypto.NewCipher(), persister)
+
+	mux := httpserver.NewHealthMux()
+	// Passkey ceremony endpoints. userIDFromRequest returns 501 until the BFF
+	// session middleware lands (docs/DESIGN.md §9) — production-safe default.
+	webauthn.RegisterRoutes(mux, svc)
+	mux.HandleFunc("POST /users/enroll", enrollHandler(enroller, logger))
+
+	// BFF login endpoints (docs/plans/bff-session-middleware.md §11.2 step 2).
+	// /login initiates the passkey assertion bound to a BFF session; /login/complete
+	// finishes it, writes the authenticated user_id to the session, and redirects
+	// back to harbor-hot/authorize/complete.
+	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(svc), devUserResolver{})
+	mux.HandleFunc("GET /login", loginHandler.BeginLogin)
+	mux.HandleFunc("POST /login/complete", loginHandler.FinishLogin)
+
+	// Wrap the mux with the BFF middleware so downstream handlers can read the
+	// authenticated user from the BFF session context (via bff.UserIDFromContext).
+	// The middleware is non-rejecting: it only populates context when a valid
+	// authenticated session cookie is present.
+	handler := bff.Middleware(bffStore)(mux)
+
+	logger.Info("starting harbor-mgmt", "port", port, "rp_id", rpID)
+	if err := httpserver.Run(ctx, ":"+port, handler, logger); err != nil {
+		if ctx.Err() != nil {
+			// Signal arrived while the server was running — httpserver.Run returned
+			// a non-nil error coincident with context cancellation. Treat as a clean
+			// shutdown so process managers don't restart the process.
+			logger.Info("server stopped by signal — exiting cleanly", "error", err)
+			stop()
+			if pool != nil {
+				pool.Close()
+			}
+			if redisClient != nil {
+				if err := redisClient.Close(); err != nil {
+					logger.Warn("redis close error on exit", "error", err)
+				}
+			}
+			os.Exit(0)
+		}
+		logger.Error("harbor-mgmt exited with error", "error", err)
+		// os.Exit skips deferred functions, so release resources explicitly.
+		stop()
+		if pool != nil {
+			pool.Close()
+		}
+		if redisClient != nil {
+			if err := redisClient.Close(); err != nil {
+				logger.Warn("redis close error on exit", "error", err)
+			}
+		}
+		os.Exit(1)
 	}
-	// The enrollment session store is the only way to resolve a ceremony's user
-	// handle — there is no client-supplied user_id (IDOR) path (docs/DESIGN.md §9).
-	handler := webauthn.NewHandler(svc).
-		WithEnrollmentSessions(enrollmentSessions)
-	handler.RegisterRoutes(mux)
+}
+
+// enrollHandler returns a handler for POST /users/enroll. It reads a JSON body
+// with a `region` field, calls the Enroller, and returns the new user ID.
+func enrollHandler(e *identity.Enroller, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Region string `json:"region"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Region == "" {
+			writeErrorJSON(w, http.StatusBadRequest, "invalid_request", "region is required")
+			return
+		}
+		res, err := e.Enroll(r.Context(), req.Region)
+		if err != nil {
+			if errors.Is(err, region.ErrUnknownRegion) {
+				writeErrorJSON(w, http.StatusBadRequest, "invalid_region", "unknown region")
+				return
+			}
+			logger.Error("enrollment failed", "error", err)
+			writeErrorJSON(w, http.StatusInternalServerError, "enrollment_failed", "enrollment failed")
+			return
+		}
+		writeJSON(w, http.StatusCreated, res)
+	}
+}
+
+// noopUserPersister drops enrollments. Replace with a sqlc-backed
+// implementation once DATABASE_URL is wired (docs/plans/user-enrollment.md).
+type noopUserPersister struct {
+	logger *slog.Logger
+}
+
+func (p *noopUserPersister) PersistUser(_ context.Context, r identity.UserRecord) error {
+	p.logger.Warn("enrollment scaffold: PersistUser is a no-op (DATABASE_URL not wired)",
+		"region", r.Region)
 	return nil
+}
+
+// --- JSON helpers -----------------------------------------------------------
+
+type jsonError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeErrorJSON(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, jsonError{Code: code, Message: message})
+}
+
+// --- env helpers ------------------------------------------------------------
+
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// splitAndTrim splits a comma-separated list and drops empty/whitespace entries.
+func splitAndTrim(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

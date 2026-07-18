@@ -10,11 +10,19 @@ package oidcapi
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
+	"time"
 
+	"github.com/harbor/harbor/internal/bff"
 	"github.com/harbor/harbor/internal/crypto"
 	"github.com/harbor/harbor/internal/gen/openapi"
 	"github.com/harbor/harbor/internal/oidc"
 )
+
+// DefaultBFFSessionTTL is the default lifetime of BFF session records in the
+// oidcapi Server (docs/plans/bff-session-middleware.md — 5 min, matching the
+// PKCE state lifetime).
+const DefaultBFFSessionTTL = 5 * time.Minute
 
 // Server implements openapi.ServerInterface for the harbor-hot binary.
 type Server struct {
@@ -24,7 +32,10 @@ type Server struct {
 	// signers are the public signing keys used to verify inbound access tokens
 	// on the /userinfo endpoint. The first is the active signer; additional
 	// entries support rotation overlap (§7.3).
-	signers []crypto.Signer
+	signers       []crypto.Signer
+	bffSessions   bff.BFFSessionStore
+	loginURL      *url.URL // parsed at construction; nil if BFF not configured
+	bffSessionTTL time.Duration
 }
 
 // Config holds the settings needed to serve the OIDC surface.
@@ -39,6 +50,14 @@ type Config struct {
 	// the active signer; additional entries support rotation overlap (§7.3).
 	// May be empty for discovery-only tests (served as {"keys":[]}).
 	Signers []crypto.Signer
+	// BFFSessions is the BFF session store. When non-nil, /authorize creates a
+	// BFF session and redirects to LoginURL rather than issuing a code directly.
+	BFFSessions bff.BFFSessionStore
+	// LoginURL is the URL of the login UI (e.g. "https://mgmt.harbor.id/login").
+	// Required when BFFSessions is non-nil.
+	LoginURL string
+	// BFFSessionTTL overrides DefaultBFFSessionTTL when non-zero.
+	BFFSessionTTL time.Duration
 }
 
 // New returns a Server that serves the generated OpenAPI contract. The JWKS
@@ -50,7 +69,29 @@ func New(cfg Config) *Server {
 		// rather than panic or 500 if it somehow does.
 		jwksBytes = []byte(`{"keys":[]}`)
 	}
-	return &Server{issuer: cfg.Issuer, svc: cfg.Service, jwksBytes: jwksBytes, signers: cfg.Signers}
+	ttl := cfg.BFFSessionTTL
+	if ttl == 0 {
+		ttl = DefaultBFFSessionTTL
+	}
+	var parsedLoginURL *url.URL
+	if cfg.LoginURL != "" {
+		var parseErr error
+		parsedLoginURL, parseErr = url.Parse(cfg.LoginURL)
+		if parseErr != nil {
+			// Malformed LoginURL → treat as unconfigured; /authorize falls back
+			// to the legacy immediate-code flow (docs/DESIGN.md §9).
+			parsedLoginURL = nil
+		}
+	}
+	return &Server{
+		issuer:        cfg.Issuer,
+		svc:           cfg.Service,
+		jwksBytes:     jwksBytes,
+		signers:       cfg.Signers,
+		bffSessions:   cfg.BFFSessions,
+		loginURL:      parsedLoginURL,
+		bffSessionTTL: ttl,
+	}
 }
 
 // Compile-time proof that Server satisfies the generated contract. If the spec
