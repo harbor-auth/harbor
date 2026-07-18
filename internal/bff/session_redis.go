@@ -75,8 +75,8 @@ func (s *RedisBFFSessionStore) Get(ctx context.Context, requestID string) (BFFSe
 	// Double-check ExpiresAt in case the record was created with a shorter TTL
 	// than the Redis key TTL (defensive; should not happen in normal operation).
 	if time.Now().After(record.ExpiresAt) {
-		// Delete the stale key and return expired.
-		_ = s.client.Del(ctx, sessionKey(requestID)).Err()
+		// Delete the stale key (best-effort — the key expires via Redis TTL anyway).
+		_ = s.client.Del(ctx, sessionKey(requestID)).Err() //nolint:errcheck
 		return BFFSessionRecord{}, ErrBFFSessionExpired
 	}
 

@@ -245,7 +245,7 @@ func (s *Server) GetAuthorizeComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Delete BFF session (one-time use)
-	_ = s.bffSessions.Delete(r.Context(), requestID)
+	_ = s.bffSessions.Delete(r.Context(), requestID) //nolint:errcheck // best-effort: session expires via TTL anyway
 
 	// Clear BFF cookie
 	bff.ClearBFFCookie(w)

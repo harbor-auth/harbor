@@ -80,10 +80,14 @@ func main() {
 		if pool != nil {
 			pool.Close()
 		}
-		os.Exit(1)
+		os.Exit(1) //nolint:gocritic // pool already closed above
 	}
 	if redisClient != nil {
-		defer redisClient.Close()
+		defer func() {
+			if err := redisClient.Close(); err != nil {
+				logger.Warn("redis close error", "error", err)
+			}
+		}()
 	}
 
 	var bffStore bff.BFFSessionStore
@@ -125,7 +129,9 @@ func main() {
 			pool.Close()
 		}
 		if redisClient != nil {
-			redisClient.Close()
+			if err := redisClient.Close(); err != nil {
+				logger.Warn("redis close error on exit", "error", err)
+			}
 		}
 		os.Exit(1)
 	}
@@ -143,7 +149,9 @@ func main() {
 			stop()
 			pool.Close()
 			if redisClient != nil {
-				redisClient.Close()
+				if err := redisClient.Close(); err != nil {
+					logger.Warn("redis close error on exit", "error", err)
+				}
 			}
 			os.Exit(1)
 		}
@@ -159,7 +167,9 @@ func main() {
 			pool.Close()
 		}
 		if redisClient != nil {
-			redisClient.Close()
+			if err := redisClient.Close(); err != nil {
+				logger.Warn("redis close error on exit", "error", err)
+			}
 		}
 		os.Exit(1)
 	}
@@ -194,7 +204,7 @@ func main() {
 	// authenticated user from the BFF session context (via bff.UserIDFromContext).
 	// The middleware is non-rejecting: it only populates context when a valid
 	// authenticated session cookie is present.
-	var handler http.Handler = bff.Middleware(bffStore)(mux)
+	handler := bff.Middleware(bffStore)(mux)
 
 	logger.Info("starting harbor-mgmt", "port", port, "rp_id", rpID)
 	if err := httpserver.Run(ctx, ":"+port, handler, logger); err != nil {
@@ -208,7 +218,9 @@ func main() {
 				pool.Close()
 			}
 			if redisClient != nil {
-				redisClient.Close()
+				if err := redisClient.Close(); err != nil {
+					logger.Warn("redis close error on exit", "error", err)
+				}
 			}
 			os.Exit(0)
 		}
@@ -219,7 +231,9 @@ func main() {
 			pool.Close()
 		}
 		if redisClient != nil {
-			redisClient.Close()
+			if err := redisClient.Close(); err != nil {
+				logger.Warn("redis close error on exit", "error", err)
+			}
 		}
 		os.Exit(1)
 	}

@@ -218,9 +218,9 @@ func TestInMemoryBFFSessionStore_ConcurrentAccess(t *testing.T) {
 			for j := 0; j < numOpsPerGoroutine; j++ {
 				// Mix of Get and SetUser operations
 				if j%2 == 0 {
-					_, _ = store.Get(ctx, reqID)
+					_, _ = store.Get(ctx, reqID) //nolint:errcheck
 				} else {
-					_ = store.SetUser(ctx, reqID, "user-"+string(rune('0'+j%10)))
+					_ = store.SetUser(ctx, reqID, "user-"+string(rune('0'+j%10))) //nolint:errcheck
 				}
 			}
 		}(i)
