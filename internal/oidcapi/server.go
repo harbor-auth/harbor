@@ -75,7 +75,13 @@ func New(cfg Config) *Server {
 	}
 	var parsedLoginURL *url.URL
 	if cfg.LoginURL != "" {
-		parsedLoginURL, _ = url.Parse(cfg.LoginURL)
+		var parseErr error
+		parsedLoginURL, parseErr = url.Parse(cfg.LoginURL)
+		if parseErr != nil {
+			// Malformed LoginURL → treat as unconfigured; /authorize falls back
+			// to the legacy immediate-code flow (docs/DESIGN.md §9).
+			parsedLoginURL = nil
+		}
 	}
 	return &Server{
 		issuer:        cfg.Issuer,
