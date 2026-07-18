@@ -3,7 +3,9 @@ package oidcapi
 import (
 	"net/http"
 	"net/url"
+	"time"
 
+	"github.com/harbor/harbor/internal/bff"
 	"github.com/harbor/harbor/internal/gen/openapi"
 	"github.com/harbor/harbor/internal/oidc"
 )
@@ -18,6 +20,84 @@ import (
 func (s *Server) GetAuthorize(w http.ResponseWriter, r *http.Request, params openapi.GetAuthorizeParams) {
 	req := authorizeRequestFromParams(params)
 
+	// BFF flow: validate, create BFF session, redirect to login
+	if s.bffSessions != nil {
+		s.authorizeWithBFFSession(w, r, req)
+		return
+	}
+
+	// Legacy flow: immediate code issuance via session resolver
+	s.authorizeLegacy(w, r, req)
+}
+
+// authorizeWithBFFSession implements the BFF-backed authorize flow:
+// 1. Validate the OIDC request
+// 2. Generate a request_id (256-bit CSPRNG)
+// 3. Create a BFF session record in the store
+// 4. Redirect to loginURL?request_id=<id>
+func (s *Server) authorizeWithBFFSession(w http.ResponseWriter, r *http.Request, req oidc.AuthorizeRequest) {
+	validated, aerr := s.svc.ValidateAuthorizeRequest(r.Context(), req)
+	if aerr != nil {
+		if aerr.Channel == oidc.ChannelErrorPage {
+			writeAuthorizeErrorPage(w)
+			return
+		}
+		q := url.Values{}
+		q.Set("error", aerr.Code)
+		q.Set("error_description", aerr.Description)
+		if req.State != "" {
+			q.Set("state", req.State)
+		}
+		redirectWithQuery(w, r, req.RedirectURI, q)
+		return
+	}
+
+	// Generate a 256-bit CSPRNG request ID
+	requestID, err := bff.NewRequestID()
+	if err != nil {
+		// CSPRNG failure is catastrophic — fail closed with error page
+		writeAuthorizeErrorPage(w)
+		return
+	}
+
+	// Create BFF session record with all OIDC parameters needed for code issuance
+	record := bff.BFFSessionRecord{
+		RequestID:           requestID,
+		State:               validated.State,
+		ClientID:            validated.Client.ID,
+		RedirectURI:         validated.RedirectURI,
+		Scope:               validated.Scope,
+		Nonce:               validated.Nonce,
+		CodeChallenge:       validated.CodeChallenge,
+		CodeChallengeMethod: validated.CodeChallengeMethod,
+		// UserID is empty until passkey ceremony completes
+		ExpiresAt: time.Now().Add(s.bffSessionTTL),
+	}
+	if err := s.bffSessions.Create(r.Context(), record); err != nil {
+		// Session creation failure — redirect with server_error
+		q := url.Values{}
+		q.Set("error", oidc.ErrCodeServerError)
+		q.Set("error_description", "could not create session")
+		if req.State != "" {
+			q.Set("state", req.State)
+		}
+		redirectWithQuery(w, r, validated.RedirectURI, q)
+		return
+	}
+
+	// Redirect to login UI with request_id
+	// Clone the pre-parsed loginURL to avoid mutating the shared instance
+	loginRedirect := *s.loginURL
+	q := loginRedirect.Query()
+	q.Set("request_id", requestID)
+	loginRedirect.RawQuery = q.Encode()
+	http.Redirect(w, r, loginRedirect.String(), http.StatusFound)
+}
+
+// authorizeLegacy implements the original authorize flow that immediately
+// issues a code via the session resolver. This is used when BFF sessions
+// are not configured.
+func (s *Server) authorizeLegacy(w http.ResponseWriter, r *http.Request, req oidc.AuthorizeRequest) {
 	result, aerr := s.svc.Authorize(r.Context(), req)
 	if aerr != nil {
 		if aerr.Channel == oidc.ChannelErrorPage {
@@ -106,4 +186,75 @@ func writeAuthorizeErrorPage(w http.ResponseWriter) {
 		"<body><h1>Authorization error</h1>" +
 		"<p>This authorization request is invalid and cannot be completed. " +
 		"Please return to the application and try again.</p></body></html>"))
+}
+
+// GetAuthorizeComplete resumes the OIDC flow after passkey authentication.
+// It is called after /login/complete redirects here with request_id.
+//
+// Flow:
+//  1. Read request_id from query param
+//  2. Look up BFF session (must have user_id set from passkey auth)
+//  3. Call oidc.Service.AuthorizeWithUser to derive PPID and issue code
+//  4. Delete BFF session (one-time use)
+//  5. Clear BFF cookie
+//  6. Redirect to RP with auth code
+func (s *Server) GetAuthorizeComplete(w http.ResponseWriter, r *http.Request) {
+	requestID := r.URL.Query().Get("request_id")
+	if requestID == "" {
+		writeAuthorizeErrorPage(w)
+		return
+	}
+
+	// Look up BFF session
+	session, err := s.bffSessions.Get(r.Context(), requestID)
+	if err != nil {
+		// Session not found or expired — show error page (no safe redirect)
+		writeAuthorizeErrorPage(w)
+		return
+	}
+
+	// Verify user has authenticated (UserID must be set by /login/complete)
+	if session.UserID == "" {
+		writeAuthorizeErrorPage(w)
+		return
+	} // Issue the authorization code using the authenticated user_id
+	result, aerr := s.svc.AuthorizeWithUser(r.Context(), oidc.AuthorizeWithUserRequest{
+		ClientID:            session.ClientID,
+		RedirectURI:         session.RedirectURI,
+		Scope:               session.Scope,
+		State:               session.State,
+		Nonce:               session.Nonce,
+		CodeChallenge:       session.CodeChallenge,
+		CodeChallengeMethod: session.CodeChallengeMethod,
+		UserID:              session.UserID,
+	})
+	if aerr != nil {
+		if aerr.Channel == oidc.ChannelErrorPage {
+			writeAuthorizeErrorPage(w)
+			return
+		}
+		// Redirect-channel error: send back to RP
+		q := url.Values{}
+		q.Set("error", aerr.Code)
+		q.Set("error_description", aerr.Description)
+		if session.State != "" {
+			q.Set("state", session.State)
+		}
+		redirectWithQuery(w, r, session.RedirectURI, q)
+		return
+	}
+
+	// Delete BFF session (one-time use)
+	_ = s.bffSessions.Delete(r.Context(), requestID)
+
+	// Clear BFF cookie
+	bff.ClearBFFCookie(w)
+
+	// Redirect to RP with auth code
+	q := url.Values{}
+	q.Set("code", result.Code)
+	if result.State != "" {
+		q.Set("state", result.State)
+	}
+	redirectWithQuery(w, r, result.RedirectURI, q)
 }

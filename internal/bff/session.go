@@ -40,6 +40,18 @@ type BFFSessionRecord struct {
 	// RedirectURI is the validated redirect_uri from the /authorize request.
 	RedirectURI string
 
+	// Scope is the validated scope from the /authorize request.
+	Scope string
+
+	// Nonce is the OIDC nonce from the /authorize request for ID token replay protection.
+	Nonce string
+
+	// CodeChallenge is the PKCE code_challenge from the /authorize request.
+	CodeChallenge string
+
+	// CodeChallengeMethod is the PKCE code_challenge_method (always S256).
+	CodeChallengeMethod string
+
 	// UserID is the authenticated user's internal UUID, populated by
 	// FinishAssertion after a successful passkey ceremony. Empty until the
 	// user authenticates.
