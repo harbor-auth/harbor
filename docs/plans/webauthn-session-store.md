@@ -1,6 +1,6 @@
 ---
 title: WebAuthn session persistence (Redis-backed, multi-replica-safe)
-status: draft
+status: approved
 design_refs: [§4.1, §4.4, §9, §11.1]
 targets: [internal/webauthn/, cmd/harbor-mgmt/]
 promoted_to: null

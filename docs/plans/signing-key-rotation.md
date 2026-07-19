@@ -1,6 +1,6 @@
 ---
 title: Signing key rotation (JWKS kid lifecycle — §7.3)
-status: draft
+status: approved
 design_refs: [§7.3, §3.5.4, §3.3]
 targets: [internal/crypto/, cmd/harbor-hot/, cmd/harbor-mgmt/, api/openapi/harbor.yaml]
 promoted_to: null

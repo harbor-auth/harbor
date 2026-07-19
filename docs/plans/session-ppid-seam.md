@@ -1,6 +1,6 @@
 ---
 title: Session seam — WebAuthn login → PPID → token subject
-status: draft
+status: approved
 design_refs: [§3.2, §11.2]
 targets: [internal/oidc/, internal/identity/, internal/webauthn/]
 promoted_to: null
