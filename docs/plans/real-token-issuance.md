@@ -1,9 +1,9 @@
 ---
 title: Real token issuance (crypto.Signer + JWKS)
-status: in-progress
+status: completed
 design_refs: [§3.3, §3.4, §7.3]
 targets: [internal/crypto/, internal/oidc/, internal/oidcapi/, api/openapi/harbor.yaml]
-promoted_to: null
+promoted_to: docs/features/real-token-issuance.md
 openspec: changes/real-token-issuance
 created: 2026-07-10
 ---
@@ -59,16 +59,16 @@ token claims minimal per §3.3's privacy note. Does **not** change `DESIGN.md`.
 
 ## Implementation checklist
 
-- [ ] `crypto.Signer` (ES256) + signing `KeyProvider` (dev in-proc key; HSM seam documented).
-- [ ] `JWTIssuer` implements `TokenIssuer`; minimal claims; `kid` in header; short TTLs (§3.5).
-- [ ] JWKS document builder from public key(s); stable `kid`.
-- [ ] Add `GET /jwks.json` to `api/openapi/harbor.yaml`; regenerate; implement handler in `internal/oidcapi`.
-- [ ] Update `/.well-known/openid-configuration` to set `"jwks_uri": "<issuer>/jwks.json"` so RPs using auto-discovery find the JWKS endpoint (§3.4).
-- [ ] Wire `JWTIssuer` into `cmd/harbor-hot/main.go` (replace `NewPlaceholderIssuer`).
-- [ ] Tests: sign→verify round-trip; issued JWT verifies against the served JWKS; `kid` matches; expired/tampered tokens rejected; no PII in claims (only consented + PPID `sub`).
-- [ ] Frozen golden vectors for a fixed key (byte-equality; never regenerated).
-- [ ] Author & verify paired OpenSpec change: `openspec validate real-token-issuance --strict`
-- [ ] Reconcile & promote: `@plan promote real-token-issuance`
+- [x] `crypto.Signer` (ES256) + signing `KeyProvider` (dev in-proc key; HSM seam documented). — `crypto.LocalSigner` (P-256 in-process, DEV-ONLY warning), `Signer` interface with the HSM as the swap-in prod implementation.
+- [x] `JWTIssuer` implements `TokenIssuer`; minimal claims; `kid` in header; short TTLs (§3.5). — `internal/oidc/jwt_issuer.go`; RFC 7638 JWK-thumbprint `kid`; 10-min ID/access TTLs.
+- [x] JWKS document builder from public key(s); stable `kid`. — `oidc.BuildJWKS` returns the spec-generated `openapi.JWKSet`; slice form supports rotation overlap.
+- [x] Add `GET /jwks.json` to `api/openapi/harbor.yaml`; regenerate; implement handler in `internal/oidcapi`. — `Server.GetJwks`, precomputed + cached (`Cache-Control: public, max-age=300`).
+- [x] Update `/.well-known/openid-configuration` to set `"jwks_uri": "<issuer>/jwks.json"` so RPs using auto-discovery find the JWKS endpoint (§3.4). — set in `internal/oidcapi/discovery.go`.
+- [x] Wire `JWTIssuer` into `cmd/harbor-hot/main.go` (replace `NewPlaceholderIssuer`). — wires `oidc.NewJWTIssuer` over `crypto.NewLocalSigner`; the same signer feeds the JWKS endpoint.
+- [x] Tests: sign→verify round-trip; issued JWT verifies against the served JWKS; `kid` matches; expired/tampered tokens rejected; no PII in claims (only consented + PPID `sub`).
+- [x] Frozen golden vectors for a fixed key (byte-equality; never regenerated). — `internal/oidc/testdata/jwt_vectors.json` pins verification of a fixed signed token (not re-signing, since ES256 is non-deterministic).
+- [x] Author & verify paired OpenSpec change: `openspec validate real-token-issuance --strict`
+- [x] Reconcile & promote: `@plan promote real-token-issuance` — promoted to `docs/features/real-token-issuance.md`.
 
 ## Risks & open questions
 
