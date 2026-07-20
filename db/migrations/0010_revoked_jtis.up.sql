@@ -1,4 +1,4 @@
--- 0006_revoked_jtis (up) — emergency JWT revocation via bloom filter (DESIGN §3.5).
+-- 0010_revoked_jtis (up) — emergency JWT revocation via bloom filter (DESIGN §3.5).
 --
 -- This table is the persistent source of truth for revoked JTIs. The in-process
 -- bloom filter (checked on every token verification) is rehydrated from this
