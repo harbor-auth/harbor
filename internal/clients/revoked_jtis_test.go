@@ -202,8 +202,12 @@ func TestDBRevokedJTIStore_ListActive(t *testing.T) {
 
 	// Insert some active JTIs (not expired)
 	activeExpiry := time.Now().Add(15 * time.Minute)
-	_, _ = s.Insert(ctx, "jti-active-1", "emergency_kill", activeExpiry)
-	_, _ = s.Insert(ctx, "jti-active-2", "key_rotation", activeExpiry)
+	if _, err := s.Insert(ctx, "jti-active-1", "emergency_kill", activeExpiry); err != nil {
+		t.Fatalf("Insert jti-active-1: %v", err)
+	}
+	if _, err := s.Insert(ctx, "jti-active-2", "key_rotation", activeExpiry); err != nil {
+		t.Fatalf("Insert jti-active-2: %v", err)
+	}
 
 	// Insert an expired JTI
 	expiredTime := time.Now().Add(-1 * time.Hour)
@@ -262,7 +266,9 @@ func TestDBRevokedJTIStore_GCExpired(t *testing.T) {
 
 	// Insert an active JTI (not expired)
 	activeExpiry := time.Now().Add(15 * time.Minute)
-	_, _ = s.Insert(ctx, "jti-keep", "emergency_kill", activeExpiry)
+	if _, err := s.Insert(ctx, "jti-keep", "emergency_kill", activeExpiry); err != nil {
+		t.Fatalf("Insert jti-keep: %v", err)
+	}
 
 	// Insert expired JTIs directly into the fake
 	expiredTime := time.Now().Add(-1 * time.Hour)

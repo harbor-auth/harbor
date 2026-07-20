@@ -120,7 +120,7 @@ func (v *JWTVerifier) Verify(ctx context.Context, token string) (*VerifiedClaims
 	// Step 1: Parse the JWT
 	header, payload, sig, err := parseCompactJWT(token)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrTokenInvalid, err)
+		return nil, fmt.Errorf("%w: %w", ErrTokenInvalid, err)
 	}
 
 	// Verify header algorithm
@@ -148,7 +148,7 @@ func (v *JWTVerifier) Verify(ctx context.Context, token string) (*VerifiedClaims
 	// Parse claims (support both ID tokens and access tokens)
 	claims, err := v.parseClaims(payload)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrTokenInvalid, err)
+		return nil, fmt.Errorf("%w: %w", ErrTokenInvalid, err)
 	}
 
 	// Step 3: Check expiry
@@ -163,7 +163,7 @@ func (v *JWTVerifier) Verify(ctx context.Context, token string) (*VerifiedClaims
 			revoked, err := v.confirmRevocation(ctx, claims.JTI)
 			if err != nil {
 				// DB error - fail closed (treat as revoked for safety)
-				return nil, fmt.Errorf("%w: revocation check failed: %v", ErrTokenRevoked, err)
+				return nil, fmt.Errorf("%w: revocation check failed: %w", ErrTokenRevoked, err)
 			}
 			if revoked {
 				return nil, ErrTokenRevoked

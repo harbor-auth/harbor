@@ -120,11 +120,14 @@ func TestPostAdminRevokeJwt_Success(t *testing.T) {
 	}
 
 	expiresAt := time.Now().Add(15 * time.Minute)
-	body, _ := json.Marshal(openapi.RevokeJwtRequest{
+	body, err := json.Marshal(openapi.RevokeJwtRequest{
 		Jti:       "revoked-jti-123",
 		Reason:    openapi.EmergencyKill,
 		ExpiresAt: expiresAt,
 	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/revoke-jwt", bytes.NewBuffer(body))
 	w := httptest.NewRecorder()
@@ -177,11 +180,14 @@ func TestPostAdminRevokeJwt_FilterAddedEvenWithoutPublisher(t *testing.T) {
 		// publisher is nil — single-replica dev mode
 	}
 
-	body, _ := json.Marshal(openapi.RevokeJwtRequest{
+	body, err := json.Marshal(openapi.RevokeJwtRequest{
 		Jti:       "local-only-jti",
 		Reason:    openapi.UserRequest,
 		ExpiresAt: time.Now().Add(time.Hour),
 	})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
 
 	req := httptest.NewRequest(http.MethodPost, "/admin/revoke-jwt", bytes.NewBuffer(body))
 	w := httptest.NewRecorder()
