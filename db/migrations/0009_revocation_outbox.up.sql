@@ -1,4 +1,4 @@
--- 0006_revocation_outbox (up) — durable outbox for theft-signal revocation
+-- 0009_revocation_outbox (up) — durable outbox for theft-signal revocation
 -- (DESIGN §3.5, §3.5.2, §10).
 --
 -- Both signalRefreshReuse() and signalCodeReuse() in internal/oidc/service.go
