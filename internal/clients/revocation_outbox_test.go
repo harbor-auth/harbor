@@ -91,6 +91,9 @@ func (m *mockSessionStore) RevokeSession(ctx context.Context, id string) error {
 func (m *mockSessionStore) RotateSession(ctx context.Context, oldID string, newSession oidc.RefreshSession) error {
 	return nil
 }
+func (m *mockSessionStore) RevokeSessionsByGrant(ctx context.Context, grantID string) error {
+	return nil
+}
 
 // Compile-time proof that mockSessionStore implements oidc.SessionStore.
 var _ oidc.SessionStore = (*mockSessionStore)(nil)
