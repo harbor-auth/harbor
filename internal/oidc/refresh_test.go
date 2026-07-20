@@ -656,3 +656,130 @@ func TestRefreshWrongClientRejected(t *testing.T) {
 		t.Fatalf("wrong client: want invalid_grant, got %q", terr.Code)
 	}
 }
+
+// TestRefreshTokenGrantIDPropagated verifies that the RefreshSession created
+// by issueRefreshToken (called from Token during code exchange) carries the
+// grant.ID, and that RotateSession preserves it through rotation — enabling
+// per-grant revocation (§11.3). An empty GrantID would break grant-scoped revocation.
+//
+//harbor:invariant INV-REFRESH-GRANT-ID-PROPAGATED
+func TestRefreshTokenGrantIDPropagated(t *testing.T) {
+	const wantRegion = "eu-west-1"
+
+	// Build stores.
+	sessionStore := NewInMemorySessionStore()
+	grantStore := NewInMemoryGrantStore()
+
+	// Build a PPIDSessionResolver wired to the same grantStore so the grant
+	// created by Resolve is visible to issueRefreshToken's FindGrant call.
+	secretLoader := NewInMemorySecretLoader()
+	secretLoader.Put(testRefreshUserID, UserSecret{
+		Region: wantRegion,
+		Secret: []byte("32-byte-test-secret-for-ppid-der"),
+	})
+	resolver := NewPPIDSessionResolver(PPIDSessionResolverConfig{
+		Auth:   NewFixedAuthSource(testRefreshUserID),
+		Loader: secretLoader,
+		Grants: grantStore,
+	})
+
+	clientReg := NewInMemoryClientRegistry()
+	clientReg.Put(Client{
+		ID:            testRefreshClientID,
+		SectorID:      "test.example.com",
+		RedirectURIs:  []string{"http://localhost/cb"},
+		ScopesAllowed: []string{"openid", "offline_access"},
+	})
+
+	svc := NewService(ServiceConfig{
+		Issuer:       "https://test.harbor.example",
+		Clients:      clientReg,
+		Codes:        NewInMemoryAuthCodeStore(),
+		Tokens:       NewPlaceholderIssuer(),
+		Sessions:     resolver,
+		SessionStore: sessionStore,
+		Grants:       grantStore,
+	})
+
+	// Step 1: Authorize to get a code (also creates the grant via PPIDSessionResolver).
+	result, aerr := svc.Authorize(context.Background(), AuthorizeRequest{
+		ClientID:            testRefreshClientID,
+		RedirectURI:         "http://localhost/cb",
+		ResponseType:        "code",
+		Scope:               "openid offline_access",
+		CodeChallenge:       "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
+		CodeChallengeMethod: "S256",
+		State:               "st",
+	})
+	if aerr != nil {
+		t.Fatalf("Authorize: %v", aerr)
+	}
+
+	// Step 2: Exchange the code for tokens — issueRefreshToken is called here.
+	tokens, terr := svc.Token(context.Background(), TokenRequest{
+		GrantType:    grantTypeAuthorizationCode,
+		Code:         result.Code,
+		RedirectURI:  "http://localhost/cb",
+		ClientID:     testRefreshClientID,
+		CodeVerifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
+	})
+	if terr != nil {
+		t.Fatalf("Token: %v", terr)
+	}
+	if tokens.RefreshToken == "" {
+		t.Fatal("expected a refresh token to be issued")
+	}
+
+	// Step 3: Decode the refresh token and look up the session to verify GrantID.
+	plaintext, err := decodeRefreshToken(tokens.RefreshToken)
+	if err != nil {
+		t.Fatalf("decodeRefreshToken: %v", err)
+	}
+	hash := hashRefreshToken(plaintext)
+	session, err := sessionStore.GetSessionByTokenHash(context.Background(), hash)
+	if err != nil {
+		t.Fatalf("GetSessionByTokenHash: %v", err)
+	}
+
+	// GrantID must be non-empty and match the grant created by PPIDSessionResolver.
+	if session.GrantID == "" {
+		t.Fatal("session.GrantID is empty — issueRefreshToken did not populate GrantID from grant")
+	}
+
+	// Verify the GrantID matches the actual grant in the store.
+	grant, found, err := grantStore.FindGrant(context.Background(), testRefreshUserID, testRefreshClientID)
+	if err != nil {
+		t.Fatalf("FindGrant: %v", err)
+	}
+	if !found {
+		t.Fatal("grant should exist after Authorize")
+	}
+	if session.GrantID != grant.ID {
+		t.Fatalf("session.GrantID = %q, want %q (grant.ID)", session.GrantID, grant.ID)
+	}
+
+	// Step 4: Rotate the refresh token and verify GrantID is preserved.
+	tokens2, terr2 := svc.Refresh(context.Background(), TokenRequest{
+		GrantType:    grantTypeRefreshToken,
+		RefreshToken: tokens.RefreshToken,
+		ClientID:     testRefreshClientID,
+	})
+	if terr2 != nil {
+		t.Fatalf("Refresh (rotation): %v", terr2)
+	}
+	if tokens2.RefreshToken == "" {
+		t.Fatal("expected a new refresh token after rotation")
+	}
+	plaintext2, err2 := decodeRefreshToken(tokens2.RefreshToken)
+	if err2 != nil {
+		t.Fatalf("decodeRefreshToken (rotated): %v", err2)
+	}
+	hash2 := hashRefreshToken(plaintext2)
+	session2, err2 := sessionStore.GetSessionByTokenHash(context.Background(), hash2)
+	if err2 != nil {
+		t.Fatalf("GetSessionByTokenHash (rotated): %v", err2)
+	}
+	if session2.GrantID != grant.ID {
+		t.Fatalf("rotated session.GrantID = %q, want %q — RotateSession did not preserve GrantID", session2.GrantID, grant.ID)
+	}
+}

@@ -39,6 +39,7 @@ func (f *fakeSessionQuerier) CreateSession(_ context.Context, arg db.CreateSessi
 		Region:           arg.Region,
 		UserID:           arg.UserID,
 		ClientID:         arg.ClientID,
+		GrantID:          arg.GrantID,
 		DeviceLabel:      arg.DeviceLabel,
 		RefreshTokenHash: arg.RefreshTokenHash,
 		ExpiresAt:        arg.ExpiresAt,
@@ -152,6 +153,26 @@ func (f *fakeSessionQuerier) RevokeSessionsByUserClient(_ context.Context, arg d
 	return nil
 }
 
+func (f *fakeSessionQuerier) RevokeSessionsByGrant(_ context.Context, grantID pgtype.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for sid, row := range f.byID {
+		if row.GrantID.String() != grantID.String() {
+			continue
+		}
+		if isRevoked(row) {
+			continue
+		}
+		var revokedAt pgtype.Timestamptz
+		if err := revokedAt.Scan(time.Now()); err != nil {
+			return err
+		}
+		row.RevokedAt = revokedAt
+		f.byID[sid] = row
+	}
+	return nil
+}
+
 // helpers
 
 func mustUUID(t *testing.T, s string) pgtype.UUID {
@@ -167,6 +188,7 @@ const (
 	sessTestUserID   = "00000000-0000-0000-0000-000000000001"
 	sessTestClientID = "test-rp"
 	sessTestRegion   = "us"
+	sessTestGrantID  = "00000000-0000-0000-0000-000000000099"
 )
 
 func buildTestSession(t *testing.T, id, userID string, hash []byte, ttl time.Duration) oidc.RefreshSession {
@@ -176,6 +198,7 @@ func buildTestSession(t *testing.T, id, userID string, hash []byte, ttl time.Dur
 		Region:    sessTestRegion,
 		UserID:    userID,
 		ClientID:  sessTestClientID,
+		GrantID:   sessTestGrantID,
 		TokenHash: hash,
 		ExpiresAt: time.Now().Add(ttl),
 	}
@@ -240,6 +263,7 @@ func TestDBSessionStoreScopedRevoke(t *testing.T) {
 		Region:    sessTestRegion,
 		UserID:    sessTestUserID,
 		ClientID:  otherClientID,
+		GrantID:   sessTestGrantID,
 		TokenHash: []byte{0xff},
 		ExpiresAt: time.Now().Add(14 * 24 * time.Hour),
 	}
@@ -419,6 +443,9 @@ func (e *errSessionQuerier) RevokeSessionsByUser(context.Context, pgtype.UUID) e
 func (e *errSessionQuerier) RevokeSessionsByUserClient(context.Context, db.RevokeSessionsByUserClientParams) error {
 	panic("unexpected RevokeSessionsByUserClient")
 }
+func (e *errSessionQuerier) RevokeSessionsByGrant(context.Context, pgtype.UUID) error {
+	panic("unexpected RevokeSessionsByGrant")
+}
 
 // TestDBSessionStoreGetByTokenHash_DBError verifies a transient (non-ErrNoRows)
 // DB error is propagated as-is and NOT masked as ErrRefreshTokenNotFound.
@@ -467,4 +494,179 @@ func TestNewDBSessionStoreWithPool_PanicsOnNilP(t *testing.T) {
 		}
 	}()
 	NewDBSessionStoreWithPool(newFakeSessionQuerier(), nil)
+}
+
+// TestDBSessionStoreCreateSession_StoresGrantID verifies that CreateSession
+// correctly stores the grant_id field from the RefreshSession struct.
+func TestDBSessionStoreCreateSession_StoresGrantID(t *testing.T) {
+	q := newFakeSessionQuerier()
+	store := NewDBSessionStore(q)
+	ctx := context.Background()
+
+	const grantID = "00000000-0000-0000-0000-000000000aaa"
+	hash := []byte("sha256-grant-id-test-32-bytes----")
+	rs := oidc.RefreshSession{
+		ID:        "00000000-0000-0000-0000-000000000601",
+		Region:    sessTestRegion,
+		UserID:    sessTestUserID,
+		ClientID:  sessTestClientID,
+		GrantID:   grantID,
+		TokenHash: hash,
+		ExpiresAt: time.Now().Add(14 * 24 * time.Hour),
+	}
+
+	if err := store.CreateSession(ctx, rs); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// Verify the grant_id was stored correctly.
+	row := q.byID[rs.ID]
+	if row.GrantID.String() != grantID {
+		t.Fatalf("expected GrantID %q, got %q", grantID, row.GrantID.String())
+	}
+}
+
+// TestDBSessionStoreRevokeSessionsByGrant verifies that RevokeSessionsByGrant
+// only revokes sessions with the matching grant_id and leaves others intact.
+func TestDBSessionStoreRevokeSessionsByGrant(t *testing.T) {
+	q := newFakeSessionQuerier()
+	store := NewDBSessionStore(q)
+	ctx := context.Background()
+
+	const (
+		grantID1 = "00000000-0000-0000-0000-000000000bbb"
+		grantID2 = "00000000-0000-0000-0000-000000000ccc"
+	)
+
+	// Create sessions with different grant_ids.
+	sessions := []struct {
+		id      string
+		grantID string
+	}{
+		{"00000000-0000-0000-0000-000000000701", grantID1},
+		{"00000000-0000-0000-0000-000000000702", grantID1},
+		{"00000000-0000-0000-0000-000000000703", grantID2},
+	}
+
+	for i, s := range sessions {
+		rs := oidc.RefreshSession{
+			ID:        s.id,
+			Region:    sessTestRegion,
+			UserID:    sessTestUserID,
+			ClientID:  sessTestClientID,
+			GrantID:   s.grantID,
+			TokenHash: []byte{byte(i + 0x70)},
+			ExpiresAt: time.Now().Add(14 * 24 * time.Hour),
+		}
+		if err := store.CreateSession(ctx, rs); err != nil {
+			t.Fatalf("CreateSession %s: %v", s.id, err)
+		}
+	}
+
+	// Revoke only sessions with grantID1.
+	if err := store.RevokeSessionsByGrant(ctx, grantID1); err != nil {
+		t.Fatalf("RevokeSessionsByGrant: %v", err)
+	}
+
+	// grantID1 sessions must be revoked.
+	for _, s := range sessions {
+		row := q.byID[s.id]
+		if s.grantID == grantID1 {
+			if !isRevoked(row) {
+				t.Errorf("session %s (grant %s) should be revoked but is not", s.id, s.grantID)
+			}
+		} else {
+			if isRevoked(row) {
+				t.Errorf("session %s (grant %s) should NOT be revoked", s.id, s.grantID)
+			}
+		}
+	}
+}
+
+// TestDBSessionStoreCreateSession_EmptyGrantID verifies that CreateSession
+// correctly handles an empty GrantID (maps to SQL NULL) and that the round-trip
+// via rowToRefreshSession yields an empty string back (not the zero-UUID sentinel).
+func TestDBSessionStoreCreateSession_EmptyGrantID(t *testing.T) {
+	q := newFakeSessionQuerier()
+	store := NewDBSessionStore(q)
+	ctx := context.Background()
+
+	hash := []byte("sha256-empty-grant-test-32-bytes-")
+	rs := oidc.RefreshSession{
+		ID:        "00000000-0000-0000-0000-000000000901",
+		Region:    sessTestRegion,
+		UserID:    sessTestUserID,
+		ClientID:  sessTestClientID,
+		GrantID:   "", // empty = legacy session without grant_id
+		TokenHash: hash,
+		ExpiresAt: time.Now().Add(14 * 24 * time.Hour),
+	}
+
+	if err := store.CreateSession(ctx, rs); err != nil {
+		t.Fatalf("CreateSession with empty GrantID: %v", err)
+	}
+
+	// Verify the grant_id was stored as NULL (Valid=false).
+	row := q.byID[rs.ID]
+	if row.GrantID.Valid {
+		t.Fatalf("expected GrantID to be NULL (Valid=false), got Valid=true with value %q", row.GrantID.String())
+	}
+
+	// Verify round-trip: GetSessionByTokenHash should return empty GrantID.
+	got, err := store.GetSessionByTokenHash(ctx, hash)
+	if err != nil {
+		t.Fatalf("GetSessionByTokenHash: %v", err)
+	}
+	if got.GrantID != "" {
+		t.Fatalf("expected GrantID to be empty string after round-trip, got %q", got.GrantID)
+	}
+}
+
+// TestDBSessionStoreRevokeSessionsByUserClient_IgnoresGrantID verifies that
+// RevokeSessionsByUserClient revokes ALL sessions for (user, client) regardless
+// of their grant_id values — the theft-signal must revoke the entire family.
+func TestDBSessionStoreRevokeSessionsByUserClient_IgnoresGrantID(t *testing.T) {
+	q := newFakeSessionQuerier()
+	store := NewDBSessionStore(q)
+	ctx := context.Background()
+
+	const (
+		grantID1 = "00000000-0000-0000-0000-000000000ddd"
+		grantID2 = "00000000-0000-0000-0000-000000000eee"
+	)
+
+	// Create sessions with different grant_ids but same (user, client).
+	sessionIDs := []string{
+		"00000000-0000-0000-0000-000000000801",
+		"00000000-0000-0000-0000-000000000802",
+	}
+	grantIDs := []string{grantID1, grantID2}
+
+	for i, id := range sessionIDs {
+		rs := oidc.RefreshSession{
+			ID:        id,
+			Region:    sessTestRegion,
+			UserID:    sessTestUserID,
+			ClientID:  sessTestClientID,
+			GrantID:   grantIDs[i],
+			TokenHash: []byte{byte(i + 0x80)},
+			ExpiresAt: time.Now().Add(14 * 24 * time.Hour),
+		}
+		if err := store.CreateSession(ctx, rs); err != nil {
+			t.Fatalf("CreateSession %s: %v", id, err)
+		}
+	}
+
+	// Revoke by (user, client) — should revoke ALL regardless of grant_id.
+	if err := store.RevokeSessionsByUserClient(ctx, sessTestUserID, sessTestClientID); err != nil {
+		t.Fatalf("RevokeSessionsByUserClient: %v", err)
+	}
+
+	// Both sessions must be revoked.
+	for _, id := range sessionIDs {
+		row := q.byID[id]
+		if !isRevoked(row) {
+			t.Errorf("session %s should be revoked by RevokeSessionsByUserClient", id)
+		}
+	}
 }

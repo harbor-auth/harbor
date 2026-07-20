@@ -27,6 +27,9 @@ type sessionQuerier interface {
 	// (global user logout) path; the hot-path theft-signal uses RevokeSessionsByUserClient.
 	RevokeSessionsByUser(ctx context.Context, userID pgtype.UUID) error
 	RevokeSessionsByUserClient(ctx context.Context, arg db.RevokeSessionsByUserClientParams) error
+	// RevokeSessionsByGrant revokes all active sessions for a specific grant,
+	// enabling per-app revocation without affecting other grants (DESIGN §11.3).
+	RevokeSessionsByGrant(ctx context.Context, grantID pgtype.UUID) error
 }
 
 // txBeginner is satisfied by *pgxpool.Pool and enables atomic rotation via
@@ -84,14 +87,6 @@ var _ oidc.SessionStore = (*DBSessionStore)(nil)
 // label. Shared by CreateSession and RotateSession so the two write paths
 // cannot silently diverge.
 func buildCreateSessionParams(rs oidc.RefreshSession) (db.CreateSessionParams, error) {
-	// TODO(grant-fk): when the sessions table gains a grant_id FK column,
-	// parse rs.GrantID here (it is always "" today — see RefreshSession.GrantID).
-	// Runtime assertion: GrantID must be "" until the DB column exists. If this
-	// fires, a caller has set GrantID to a non-empty value without also updating
-	// this function — the value would be silently dropped in CreateSession.
-	if rs.GrantID != "" {
-		return db.CreateSessionParams{}, fmt.Errorf("sessions: GrantID %q is not supported (no grant_id DB column yet — see TODO(grant-fk))", rs.GrantID)
-	}
 	var id pgtype.UUID
 	if err := id.Scan(rs.ID); err != nil {
 		return db.CreateSessionParams{}, fmt.Errorf("sessions: parse session ID %q: %w", rs.ID, err)
@@ -99,6 +94,14 @@ func buildCreateSessionParams(rs oidc.RefreshSession) (db.CreateSessionParams, e
 	var userID pgtype.UUID
 	if err := userID.Scan(rs.UserID); err != nil {
 		return db.CreateSessionParams{}, fmt.Errorf("sessions: parse user ID %q: %w", rs.UserID, err)
+	}
+	// Empty GrantID maps to SQL NULL (pgtype.UUID{Valid:false}) for backward
+	// compatibility with sessions created before the grant_id column existed.
+	var grantID pgtype.UUID
+	if rs.GrantID != "" {
+		if err := grantID.Scan(rs.GrantID); err != nil {
+			return db.CreateSessionParams{}, fmt.Errorf("sessions: parse grant ID %q: %w", rs.GrantID, err)
+		}
 	}
 	var deviceLabel *string
 	if rs.DeviceLabel != "" {
@@ -114,6 +117,7 @@ func buildCreateSessionParams(rs oidc.RefreshSession) (db.CreateSessionParams, e
 		Region:           rs.Region,
 		UserID:           userID,
 		ClientID:         rs.ClientID,
+		GrantID:          grantID,
 		DeviceLabel:      deviceLabel,
 		RefreshTokenHash: rs.TokenHash,
 		ExpiresAt:        expiresAt,
@@ -254,6 +258,18 @@ func (s *DBSessionStore) RevokeSessionsByUserClient(ctx context.Context, userID,
 	})
 }
 
+// RevokeSessionsByGrant implements oidc.SessionStore (per-app revocation;
+// DESIGN §11.3). Revokes all active sessions for a specific grant, enabling
+// users to disconnect a single app without affecting other grants.
+// The partial index idx_sessions_grant_id (migration 0006) makes this O(log n).
+func (s *DBSessionStore) RevokeSessionsByGrant(ctx context.Context, grantID string) error {
+	var gid pgtype.UUID
+	if err := gid.Scan(grantID); err != nil {
+		return fmt.Errorf("sessions: parse grant ID %q: %w", grantID, err)
+	}
+	return s.q.RevokeSessionsByGrant(ctx, gid)
+}
+
 // rowToRefreshSession converts a sqlc Session row to the domain type.
 func rowToRefreshSession(row db.Session) oidc.RefreshSession {
 	var label string
@@ -272,6 +288,7 @@ func rowToRefreshSession(row db.Session) oidc.RefreshSession {
 		Region:      row.Region,
 		UserID:      uuidToString(row.UserID),
 		ClientID:    row.ClientID,
+		GrantID:     nullableUUIDToString(row.GrantID),
 		DeviceLabel: label,
 		TokenHash:   row.RefreshTokenHash,
 		ExpiresAt:   expiresAt,
@@ -282,4 +299,16 @@ func rowToRefreshSession(row db.Session) oidc.RefreshSession {
 // isRevoked reports whether a db.Session row has been revoked.
 func isRevoked(row db.Session) bool {
 	return row.RevokedAt.Valid
+}
+
+// nullableUUIDToString converts a pgtype.UUID to string, returning empty
+// string for NULL/invalid UUIDs. This is the inverse of the empty-string
+// handling in buildCreateSessionParams: empty string → NULL → empty string.
+// Used for nullable FK columns like grant_id where NULL is a valid state
+// (legacy rows created before the column was added).
+func nullableUUIDToString(u pgtype.UUID) string {
+	if !u.Valid {
+		return ""
+	}
+	return u.String()
 }

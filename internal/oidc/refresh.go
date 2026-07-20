@@ -27,7 +27,7 @@ type RefreshSession struct {
 	ID          string // UUID string
 	Region      string // user's home jurisdiction (§5)
 	UserID      string // internal user UUID
-	GrantID     string // associated consent grant UUID — always "" until a DB column is added (no persistence yet). The copy-through in Refresh() (newSession.GrantID = session.GrantID) is a placeholder.
+	GrantID     string // associated consent grant UUID; persisted via the grant_id FK column (migration 0006). Empty for legacy sessions created before the column was added.
 	ClientID    string // the RP this session belongs to
 	DeviceLabel string // optional: UA string / device name
 	TokenHash   []byte // SHA-256 of the opaque plaintext — NEVER the plaintext
@@ -73,6 +73,11 @@ type SessionStore interface {
 	// RevokeSessionsByUserClient revokes every active session for a
 	// (userID, clientID) pairing — the theft-signal family revoke (§3.5, §11.7).
 	RevokeSessionsByUserClient(ctx context.Context, userID, clientID string) error
+
+	// RevokeSessionsByGrant revokes every active session for a specific grant,
+	// enabling the §11.3 user-initiated disconnect flow where a user can revoke
+	// access to a single connected app without affecting other grants.
+	RevokeSessionsByGrant(ctx context.Context, grantID string) error
 }
 
 // sessionEntry is a stored session plus its revoked flag (in-memory store).
@@ -192,6 +197,19 @@ func (s *InMemorySessionStore) RevokeSessionsByUserClient(_ context.Context, use
 	return nil
 }
 
+// RevokeSessionsByGrant implements SessionStore (per-grant revoke for §11.3 disconnect flow).
+func (s *InMemorySessionStore) RevokeSessionsByGrant(_ context.Context, grantID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range s.byID {
+		if e.s.GrantID == grantID {
+			e.revoked = true
+			e.s.RevokedAt = time.Now()
+		}
+	}
+	return nil
+}
+
 // hashRefreshToken returns the SHA-256 digest of plaintext. Only the digest is
 // persisted — the plaintext is ephemeral (docs/DESIGN.md §7.4).
 func hashRefreshToken(plaintext []byte) []byte {
@@ -238,3 +256,4 @@ func (noopSessionStore) RotateSession(context.Context, string, RefreshSession) e
 func (noopSessionStore) RevokeSessionsByUserClient(context.Context, string, string) error {
 	return nil
 }
+func (noopSessionStore) RevokeSessionsByGrant(context.Context, string) error { return nil }

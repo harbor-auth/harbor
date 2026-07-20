@@ -71,6 +71,7 @@ type Session struct {
 	ExpiresAt        pgtype.Timestamptz `json:"expires_at"`
 	RevokedAt        pgtype.Timestamptz `json:"revoked_at"`
 	ClientID         string             `json:"client_id"`
+	GrantID          pgtype.UUID        `json:"grant_id"`
 }
 
 type User struct {

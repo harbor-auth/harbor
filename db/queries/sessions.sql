@@ -6,15 +6,22 @@
 SELECT * FROM sessions
 WHERE id = $1;
 
--- GetActiveSession returns a session ONLY when it is still usable — not revoked
--- and not expired. Auth flows (refresh-token rotation; DESIGN §3.5) MUST use
--- this rather than GetSession, which returns revoked/expired rows for
--- admin/audit purposes.
+-- GetActiveSession returns a session ONLY when it is still usable — not revoked,
+-- not expired, and whose underlying grant is still active. Auth flows (refresh-
+-- token rotation; DESIGN §3.5) MUST use this rather than GetSession, which
+-- returns revoked/expired rows for admin/audit purposes.
+--
+-- The LEFT JOIN on grants handles sessions with NULL grant_id (legacy rows
+-- created before grant_id was added). For those rows, grants.revoked_at is NULL
+-- so they pass the filter. Sessions with a grant_id only pass if the grant is
+-- not revoked.
 -- name: GetActiveSession :one
-SELECT * FROM sessions
-WHERE id = $1
-  AND revoked_at IS NULL
-  AND expires_at > now();
+SELECT sessions.* FROM sessions
+LEFT JOIN grants ON sessions.grant_id = grants.id
+WHERE sessions.id = $1
+  AND sessions.revoked_at IS NULL
+  AND sessions.expires_at > now()
+  AND (sessions.grant_id IS NULL OR grants.revoked_at IS NULL);
 
 -- name: ListSessionsByUser :many
 SELECT * FROM sessions
@@ -24,9 +31,9 @@ ORDER BY created_at DESC;
 
 -- name: CreateSession :one
 INSERT INTO sessions (
-    id, region, user_id, client_id, device_label, refresh_token_hash, expires_at
+    id, region, user_id, client_id, grant_id, device_label, refresh_token_hash, expires_at
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7
+    $1, $2, $3, $4, $5, $6, $7, $8
 )
 RETURNING *;
 
@@ -53,6 +60,17 @@ UPDATE sessions
 SET revoked_at = now()
 WHERE user_id = $1
   AND client_id = $2
+  AND revoked_at IS NULL;
+
+-- RevokeSessionsByGrant revokes every active session for a specific grant —
+-- used when a user revokes a connected app (DESIGN §11.3). Scoped to a single
+-- grant so revoking one app connection does not affect other grants for the
+-- same (user, client) pair. The partial index idx_sessions_grant_id (migration
+-- 0006) makes this fast.
+-- name: RevokeSessionsByGrant :exec
+UPDATE sessions
+SET revoked_at = now()
+WHERE grant_id = $1
   AND revoked_at IS NULL;
 
 -- DeleteExpiredSessions reaps rows whose refresh token has expired — background
