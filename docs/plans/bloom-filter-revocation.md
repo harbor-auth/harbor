@@ -1,6 +1,6 @@
 ---
 title: Bloom-filter revocation (§3.5 — emergency JWT kill)
-status: draft
+status: completed
 design_refs: [§3.5, §3.5.2, §3.5.4, §7.4]
 targets: [internal/oidc/, cmd/harbor-hot/]
 promoted_to: null
@@ -154,16 +154,23 @@ kill management endpoint (§7.4's operational API). Does **not** change
 
 ## Implementation checklist
 
-- [ ] Add `github.com/bits-and-blooms/bloom/v3` to `go.mod`
-- [ ] Write migration `0005_revoked_jtis.{up,down}.sql`
-- [ ] Write `db/queries/revoked_jtis.sql` (Insert, ListActive, GCExpired)
-- [ ] Run `sqlc generate`
-- [ ] Implement `RevocationFilter` interface in `internal/oidc/revocation_filter.go`
-- [ ] Wire `filter.MightContain(jti)` into the JWT verification path
-- [ ] Add DB introspection fallback on filter hit
-- [ ] Add `POST /admin/revoke-jwt` to `harbor-mgmt`
-- [ ] Add Redis pub/sub subscriber in `harbor-hot` (or polling fallback)
-- [ ] Add filter rehydration on startup
-- [ ] Invariant: add `INV-EMERGENCY-REVOCATION` to `invariants/registry.yaml`
-- [ ] `go test -race ./...` passes
-- [ ] `@validate` passes
+- [x] Add `github.com/bits-and-blooms/bloom/v3` to `go.mod`
+- [x] Write migration `0010_revoked_jtis.{up,down}.sql`
+- [x] Write `db/queries/revoked_jtis.sql` (Insert, ListActive, GCExpired)
+- [x] Run `sqlc generate`
+- [x] Implement `RevocationFilter` interface in `internal/oidc/revocation_filter.go`
+- [x] Wire `filter.MightContain(jti)` into the JWT verification path
+- [x] Add DB introspection fallback on filter hit
+- [x] Add `POST /admin/revoke-jwt` to the OIDC surface
+- [x] Add Redis pub/sub subscriber in `harbor-hot` (or polling fallback)
+- [x] Add filter rehydration on startup
+- [x] Invariant: add `INV-EMERGENCY-REVOCATION` to `invariants/registry.yaml`
+- [x] `go test -race ./...` passes
+- [x] `@validate` passes
+
+## As-built note
+
+Migration landed as `0010_revoked_jtis` (renumbered from `0005`/`0006` to avoid
+collision). The `POST /admin/revoke-jwt` handler lives on the OIDC surface
+(`internal/oidcapi/revoke_jwt.go`) rather than a separate `harbor-mgmt` binary.
+Merged to main in PR #33.
