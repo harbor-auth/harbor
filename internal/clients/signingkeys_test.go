@@ -305,9 +305,17 @@ func TestMemSigningKeyStoreConcurrent(t *testing.T) {
 				t.Errorf("Create: %v", err)
 				return
 			}
-			_, _ = s.GetByKid(ctx, kid)
-			_, _ = s.ListLive(ctx)
-			_, _ = s.GetActive(ctx)
+			// Concurrent readers; errors are expected/benign here (e.g. no
+			// active key yet) — we only care that these don't race or panic.
+			if _, err := s.GetByKid(ctx, kid); err != nil {
+				t.Errorf("GetByKid(%s): %v", kid, err)
+			}
+			if _, err := s.ListLive(ctx); err != nil {
+				t.Errorf("ListLive: %v", err)
+			}
+			if _, err := s.GetActive(ctx); err != nil && !errors.Is(err, ErrSigningKeyNotFound) {
+				t.Errorf("GetActive: unexpected err %v", err)
+			}
 		}(i)
 	}
 	wg.Wait()

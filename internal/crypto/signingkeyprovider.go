@@ -56,7 +56,10 @@ func NewMultiKeyProvider(active Signer, pending ...Signer) (*MultiKeyProvider, e
 		active: active,
 		byKid:  make(map[string]Signer, 1+len(pending)),
 	}
-	p.addLocked(active)
+	// Cannot fail: byKid is empty, so the active signer's kid is never a dup.
+	if err := p.addLocked(active); err != nil {
+		return nil, err
+	}
 	for _, s := range pending {
 		if s == nil {
 			return nil, fmt.Errorf("crypto: NewMultiKeyProvider: pending signer must not be nil")

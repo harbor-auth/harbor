@@ -313,8 +313,8 @@ func TestDBSigningKeyStoreStateTransitionsPersist(t *testing.T) {
 	if _, err := s.GetActive(ctx); !errors.Is(err, ErrSigningKeyNotFound) {
 		t.Errorf("pending: expected no active key, got %v", err)
 	}
-	if live, _ := s.ListLive(ctx); len(live) != 1 {
-		t.Errorf("pending: ListLive got %d, want 1", len(live))
+	if live, err := s.ListLive(ctx); err != nil || len(live) != 1 {
+		t.Errorf("pending: ListLive got %d (err %v), want 1", len(live), err)
 	}
 
 	// Promote to active with a promoted_at timestamp.
@@ -351,8 +351,8 @@ func TestDBSigningKeyStoreStateTransitionsPersist(t *testing.T) {
 	if _, err := s.GetActive(ctx); !errors.Is(err, ErrSigningKeyNotFound) {
 		t.Errorf("retired: expected no active key, got %v", err)
 	}
-	if live, _ := s.ListLive(ctx); len(live) != 0 {
-		t.Errorf("retired: ListLive got %d, want 0", len(live))
+	if live, err := s.ListLive(ctx); err != nil || len(live) != 0 {
+		t.Errorf("retired: ListLive got %d (err %v), want 0", len(live), err)
 	}
 	if _, err := s.GetByKid(ctx, "kid-a"); err != nil {
 		t.Errorf("GetByKid on retired key: %v", err)
@@ -378,8 +378,8 @@ func TestDBSigningKeyStoreRetireByKid(t *testing.T) {
 	if got.RetiredAt == nil {
 		t.Error("retired_at should be stamped by Retire")
 	}
-	if live, _ := s.ListLive(ctx); len(live) != 0 {
-		t.Errorf("ListLive after retire: got %d, want 0", len(live))
+	if live, err := s.ListLive(ctx); err != nil || len(live) != 0 {
+		t.Errorf("ListLive after retire: got %d (err %v), want 0", len(live), err)
 	}
 }
 
@@ -389,9 +389,18 @@ func TestDBSigningKeyStoreListLiveOrdering(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newDBStoreWithFake()
 
-	k1, _ := s.Create(ctx, newDBTestKey("kid-1"))
-	k2, _ := s.Create(ctx, newDBTestKey("kid-2"))
-	k3, _ := s.Create(ctx, newDBTestKey("kid-3"))
+	k1, err := s.Create(ctx, newDBTestKey("kid-1"))
+	if err != nil {
+		t.Fatalf("Create k1: %v", err)
+	}
+	k2, err := s.Create(ctx, newDBTestKey("kid-2"))
+	if err != nil {
+		t.Fatalf("Create k2: %v", err)
+	}
+	k3, err := s.Create(ctx, newDBTestKey("kid-3"))
+	if err != nil {
+		t.Fatalf("Create k3: %v", err)
+	}
 
 	// Promote k2, retire k3, leave k1 pending.
 	promoted := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
