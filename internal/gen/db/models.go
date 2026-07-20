@@ -73,6 +73,13 @@ type RevocationOutbox struct {
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 }
 
+type RevokedJti struct {
+	Jti       string             `json:"jti"`
+	RevokedAt pgtype.Timestamptz `json:"revoked_at"`
+	Reason    string             `json:"reason"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+}
+
 type Session struct {
 	ID               pgtype.UUID        `json:"id"`
 	Region           string             `json:"region"`

@@ -264,6 +264,51 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /admin/revoke-jwt:
+    post:
+      operationId: postAdminRevokeJwt
+      summary: Emergency JWT revocation
+      description: >-
+        Adds a JTI to the revocation bloom filter for immediate invalidation
+        (DESIGN §3.5, §7.4). This is the emergency kill mechanism for compromised
+        tokens — the bloom filter is checked on every token verification (~100ns
+        overhead). The JTI is persisted to the revoked_jtis table and broadcast
+        to all harbor-hot replicas via Redis pub/sub. Use sparingly: routine
+        revocation should use refresh-token deletion (short-lived JWTs expire
+        naturally within 15 minutes).
+      tags:
+        - admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RevokeJwtRequest"
+      responses:
+        "200":
+          description: JTI successfully added to revocation list.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RevokeJwtResponse"
+        "400":
+          description: Invalid request (missing or malformed fields).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized (missing or invalid admin credentials).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Internal error (DB or Redis failure).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /jwks.json:
     get:
       operationId: getJwks
@@ -580,6 +625,55 @@ components:
           description: >-
             True if this was an emergency rotation (zero grace period and
             overlap window).
+    RevokeJwtRequest:
+      type: object
+      description: Request to revoke a JWT by its JTI.
+      required:
+        - jti
+        - reason
+        - expires_at
+      properties:
+        jti:
+          type: string
+          description: >-
+            The JWT ID (`jti` claim) to revoke. This is the unique identifier
+            of the access token to invalidate.
+          example: "a1b2c3d4e5f6g7h8i9j0"
+        reason:
+          type: string
+          description: >-
+            Reason for revocation. Must be one of: emergency_kill, key_rotation,
+            user_request.
+          enum:
+            - emergency_kill
+            - key_rotation
+            - user_request
+          example: "emergency_kill"
+        expires_at:
+          type: string
+          format: date-time
+          description: >-
+            The original expiry time of the JWT being revoked. Used for garbage
+            collection — the revocation entry is removed after this time (the
+            JWT would be invalid anyway). Must be in RFC 3339 format.
+          example: "2026-07-15T21:00:00Z"
+    RevokeJwtResponse:
+      type: object
+      description: Response confirming JWT revocation.
+      required:
+        - jti
+        - revoked_at
+      properties:
+        jti:
+          type: string
+          description: The JTI that was revoked.
+        revoked_at:
+          type: string
+          format: date-time
+          description: Timestamp when the revocation was recorded.
+        reason:
+          type: string
+          description: The reason provided for revocation.
     Error:
       type: object
       description: Standard error envelope.

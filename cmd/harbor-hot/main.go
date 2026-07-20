@@ -25,6 +25,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/harbor/harbor/internal/clients"
 	"github.com/harbor/harbor/internal/crypto"
 	"github.com/harbor/harbor/internal/gen/db"
@@ -33,6 +35,34 @@ import (
 	"github.com/harbor/harbor/internal/oidc"
 	"github.com/harbor/harbor/internal/oidcapi"
 )
+
+// redisRevocationPublisher adapts *redis.Client to oidcapi.RevocationPublisher:
+// go-redis Publish returns *IntCmd, so we surface only its error.
+type redisRevocationPublisher struct {
+	client *redis.Client
+}
+
+func (p redisRevocationPublisher) Publish(ctx context.Context, channel, message string) error {
+	return p.client.Publish(ctx, channel, message).Err()
+}
+
+// dbActiveJTILister adapts *clients.DBRevokedJTIStore to oidc.ActiveJTILister,
+// projecting the domain rows down to the JTI strings the filter needs.
+type dbActiveJTILister struct {
+	store *clients.DBRevokedJTIStore
+}
+
+func (a dbActiveJTILister) ListActiveJTIs(ctx context.Context) ([]string, error) {
+	rows, err := a.store.ListActive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	jtis := make([]string, len(rows))
+	for i, r := range rows {
+		jtis[i] = r.JTI
+	}
+	return jtis, nil
+}
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -108,6 +138,18 @@ func main() {
 		defer func() { _ = redisClient.Close() }() //nolint:errcheck // shutdown cleanup
 	}
 
+	// Emergency JWT revocation bloom filter (docs/DESIGN.md §3.5). Always
+	// created (~240KB at 10k capacity / 1-in-1M FP rate); it is populated from
+	// the revoked_jtis table on startup and kept in sync across replicas via the
+	// Redis revocation channel. Without Redis, cross-replica propagation relies
+	// on periodic rehydration.
+	revocationFilter := oidc.NewBloomRevocationFilter(oidc.DefaultBloomCapacity, oidc.DefaultBloomFPRate)
+
+	var revocationPublisher oidcapi.RevocationPublisher
+	if redisClient != nil {
+		revocationPublisher = redisRevocationPublisher{client: redisClient}
+	}
+
 	// Auth code store: Redis-backed if available, otherwise in-memory fallback.
 	var authCodeStore oidc.AuthCodeStore
 	if redisClient != nil {
@@ -131,6 +173,12 @@ func main() {
 		secretLoader     oidc.UserSecretLoader
 		revocationOutbox oidc.RevocationOutbox
 		revocationWorker *oidc.RevocationWorker
+
+		// Revocation persistence + startup rehydration source. Both stay nil in
+		// the in-memory dev path, in which case POST /admin/revoke-jwt returns 503
+		// and there is nothing to rehydrate.
+		revokedStore     oidcapi.RevokedJTIStore
+		revocationLister oidc.ActiveJTILister
 	)
 
 	if pool != nil {
@@ -187,6 +235,12 @@ func main() {
 			Logger:       logger,
 		})
 
+		// Emergency JWT revocation persistence + startup rehydration source
+		// (docs/DESIGN.md §3.5). Wired only in the DB path; the in-memory dev
+		// scaffold leaves these nil (POST /admin/revoke-jwt returns 503).
+		dbRevoked := clients.NewDBRevokedJTIStore(q)
+		revokedStore = dbRevoked
+		revocationLister = dbActiveJTILister{store: dbRevoked}
 		logger.Info("using DB-backed stores")
 		// SCAFFOLD: even in the DB path the subject is still resolved by
 		// FixedAuthSource below, so every /authorize authenticates as the SAME
@@ -249,11 +303,39 @@ func main() {
 	}
 
 	srv := oidcapi.New(oidcapi.Config{
-		Issuer:  issuer,
-		Service: svc,
-		Signers: []crypto.Signer{signer},
+		Issuer:              issuer,
+		Service:             svc,
+		Signers:             []crypto.Signer{signer},
+		RevokedJTIStore:     revokedStore,
+		RevocationFilter:    revocationFilter,
+		RevocationPublisher: revocationPublisher,
 	})
 	handler := openapi.HandlerFromMux(srv, http.NewServeMux())
+
+	// Rehydrate the bloom filter from the DB BEFORE serving traffic so emergency
+	// revocations survive a replica restart (docs/DESIGN.md §3.5). On error we
+	// log and continue with an empty filter — the DB introspection fallback in
+	// the verifier still catches revoked tokens.
+	if revocationLister != nil {
+		if _, err := oidc.RehydrateFilter(ctx, revocationLister, revocationFilter, logger); err != nil {
+			logger.Error("failed to rehydrate revocation filter — continuing with empty filter", "error", err)
+		}
+	}
+
+	// Subscribe to cross-replica revocation broadcasts. NewRevocationSubscriber
+	// returns nil when Redis is absent, so single-replica dev skips this.
+	if sub := clients.NewRevocationSubscriber(clients.RevocationSubscriberConfig{
+		Client: redisClient,
+		Filter: revocationFilter,
+		Logger: logger,
+	}); sub != nil {
+		go func() {
+			if err := sub.Run(ctx); err != nil && ctx.Err() == nil {
+				logger.Error("revocation subscriber stopped", "error", err)
+			}
+		}()
+		logger.Info("revocation subscriber started", "channel", sub.Channel())
+	}
 
 	logger.Info("starting harbor-hot", "port", port, "issuer", issuer)
 	if err := httpserver.Run(ctx, ":"+port, handler, logger); err != nil {

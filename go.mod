@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/bits-and-blooms/bloom/v3 v3.7.1
 	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/getkin/kin-openapi v0.140.0
 	github.com/go-webauthn/webauthn v0.17.4
@@ -18,6 +19,7 @@ require (
 
 require (
 	github.com/apapsch/go-jsonmerge/v2 v2.0.0 // indirect
+	github.com/bits-and-blooms/bitset v1.24.2 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/go-openapi/jsonpointer v0.22.5 // indirect
 	github.com/go-openapi/swag/jsonname v0.25.5 // indirect
