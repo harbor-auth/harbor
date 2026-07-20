@@ -125,10 +125,12 @@ func main() {
 	const demoUserID = "00000000-0000-0000-0000-000000000001"
 
 	var (
-		clientRegistry oidc.ClientRegistry
-		grantStore     oidc.GrantStore
-		sessionStore   oidc.SessionStore
-		secretLoader   oidc.UserSecretLoader
+		clientRegistry   oidc.ClientRegistry
+		grantStore       oidc.GrantStore
+		sessionStore     oidc.SessionStore
+		secretLoader     oidc.UserSecretLoader
+		revocationOutbox oidc.RevocationOutbox
+		revocationWorker *oidc.RevocationWorker
 	)
 
 	if pool != nil {
@@ -169,6 +171,22 @@ func main() {
 		grantStore = clients.NewDBGrantStore(q)
 		sessionStore = clients.NewDBSessionStoreWithPool(q, pool)
 		secretLoader = clients.NewDBSecretLoader(q, keyProvider, crypto.NewCipher())
+
+		// Revocation outbox for durable theft-signal delivery
+		// (docs/plans/revocation-outbox.md, DESIGN §3.5). Only wired in the DB path;
+		// the in-memory dev scaffold uses the noop outbox (inline-only revocation).
+		dbOutbox := clients.NewDBRevocationOutbox(q, logger)
+		revocationOutbox = dbOutbox
+
+		// RevocationWorker polls the outbox and delivers pending revocation signals.
+		// It is started in a background goroutine below and shuts down gracefully
+		// when ctx is cancelled (SIGINT/SIGTERM).
+		revocationWorker = oidc.NewRevocationWorker(oidc.RevocationWorkerConfig{
+			Outbox:       dbOutbox,
+			SessionStore: sessionStore,
+			Logger:       logger,
+		})
+
 		logger.Info("using DB-backed stores")
 		// SCAFFOLD: even in the DB path the subject is still resolved by
 		// FixedAuthSource below, so every /authorize authenticates as the SAME
@@ -200,6 +218,8 @@ func main() {
 
 		grantStore = oidc.NewInMemoryGrantStore()
 		sessionStore = oidc.NewInMemorySessionStore()
+		// revocationOutbox stays nil → NewService defaults to noopRevocationOutbox
+		// (inline-only revocation; no durable delivery in dev mode).
 	}
 
 	svc := oidc.NewService(oidc.ServiceConfig{
@@ -215,7 +235,18 @@ func main() {
 		}),
 		Grants:       grantStore,
 		SessionStore: sessionStore,
+		Outbox:       revocationOutbox, // durable theft-signal delivery (nil → noop in dev mode)
 	})
+
+	// Start the revocation worker if the DB-backed outbox is available. The
+	// worker runs in a background goroutine and shuts down gracefully when ctx is
+	// cancelled (SIGINT/SIGTERM) — Run() blocks on ctx.Done() and returns. No
+	// explicit join is needed: the worker's only side effects are DB writes, and
+	// ctx cancellation propagates to any in-flight DeliverPending before
+	// pool.Close() drains the pool.
+	if revocationWorker != nil {
+		go revocationWorker.Run(ctx)
+	}
 
 	srv := oidcapi.New(oidcapi.Config{
 		Issuer:  issuer,

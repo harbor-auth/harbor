@@ -69,6 +69,38 @@ func (s *chaosRevokeSessionStore) RevokeSessionsByUserClient(_ context.Context, 
 	return s.revokeErr
 }
 
+// recordingOutbox records every Enqueue call so chaos tests can assert that the
+// durable revocation signal was persisted to the outbox EVEN WHEN the inline
+// best-effort revoke fails. This is the whole point of the transactional-outbox
+// pattern: a downstream (RevokeSessionsByUserClient / RevokeCodeFamily) outage
+// must not drop the theft signal — it survives in the outbox for the worker.
+type recordingOutbox struct {
+	mu       sync.Mutex
+	entries  []OutboxEntry
+	enqueErr error // when set, Enqueue returns this error (simulates outbox DB failure)
+}
+
+func (o *recordingOutbox) Enqueue(_ context.Context, entry OutboxEntry) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.entries = append(o.entries, entry)
+	return o.enqueErr
+}
+
+func (o *recordingOutbox) recorded() []OutboxEntry {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	out := make([]OutboxEntry, len(o.entries))
+	copy(out, o.entries)
+	return out
+}
+
+// chaosRevocationSink always fails RevokeCodeFamily — used to prove the outbox
+// still captures the code-reuse signal when the inline sink is unavailable.
+type chaosRevocationSink struct{ err error }
+
+func (s chaosRevocationSink) RevokeCodeFamily(context.Context, AuthCode) error { return s.err }
+
 // chaosFindGrantStore wraps InMemoryGrantStore and injects an error on
 // FindGrant to simulate the grant table being temporarily unavailable.
 type chaosFindGrantStore struct {
@@ -600,6 +632,149 @@ func TestChaos_Token_ValidateTokenParams_GatesStoreAccess(t *testing.T) {
 	}
 	if terr5.Code != ErrCodeUnsupportedGrantType {
 		t.Fatalf("unknown grant_type: want unsupported_grant_type, got %q (ValidateTokenParams should reject unknown grant_type before any store access)", terr5.Code)
+	}
+}
+
+// TestChaos_Refresh_OutboxEnqueuesWhenDownstreamFails verifies that when a
+// revoked refresh token is replayed AND the inline family revoke fails
+// (RevokeSessionsByUserClient errors), the theft signal is still durably
+// persisted to the outbox. The background worker (RevocationWorker) will then
+// retry delivery, so the revocation is never silently dropped
+// (docs/plans/revocation-outbox.md, DESIGN §3.5).
+//
+// The client response must remain invalid_grant regardless — the durability of
+// the side-effect is independent of what the attacker sees.
+//
+//harbor:invariant INV-DURABLE-REVOCATION
+func TestChaos_Refresh_OutboxEnqueuesWhenDownstreamFails(t *testing.T) {
+	// Seed a session and rotate it legitimately so the original token is revoked.
+	innerStore := NewInMemorySessionStore()
+	grantStore := NewInMemoryGrantStore()
+	origToken := seedSession(t, innerStore, grantStore, "ppid-outbox-refresh")
+
+	setupSvc := newChaosService(innerStore, grantStore)
+	if _, terr := setupSvc.Refresh(context.Background(), refreshReq(origToken)); terr != nil {
+		t.Fatalf("initial rotation: %v", terr)
+	}
+	// origToken is now tombstoned — replaying it fires the theft signal.
+
+	// Inline revoke fails; outbox records the enqueue.
+	chaosStore := &chaosRevokeSessionStore{
+		InMemorySessionStore: innerStore,
+		revokeErr:            errors.New("sessions table: timeout during family revoke"),
+	}
+	outbox := &recordingOutbox{}
+
+	var logBuf bytes.Buffer
+	chaosSvc := NewService(ServiceConfig{
+		Issuer:       "https://chaos.harbor.example",
+		Clients:      NewInMemoryClientRegistry(),
+		Codes:        NewInMemoryAuthCodeStore(),
+		Tokens:       NewPlaceholderIssuer(),
+		Sessions:     NewStubSessionResolver("ppid-outbox-refresh"),
+		SessionStore: chaosStore,
+		Grants:       grantStore,
+		Outbox:       outbox,
+		Logger:       slog.New(slog.NewTextHandler(&logBuf, nil)),
+	})
+
+	_, terr := chaosSvc.Refresh(context.Background(), refreshReq(origToken))
+	if terr == nil {
+		t.Fatal("expected error for replayed revoked token")
+	}
+	if terr.Code != ErrCodeInvalidGrant {
+		t.Fatalf("replayed revoked token: want invalid_grant, got %q", terr.Code)
+	}
+
+	// The durable signal MUST have been enqueued despite the inline revoke failing.
+	recorded := outbox.recorded()
+	if len(recorded) != 1 {
+		t.Fatalf("expected 1 outbox enqueue after inline revoke failure, got %d", len(recorded))
+	}
+	if recorded[0].Reason != "refresh_reuse" {
+		t.Fatalf("enqueued Reason = %q, want \"refresh_reuse\"", recorded[0].Reason)
+	}
+	if recorded[0].ClientID != testRefreshClientID {
+		t.Fatalf("enqueued ClientID = %q, want %q", recorded[0].ClientID, testRefreshClientID)
+	}
+
+	// The inline revoke failure must still be logged at ERROR (not swallowed).
+	if !strings.Contains(logBuf.String(), "refresh-family revocation failed") {
+		t.Fatalf("expected ERROR log for failed inline family revoke; got: %s", logBuf.String())
+	}
+	// PII constraint (§6.5.7): user_id must not appear in logs.
+	if strings.Contains(logBuf.String(), testRefreshUserID) {
+		t.Fatalf("log must not contain user_id (PII); got: %s", logBuf.String())
+	}
+}
+
+// TestChaos_Token_OutboxEnqueuesWhenDownstreamFails verifies the code-reuse
+// parity of TestChaos_Refresh_OutboxEnqueuesWhenDownstreamFails: when a consumed
+// authorization code is replayed AND the inline RevokeCodeFamily fails, the
+// code-reuse signal is still durably enqueued to the outbox for worker retry.
+//
+//harbor:invariant INV-DURABLE-REVOCATION
+func TestChaos_Token_OutboxEnqueuesWhenDownstreamFails(t *testing.T) {
+	const codeVal = "chaos-outbox-code-reuse"
+
+	// Seed a consumed code that carries a real UserID + ClientID so the
+	// signalCodeReuse enqueue guard (code.UserID != "") passes.
+	codeStore := NewInMemoryAuthCodeStore()
+	if err := codeStore.Save(context.Background(), AuthCode{
+		Code:     codeVal,
+		ClientID: testRefreshClientID,
+		UserID:   testRefreshUserID,
+	}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if _, err := codeStore.Consume(context.Background(), codeVal); err != nil {
+		t.Fatalf("seed Consume: %v", err)
+	}
+
+	outbox := &recordingOutbox{}
+	var logBuf bytes.Buffer
+	svc := NewService(ServiceConfig{
+		Issuer:      "https://chaos.harbor.example",
+		Clients:     NewInMemoryClientRegistry(),
+		Codes:       codeStore,
+		Tokens:      NewPlaceholderIssuer(),
+		Sessions:    NewStubSessionResolver("ppid-chaos"),
+		Revocations: chaosRevocationSink{err: errors.New("code-family revoke: DB unavailable")},
+		Outbox:      outbox,
+		Logger:      slog.New(slog.NewTextHandler(&logBuf, nil)),
+	})
+
+	// Peek returns consumed=true → signalCodeReuse fires before ValidateTokenExchange.
+	_, terr := svc.Token(context.Background(), TokenRequest{
+		GrantType:    "authorization_code",
+		Code:         codeVal,
+		ClientID:     testRefreshClientID,
+		RedirectURI:  "http://localhost/cb",
+		CodeVerifier: "any-verifier",
+	})
+	if terr == nil {
+		t.Fatal("expected error (code already consumed), got nil")
+	}
+	if terr.Code != ErrCodeInvalidGrant {
+		t.Fatalf("want invalid_grant, got %q", terr.Code)
+	}
+
+	// The durable code-reuse signal MUST have been enqueued despite the inline
+	// RevokeCodeFamily failing.
+	recorded := outbox.recorded()
+	if len(recorded) != 1 {
+		t.Fatalf("expected 1 outbox enqueue after inline revoke failure, got %d", len(recorded))
+	}
+	if recorded[0].Reason != "code_reuse" {
+		t.Fatalf("enqueued Reason = %q, want \"code_reuse\"", recorded[0].Reason)
+	}
+	if recorded[0].ClientID != testRefreshClientID {
+		t.Fatalf("enqueued ClientID = %q, want %q", recorded[0].ClientID, testRefreshClientID)
+	}
+
+	// The inline revoke failure must still be logged at ERROR.
+	if !strings.Contains(logBuf.String(), "code-family revocation failed") {
+		t.Fatalf("expected ERROR log for failed inline code-family revoke; got: %s", logBuf.String())
 	}
 }
 

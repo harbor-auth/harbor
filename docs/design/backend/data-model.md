@@ -64,6 +64,18 @@ sessions (
   revoked_at    timestamptz
 )
 
+revocation_outbox (                -- durable theft-signal delivery (§3.5)
+  id            uuid pk,
+  reason        text,             -- 'refresh_reuse' | 'code_reuse'
+  user_id       uuid fk,
+  client_id     text fk,
+  grant_id      uuid fk,          -- nullable; references grants(id) for audit provenance
+  status        text,             -- 'pending' | 'delivered' | 'failed'
+  retry_count   int,              -- exponential backoff: 5s→30s→5m→30m→1h cap
+  next_attempt_at timestamptz,    -- partial index (status='pending') drives the worker poll
+  created_at    timestamptz       -- 24h TTL: past this, status='failed' (dead-letter)
+)
+
 audit_events (                     -- user-visible auth trail
   id            uuid pk,
   user_id       uuid fk,
@@ -75,3 +87,5 @@ audit_events (                     -- user-visible auth trail
 ```
 
 **PPID derivation** (§3.2): `pairwise_sub = B64URL(HMAC-SHA256(pairwise_secret, sector_id || user_id))`.
+
+**Revocation outbox** (§3.5): when a rotated refresh token or a consumed authorization code is replayed, the theft signal is enqueued to `revocation_outbox` *before* the best-effort inline revoke. A background worker (`RevocationWorker`) polls pending rows every 5s and retries delivery with exponential backoff, so a transient DB failure during the inline revoke never silently drops the family-revoke signal. Delivery is idempotent (`RevokeSessionsByUserClient` is a no-op on an already-revoked family). See [docs/plans/revocation-outbox.md](../../plans/revocation-outbox.md) and invariant `INV-DURABLE-REVOCATION`.

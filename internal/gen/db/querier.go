@@ -11,6 +11,8 @@ import (
 )
 
 type Querier interface {
+	// Count pending revocations (for monitoring/alerting).
+	CountPendingRevocations(ctx context.Context) (int64, error)
 	// Queries for the audit_events table (the user-visible auth trail; DESIGN §10,
 	// §11.6). This log is APPEND-ONLY — no update/delete — so users get a truthful,
 	// tamper-evident history. The query IS the contract (DESIGN §1.3): `sqlc
@@ -39,10 +41,27 @@ type Querier interface {
 	// encrypted bytea — never plaintext (DESIGN §4.4, §10).
 	CreateUser(ctx context.Context, arg CreateUserParams) (User, error)
 	DeleteCredential(ctx context.Context, id pgtype.UUID) error
+	// Clean up delivered revocation signals older than the retention period.
+	// Background cleanup, off the hot path.
+	DeleteDeliveredRevocations(ctx context.Context, createdAt pgtype.Timestamptz) error
 	// DeleteExpiredSessions reaps rows whose refresh token has expired — background
 	// cleanup, off the hot path.
 	DeleteExpiredSessions(ctx context.Context) error
 	DeleteMFAFactor(ctx context.Context, id pgtype.UUID) error
+	// Queries for the revocation_outbox table (durable theft-signal delivery;
+	// DESIGN §3.5, §3.5.2, §10). The query IS the contract (DESIGN §1.3):
+	// `sqlc generate` (via @codegen) produces typed Go — never hand-write DB types.
+	//
+	// The outbox pattern: signalRefreshReuse/signalCodeReuse INSERT here first,
+	// then a background worker polls and delivers with retry.
+	// Enqueue a revocation signal for durable delivery. Called by signalRefreshReuse
+	// and signalCodeReuse after (or instead of) the inline best-effort attempt.
+	EnqueueRevocation(ctx context.Context, arg EnqueueRevocationParams) (RevocationOutbox, error)
+	// Fetch pending revocation signals ready for delivery. Uses FOR UPDATE SKIP
+	// LOCKED to allow multiple workers without contention. Limited to batch_size
+	// rows to avoid long transactions. Only fetches rows whose next_attempt_at
+	// has passed (respecting exponential backoff).
+	FetchPendingRevocations(ctx context.Context, limit int32) ([]RevocationOutbox, error)
 	FindGrantByUserClient(ctx context.Context, arg FindGrantByUserClientParams) (Grant, error)
 	// GetActiveSession returns a session ONLY when it is still usable — not revoked,
 	// not expired, and whose underlying grant is still active. Auth flows (refresh-
@@ -76,6 +95,8 @@ type Querier interface {
 	// The query IS the contract (DESIGN §1.3): `sqlc generate` (via @codegen)
 	// produces typed Go — never hand-write DB types.
 	GetRelyingParty(ctx context.Context, clientID string) (RelyingParty, error)
+	// Get a single revocation entry by ID (for debugging/admin).
+	GetRevocation(ctx context.Context, id pgtype.UUID) (RevocationOutbox, error)
 	// Queries for the sessions table (opaque, rotating, one-time-use refresh
 	// tokens; DESIGN §3.5, §10). The query IS the contract (DESIGN §1.3):
 	// `sqlc generate` (via @codegen) produces typed Go — never hand-write DB types.
@@ -89,6 +110,10 @@ type Querier interface {
 	// verification when the kid is known from the JWT header.
 	GetSigningKeyByKid(ctx context.Context, kid string) (SigningKey, error)
 	GetUser(ctx context.Context, id pgtype.UUID) (User, error)
+	// Increment retry count and set next attempt time with exponential backoff.
+	// Called when delivery fails but retries remain. The caller computes
+	// next_attempt_at based on the retry policy (5s, 30s, 5m, 30m, 1h cap).
+	IncrementRevocationRetry(ctx context.Context, arg IncrementRevocationRetryParams) error
 	// ListAuditEventsByUser powers the dashboard audit-log viewer (DESIGN §9).
 	// Newest-first with limit/offset paging, served by idx_audit_events_user_time.
 	ListAuditEventsByUser(ctx context.Context, arg ListAuditEventsByUserParams) ([]AuditEvent, error)
@@ -104,6 +129,12 @@ type Querier interface {
 	// MarkMFAFactorUsed burns a one-time factor (e.g. a recovery code) so it can't
 	// be replayed. Only flips unused → used, so a double-spend is a no-op.
 	MarkMFAFactorUsed(ctx context.Context, id pgtype.UUID) error
+	// Mark a revocation signal as successfully delivered. Called after
+	// RevocationSink.RevokeSessionsByUserClient succeeds.
+	MarkRevocationDelivered(ctx context.Context, id pgtype.UUID) error
+	// Mark a revocation signal as permanently failed (dead-letter). Called when
+	// TTL (24h) expires or max retries exceeded. Triggers alerting.
+	MarkRevocationFailed(ctx context.Context, id pgtype.UUID) error
 	// Convenience query to retire a key by kid. Sets state to 'retired' and
 	// retired_at to now(). Used during scheduled rotation (after overlap window)
 	// or emergency rotation (immediate).
