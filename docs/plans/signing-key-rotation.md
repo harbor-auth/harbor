@@ -1,9 +1,9 @@
 ---
 title: Signing key rotation (JWKS kid lifecycle — §7.3)
-status: completed
+status: promoted
 design_refs: [§7.3, §3.5.4, §3.3]
 targets: [internal/crypto/, cmd/harbor-hot/, cmd/harbor-mgmt/, api/openapi/harbor.yaml]
-promoted_to: null
+promoted_to: docs/features/signing-key-rotation.md
 openspec: changes/signing-key-rotation
 created: 2026-07-14
 ---

@@ -1,6 +1,6 @@
 ---
 title: Revocation outbox (durable theft-signal delivery)
-status: completed
+status: promoted
 design_refs: [§3.5, §3.5.2, §10]
 targets: [internal/oidc/, internal/clients/, db/migrations/, db/queries/]
 promoted_to: docs/features/revocation-outbox.md

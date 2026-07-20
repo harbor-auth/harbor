@@ -1,6 +1,6 @@
 ---
 title: Adopt Hippo as standing agent memory
-status: promoted           # draft | approved | in-progress | promoted | abandoned
+status: promoted           # draft | approved | in-progress | merged | promoted | abandoned
 design_refs: [§1.9]        # DESIGN.md sections this work serves
 targets: [.agents/hippo.md, .agents/README.md, .agents/build.md]
 promoted_to: features/hippo-usage.md   # features/<slug>.md once implemented, else null

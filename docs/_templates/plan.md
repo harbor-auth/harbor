@@ -3,7 +3,8 @@
 # Then add a row to docs/README.md (Plans table). A plan describes FUTURE work;
 # once shipped it graduates into a feature doc via `@plan promote`.
 title: <Human-readable feature name>
-status: draft              # draft | approved | in-progress | promoted | abandoned
+status: draft              # draft | approved | in-progress | merged | promoted | abandoned
+                           # (NB: no 'completed' — 'merged' means code is on main; 'promoted' means feature doc written)
 design_refs: [§0.0]        # DESIGN.md sections this work serves
 targets: [internal/<pkg>/] # PREDICTED code paths (refined as work proceeds)
 promoted_to: null          # features/<slug>.md once implemented, else null
