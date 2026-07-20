@@ -36,6 +36,9 @@ type Server struct {
 	bffSessions   bff.BFFSessionStore
 	loginURL      *url.URL // parsed at construction; nil if BFF not configured
 	bffSessionTTL time.Duration
+	// rotator drives POST /admin/keys/rotate (§7.3, §3.5.4). May be nil, in
+	// which case the rotate endpoint reports 501 Not Implemented.
+	rotator *crypto.KeyRotator
 }
 
 // Config holds the settings needed to serve the OIDC surface.
@@ -58,6 +61,9 @@ type Config struct {
 	LoginURL string
 	// BFFSessionTTL overrides DefaultBFFSessionTTL when non-zero.
 	BFFSessionTTL time.Duration
+	// Rotator drives POST /admin/keys/rotate (§7.3, §3.5.4). May be nil, in
+	// which case the rotate endpoint reports 501 Not Implemented.
+	Rotator *crypto.KeyRotator
 }
 
 // New returns a Server that serves the generated OpenAPI contract. The JWKS
@@ -91,6 +97,7 @@ func New(cfg Config) *Server {
 		bffSessions:   cfg.BFFSessions,
 		loginURL:      parsedLoginURL,
 		bffSessionTTL: ttl,
+		rotator:       cfg.Rotator,
 	}
 }
 

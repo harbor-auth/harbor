@@ -219,6 +219,51 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OAuthError"
+  /admin/keys/rotate:
+    post:
+      operationId: postAdminKeysRotate
+      summary: Rotate signing key
+      description: >-
+        Initiates rotation to a new signing key (DESIGN §7.3, §3.5.4). The new
+        key enters pending state (published in JWKS but not yet signing). After
+        the grace period, it is promoted to active and the old key enters the
+        overlap window before retirement. Emergency rotation (`emergency=true`)
+        uses zero grace period and zero overlap — the old key disappears from
+        JWKS immediately, invalidating all in-flight tokens signed with it.
+        This is the "nuclear option" for compromised keys.
+      tags:
+        - admin
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SigningKeyRotateRequest"
+      responses:
+        "200":
+          description: Rotation initiated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SigningKeyRotateResponse"
+        "400":
+          description: Invalid request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "401":
+          description: Unauthorized — admin authentication required.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "500":
+          description: Internal server error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /jwks.json:
     get:
       operationId: getJwks
@@ -485,6 +530,56 @@ components:
           description: >-
             Whether the email address has been verified. Only present if the
             `email` scope was granted.
+    SigningKeyRotateRequest:
+      type: object
+      description: >-
+        Request to rotate the signing key. All fields are optional; omitting
+        `emergency` defaults to scheduled rotation with grace period and
+        overlap window.
+      properties:
+        emergency:
+          type: boolean
+          description: >-
+            If true, perform emergency rotation with zero grace period and
+            zero overlap window. The old key is removed from JWKS immediately,
+            invalidating all in-flight tokens signed with it. Use only when
+            the signing key is confirmed compromised (DESIGN §3.5.4).
+          default: false
+    SigningKeyRotateResponse:
+      type: object
+      description: Response from a successful signing key rotation.
+      required:
+        - new_kid
+        - promoted_at
+      properties:
+        new_kid:
+          type: string
+          description: >-
+            Key ID of the new signing key (RFC 7638 JWK Thumbprint). This kid
+            will appear in the JWKS immediately (pending state) and in JWT
+            headers once promoted to active.
+        old_kid:
+          type: string
+          description: >-
+            Key ID of the previous active signing key, if any. Will be retired
+            after the overlap window (or immediately for emergency rotation).
+        promoted_at:
+          type: string
+          format: date-time
+          description: >-
+            Timestamp when the new key will be promoted to active (signing new
+            tokens). For emergency rotation, this is the current time.
+        retired_at:
+          type: string
+          format: date-time
+          description: >-
+            Timestamp when the old key will be retired (removed from JWKS).
+            Only present if there was a previous active key.
+        is_emergency:
+          type: boolean
+          description: >-
+            True if this was an emergency rotation (zero grace period and
+            overlap window).
     Error:
       type: object
       description: Standard error envelope.

@@ -74,6 +74,18 @@ type Session struct {
 	GrantID          pgtype.UUID        `json:"grant_id"`
 }
 
+type SigningKey struct {
+	ID                pgtype.UUID        `json:"id"`
+	Kid               string             `json:"kid"`
+	State             string             `json:"state"`
+	PublicKeyBytes    []byte             `json:"public_key_bytes"`
+	PrivateKeyWrapped []byte             `json:"private_key_wrapped"`
+	Region            string             `json:"region"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	PromotedAt        pgtype.Timestamptz `json:"promoted_at"`
+	RetiredAt         pgtype.Timestamptz `json:"retired_at"`
+}
+
 type User struct {
 	ID               pgtype.UUID        `json:"id"`
 	Region           string             `json:"region"`
