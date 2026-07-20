@@ -4,7 +4,6 @@ status: completed
 design_refs: [§7.3, §3.5.4, §3.3]
 targets: [internal/crypto/, cmd/harbor-hot/, cmd/harbor-mgmt/, api/openapi/harbor.yaml]
 promoted_to: null
-status_note: merged to main in PR #31 (migration 0008_signing_keys)
 openspec: changes/signing-key-rotation
 created: 2026-07-14
 ---
@@ -125,6 +124,11 @@ always the intended shape). No DESIGN changes needed.
 - [x] Tests: scheduled rotation (promote after grace); emergency rotation (zero grace + zero overlap); JWKS serves both old and new key during overlap; old key absent after retirement; tokens signed by retired key rejected by RP verify
 - [x] Author & verify paired OpenSpec change: `openspec validate signing-key-rotation --strict`
 - [x] Reconcile & promote: `@plan promote signing-key-rotation`
+
+## As-built note
+
+Signing key metadata landed as migration `0008_signing_keys`. Merged to main in
+PR #31.
 
 ## Risks & open questions
 
