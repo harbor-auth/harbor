@@ -1,6 +1,6 @@
 ---
 title: Real token issuance (crypto.Signer + JWKS)
-status: completed
+status: promoted
 design_refs: [§3.3, §3.4, §7.3]
 targets: [internal/crypto/, internal/oidc/, internal/oidcapi/, api/openapi/harbor.yaml]
 promoted_to: docs/features/real-token-issuance.md

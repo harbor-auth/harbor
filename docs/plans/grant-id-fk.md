@@ -1,9 +1,9 @@
 ---
 title: Grant-ID foreign key on sessions (scope revocation to user-client-grant family)
-status: completed
+status: promoted
 design_refs: [§3.5, §10, §11.3]
 targets: [db/migrations/, db/queries/, internal/clients/, internal/oidc/]
-promoted_to: null
+promoted_to: docs/features/grant-id-fk.md
 openspec: changes/grant-id-fk
 created: 2026-07-14
 ---

@@ -1,9 +1,9 @@
 ---
 title: Bloom-filter revocation (§3.5 — emergency JWT kill)
-status: completed
+status: promoted
 design_refs: [§3.5, §3.5.2, §3.5.4, §7.4]
 targets: [internal/oidc/, cmd/harbor-hot/]
-promoted_to: null
+promoted_to: docs/features/bloom-filter-revocation.md
 openspec: changes/bloom-filter-revocation
 created: 2026-07-14
 ---

@@ -23,7 +23,9 @@ If no path is given, resolve the plan from the current branch name against `docs
 
 ## Lifecycle integration
 
-`@build` operates on a plan whose `status` is **`approved`** (the agreed plan of record). On starting, flip it to **`in-progress`** (`@plan status <slug> in-progress` — update the frontmatter **and** the Plans row together). As checklist items land, **tick the `- [ ]` boxes** in the plan — that is the progress record (there is no separate TODO document). On completion, graduate with **`@plan promote <slug>`**; `@build` itself never writes `docs/features/*.md`.
+`@build` operates on a plan whose `status` is **`approved`** (the agreed plan of record). On starting, flip it to **`in-progress`** (`@plan status <slug> in-progress` — update the frontmatter **and** the Plans row together). As checklist items land, **tick the `- [ ]` boxes** in the plan — that is the progress record (there is no separate TODO document).
+
+The plan stays **`in-progress` until its code is verifiably on `main`**. "An agent finished the checklist on a branch" is **not** the same as "shipped": the terminal path is the two-step `merged → promoted` gate defined in [`@plan`](./plan.md). Only after the PR **lands on `main`** (CI green, migrations non-colliding, `targets:` paths present on `origin/main`) does the plan advance to **`merged`** (`@plan merged <slug> <pr#>`); only then does **`@plan promote <slug>`** graduate it into a feature doc. `@build` itself never writes `docs/features/*.md` and **never sets a plan done off a working-branch merge**.
 
 ## Execution loop
 
@@ -87,6 +89,8 @@ feat(oidc): refresh-token rotation — mint+rotate+revoke
 
 Mid-build settings: `skipCi: true` (we validate locally), `createPr: false` (PR is opened once, at the end or a milestone), `syncWithMaster: false` (avoid repeated mid-build merges). **`worktree`:** Harbor is a single Go repo — pass a sibling worktree path if you're building in one, else `worktree: "none"`.
 
+> **Committing/pushing is not "done."** Pushing a branch — or merging it into another **agent/`weft/*` branch** — does **not** land the code on `main`. The plan is only shipped once its PR is merged **into `main`** with green CI (the `merged` gate). Never flip the plan to a done state at this step.
+
 ### 6. Update progress
 
 Tick the landed checklist items to `- [x]` in `docs/plans/<slug>.md`, and note any deviations/decisions inline in the plan.
@@ -142,8 +146,10 @@ When all in-scope checklist items are done:
 2. Final **`@validate`** + **`@go-test`** (full + `-race` + integration) pass.
 3. Final review loop — **`@harbor-reviewer`** + **`@deep-code-reviewer`** (in parallel, same iterate-until-nits rule as step 4) on the full change set.
 4. **OpenSpec gate** — the paired OpenSpec change must pass **`openspec validate <slug> --strict`** (the formal spec gate) before promote; once shipped, **`@openspec archive <slug>`** merges its spec deltas into `openspec/specs/`.
-5. **`@plan promote <slug>`** — graduate the plan into a feature doc (`@docs new`), record provenance, and move its row to Features in `docs/README.md`.
-6. Report what was built, any deviations noted in the plan, and remaining items.
+5. **Open the PR against `main` and get it merged** — `@github-flow` with `createPr: true`, `skipCi: false`, `syncWithMaster: true`, `prBaseBranch: main`. Wait for CI (`agent-check` + `e2e`) to go green and the PR to actually **merge into `main`**. Merging into any other branch does not count.
+6. **Verify + mark `merged`** — run the *merged gate* (`@plan merged <slug> <pr#>`): `git fetch origin main`; confirm the PR is `MERGED` with `baseRefName: main`; confirm every `targets:` path resolves under `git ls-tree -r origin/main`; confirm any migration number is unique on `main` (**no collision**). Only then flip `status: merged`. If any check fails, the plan stays `in-progress` — fix the real gap.
+7. **`@plan promote <slug>`** — only now graduate the (now `merged`) plan into a feature doc (`@docs new`), record provenance, and move its row to Features in `docs/README.md`.
+8. Report what was built, the PR number and its merge-to-`main` status, any deviations noted in the plan, and remaining items.
 
 ## Relationship to other skills
 
@@ -165,4 +171,6 @@ When all in-scope checklist items are done:
 - [ ] **Negative/security tests** from the checklist green before each chunk is done?
 - [ ] Checklist `- [x]` boxes ticked and deviations noted **in the plan** as work lands?
 - [ ] Paired **OpenSpec change verified** (`openspec validate <slug> --strict`) before promote, and **archived** (`@openspec archive <slug>`) on ship?
-- [ ] On completion: *Definition of done* met, then **`@plan promote <slug>`** graduates the plan into a feature doc and updates `docs/README.md`?
+- [ ] Plan kept **`in-progress` until its PR is merged into `main`** (a working-branch/`weft/*` merge does **not** count)?
+- [ ] On completion: *Definition of done* met, PR **merged into `main`** with CI green, then **verified via the merged gate** (`@plan merged <slug> <pr#>`: PR merged to `main`, `targets:` paths present on `origin/main`, migration number unique) before `status: merged`?
+- [ ] Only after `merged`: **`@plan promote <slug>`** graduates the plan into a feature doc and updates `docs/README.md`?

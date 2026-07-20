@@ -1,6 +1,6 @@
 ---
 title: Agentic development foundations
-status: promoted           # draft | approved | in-progress | promoted | abandoned
+status: promoted           # draft | approved | in-progress | merged | promoted | abandoned
 design_refs: [§1.8, §1.9, §2.2, §5.3, §5.4, §6.5.7, §11.7, §A.8]
 targets: [flake.nix, Makefile, invariants/, internal/telemetry/, internal/arch/, tools/lint/, e2e/, .github/workflows/, .agents/ENTRYPOINT.md, CODEOWNERS]
 promoted_to: features/agentic-foundations.md  # features/<slug>.md once implemented, else null
