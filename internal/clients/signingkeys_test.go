@@ -146,11 +146,20 @@ func TestMemSigningKeyStoreListLive(t *testing.T) {
 
 	// Three keys created at increasing times for deterministic ordering.
 	s.WithClock(fixedClock(base))
-	k1, _ := s.Create(ctx, newTestKey("id-1", "kid-1"))
+	k1, err := s.Create(ctx, newTestKey("id-1", "kid-1"))
+	if err != nil {
+		t.Fatalf("Create k1: %v", err)
+	}
 	s.WithClock(fixedClock(base.Add(1 * time.Hour)))
-	k2, _ := s.Create(ctx, newTestKey("id-2", "kid-2"))
+	k2, err := s.Create(ctx, newTestKey("id-2", "kid-2"))
+	if err != nil {
+		t.Fatalf("Create k2: %v", err)
+	}
 	s.WithClock(fixedClock(base.Add(2 * time.Hour)))
-	k3, _ := s.Create(ctx, newTestKey("id-3", "kid-3"))
+	k3, err := s.Create(ctx, newTestKey("id-3", "kid-3"))
+	if err != nil {
+		t.Fatalf("Create k3: %v", err)
+	}
 
 	// Promote k2 to active, retire k3. k1 stays pending.
 	promoted := base.Add(90 * time.Minute)
@@ -225,7 +234,10 @@ func TestMemSigningKeyStoreRetire(t *testing.T) {
 	}
 
 	// A retired key is no longer live.
-	live, _ := s.ListLive(ctx)
+	live, err := s.ListLive(ctx)
+	if err != nil {
+		t.Fatalf("ListLive: %v", err)
+	}
 	if len(live) != 0 {
 		t.Errorf("ListLive after retire: got %d, want 0", len(live))
 	}
@@ -254,8 +266,8 @@ func TestMemSigningKeyStoreLifecycle(t *testing.T) {
 	if _, err := s.GetActive(ctx); !errors.Is(err, ErrSigningKeyNotFound) {
 		t.Errorf("pending: expected no active key, got %v", err)
 	}
-	if live, _ := s.ListLive(ctx); len(live) != 1 {
-		t.Errorf("pending: ListLive got %d, want 1", len(live))
+	if live, err := s.ListLive(ctx); err != nil || len(live) != 1 {
+		t.Errorf("pending: ListLive got %d (err %v), want 1", len(live), err)
 	}
 
 	// Promote to active.
@@ -278,8 +290,8 @@ func TestMemSigningKeyStoreLifecycle(t *testing.T) {
 	if _, err := s.GetActive(ctx); !errors.Is(err, ErrSigningKeyNotFound) {
 		t.Errorf("retired: expected no active key, got %v", err)
 	}
-	if live, _ := s.ListLive(ctx); len(live) != 0 {
-		t.Errorf("retired: ListLive got %d, want 0", len(live))
+	if live, err := s.ListLive(ctx); err != nil || len(live) != 0 {
+		t.Errorf("retired: ListLive got %d (err %v), want 0", len(live), err)
 	}
 	// GetByKid still finds the retired key (it exists, just not live).
 	if _, err := s.GetByKid(ctx, key.Kid); err != nil {
