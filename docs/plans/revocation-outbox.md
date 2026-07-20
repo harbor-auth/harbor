@@ -1,6 +1,6 @@
 ---
 title: Revocation outbox (durable theft-signal delivery)
-status: implemented
+status: completed
 design_refs: [§3.5, §3.5.2, §10]
 targets: [internal/oidc/, internal/clients/, db/migrations/, db/queries/]
 promoted_to: docs/features/revocation-outbox.md
@@ -157,7 +157,7 @@ plan).
 
 ## Implementation checklist
 
-- [x] Write migration `0006_revocation_outbox.{up,down}.sql`
+- [x] Write migration `0009_revocation_outbox.{up,down}.sql`
 - [x] Write `db/queries/revocation_outbox.sql` (Enqueue, FetchPending, MarkDelivered, IncrementRetry, MarkFailed)
 - [x] Run `sqlc generate`
 - [x] Define `RevocationOutbox` interface + `OutboxEntry` type in `internal/oidc/service.go`
@@ -170,8 +170,10 @@ plan).
 
 ## As-built notes (divergences from the draft above)
 
-- **Migration number is `0006`**, not `0004` — it landed after the auth-code and
-  session migrations that were merged in the interim.
+- **Migration number is `0009`**, not `0004` — it was renumbered from `0006`
+  during the merge to main to avoid colliding with `0006_recovery_required`;
+  it lands after the recovery-required, sessions-grant-id, and signing-keys
+  migrations merged in the interim. Merged to main in PR #32.
 - **The `RevocationOutbox` interface + `OutboxEntry` domain type live in
   `internal/oidc/service.go`, not `store.go`** — they must be in the `oidc`
   package (not `internal/clients`) because `clients` imports `oidc`; defining

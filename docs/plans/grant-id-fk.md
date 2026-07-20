@@ -1,6 +1,6 @@
 ---
 title: Grant-ID foreign key on sessions (scope revocation to user-client-grant family)
-status: draft
+status: completed
 design_refs: [§3.5, §10, §11.3]
 targets: [db/migrations/, db/queries/, internal/clients/, internal/oidc/]
 promoted_to: null
@@ -123,12 +123,17 @@ theft-signal scoping so future multi-grant scenarios work correctly. Does
 
 ## Implementation checklist
 
-- [ ] Write and apply `0003_grant_id_fk.up.sql` / `.down.sql`
-- [ ] Update `db/queries/sessions.sql` (INSERT + new REVOKE BY GRANT query)
-- [ ] Run `sqlc generate` to regenerate `internal/gen/db/`
-- [ ] Update `buildCreateSessionParams` in `internal/clients/sessions.go`
-- [ ] Add `RevokeSessionsByGrant` to `oidc.SessionStore` and both impls
-- [ ] Thread `GrantID` through `RotateSession` in `service.go`
-- [ ] Add tests for the new `RevokeSessionsByGrant` path
-- [ ] `go test -race ./...` passes
-- [ ] `@validate` passes (invariants check)
+- [x] Write and apply `0007_sessions_grant_id.up.sql` / `.down.sql`
+- [x] Update `db/queries/sessions.sql` (INSERT + new REVOKE BY GRANT query)
+- [x] Run `sqlc generate` to regenerate `internal/gen/db/`
+- [x] Update `buildCreateSessionParams` in `internal/clients/sessions.go`
+- [x] Add `RevokeSessionsByGrant` to `oidc.SessionStore` and both impls
+- [x] Thread `GrantID` through `RotateSession` in `service.go`
+- [x] Add tests for the new `RevokeSessionsByGrant` path
+- [x] `go test -race ./...` passes
+- [x] `@validate` passes (invariants check)
+
+## As-built note
+
+Migration landed as `0007_sessions_grant_id` (not `0003`) — it merged after the
+recovery-required and interim migrations. Merged to main in PR #30.
