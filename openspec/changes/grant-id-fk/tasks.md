@@ -35,4 +35,4 @@
 
 - [x] `go build ./... && go vet ./... && go test ./...`
 - [x] `make agent-check` (golangci-lint version mismatch is tooling issue, not code)
-- [x] `openspec validate grant-id-fk-deff95ce --strict`
+- [x] `openspec validate grant-id-fk --strict`
