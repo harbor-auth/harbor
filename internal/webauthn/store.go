@@ -141,7 +141,7 @@ type sessionEntry struct {
 }
 
 // InMemorySessionStore is a development/testing SessionStore. Production wiring
-// should use a shared, short-TTL store (e.g. Redis; docs/DESIGN.md §4.4) so the
+// should use RedisSessionStore (see docs/plans/webauthn-session-store.md) so the
 // ceremony works across replicas.
 type InMemorySessionStore struct {
 	mu       sync.Mutex
