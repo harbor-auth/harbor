@@ -1,4 +1,4 @@
--- 0006_sessions_grant_id (down) — remove the grant_id column and its partial
+-- 0007_sessions_grant_id (down) — remove the grant_id column and its partial
 -- index added in the up migration.
 SET lock_timeout = '3s';
 SET statement_timeout = '30s';

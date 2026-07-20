@@ -1,4 +1,4 @@
--- 0006_sessions_grant_id (up) — add grant_id FK column to sessions so revocation
+-- 0007_sessions_grant_id (up) — add grant_id FK column to sessions so revocation
 -- can be scoped to a specific user-client-grant family rather than revoking all
 -- sessions for a (user_id, client_id) pair (DESIGN §3.5, §10, §11.3).
 --
