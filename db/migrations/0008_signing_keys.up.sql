@@ -1,4 +1,4 @@
--- 0006_signing_keys (up) — signing key lifecycle table for JWKS kid rotation
+-- 0008_signing_keys (up) — signing key lifecycle table for JWKS kid rotation
 -- (DESIGN §7.3, §3.5.4).
 --
 -- Keys progress through states: pending → active → retired. Exactly one key

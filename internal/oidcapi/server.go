@@ -53,7 +53,6 @@ type Config struct {
 	// the active signer; additional entries support rotation overlap (§7.3).
 	// May be empty for discovery-only tests (served as {"keys":[]}).
 	Signers []crypto.Signer
-<<<<<<< HEAD
 	// BFFSessions is the BFF session store. When non-nil, /authorize creates a
 	// BFF session and redirects to LoginURL rather than issuing a code directly.
 	BFFSessions bff.BFFSessionStore
