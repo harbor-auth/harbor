@@ -196,7 +196,10 @@ func TestMemSigningKeyStoreSetStateNotFound(t *testing.T) {
 func TestMemSigningKeyStoreSetStatePreservesTimestamps(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemSigningKeyStore()
-	created, _ := s.Create(ctx, newTestKey("id-1", "kid-a"))
+	created, err := s.Create(ctx, newTestKey("id-1", "kid-a"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
 
 	promoted := time.Date(2026, 3, 3, 3, 0, 0, 0, time.UTC)
 	if _, err := s.SetState(ctx, created.ID, signingKeyStateActive, &promoted, nil); err != nil {
@@ -220,7 +223,10 @@ func TestMemSigningKeyStoreRetire(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 7, 7, 7, 0, 0, 0, time.UTC)
 	s := NewMemSigningKeyStore().WithClock(fixedClock(now))
-	created, _ := s.Create(ctx, newTestKey("id-1", "kid-a"))
+	created, err := s.Create(ctx, newTestKey("id-1", "kid-a"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
 
 	got, err := s.Retire(ctx, created.Kid)
 	if err != nil {
