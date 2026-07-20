@@ -15,12 +15,12 @@ import (
 // SigningKey represents a signing key in the key rotation lifecycle.
 // Keys progress through states: pending → active → retired.
 type SigningKey struct {
-	ID                string    // UUID primary key
-	Kid               string    // key identifier in JWKS
-	State             string    // "pending" | "active" | "retired"
-	PublicKeyBytes    []byte    // DER-encoded ECDSA P-256 public key
-	PrivateKeyWrapped []byte    // envelope-encrypted private key
-	Region            string    // data sovereignty jurisdiction
+	ID                string // UUID primary key
+	Kid               string // key identifier in JWKS
+	State             string // "pending" | "active" | "retired"
+	PublicKeyBytes    []byte // DER-encoded ECDSA P-256 public key
+	PrivateKeyWrapped []byte // envelope-encrypted private key
+	Region            string // data sovereignty jurisdiction
 	CreatedAt         time.Time
 	PromotedAt        *time.Time // when state changed to 'active'
 	RetiredAt         *time.Time // when state changed to 'retired'

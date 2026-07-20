@@ -35,10 +35,10 @@ type SigningKeyProvider interface {
 // (SetActive) and new signers added (Add) while readers call ActiveSigner /
 // AllSigners.
 type MultiKeyProvider struct {
-	mu       sync.RWMutex
-	active   Signer            // the signer for new tokens; never nil after construction
-	byKid    map[string]Signer // all live signers keyed by kid (includes active)
-	order    []string          // kids in insertion order for deterministic AllSigners output
+	mu     sync.RWMutex
+	active Signer            // the signer for new tokens; never nil after construction
+	byKid  map[string]Signer // all live signers keyed by kid (includes active)
+	order  []string          // kids in insertion order for deterministic AllSigners output
 }
 
 // Compile-time proof that MultiKeyProvider implements SigningKeyProvider.
