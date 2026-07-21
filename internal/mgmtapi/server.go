@@ -49,7 +49,10 @@ type Server struct {
 	// consents provides access to consent grants for the authenticated user.
 	// May be nil in dev-scaffold mode; GetConsentGrants then returns 503.
 	consents ConsentStore
-	logger   *slog.Logger
+	// sessionRevoker cascades consent revocation to active sessions with the RP.
+	// May be nil (dev-scaffold mode); DeleteConsentGrant then skips the cascade.
+	sessionRevoker SessionRevoker
+	logger         *slog.Logger
 }
 
 // New returns a Server. A nil enroller is valid and puts the enrollment route
@@ -109,6 +112,15 @@ func (s *Server) WithConsentStore(consents ConsentStore) *Server {
 	return s
 }
 
+// WithSessionRevoker attaches the session revoker used to cascade consent
+// revocation to active refresh-token sessions. When set, DELETE
+// /consent-grants/{client_id} also revokes the user's sessions with that RP.
+// A nil revoker skips the cascade. Returns s for chaining.
+func (s *Server) WithSessionRevoker(revoker SessionRevoker) *Server {
+	s.sessionRevoker = revoker
+	return s
+}
+
 // Routes registers harbor-mgmt's cold-path routes on mux. It is additive: the
 // caller owns the mux (typically httpserver.NewHealthMux) and its /healthz route.
 func (s *Server) Routes(mux *http.ServeMux) {
@@ -118,6 +130,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /register/{client_id}", s.PutRegister)
 	mux.HandleFunc("DELETE /register/{client_id}", s.DeleteRegister)
 	mux.HandleFunc("GET /consent-grants", s.GetConsentGrants)
+	mux.HandleFunc("DELETE /consent-grants/{client_id}", s.DeleteConsentGrant)
 }
 
 // errorResponse is the JSON error envelope for the cold-path API. Messages are

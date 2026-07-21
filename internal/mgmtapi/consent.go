@@ -8,11 +8,25 @@ import (
 	"github.com/harbor/harbor/internal/oidc"
 )
 
-// ConsentStore is the narrow interface the consent handler needs from
+// ConsentStore is the narrow interface the consent handlers need from
 // oidc.ConsentStore. Depending on the interface keeps the HTTP layer
 // unit-testable with a fake.
 type ConsentStore interface {
+	// Get returns the active grant for a (userID, clientID) pair. found=false
+	// means the user has no active grant for that client.
+	Get(ctx context.Context, userID, clientID string) (oidc.ConsentGrant, bool, error)
+	// List returns all active grants for a user (newest first).
 	List(ctx context.Context, userID string) ([]oidc.ConsentGrant, error)
+	// Revoke soft-deletes a grant by its UUID string ID (idempotent).
+	Revoke(ctx context.Context, id string) error
+}
+
+// SessionRevoker cascades consent revocation to active refresh-token sessions.
+// Revoking a consent grant should also tear down any sessions the user has with
+// that RP so the app cannot silently continue via refresh tokens
+// (docs/DESIGN.md §11.3). Satisfied by clients.DBSessionStore.
+type SessionRevoker interface {
+	RevokeSessionsByUserClient(ctx context.Context, userID, clientID string) error
 }
 
 // UserIDHeader is the header containing the authenticated user's ID.
@@ -70,4 +84,64 @@ func (s *Server) GetConsentGrants(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, http.StatusOK, resp)
+}
+
+// DeleteConsentGrant handles DELETE /consent-grants/{client_id} — revokes the
+// authenticated user's consent grant for the given RP and cascades the
+// revocation to any active sessions with that RP. The operation is idempotent:
+// it returns 204 even when no active grant exists so repeated calls (or races)
+// are safe. Users can only revoke their own grants — the lookup is scoped by
+// the X-Harbor-User-ID header set by upstream authentication.
+func (s *Server) DeleteConsentGrant(w http.ResponseWriter, r *http.Request) {
+	userID := r.Header.Get(UserIDHeader)
+	if userID == "" {
+		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
+		return
+	}
+
+	clientID := r.PathValue("client_id")
+	if clientID == "" {
+		s.writeError(w, http.StatusBadRequest, "invalid_request", "client_id is required")
+		return
+	}
+
+	if s.consents == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "consent service not configured")
+		return
+	}
+
+	// Look up the grant scoped to this user so we (a) confirm ownership and
+	// (b) obtain the grant ID needed to revoke. A missing grant is not an
+	// error — revocation is idempotent.
+	grant, found, err := s.consents.Get(r.Context(), userID, clientID)
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "mgmtapi: consent lookup failed",
+			"error", err)
+		s.writeError(w, http.StatusInternalServerError, "server_error", "failed to revoke consent grant")
+		return
+	}
+
+	if found {
+		if err := s.consents.Revoke(r.Context(), grant.ID); err != nil {
+			s.logger.ErrorContext(r.Context(), "mgmtapi: consent revoke failed",
+				"error", err)
+			s.writeError(w, http.StatusInternalServerError, "server_error", "failed to revoke consent grant")
+			return
+		}
+	}
+
+	// Cascade to active sessions for this (user, client) pair, reusing the
+	// existing revocation stack. Runs even when no grant existed so any lingering
+	// sessions are still torn down (idempotent). A nil revoker skips the cascade
+	// (dev-scaffold mode without a session store).
+	if s.sessionRevoker != nil {
+		if err := s.sessionRevoker.RevokeSessionsByUserClient(r.Context(), userID, clientID); err != nil {
+			s.logger.ErrorContext(r.Context(), "mgmtapi: session cascade revoke failed",
+				"error", err)
+			s.writeError(w, http.StatusInternalServerError, "server_error", "failed to revoke consent grant")
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
