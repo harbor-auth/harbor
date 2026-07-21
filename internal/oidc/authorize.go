@@ -22,6 +22,7 @@ type AuthorizeRequest struct {
 	Nonce               string
 	CodeChallenge       string
 	CodeChallengeMethod string
+	Prompt              string // OIDC prompt parameter: "none", "login", "consent", or empty
 }
 
 // ValidatedAuthorize is a request that has passed every /authorize check. Its

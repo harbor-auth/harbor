@@ -1,6 +1,10 @@
 package oidc
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+)
 
 const testRedirectURI = "http://localhost:3000/callback"
 
@@ -101,5 +105,107 @@ func TestValidateAuthorize_RedirectChannelErrors(t *testing.T) {
 				t.Fatalf("%s: code = %q, want %q", tc.name, err.Code, tc.wantCode)
 			}
 		})
+	}
+}
+
+// testServiceWithConsent creates a Service with consent store for testing.
+func testServiceWithConsent(consents ConsentStore) *Service {
+	clients := NewInMemoryClientRegistry()
+	clients.Put(testClient())
+	return NewService(ServiceConfig{
+		Issuer:   "https://test.example",
+		Clients:  clients,
+		Codes:    NewInMemoryAuthCodeStore(),
+		Tokens:   &stubTokenIssuer{},
+		Sessions: &userIDSessionResolver{subject: "ppid-123", userID: "user-456"},
+		Consents: consents,
+	})
+}
+
+// userIDSessionResolver returns a fixed subject and userID for consent testing.
+type userIDSessionResolver struct {
+	subject string
+	userID  string
+}
+
+func (r *userIDSessionResolver) Resolve(_ context.Context, _ Client, _ string) (string, string, bool, error) {
+	return r.subject, r.userID, true, nil
+}
+
+// stubTokenIssuer is a minimal TokenIssuer for authorize tests.
+type stubTokenIssuer struct{}
+
+func (s *stubTokenIssuer) Issue(_ context.Context, _ IssueParams) (IssuedTokens, error) {
+	return IssuedTokens{AccessToken: "access-token", IDToken: "id-token", ExpiresIn: 3600}, nil
+}
+
+func TestAuthorize_ConsentSkip_CoveringGrant(t *testing.T) {
+	// Setup: user already has a covering consent grant
+	consents := NewInMemoryConsentStore()
+	_, _ = consents.Upsert(context.Background(), "user-456", "demo-client", []string{"openid", "profile"})
+
+	svc := testServiceWithConsent(consents)
+	req := validAuthorizeReq()
+
+	result, err := svc.Authorize(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Authorize() error = %v, want nil", err)
+	}
+	if result.Code == "" {
+		t.Error("expected authorization code to be issued")
+	}
+}
+
+func TestAuthorize_ConsentPromptNone_NoGrant_InteractionRequired(t *testing.T) {
+	// No existing consent grant, prompt=none should fail
+	consents := NewInMemoryConsentStore()
+	svc := testServiceWithConsent(consents)
+
+	req := validAuthorizeReq()
+	req.Prompt = "none"
+
+	_, err := svc.Authorize(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected interaction_required error")
+	}
+	if !strings.Contains(err.Code, "interaction_required") {
+		t.Errorf("error code = %q, want interaction_required", err.Code)
+	}
+}
+
+func TestAuthorize_ConsentPromptNone_CoveringGrant_Success(t *testing.T) {
+	// Existing covering grant with prompt=none should succeed
+	consents := NewInMemoryConsentStore()
+	_, _ = consents.Upsert(context.Background(), "user-456", "demo-client", []string{"openid", "profile"})
+
+	svc := testServiceWithConsent(consents)
+	req := validAuthorizeReq()
+	req.Prompt = "none"
+
+	result, err := svc.Authorize(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Authorize() error = %v, want nil", err)
+	}
+	if result.Code == "" {
+		t.Error("expected authorization code to be issued")
+	}
+}
+
+func TestAuthorize_ConsentPromptNone_ScopeEscalation_InteractionRequired(t *testing.T) {
+	// Existing grant doesn't cover all requested scopes, prompt=none should fail
+	consents := NewInMemoryConsentStore()
+	_, _ = consents.Upsert(context.Background(), "user-456", "demo-client", []string{"openid"})
+
+	svc := testServiceWithConsent(consents)
+	req := validAuthorizeReq()
+	req.Prompt = "none"
+	req.Scope = "openid profile" // requesting more than granted
+
+	_, err := svc.Authorize(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected interaction_required error")
+	}
+	if !strings.Contains(err.Code, "interaction_required") {
+		t.Errorf("error code = %q, want interaction_required", err.Code)
 	}
 }

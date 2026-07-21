@@ -542,6 +542,189 @@ func TestService_signalCodeReuse_NoLogOnSuccess(t *testing.T) {
 	}
 }
 
+// --- Consent upsert tests ---
+
+// userIDSessionResolver returns a fixed subject and userID for consent testing.
+type userIDSessionResolverSvc struct {
+	subject string
+	userID  string
+}
+
+func (r *userIDSessionResolverSvc) Resolve(_ context.Context, _ Client, _ string) (string, string, bool, error) {
+	return r.subject, r.userID, true, nil
+}
+
+func TestService_Authorize_UpsertsConsentOnApproval(t *testing.T) {
+	clients := NewInMemoryClientRegistry()
+	clients.Put(testClient())
+	consents := NewInMemoryConsentStore()
+
+	svc := NewService(ServiceConfig{
+		Issuer:   "https://eu.harbor.id",
+		Clients:  clients,
+		Codes:    NewInMemoryAuthCodeStore(),
+		Tokens:   NewPlaceholderIssuer(),
+		Sessions: &userIDSessionResolverSvc{subject: "ppid-123", userID: "user-456"},
+		Consents: consents,
+		NewCode:  func() (string, error) { return "test-code-12345", nil },
+		Now:      func() time.Time { return time.Unix(1_700_000_000, 0) },
+	})
+
+	// No consent exists yet
+	_, found, _ := consents.Get(context.Background(), "user-456", "demo-client")
+	if found {
+		t.Fatal("expected no consent before Authorize")
+	}
+
+	// Authorize should create consent
+	req := validAuthorizeReq()
+	result, aerr := svc.Authorize(context.Background(), req)
+	if aerr != nil {
+		t.Fatalf("Authorize = %v, want success", aerr)
+	}
+	if result.Code == "" {
+		t.Fatal("expected authorization code")
+	}
+
+	// Consent should now exist
+	grant, found, err := consents.Get(context.Background(), "user-456", "demo-client")
+	if err != nil {
+		t.Fatalf("consents.Get error: %v", err)
+	}
+	if !found {
+		t.Fatal("expected consent after Authorize")
+	}
+	// Should have the requested scopes (canonicalized)
+	expectedScopes := CanonicalizeScopes(strings.Fields(req.Scope))
+	if len(grant.Scopes) != len(expectedScopes) {
+		t.Fatalf("Scopes = %v, want %v", grant.Scopes, expectedScopes)
+	}
+}
+
+func TestService_Authorize_ScopeEscalation_PersistsMergedScopes(t *testing.T) {
+	clients := NewInMemoryClientRegistry()
+	clients.Put(Client{
+		ID:            "demo-client",
+		RedirectURIs:  []string{testRedirectURI},
+		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
+	})
+	consents := NewInMemoryConsentStore()
+
+	// Pre-populate consent with only "openid"
+	_, _ = consents.Upsert(context.Background(), "user-456", "demo-client", []string{"openid"})
+
+	svc := NewService(ServiceConfig{
+		Issuer:   "https://eu.harbor.id",
+		Clients:  clients,
+		Codes:    NewInMemoryAuthCodeStore(),
+		Tokens:   NewPlaceholderIssuer(),
+		Sessions: &userIDSessionResolverSvc{subject: "ppid-123", userID: "user-456"},
+		Consents: consents,
+		NewCode:  func() (string, error) { return "test-code-12345", nil },
+		Now:      func() time.Time { return time.Unix(1_700_000_000, 0) },
+	})
+
+	// Request more scopes than previously granted (escalation)
+	req := validAuthorizeReq()
+	req.Scope = "openid profile email"
+
+	result, aerr := svc.Authorize(context.Background(), req)
+	if aerr != nil {
+		t.Fatalf("Authorize = %v, want success", aerr)
+	}
+	if result.Code == "" {
+		t.Fatal("expected authorization code")
+	}
+
+	// Consent should now have merged scopes (openid + profile + email)
+	grant, found, err := consents.Get(context.Background(), "user-456", "demo-client")
+	if err != nil {
+		t.Fatalf("consents.Get error: %v", err)
+	}
+	if !found {
+		t.Fatal("expected consent after Authorize")
+	}
+	// Should have all scopes merged and canonicalized
+	if len(grant.Scopes) != 3 {
+		t.Fatalf("Scopes = %v, want [email openid profile]", grant.Scopes)
+	}
+	// Verify canonical order
+	expected := []string{"email", "openid", "profile"}
+	for i, s := range expected {
+		if grant.Scopes[i] != s {
+			t.Fatalf("Scopes[%d] = %q, want %q", i, grant.Scopes[i], s)
+		}
+	}
+}
+
+func TestService_Authorize_ConsentUpsertError(t *testing.T) {
+	clients := NewInMemoryClientRegistry()
+	clients.Put(testClient())
+
+	// Use a consent store that fails on Upsert
+	consents := &errConsentStore{upsertErr: errors.New("database connection failed")}
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	svc := NewService(ServiceConfig{
+		Issuer:   "https://eu.harbor.id",
+		Clients:  clients,
+		Codes:    NewInMemoryAuthCodeStore(),
+		Tokens:   NewPlaceholderIssuer(),
+		Sessions: &userIDSessionResolverSvc{subject: "ppid-123", userID: "user-456"},
+		Consents: consents,
+		Logger:   logger,
+		NewCode:  func() (string, error) { return "test-code-12345", nil },
+		Now:      func() time.Time { return time.Unix(1_700_000_000, 0) },
+	})
+
+	_, aerr := svc.Authorize(context.Background(), validAuthorizeReq())
+	if aerr == nil {
+		t.Fatal("expected error for consent upsert failure")
+	}
+	if aerr.Code != ErrCodeServerError {
+		t.Fatalf("Code = %q, want %q", aerr.Code, ErrCodeServerError)
+	}
+	if aerr.Channel != ChannelRedirect {
+		t.Fatalf("Channel = %v, want ChannelRedirect", aerr.Channel)
+	}
+
+	// Verify error was logged
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "consent upsert failed") {
+		t.Fatalf("expected log message about consent upsert failure, got: %s", logOutput)
+	}
+}
+
+// errConsentStore is a ConsentStore that returns configurable errors.
+type errConsentStore struct {
+	getErr    error
+	upsertErr error
+}
+
+func (s *errConsentStore) Get(_ context.Context, _, _ string) (ConsentGrant, bool, error) {
+	if s.getErr != nil {
+		return ConsentGrant{}, false, s.getErr
+	}
+	return ConsentGrant{}, false, nil
+}
+
+func (s *errConsentStore) Upsert(_ context.Context, _, _ string, _ []string) (ConsentGrant, error) {
+	if s.upsertErr != nil {
+		return ConsentGrant{}, s.upsertErr
+	}
+	return ConsentGrant{}, nil
+}
+
+func (s *errConsentStore) List(_ context.Context, _ string) ([]ConsentGrant, error) {
+	return nil, nil
+}
+
+func (s *errConsentStore) Revoke(_ context.Context, _ string) error {
+	return nil
+}
+
 func TestService_signalCodeReuse_LogDoesNotContainPII(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	code := AuthCode{

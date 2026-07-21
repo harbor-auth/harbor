@@ -26,6 +26,7 @@ import (
 	"github.com/harbor/harbor/internal/gen/db"
 	"github.com/harbor/harbor/internal/httpserver"
 	"github.com/harbor/harbor/internal/identity"
+	"github.com/harbor/harbor/internal/mgmtapi"
 	"github.com/harbor/harbor/internal/region"
 	"github.com/harbor/harbor/internal/webauthn"
 )
@@ -193,11 +194,21 @@ func main() {
 		persister = &noopUserPersister{logger: logger}
 	}
 	enroller := identity.NewEnroller(kp, crypto.NewCipher(), persister)
+	// Consent store for mgmtapi consent grant endpoints.
+	var consentStore mgmtapi.ConsentStore
+	var sessionRevoker mgmtapi.SessionRevoker
+	if pool != nil {
+		q := db.New(pool)
+		consentStore = clients.NewDBConsentStore(q)
+		sessionRevoker = clients.NewDBSessionStore(q)
+	}
+	mgmtServer := mgmtapi.New(enroller, logger).WithConsentStore(consentStore).WithSessionRevoker(sessionRevoker)
 
 	mux := httpserver.NewHealthMux()
 	// Passkey ceremony endpoints. userIDFromRequest returns 501 until the BFF
 	// session middleware lands (docs/DESIGN.md §9) — production-safe default.
 	webauthn.RegisterRoutes(mux, svc)
+	mgmtServer.Routes(mux)
 	mux.HandleFunc("POST /users/enroll", enrollHandler(enroller, logger))
 
 	// BFF login endpoints (docs/plans/bff-session-middleware.md §11.2 step 2).
