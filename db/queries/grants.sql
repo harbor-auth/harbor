@@ -30,3 +30,19 @@ SELECT * FROM grants
 WHERE user_id = $1
   AND client_id = $2
   AND revoked_at IS NULL;
+
+-- ListGrantsByClient returns all active grants for a specific client. Used
+-- during client deletion (RFC 7592) to identify affected users.
+-- name: ListGrantsByClient :many
+SELECT * FROM grants
+WHERE client_id = $1
+  AND revoked_at IS NULL
+ORDER BY created_at DESC;
+
+-- RevokeGrantsByClient revokes all active grants for a specific client. Used
+-- during client deletion (RFC 7592) to clean up user authorizations.
+-- name: RevokeGrantsByClient :exec
+UPDATE grants
+SET revoked_at = now()
+WHERE client_id = $1
+  AND revoked_at IS NULL;

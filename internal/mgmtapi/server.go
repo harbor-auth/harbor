@@ -29,7 +29,24 @@ type Server struct {
 	// and returned as an HttpOnly cookie for the registration ceremony to read
 	// (docs/DESIGN.md §9, §11.1). Nil leaves the cookie unset (dev-scaffold mode).
 	sessions EnrollmentSessionStore
-	logger   *slog.Logger
+	// clientReg, when non-nil, persists dynamically-registered clients for the
+	// RFC 7591 POST /register endpoint. Nil puts /register into a 503 state.
+	clientReg ClientRegistrationStore
+	// clientMgmt, when non-nil, backs the RFC 7592 client configuration
+	// endpoints (GET/PUT/DELETE /register/{client_id}). It is wired from the same
+	// store as clientReg when that store also satisfies ClientManagementStore
+	// (clients.DBClientRegistrationStore does). Nil puts those routes in a 503
+	// state.
+	clientMgmt ClientManagementStore
+	// registrationBaseURL is the external base URL used to build each client's
+	// RFC 7592 registration_client_uri ({base}/register/{client_id}).
+	registrationBaseURL string
+	// initialAccessTokenHash, when non-nil, gates POST /register: callers must
+	// present the matching initial access token as a Bearer credential, or the
+	// endpoint returns 401 and persists nothing (RFC 7591 §1.2, §3). Nil disables
+	// the gate (open registration). The token is stored HASHED, never plaintext.
+	initialAccessTokenHash []byte
+	logger                 *slog.Logger
 }
 
 // New returns a Server. A nil enroller is valid and puts the enrollment route
@@ -51,10 +68,44 @@ func (s *Server) WithEnrollmentSessions(sessions EnrollmentSessionStore) *Server
 	return s
 }
 
+// WithClientRegistration wires the RFC 7591 POST /register endpoint. store
+// persists new clients; baseURL is the external base used to build each
+// client's registration_client_uri ({baseURL}/register/{client_id}). A nil
+// store leaves /register in a 503 state. Returns s for chaining.
+func (s *Server) WithClientRegistration(store ClientRegistrationStore, baseURL string) *Server {
+	s.clientReg = store
+	s.registrationBaseURL = baseURL
+	// A store that also implements the RFC 7592 management behaviour (the
+	// production *clients.DBClientRegistrationStore does) transparently enables
+	// the GET/PUT/DELETE /register/{client_id} routes.
+	if mgmt, ok := store.(ClientManagementStore); ok {
+		s.clientMgmt = mgmt
+	}
+	return s
+}
+
+// WithInitialAccessToken gates the RFC 7591 POST /register endpoint behind an
+// initial access token (RFC 7591 §1.2, §3). When token is non-empty, callers
+// must present it as a Bearer credential in the Authorization header or the
+// endpoint returns 401 and persists nothing. An empty token leaves the gate
+// open (anonymous registration). The token is stored HASHED and compared in
+// constant time, so a configured value never lingers in plaintext. Returns s
+// for chaining.
+func (s *Server) WithInitialAccessToken(token string) *Server {
+	if token != "" {
+		s.initialAccessTokenHash = HashSecret(token)
+	}
+	return s
+}
+
 // Routes registers harbor-mgmt's cold-path routes on mux. It is additive: the
 // caller owns the mux (typically httpserver.NewHealthMux) and its /healthz route.
 func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /enroll", s.PostEnroll)
+	mux.HandleFunc("POST /register", s.PostRegister)
+	mux.HandleFunc("GET /register/{client_id}", s.GetRegister)
+	mux.HandleFunc("PUT /register/{client_id}", s.PutRegister)
+	mux.HandleFunc("DELETE /register/{client_id}", s.DeleteRegister)
 }
 
 // errorResponse is the JSON error envelope for the cold-path API. Messages are
