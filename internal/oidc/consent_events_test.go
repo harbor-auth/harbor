@@ -70,5 +70,5 @@ func TestNoopConsentEventEmitter_Emit(t *testing.T) {
 
 func TestNoopConsentEventEmitter_ImplementsInterface(t *testing.T) {
 	// Compile-time check is in consent_events.go, but verify at runtime too.
-	var _ ConsentEventEmitter = NoopConsentEventEmitter()
+	var _ = NoopConsentEventEmitter()
 }

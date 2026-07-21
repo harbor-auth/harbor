@@ -60,7 +60,9 @@ func (f *fakeConsentQuerier) UpsertConsentGrant(_ context.Context, arg db.Upsert
 
 	// Create new
 	var id pgtype.UUID
-	_ = id.Scan("11111111-1111-1111-1111-111111111111")
+	if err := id.Scan("11111111-1111-1111-1111-111111111111"); err != nil {
+		return db.ConsentGrant{}, err
+	}
 	g := db.ConsentGrant{
 		ID:        id,
 		UserID:    arg.UserID,
@@ -188,8 +190,12 @@ func TestDBConsentStore_List(t *testing.T) {
 	userID := "550e8400-e29b-41d4-a716-446655440000"
 
 	// Create grants for two clients
-	_, _ = store.Upsert(ctx, userID, "client-a", []string{"openid"})
-	_, _ = store.Upsert(ctx, userID, "client-b", []string{"profile"})
+	if _, err := store.Upsert(ctx, userID, "client-a", []string{"openid"}); err != nil {
+		t.Fatalf("upsert client-a: %v", err)
+	}
+	if _, err := store.Upsert(ctx, userID, "client-b", []string{"profile"}); err != nil {
+		t.Fatalf("upsert client-b: %v", err)
+	}
 
 	grants, err := store.List(ctx, userID)
 	if err != nil {
@@ -218,10 +224,13 @@ func TestDBConsentStore_Revoke(t *testing.T) {
 	clientID := "test-client"
 
 	// Create grant
-	grant, _ := store.Upsert(ctx, userID, clientID, []string{"openid"})
+	grant, err := store.Upsert(ctx, userID, clientID, []string{"openid"})
+	if err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
 
 	// Revoke it
-	err := store.Revoke(ctx, grant.ID)
+	err = store.Revoke(ctx, grant.ID)
 	if err != nil {
 		t.Fatalf("Revoke failed: %v", err)
 	}

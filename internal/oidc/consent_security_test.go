@@ -2,6 +2,7 @@ package oidc
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -84,7 +85,10 @@ func TestConsentGrant_CrossClientIsolation(t *testing.T) {
 	}
 
 	// ConsentDecision for client B should require a prompt (no grant exists)
-	grantA, _, _ := store.Get(ctx, userID, clientA)
+	grantA, _, err := store.Get(ctx, userID, clientA)
+	if err != nil {
+		t.Fatalf("get grant: %v", err)
+	}
 	decision, err := ConsentDecision(&grantA, []string{"openid", "profile"}, "")
 	if err != nil {
 		t.Fatalf("consent decision for client A failed: %v", err)
@@ -217,7 +221,7 @@ func TestConsentGrant_NoPIIBeyondFKsAndScopes(t *testing.T) {
 func TestConsentDecision_PromptNoneRequiresExistingGrant(t *testing.T) {
 	// No grant exists — prompt=none MUST fail
 	_, err := ConsentDecision(nil, []string{"openid"}, "none")
-	if err != ErrInteractionRequired {
+	if !errors.Is(err, ErrInteractionRequired) {
 		t.Errorf("prompt=none with no grant should return ErrInteractionRequired, got %v", err)
 	}
 
@@ -231,7 +235,7 @@ func TestConsentDecision_PromptNoneRequiresExistingGrant(t *testing.T) {
 		RevokedAt: &now,
 	}
 	_, err = ConsentDecision(revokedGrant, []string{"openid"}, "none")
-	if err != ErrInteractionRequired {
+	if !errors.Is(err, ErrInteractionRequired) {
 		t.Errorf("prompt=none with revoked grant should return ErrInteractionRequired, got %v", err)
 	}
 
@@ -243,7 +247,7 @@ func TestConsentDecision_PromptNoneRequiresExistingGrant(t *testing.T) {
 		Scopes:   []string{"openid"},
 	}
 	_, err = ConsentDecision(existingGrant, []string{"openid", "profile"}, "none")
-	if err != ErrInteractionRequired {
+	if !errors.Is(err, ErrInteractionRequired) {
 		t.Errorf("prompt=none with scope escalation should return ErrInteractionRequired, got %v", err)
 	}
 }
