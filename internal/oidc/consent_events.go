@@ -31,6 +31,12 @@ type ConsentEvent struct {
 	// Kind identifies the type of consent event (granted, scope_escalated, revoked).
 	Kind ConsentEventKind
 
+	// GrantID is the UUID string of the consent grant the event refers to.
+	// For revoked events — where only the grant ID is available — this is the
+	// primary identifier; audit consumers can resolve the (user, client) pair
+	// from it.
+	GrantID string
+
 	// UserID is the user's UUID string (the subject of the consent).
 	UserID string
 

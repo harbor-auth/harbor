@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -25,13 +26,34 @@ type consentQuerier interface {
 // in the consent_grants table (docs/DESIGN.md §11) — per-(user, RP, scope)
 // consent records enforced at /authorize and managed via harbor-mgmt.
 type DBConsentStore struct {
-	q consentQuerier
+	q       consentQuerier
+	emitter oidc.ConsentEventEmitter
 }
 
 // NewDBConsentStore returns a ConsentStore backed by q. q is typically
-// *db.Queries obtained from a pgx connection pool.
+// *db.Queries obtained from a pgx connection pool. Event emission defaults to
+// a no-op; call WithEmitter to wire an observability backend.
 func NewDBConsentStore(q consentQuerier) *DBConsentStore {
-	return &DBConsentStore{q: q}
+	return &DBConsentStore{q: q, emitter: oidc.NoopConsentEventEmitter()}
+}
+
+// WithEmitter attaches a ConsentEventEmitter so grant/escalation/revocation
+// events are published for audit and analytics. A nil emitter leaves the
+// existing (no-op) emitter in place. Returns s for chaining.
+func (s *DBConsentStore) WithEmitter(emitter oidc.ConsentEventEmitter) *DBConsentStore {
+	if emitter != nil {
+		s.emitter = emitter
+	}
+	return s
+}
+
+// emit publishes a consent event best-effort: a nil emitter is skipped and any
+// emit error is swallowed so observability never blocks the consent write path.
+func (s *DBConsentStore) emit(ctx context.Context, event oidc.ConsentEvent) {
+	if s.emitter == nil {
+		return
+	}
+	_ = s.emitter.Emit(ctx, event)
 }
 
 // Compile-time proof that DBConsentStore implements oidc.ConsentStore.
@@ -66,6 +88,12 @@ func (s *DBConsentStore) Upsert(ctx context.Context, userID, clientID string, sc
 	if err != nil {
 		return oidc.ConsentGrant{}, fmt.Errorf("clients: Upsert consent: invalid userID: %w", err)
 	}
+
+	// Look up any existing active grant BEFORE writing so we can classify the
+	// resulting event as a first-time grant vs a scope escalation. A lookup
+	// error is non-fatal — we fall back to treating the write as a new grant.
+	existing, hadExisting, _ := s.Get(ctx, userID, clientID)
+
 	canonicalScopes := oidc.CanonicalizeScopes(scopes)
 	row, err := s.q.UpsertConsentGrant(ctx, db.UpsertConsentGrantParams{
 		UserID:   uUID,
@@ -75,7 +103,32 @@ func (s *DBConsentStore) Upsert(ctx context.Context, userID, clientID string, sc
 	if err != nil {
 		return oidc.ConsentGrant{}, fmt.Errorf("clients: Upsert consent: %w", err)
 	}
-	return rowToConsentGrant(row), nil
+	grant := rowToConsentGrant(row)
+
+	// Classify and emit the consent event. A re-confirmation with no new scopes
+	// emits nothing — there is no meaningful state change to record.
+	switch {
+	case !hadExisting:
+		s.emit(ctx, oidc.ConsentEvent{
+			Kind:      oidc.ConsentEventGranted,
+			GrantID:   grant.ID,
+			UserID:    grant.UserID,
+			ClientID:  grant.ClientID,
+			Scopes:    grant.Scopes,
+			Timestamp: grant.GrantedAt,
+		})
+	case scopesWidened(existing.Scopes, canonicalScopes):
+		s.emit(ctx, oidc.ConsentEvent{
+			Kind:      oidc.ConsentEventScopeEscalated,
+			GrantID:   grant.ID,
+			UserID:    grant.UserID,
+			ClientID:  grant.ClientID,
+			Scopes:    grant.Scopes,
+			Timestamp: grant.UpdatedAt,
+		})
+	}
+
+	return grant, nil
 }
 
 // List implements oidc.ConsentStore. Returns all active (non-revoked) consent
@@ -105,7 +158,30 @@ func (s *DBConsentStore) Revoke(ctx context.Context, id string) error {
 	if err := s.q.RevokeConsentGrant(ctx, gUID); err != nil {
 		return fmt.Errorf("clients: Revoke consent: %w", err)
 	}
+	// The revoke query returns no row, so only the grant ID is available for the
+	// event; audit consumers resolve (user, client, scopes) from GrantID.
+	s.emit(ctx, oidc.ConsentEvent{
+		Kind:      oidc.ConsentEventRevoked,
+		GrantID:   id,
+		Timestamp: time.Now(),
+	})
 	return nil
+}
+
+// scopesWidened reports whether newScopes contains any scope not already present
+// in oldScopes (i.e. the grant is being expanded). Both slices are expected to
+// be canonical (sorted, deduplicated).
+func scopesWidened(oldScopes, newScopes []string) bool {
+	old := make(map[string]struct{}, len(oldScopes))
+	for _, sc := range oldScopes {
+		old[sc] = struct{}{}
+	}
+	for _, sc := range newScopes {
+		if _, ok := old[sc]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 // rowToConsentGrant maps a sqlc ConsentGrant row to the oidc domain type.

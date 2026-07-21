@@ -9,7 +9,18 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	db "github.com/harbor/harbor/internal/gen/db"
+	"github.com/harbor/harbor/internal/oidc"
 )
+
+// fakeConsentEmitter records emitted consent events for assertions.
+type fakeConsentEmitter struct {
+	events []oidc.ConsentEvent
+}
+
+func (f *fakeConsentEmitter) Emit(_ context.Context, e oidc.ConsentEvent) error {
+	f.events = append(f.events, e)
+	return nil
+}
 
 // fakeConsentQuerier implements consentQuerier for unit tests.
 type fakeConsentQuerier struct {
@@ -232,5 +243,107 @@ func TestDBConsentStore_Revoke_InvalidID(t *testing.T) {
 	err := store.Revoke(ctx, "not-a-uuid")
 	if err == nil {
 		t.Error("expected error for invalid id")
+	}
+}
+
+func TestDBConsentStore_Upsert_EmitsGrantedEvent(t *testing.T) {
+	emitter := &fakeConsentEmitter{}
+	store := NewDBConsentStore(newFakeConsentQuerier()).WithEmitter(emitter)
+	ctx := context.Background()
+	userID := "550e8400-e29b-41d4-a716-446655440000"
+
+	if _, err := store.Upsert(ctx, userID, "client-a", []string{"openid"}); err != nil {
+		t.Fatalf("Upsert failed: %v", err)
+	}
+
+	if len(emitter.events) != 1 {
+		t.Fatalf("got %d events, want 1", len(emitter.events))
+	}
+	e := emitter.events[0]
+	if e.Kind != oidc.ConsentEventGranted {
+		t.Errorf("event kind = %q, want %q", e.Kind, oidc.ConsentEventGranted)
+	}
+	if e.ClientID != "client-a" {
+		t.Errorf("event ClientID = %q, want %q", e.ClientID, "client-a")
+	}
+	if len(e.Scopes) != 1 || e.Scopes[0] != "openid" {
+		t.Errorf("event Scopes = %v, want [openid]", e.Scopes)
+	}
+	if e.GrantID == "" {
+		t.Error("event GrantID should be populated")
+	}
+}
+
+func TestDBConsentStore_Upsert_EmitsScopeEscalatedEvent(t *testing.T) {
+	emitter := &fakeConsentEmitter{}
+	store := NewDBConsentStore(newFakeConsentQuerier()).WithEmitter(emitter)
+	ctx := context.Background()
+	userID := "550e8400-e29b-41d4-a716-446655440000"
+
+	if _, err := store.Upsert(ctx, userID, "client-a", []string{"openid"}); err != nil {
+		t.Fatalf("first Upsert failed: %v", err)
+	}
+	if _, err := store.Upsert(ctx, userID, "client-a", []string{"openid", "profile"}); err != nil {
+		t.Fatalf("second Upsert failed: %v", err)
+	}
+
+	if len(emitter.events) != 2 {
+		t.Fatalf("got %d events, want 2", len(emitter.events))
+	}
+	if emitter.events[0].Kind != oidc.ConsentEventGranted {
+		t.Errorf("first event kind = %q, want %q", emitter.events[0].Kind, oidc.ConsentEventGranted)
+	}
+	esc := emitter.events[1]
+	if esc.Kind != oidc.ConsentEventScopeEscalated {
+		t.Errorf("second event kind = %q, want %q", esc.Kind, oidc.ConsentEventScopeEscalated)
+	}
+	if len(esc.Scopes) != 2 {
+		t.Errorf("escalation event Scopes = %v, want 2 scopes", esc.Scopes)
+	}
+}
+
+func TestDBConsentStore_Upsert_NoEventOnUnchangedScopes(t *testing.T) {
+	emitter := &fakeConsentEmitter{}
+	store := NewDBConsentStore(newFakeConsentQuerier()).WithEmitter(emitter)
+	ctx := context.Background()
+	userID := "550e8400-e29b-41d4-a716-446655440000"
+
+	if _, err := store.Upsert(ctx, userID, "client-a", []string{"openid", "profile"}); err != nil {
+		t.Fatalf("first Upsert failed: %v", err)
+	}
+	// Re-confirm the same scopes (different order) — must not emit a new event.
+	if _, err := store.Upsert(ctx, userID, "client-a", []string{"profile", "openid"}); err != nil {
+		t.Fatalf("second Upsert failed: %v", err)
+	}
+
+	if len(emitter.events) != 1 {
+		t.Fatalf("got %d events, want 1 (only the initial granted event)", len(emitter.events))
+	}
+}
+
+func TestDBConsentStore_Revoke_EmitsRevokedEvent(t *testing.T) {
+	emitter := &fakeConsentEmitter{}
+	store := NewDBConsentStore(newFakeConsentQuerier()).WithEmitter(emitter)
+	ctx := context.Background()
+	userID := "550e8400-e29b-41d4-a716-446655440000"
+
+	grant, err := store.Upsert(ctx, userID, "client-a", []string{"openid"})
+	if err != nil {
+		t.Fatalf("Upsert failed: %v", err)
+	}
+	if err := store.Revoke(ctx, grant.ID); err != nil {
+		t.Fatalf("Revoke failed: %v", err)
+	}
+
+	// Events: granted (from Upsert) + revoked (from Revoke).
+	if len(emitter.events) != 2 {
+		t.Fatalf("got %d events, want 2", len(emitter.events))
+	}
+	last := emitter.events[len(emitter.events)-1]
+	if last.Kind != oidc.ConsentEventRevoked {
+		t.Errorf("last event kind = %q, want %q", last.Kind, oidc.ConsentEventRevoked)
+	}
+	if last.GrantID != grant.ID {
+		t.Errorf("revoked event GrantID = %q, want %q", last.GrantID, grant.ID)
 	}
 }
