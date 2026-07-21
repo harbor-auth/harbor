@@ -1,9 +1,9 @@
 ---
 title: OIDF OP conformance (green conformance suite on every PR)
-status: draft
+status: promoted
 design_refs: [§1.8, §11.7, §3.1]
 targets: [internal/oidcapi/, internal/oidc/, api/openapi/harbor.yaml, conformance/]
-promoted_to: null
+promoted_to: docs/features/oidf-conformance.md
 openspec: changes/oidf-conformance
 created: 2026-07-14
 ---
@@ -143,29 +143,36 @@ realization of existing design.
 ## Implementation checklist
 
 ### Phase 1 (id_token completeness)
-- [ ] Add `auth_time`, `nonce`, `jti`, `azp` to `tokens.Issue` signature
-- [ ] Capture `nonce` in `authorize.go` → store in `AuthCode`
-- [ ] Thread `nonce` through `Token()` → `tokens.Issue`
-- [ ] Add `auth_time` to `RefreshSession`; set at session creation
-- [ ] Issue UUID `jti` per id_token
-- [ ] Tests: `TestTokenIssue_IDTokenClaims`
+- [x] Add `auth_time`, `nonce`, `jti`, `azp`, `acr`, `amr` to the id_token claims (`internal/oidc/jwt_issuer.go`)
+- [x] Capture `nonce` at authorize → thread through to token issuance
+- [x] Add `auth_time` to the session; set at session creation; emit in id_token
+- [x] Issue a per-token `jti` (256-bit, `newJTI()`) on id and access tokens
+- [x] Tests: `internal/oidc/jwt_issuer_test.go` id_token claim assertions
 
 ### Phase 2 (userinfo)
-- [ ] Add `GET /userinfo` to OpenAPI spec; regenerate
-- [ ] Implement `internal/oidcapi/userinfo.go`
-- [ ] Tests: `TestUserinfo_*`
+- [x] Add `GET /userinfo` to OpenAPI spec; regenerate
+- [x] Implement `internal/oidcapi/userinfo.go`
+- [x] Tests: `internal/oidcapi/userinfo_test.go`
 
 ### Phase 3 (discovery)
-- [ ] Fill all missing fields in `discoveryHandler`
-- [ ] Tests: `TestDiscovery_RequiredFields`
+- [x] Fill missing discovery fields (`subject_types_supported`, `claims_supported`, `userinfo_endpoint`)
+- [x] Tests: `internal/oidcapi/discovery_test.go`
 
 ### Phase 4 (nonce passthrough)
-- [ ] Already covered in Phase 1 above
+- [x] Covered in Phase 1
 
 ### Phase 5 (auth_time)
-- [ ] Already covered in Phase 1 above
+- [x] Covered in Phase 1
 
 ### Phase 6 (assert-pass.sh)
-- [ ] Update `conformance/assert-pass.sh` as each phase ships
-- [ ] CI `e2e` job goes green
-- [ ] `@validate` passes
+- [x] Fail-closed `conformance/assert-pass.sh` with a `REQUIRED_MODULES` allowlist
+- [x] CI `e2e` job runs the suite as a release gate (§1.8 Stage 7)
+- [x] `@validate` passes
+
+> **Promoted (2026-07-20):** shipped via PR #28 (`feat(oidc): OIDF OP
+> conformance suite compliance`, commit `bf3abd9`). As-built behaviour is
+> documented in [docs/features/oidf-conformance.md](../features/oidf-conformance.md).
+> `harbor-hot` passes the OIDC Basic OP certification plan; the conformance run
+> is a release-blocking CI gate. `auth-code-persistence` remains a follow-up
+> multi-replica hardening (the suite passes against the in-memory code store in
+> single-replica CI).
