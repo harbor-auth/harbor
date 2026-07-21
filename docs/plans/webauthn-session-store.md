@@ -1,9 +1,9 @@
 ---
 title: WebAuthn session persistence (Redis-backed, multi-replica-safe)
-status: approved
+status: promoted
 design_refs: [§4.1, §4.4, §9, §11.1]
 targets: [internal/webauthn/, cmd/harbor-mgmt/]
-promoted_to: null
+promoted_to: docs/features/webauthn-session-store.md
 openspec: changes/webauthn-session-store
 created: 2026-07-17
 ---
@@ -82,31 +82,37 @@ single-use). Does **not** change `DESIGN.md`.
 
 ## Implementation checklist
 
-- [ ] `RedisSessionStore` struct wrapping `*redis.Client` + `sessionTTL time.Duration`.
-- [ ] `Save(ctx, key, data)` — JSON-marshal `gowebauthn.SessionData`; `SET NX EX
+- [x] `RedisSessionStore` struct wrapping `*redis.Client` + `sessionTTL time.Duration`.
+- [x] `Save(ctx, key, data)` — JSON-marshal `gowebauthn.SessionData`; `SET NX EX
   <ttl>`. Return an error if the key already exists (NX failed).
-- [ ] `Take(ctx, key)` — Lua script: `GET key` → `DEL key` → `return value`.
+- [x] `Take(ctx, key)` — Lua script: `GET key` → `DEL key` → `return value`.
   Return `ErrSessionNotFound` when result is nil.
-- [ ] Lua script must handle the concurrent-request case: GET then DEL is
+- [x] Lua script must handle the concurrent-request case: GET then DEL is
   atomic at the script level; two concurrent `Take` calls cannot both retrieve
   the value.
-- [ ] Validate that all fields of `gowebauthn.SessionData` survive a JSON
+- [x] Validate that all fields of `gowebauthn.SessionData` survive a JSON
   round-trip (all fields are exported in the upstream library; verify against
   the pinned version in `go.mod`).
-- [ ] Integration tests (miniredis preferred; fallback real Redis in CI):
+- [x] Integration tests (miniredis preferred; fallback real Redis in CI):
   - `Save` → `Take` round-trip preserves all `SessionData` fields.
   - Double-`Take` returns `ErrSessionNotFound` on the second call.
   - Expired session (TTL elapsed) returns `ErrSessionNotFound`.
   - `Save` with duplicate key returns an error (NX guard).
   - Concurrent `Take` calls: only one succeeds.
-- [ ] Wire `RedisSessionStore` into `cmd/harbor-mgmt/main.go` when `REDIS_URL`
+- [x] Wire `RedisSessionStore` into `cmd/harbor-mgmt/main.go` when `REDIS_URL`
   is set; keep `InMemorySessionStore` for dev (no-Redis path).
-- [ ] Update the `InMemorySessionStore` production-warning comment to reference
+- [x] Update the `InMemorySessionStore` production-warning comment to reference
   this plan slug (`webauthn-session-store`).
-- [ ] Tests: confirm no PII in Redis keys or values; TTL fires correctly; Lua
+- [x] Tests: confirm no PII in Redis keys or values; TTL fires correctly; Lua
   atomicity serialises concurrent `Take` calls.
-- [ ] Author & verify paired OpenSpec change: `openspec validate webauthn-session-store --strict`
-- [ ] Reconcile & promote: `@plan promote webauthn-session-store`
+- [x] Author & verify paired OpenSpec change: `openspec validate webauthn-session-store --strict`
+- [x] Reconcile & promote: `@plan promote webauthn-session-store`
+
+> **Promoted (2026-07-20):** shipped via PR #39 (rebased clean onto main; CI
+> green — agent-check, helm-lint, e2e). As-built behaviour is documented in
+> [docs/features/webauthn-session-store.md](../features/webauthn-session-store.md).
+> A fail-closed default TTL was added during landing: a non-positive
+> `sessionTTL` is coerced to 5 min so expiry can never be accidentally disabled.
 
 ## Risks & open questions
 

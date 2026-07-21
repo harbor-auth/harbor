@@ -24,69 +24,63 @@ plans that still depend on them.
 
 | Shipped feature | DESIGN § | Unblocked |
 |---|---|---|
-| [`real-token-issuance`](../features/real-token-issuance.md) | §3.3 · §3.4 · §7.3 | `signing-key-rotation` ✅, `token-introspection`, `userinfo-endpoint`, `session-ppid-seam`, `refresh-token-rotation`, `oidf-conformance` |
+| [`real-token-issuance`](../features/real-token-issuance.md) | §3.3 · §3.4 · §7.3 | `signing-key-rotation` ✅, `token-introspection`, `userinfo-endpoint`, `session-ppid-seam` ✅, `refresh-token-rotation` ✅, `oidf-conformance` |
 | [`signing-key-rotation`](../features/signing-key-rotation.md) | §7.3 · §3.5 · §3.3 | (leaf — JWKS `kid` lifecycle) |
 | [`grant-id-fk`](../features/grant-id-fk.md) | §3.5 · §10 · §11.3 | `revocation-outbox` ✅ |
 | [`revocation-outbox`](../features/revocation-outbox.md) | §3.5 · §10 | `bloom-filter-revocation` ✅ |
 | [`bloom-filter-revocation`](../features/bloom-filter-revocation.md) | §3.5 · §7.4 | (leaf — emergency JWT kill) |
+| [`webauthn-session-store`](../features/webauthn-session-store.md) | §4.1 · §4.4 · §9 | (leaf — multi-replica ceremony sessions) |
+| [`client-grant-persistence`](../features/client-grant-persistence.md) | §3.2 · §10 · §11.3 | `session-ppid-seam` ✅ |
+| [`user-enrollment`](../features/user-enrollment.md) | §11.1 · §10 · §4.4 | `session-ppid-seam` ✅, `userinfo-endpoint`, `bff-session-middleware`, `oidf-conformance` |
+| [`session-ppid-seam`](../features/session-ppid-seam.md) | §3.2 · §11.2 | `bff-session-middleware`, `refresh-token-rotation` ✅, `oidf-conformance` |
+| [`refresh-token-rotation`](../features/refresh-token-rotation.md) | §3.5 · §10 · §11.7 | (leaf — rotating opaque refresh tokens) |
 
-> **Why they're gone from the DAG:** all of Critical Path B ("Safe Revocation")
-> and the token-signing root have shipped. The remaining graph is what's left to
-> reach **Real Login** (Critical Path C) and a **fully green conformance suite**.
+> **Why they're gone from the DAG:** all of Critical Path A ("First Honest
+> Token") and Critical Path B ("Safe Revocation") have **fully shipped**, and
+> Critical Path C ("Real Login") is one link from complete — only
+> `bff-session-middleware` remains to close the `?user_id` impersonation hole.
+> The remaining graph is what's left to reach that final security fix and a
+> **fully green conformance suite**.
 
 ---
 
 ## Dependency graph (ASCII) — remaining work
 
 `✅` marks a shipped prerequisite (see the table above). Unmarked boxes are
-still to build.
+still to build. Every remaining plan's *unbuilt* prerequisites are now few — the
+foundational data/session/identity layers have all landed.
 
 ```
-┌──────────────────────────── LAYER 0 — no prerequisites ─────────────────────────────┐
-│                                                                                      │
-│  ┌─────────────────────┐  ┌─────────────────┐  ┌─────────────────┐  ┌────────────┐  │
-│  │ envelope-encryption │  │  auth-code-     │  │ client-grant-   │  │ webauthn-  │  │
-│  │ -kms  §4.4·§7.3·§10 │  │  persistence    │  │ persistence     │  │ session-   │  │
-│  │   (in-progress)     │  │  §4.1 · §10    │  │  §3.2 · §10    │  │ store §4.4 │  │
-│  └──────────┬──────────┘  └───────┬─────────┘  └───────┬─────────┘  └────────────┘  │
-└─────────────┼─────────────────────┼───────────────────┼──────────────────────────────┘
-              │                      │                   │
-              │  LAYER 1             │                   │
-              ▼                      │                   │
-  ┌───────────────────┐  ┌───────────────────────┐      │
-  │  user-enrollment  │  │  token-introspection  │      │
-  │  §11.1 · §10·§4.4 │  │  §3.3  (+ ✅rti)      │      │
-  └────────┬──────────┘  └───────────────────────┘      │
-           │                                             │
-           │  LAYER 2   (+ ✅ real-token-issuance)       │
-           ▼                                             ▼
-┌─────────────────────────┐              ┌────────────────────────────┐
-│    session-ppid-seam    │              │    userinfo-endpoint       │
-│     §3.2 · §11.2        │              │    §3.3 · §11.4 · §3.1     │
-│      (approved)         │              │   (+ ✅rti + user-enroll)  │
-└───────────┬─────────────┘              └────────────────────────────┘
-            │
-            │  LAYER 3   (all unblocked once session-ppid-seam lands)
-┌───────────┼──────────────────────────────┐
-▼           ▼                              ▼
-┌─────────────────┐              ┌──────────────────────┐
-│  bff-session-   │              │  refresh-token-      │
-│  middleware     │              │  rotation §3.5·§10   │
-│  §9·§11.1·§11.2 │              │   (+ ✅rti)          │
-└─────────────────┘              └──────────────────────┘
-  (end-to-end login —
-   most urgent security fix)
-
-
-──────────────────────── LAYER 4 — final integration gate ───────────────────
-  (requires: ✅ real-token-issuance + auth-code-persistence + user-enrollment +
-   session-ppid-seam; suite goes fully green only after all remaining layers land)
-
-                           ┌──────────────────────────────┐
-                           │       oidf-conformance        │
-                           │      §1.8 · §11.7 · §3.1     │
-                           └──────────────────────────────┘
+┌──────────────────── LAYER 0 — no unbuilt prerequisites ─────────────────────┐
+│                                                                             │
+│  ┌─────────────────────┐  ┌─────────────────┐  ┌────────────────────────┐  │
+│  │ envelope-encryption │  │ token-          │  │  bff-session-          │  │
+│  │ -kms  §4.4·§7.3·§10 │  │ introspection   │  │  middleware            │  │
+│  │   (in-progress)     │  │ §3.3 (+ ✅rti)  │  │  §9·§11.1·§11.2        │  │
+│  └─────────────────────┘  └─────────────────┘  │ (+ ✅enroll+ppid-seam) │  │
+│                                                 │  🔴 closes ?user_id    │  │
+│  ┌─────────────────────┐  ┌─────────────────┐   └────────────────────────┘  │
+│  │  auth-code-         │  │  userinfo-      │                               │
+│  │  persistence        │  │  endpoint       │                               │
+│  │  §4.1 · §10        │  │ §3.3·§11.4·§3.1 │                               │
+│  └──────────┬──────────┘  │ (+ ✅rti+enroll)│                               │
+│             │             └─────────────────┘                               │
+└─────────────┼───────────────────────────────────────────────────────────────┘
+              │
+              │  LAYER 1
+              ▼
+   ┌──────────────────────────────┐
+   │       oidf-conformance        │
+   │      §1.8 · §11.7 · §3.1     │
+   │  (+ ✅rti/enroll/ppid-seam;   │
+   │   needs auth-code-persistence)│
+   └──────────────────────────────┘
 ```
+
+> **🔴 `bff-session-middleware` is the single highest-priority item.** It is now
+> a buildable root — both its prerequisites (`user-enrollment`,
+> `session-ppid-seam`) have shipped — and it closes the `?user_id`
+> impersonation hole (§9), the codebase's worst remaining security hole.
 
 ---
 
@@ -98,11 +92,8 @@ prerequisites (`✅`) are already satisfied.
 
 | Phase | Plans | Gate / unlock |
 |---|---|---|
-| **0** | `envelope-encryption-kms` *(in-progress)* · `auth-code-persistence` · `client-grant-persistence` · `webauthn-session-store` *(approved)* | Nothing blocked — all roots |
-| **1** | `user-enrollment` · `token-introspection` | `user-enrollment` unblocked by `kms`; `token-introspection` unblocked by ✅ `real-token-issuance` |
-| **2** | `session-ppid-seam` *(approved)* · `userinfo-endpoint` | `session-ppid-seam` needs `user-enrollment` + `client-grant-persistence` + ✅ `real-token-issuance`; `userinfo-endpoint` needs ✅ `real-token-issuance` + `user-enrollment` |
-| **3** | `bff-session-middleware` · `refresh-token-rotation` | Both unblocked once `session-ppid-seam` lands |
-| **4** | `oidf-conformance` | Unblocked once ✅ `real-token-issuance` + `auth-code-persistence` + `user-enrollment` + `session-ppid-seam` land; suite goes fully green only after all phases |
+| **0** | `bff-session-middleware` 🔴 · `envelope-encryption-kms` *(in-progress)* · `auth-code-persistence` · `token-introspection` · `userinfo-endpoint` | All roots. `bff-session-middleware` unblocked by ✅ `user-enrollment` + ✅ `session-ppid-seam`; `token-introspection`/`userinfo-endpoint` unblocked by ✅ `real-token-issuance` (+ ✅ `user-enrollment`) |
+| **1** | `oidf-conformance` | Needs `auth-code-persistence` (+ ✅ `real-token-issuance` + ✅ `user-enrollment` + ✅ `session-ppid-seam`); suite goes fully green only after all roots land |
 
 ---
 
@@ -115,85 +106,76 @@ Each row is `(plan, requires)`. **Type** distinguishes:
 A `✅` on a prerequisite means it has already shipped (see the *Already shipped*
 table) — the edge is satisfied and kept only for traceability.
 
-> **Note on `bff-session-middleware` direction:** Architecturally the BFF session
-> *provides* the secure `user_id` to the SessionResolver, which might suggest
-> `session-ppid-seam` should depend on BFF instead. The current edge is
-> intentional: the seam is scaffolded first against the `?user_id` placeholder
-> so its `SessionResolver` interface can be defined and tested independently;
-> BFF then replaces that insecure source without changing the interface. The
-> BFF plan requires the seam's interface to exist before it can be wired in.
-
 | Plan | Requires | Type |
 |---|---|---|
 | `envelope-encryption-kms` | *(none)* | — |
 | `auth-code-persistence` | *(none)* | — |
-| `client-grant-persistence` | *(none)* | — |
-| `webauthn-session-store` | *(none)* | — |
-| `user-enrollment` | `envelope-encryption-kms` | hard |
 | `token-introspection` | ✅ `real-token-issuance` | hard |
-| `userinfo-endpoint` | ✅ `real-token-issuance` · `user-enrollment` | hard |
-| `session-ppid-seam` | `user-enrollment` · `client-grant-persistence` · ✅ `real-token-issuance` | hard |
-| `bff-session-middleware` | `user-enrollment` · `session-ppid-seam` | hard (see direction note above) |
-| `refresh-token-rotation` | ✅ `real-token-issuance` · `session-ppid-seam` | hard |
-| `oidf-conformance` | ✅ `real-token-issuance` · `auth-code-persistence` · `user-enrollment` · `session-ppid-seam` | hard |
+| `userinfo-endpoint` | ✅ `real-token-issuance` · ✅ `user-enrollment` | hard |
+| `bff-session-middleware` | ✅ `user-enrollment` · ✅ `session-ppid-seam` | hard |
+| `oidf-conformance` | `auth-code-persistence` · ✅ `real-token-issuance` · ✅ `user-enrollment` · ✅ `session-ppid-seam` | hard |
+
+> **Note on `bff-session-middleware` direction:** Architecturally the BFF session
+> *provides* the secure `user_id` to the SessionResolver. The seam was
+> scaffolded first (against the `?user_id` placeholder) so its `SessionResolver`
+> interface could be defined and tested independently; that seam has now shipped
+> (`session-ppid-seam` ✅), so BFF replaces the insecure `?user_id` source
+> without changing the interface.
 
 ---
 
 ## The critical paths
 
-Each named path is the longest unbroken chain from a root (Layer 0) through to a
-significant milestone. Plans on these paths cannot slip without delaying
-everything downstream. **Critical Path B ("Safe Revocation") has fully shipped**
-and is retained below for the record.
+Each named path is the longest unbroken chain from a root through to a
+significant milestone. **Critical Paths A and B have fully shipped**; Critical
+Path C is one link from complete. All three are retained below for the record.
 
-### Critical path A — "First Honest Token"
+### Critical path A — "First Honest Token" (✅ fully shipped)
 
-The sequence that yields a real, signed, pairwise-subject `id_token`:
+The sequence that yields a real, signed, pairwise-subject `id_token` — now
+complete end-to-end:
 
 ```
 ✅ real-token-issuance
-  └─► session-ppid-seam        (approved — next convergence point)
-         └─► refresh-token-rotation
+  └─► ✅ session-ppid-seam
+         └─► ✅ refresh-token-rotation
 ```
 
-The token root has shipped; nothing produces a spec-compliant, per-RP `sub`
-until `session-ppid-seam` and `refresh-token-rotation` also land.
+Harbor now issues a spec-compliant, per-RP `sub` with rotating opaque refresh
+tokens.
 
-### Critical path B — "Safe Revocation" (revocation core ✅ shipped)
+### Critical path B — "Safe Revocation" (✅ fully shipped)
 
-The sequence that yields durable, scoped, near-instant revocation. The three
-revocation links have **landed on `main`**; the two upstream roots remain on the
-backlog (they were prototyped against, not yet fully wired):
+The sequence that yields durable, scoped, near-instant revocation — every link,
+including both upstream roots, has **landed on `main`**:
 
 ```
-client-grant-persistence*   └─► session-ppid-seam*
+✅ client-grant-persistence
+  └─► ✅ session-ppid-seam
          └─► ✅ grant-id-fk
                └─► ✅ revocation-outbox
                      └─► ✅ bloom-filter-revocation
 ```
 
-The bloom filter is the emergency kill lever (§3.5). *(`grant-id-fk`,
-`revocation-outbox`, and `bloom-filter-revocation` shipped ahead of the full
-`client-grant-persistence` / `session-ppid-seam` build-out; those two roots
-(unmarked above) remain on the backlog to complete the production wiring they
-prototyped against.)*
+The bloom filter is the emergency kill lever (§3.5).
 
-### Critical path C — "Real Login" (most urgent security fix)
+### Critical path C — "Real Login" (one link remaining — most urgent)
 
 The sequence that replaces the `?user_id` impersonation hack in
 `webauthn/handlers.go` — the codebase's single worst security hole today:
 
 ```
-envelope-encryption-kms       (in-progress)
-  └─► user-enrollment
-         └─► session-ppid-seam (approved)
-               └─► bff-session-middleware
+✅ envelope-encryption-kms   (in-progress — dev-local KMS in use today)
+  └─► ✅ user-enrollment
+         └─► ✅ session-ppid-seam
+               └─► bff-session-middleware   🔴 ONLY UNBUILT LINK
 ```
 
-Until `bff-session-middleware` lands, any HTTP client can forge any user's
-identity by supplying `?user_id=<arbitrary>`. This path has no dependency on the
-(already-shipped) token-signing track — it can be driven independently. **This is
-now the highest-priority remaining chain.**
+Everything up to the seam has shipped (`user-enrollment` runs today against a
+dev-local key provider; `envelope-encryption-kms` is an in-progress hardening
+that swaps in the real regional KEK). Until `bff-session-middleware` lands, any
+HTTP client can forge any user's identity by supplying `?user_id=<arbitrary>`.
+**This is the highest-priority remaining chain and it is now a buildable root.**
 
 ---
 
@@ -201,24 +183,21 @@ now the highest-priority remaining chain.**
 
 Given what's already shipped, the optimal remaining sequence is:
 
-1. **Finish Phase 0 (in flight + roots):** complete `envelope-encryption-kms`
-   *(already in-progress — the root of Critical Path C)*, and in parallel
-   `auth-code-persistence`, `client-grant-persistence`, and
-   `webauthn-session-store` *(approved, no prerequisites)*.
-2. **Then in parallel (Phase 1):** `user-enrollment` (unblocked by `kms`) ·
-   `token-introspection` (unblocked by ✅ `real-token-issuance`).
-3. **Then (Phase 2):** `session-ppid-seam` *(already approved — the convergence
-   point of Critical Paths A and C)* · `userinfo-endpoint`.
-4. **Then in parallel (Phase 3):** `bff-session-middleware` *(closes the
-   `?user_id` hole)* + `refresh-token-rotation`.
-5. **Finally (Phase 4):** `oidf-conformance` (the §1.8 Stage-7 gate — green CI
-   confirms everything composes).
+1. **`bff-session-middleware` 🔴 (do this first):** now a buildable root — both
+   prerequisites (✅ `user-enrollment`, ✅ `session-ppid-seam`) have shipped. It
+   closes the `?user_id` impersonation hole (§9), the worst remaining security
+   gap, and completes Critical Path C ("Real Login").
+2. **In parallel (Phase 0 roots):** `token-introspection` and `userinfo-endpoint`
+   (both depend only on shipped work) · `auth-code-persistence` (root) ·
+   finish `envelope-encryption-kms` *(in-progress — replaces the dev-local key
+   provider with the real regional KEK)*.
+3. **Finally (Phase 1):** `oidf-conformance` — its only unbuilt prerequisite is
+   `auth-code-persistence`; the §1.8 Stage-7 gate goes fully green once all
+   roots land.
 
-> **Tip for agents:** The token-signing root and all of Critical Path B have
-> shipped. The highest-leverage remaining move is **`session-ppid-seam`**
-> (already `approved`): it's the convergence point of Critical Path A ("First
-> Honest Token") *and* Critical Path C ("Real Login"), and it unblocks
-> `bff-session-middleware` and `refresh-token-rotation` simultaneously. Its only
-> unbuilt prerequisites are `user-enrollment` and `client-grant-persistence` —
-> land those first. Meanwhile `webauthn-session-store` (approved, no prereqs)
-> and `envelope-encryption-kms` (in-progress) can proceed independently.
+> **Tip for agents:** Critical Paths A and B are done and C is one link away.
+> The single highest-leverage move is **`bff-session-middleware`** — a now-
+> unblocked root that closes the `?user_id` hole. After that, the remaining
+> backlog is shallow: `token-introspection`, `userinfo-endpoint`, and
+> `auth-code-persistence` are all roots, and only `oidf-conformance` waits on
+> `auth-code-persistence`.
