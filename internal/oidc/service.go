@@ -123,6 +123,7 @@ type ServiceConfig struct {
 	Sessions     SessionResolver
 	SessionStore SessionStore     // optional; defaults to noopSessionStore (no refresh tokens)
 	Grants       GrantStore       // optional; defaults to noopGrantStore
+	Consents     ConsentStore     // optional; defaults to noopConsentStore (skip consent check)
 	Revocations  RevocationSink   // optional; defaults to noopRevocationSink
 	Outbox       RevocationOutbox // optional; defaults to noopRevocationOutbox (no durable delivery)
 	Logger       *slog.Logger
@@ -143,6 +144,7 @@ type Service struct {
 	sessions     SessionResolver
 	sessionStore SessionStore
 	grants       GrantStore
+	consents     ConsentStore
 	revocations  RevocationSink
 	outbox       RevocationOutbox
 	logger       *slog.Logger
@@ -162,6 +164,7 @@ func NewService(cfg ServiceConfig) *Service {
 		sessions:     cfg.Sessions,
 		sessionStore: cfg.SessionStore,
 		grants:       cfg.Grants,
+		consents:     cfg.Consents,
 		revocations:  cfg.Revocations,
 		outbox:       cfg.Outbox,
 		logger:       cfg.Logger,
@@ -172,6 +175,9 @@ func NewService(cfg ServiceConfig) *Service {
 	}
 	if svc.grants == nil {
 		svc.grants = noopGrantStore{}
+	}
+	if svc.consents == nil {
+		svc.consents = noopConsentStore{}
 	}
 	if svc.sessionStore == nil {
 		svc.sessionStore = noopSessionStore{}
@@ -336,6 +342,39 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (*Authori
 	}
 	if !approved {
 		return nil, redirectErr(ErrCodeAccessDenied, "the user did not grant consent")
+	}
+
+	// Consent check: lookup existing consent and apply decision logic.
+	// This runs AFTER authentication (userID is known) but BEFORE code issuance.
+	if userID != "" {
+		requestedScopes := strings.Fields(validated.Scope)
+		existingGrant, found, err := s.consents.Get(ctx, userID, validated.Client.ID)
+		if err != nil {
+			s.logger.ErrorContext(ctx, "consent lookup failed",
+				slog.String("client_id", validated.Client.ID),
+				slog.Any("error", err))
+			return nil, redirectErr(ErrCodeServerError, "could not check consent status")
+		}
+
+		var grantPtr *ConsentGrant
+		if found {
+			grantPtr = &existingGrant
+		}
+
+		decision, decErr := ConsentDecision(grantPtr, requestedScopes, req.Prompt)
+		if decErr != nil {
+			// ErrInteractionRequired is an *AuthorizeError
+			if authErr, ok := decErr.(*AuthorizeError); ok {
+				return nil, authErr
+			}
+			return nil, redirectErr(ErrCodeServerError, "consent decision failed")
+		}
+
+		// If skip=false, the SessionResolver should have handled the consent prompt.
+		// For now, we trust the SessionResolver's approval signal. In the future,
+		// the consent screen will be a separate step that updates the consent store.
+		// When skip=true, we can proceed directly to code issuance.
+		_ = decision // decision.Skip tells us whether consent was skipped
 	}
 
 	codeStr, err := s.newCode()

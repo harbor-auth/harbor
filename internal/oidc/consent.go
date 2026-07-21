@@ -158,6 +158,27 @@ func mergeScopes(a, b []string) []string {
 	return result
 }
 
+// noopConsentStore is a ConsentStore that always returns no grant. Used as the
+// default in ServiceConfig when no consent store is wired — the consent check
+// effectively becomes a no-op (always requires consent prompt).
+type noopConsentStore struct{}
+
+// Compile-time proof that noopConsentStore implements ConsentStore.
+var _ ConsentStore = noopConsentStore{}
+
+func (noopConsentStore) Get(_ context.Context, _, _ string) (ConsentGrant, bool, error) {
+	return ConsentGrant{}, false, nil
+}
+func (noopConsentStore) Upsert(_ context.Context, _, _ string, _ []string) (ConsentGrant, error) {
+	return ConsentGrant{}, nil
+}
+func (noopConsentStore) List(_ context.Context, _ string) ([]ConsentGrant, error) {
+	return nil, nil
+}
+func (noopConsentStore) Revoke(_ context.Context, _ string) error {
+	return nil
+}
+
 // CanonicalizeScopes returns a sorted, deduplicated copy of the input scopes.
 // This ensures consistent storage and comparison of scope sets regardless of
 // the order in which scopes were requested or granted.
