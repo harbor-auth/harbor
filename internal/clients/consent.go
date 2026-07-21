@@ -1,0 +1,123 @@
+package clients
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+
+	db "github.com/harbor/harbor/internal/gen/db"
+	"github.com/harbor/harbor/internal/oidc"
+)
+
+// consentQuerier is the narrow interface over *db.Queries that DBConsentStore
+// needs. Production code passes *db.Queries; tests pass a small fake.
+type consentQuerier interface {
+	GetConsentGrantByUserClient(ctx context.Context, arg db.GetConsentGrantByUserClientParams) (db.ConsentGrant, error)
+	UpsertConsentGrant(ctx context.Context, arg db.UpsertConsentGrantParams) (db.ConsentGrant, error)
+	ListConsentGrantsByUser(ctx context.Context, userID pgtype.UUID) ([]db.ConsentGrant, error)
+	RevokeConsentGrant(ctx context.Context, id pgtype.UUID) error
+}
+
+// DBConsentStore is a sqlc-backed oidc.ConsentStore. It persists consent grants
+// in the consent_grants table (docs/DESIGN.md §11) — per-(user, RP, scope)
+// consent records enforced at /authorize and managed via harbor-mgmt.
+type DBConsentStore struct {
+	q consentQuerier
+}
+
+// NewDBConsentStore returns a ConsentStore backed by q. q is typically
+// *db.Queries obtained from a pgx connection pool.
+func NewDBConsentStore(q consentQuerier) *DBConsentStore {
+	return &DBConsentStore{q: q}
+}
+
+// Compile-time proof that DBConsentStore implements oidc.ConsentStore.
+var _ oidc.ConsentStore = (*DBConsentStore)(nil)
+
+// Get implements oidc.ConsentStore. Returns (ConsentGrant{}, false, nil) when
+// no active grant exists for (userID, clientID). Any DB error propagates as
+// the third return value.
+func (s *DBConsentStore) Get(ctx context.Context, userID, clientID string) (oidc.ConsentGrant, bool, error) {
+	uUID, err := parseUUID(userID)
+	if err != nil {
+		return oidc.ConsentGrant{}, false, fmt.Errorf("clients: Get consent: invalid userID: %w", err)
+	}
+	row, err := s.q.GetConsentGrantByUserClient(ctx, db.GetConsentGrantByUserClientParams{
+		UserID:   uUID,
+		ClientID: clientID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return oidc.ConsentGrant{}, false, nil
+		}
+		return oidc.ConsentGrant{}, false, fmt.Errorf("clients: Get consent: %w", err)
+	}
+	return rowToConsentGrant(row), true, nil
+}
+
+// Upsert implements oidc.ConsentStore. Creates a new consent grant or updates
+// the scopes of an existing active grant. Scopes are canonicalized (sorted and
+// deduplicated) before storage.
+func (s *DBConsentStore) Upsert(ctx context.Context, userID, clientID string, scopes []string) (oidc.ConsentGrant, error) {
+	uUID, err := parseUUID(userID)
+	if err != nil {
+		return oidc.ConsentGrant{}, fmt.Errorf("clients: Upsert consent: invalid userID: %w", err)
+	}
+	canonicalScopes := oidc.CanonicalizeScopes(scopes)
+	row, err := s.q.UpsertConsentGrant(ctx, db.UpsertConsentGrantParams{
+		UserID:   uUID,
+		ClientID: clientID,
+		Scopes:   canonicalScopes,
+	})
+	if err != nil {
+		return oidc.ConsentGrant{}, fmt.Errorf("clients: Upsert consent: %w", err)
+	}
+	return rowToConsentGrant(row), nil
+}
+
+// List implements oidc.ConsentStore. Returns all active (non-revoked) consent
+// grants for a user, newest first.
+func (s *DBConsentStore) List(ctx context.Context, userID string) ([]oidc.ConsentGrant, error) {
+	uUID, err := parseUUID(userID)
+	if err != nil {
+		return nil, fmt.Errorf("clients: List consents: invalid userID: %w", err)
+	}
+	rows, err := s.q.ListConsentGrantsByUser(ctx, uUID)
+	if err != nil {
+		return nil, fmt.Errorf("clients: List consents: %w", err)
+	}
+	out := make([]oidc.ConsentGrant, len(rows))
+	for i, r := range rows {
+		out[i] = rowToConsentGrant(r)
+	}
+	return out, nil
+}
+
+// Revoke implements oidc.ConsentStore. Soft-deletes by ID. id must be a UUID string.
+func (s *DBConsentStore) Revoke(ctx context.Context, id string) error {
+	gUID, err := parseUUID(id)
+	if err != nil {
+		return fmt.Errorf("clients: Revoke consent: invalid id: %w", err)
+	}
+	if err := s.q.RevokeConsentGrant(ctx, gUID); err != nil {
+		return fmt.Errorf("clients: Revoke consent: %w", err)
+	}
+	return nil
+}
+
+// rowToConsentGrant maps a sqlc ConsentGrant row to the oidc domain type.
+// It is a pure function so it is directly unit-testable without a DB.
+func rowToConsentGrant(row db.ConsentGrant) oidc.ConsentGrant {
+	return oidc.ConsentGrant{
+		ID:        uuidToString(row.ID),
+		UserID:    uuidToString(row.UserID),
+		ClientID:  row.ClientID,
+		Scopes:    row.Scopes,
+		GrantedAt: row.GrantedAt.Time,
+		UpdatedAt: row.UpdatedAt.Time,
+		RevokedAt: timePtrFromPgtz(row.RevokedAt),
+	}
+}
