@@ -13,12 +13,12 @@ import (
 // scope set, enforced at /authorize to ensure users have granted consent before
 // tokens are issued.
 type ConsentGrant struct {
-	ID        string    // UUID string
-	UserID    string    // UUID string
-	ClientID  string    // relying_parties.client_id
-	Scopes    []string  // canonical sorted scope set
-	GrantedAt time.Time // when consent was first granted
-	UpdatedAt time.Time // when consent was last updated (e.g. scope change)
+	ID        string     // UUID string
+	UserID    string     // UUID string
+	ClientID  string     // relying_parties.client_id
+	Scopes    []string   // canonical sorted scope set
+	GrantedAt time.Time  // when consent was first granted
+	UpdatedAt time.Time  // when consent was last updated (e.g. scope change)
 	RevokedAt *time.Time // nil = active consent
 }
 
