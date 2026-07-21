@@ -1,6 +1,6 @@
 ---
 title: Authorization code persistence (Redis-backed, multi-replica-safe)
-status: draft
+status: approved
 design_refs: [§4.1, §4.4, §10]
 targets: [internal/oidc/, internal/clients/, cmd/harbor-hot/]
 promoted_to: null
