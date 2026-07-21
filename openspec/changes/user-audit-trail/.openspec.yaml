@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-07-21
+goal: Build a user-owned, envelope-encrypted, crypto-shredded audit trail — a user_audit_events table (migration 0013) whose payload is encrypted under the user's DEK, a closed event taxonomy (auth.login, token.issued/refreshed/revoked + consent.* aligned with consent-ledger), a best-effort non-blocking AuditRecorder, a user-only harbor-mgmt read path (no operator plaintext), and crypto-shred integration so destroying the user's wrapped DEK renders the trail unrecoverable — with no cross-user leakage and regional storage

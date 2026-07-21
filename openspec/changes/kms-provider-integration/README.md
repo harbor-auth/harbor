@@ -1,0 +1,3 @@
+# kms-provider-integration
+
+Replace the fail-closed `kmsKeyProvider` scaffold (`ErrKMSNotImplemented`) in `internal/crypto/` with a real regional KEK provider behind the existing `KeyProvider` seam: a vendor-neutral `kmsClient` interface (encrypt/decrypt by key-ID), a versioned self-describing wrapped-DEK envelope (version, region, kek_key_id), region→key-ID resolution that fails closed on an unknown region so a wrap/unwrap never crosses a jurisdiction, and a `RewrapDEK` KEK-rotation primitive that re-wraps a DEK under the current regional KEK without exposing DEK plaintext. Emulator-backed tests keep the crypto package hermetic and vendor-neutral.
