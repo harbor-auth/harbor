@@ -1,0 +1,73 @@
+package mgmtapi
+
+import (
+	"context"
+	"net/http"
+	"time"
+
+	"github.com/harbor/harbor/internal/oidc"
+)
+
+// ConsentStore is the narrow interface the consent handler needs from
+// oidc.ConsentStore. Depending on the interface keeps the HTTP layer
+// unit-testable with a fake.
+type ConsentStore interface {
+	List(ctx context.Context, userID string) ([]oidc.ConsentGrant, error)
+}
+
+// UserIDHeader is the header containing the authenticated user's ID.
+// In production this is set by upstream authentication middleware (e.g. BFF
+// session validation). For testing, it can be set directly.
+const UserIDHeader = "X-Harbor-User-ID"
+
+// ConsentGrantResponse is the JSON representation of a consent grant
+// returned by GET /consent-grants.
+type ConsentGrantResponse struct {
+	ID        string   `json:"id"`
+	ClientID  string   `json:"client_id"`
+	Scopes    []string `json:"scopes"`
+	GrantedAt string   `json:"granted_at"` // RFC3339 format
+}
+
+// ConsentGrantsListResponse is the JSON envelope for GET /consent-grants.
+type ConsentGrantsListResponse struct {
+	Grants []ConsentGrantResponse `json:"grants"`
+}
+
+// GetConsentGrants handles GET /consent-grants — returns all active consent
+// grants for the authenticated user. The user ID comes from the X-Harbor-User-ID
+// header set by upstream authentication.
+func (s *Server) GetConsentGrants(w http.ResponseWriter, r *http.Request) {
+	userID := r.Header.Get(UserIDHeader)
+	if userID == "" {
+		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
+		return
+	}
+
+	if s.consents == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "consent service not configured")
+		return
+	}
+
+	grants, err := s.consents.List(r.Context(), userID)
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "mgmtapi: consent list failed",
+			"error", err)
+		s.writeError(w, http.StatusInternalServerError, "server_error", "failed to retrieve consent grants")
+		return
+	}
+
+	resp := ConsentGrantsListResponse{
+		Grants: make([]ConsentGrantResponse, len(grants)),
+	}
+	for i, g := range grants {
+		resp.Grants[i] = ConsentGrantResponse{
+			ID:        g.ID,
+			ClientID:  g.ClientID,
+			Scopes:    g.Scopes,
+			GrantedAt: g.GrantedAt.Format(time.RFC3339),
+		}
+	}
+
+	s.writeJSON(w, http.StatusOK, resp)
+}
