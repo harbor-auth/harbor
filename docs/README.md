@@ -38,6 +38,7 @@ docs/plans/         → future WHAT — intent not yet built
 | [user-enrollment](features/user-enrollment.md) | implemented | §11.1, §10, §4.4 | `internal/identity/`, `internal/webauthn/`, `internal/mgmtapi/`, `cmd/harbor-mgmt/` | 2026-07-20 |
 | [session-ppid-seam](features/session-ppid-seam.md) | implemented | §3.2, §11.2 | `internal/oidc/`, `internal/clients/`, `cmd/harbor-hot/` | 2026-07-20 |
 | [refresh-token-rotation](features/refresh-token-rotation.md) | implemented | §3.5, §10, §11.7 | `internal/oidc/`, `internal/clients/`, `cmd/harbor-hot/` | 2026-07-20 |
+| [webauthn-session-store](features/webauthn-session-store.md) | implemented | §4.1, §4.4, §9 | `internal/webauthn/`, `cmd/harbor-mgmt/` | 2026-07-20 |
 
 ## Plans (future / in progress)
 
