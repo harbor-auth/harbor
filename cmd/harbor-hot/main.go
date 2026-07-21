@@ -170,6 +170,7 @@ func main() {
 		clientRegistry   oidc.ClientRegistry
 		grantStore       oidc.GrantStore
 		sessionStore     oidc.SessionStore
+        consentStore     oidc.ConsentStore
 		secretLoader     oidc.UserSecretLoader
 		revocationOutbox oidc.RevocationOutbox
 		revocationWorker *oidc.RevocationWorker
@@ -218,6 +219,7 @@ func main() {
 		clientRegistry = clients.NewDBClientRegistry(q).WithLogger(logger)
 		grantStore = clients.NewDBGrantStore(q)
 		sessionStore = clients.NewDBSessionStoreWithPool(q, pool)
+        consentStore = clients.NewDBConsentStore(q)
 		secretLoader = clients.NewDBSecretLoader(q, keyProvider, crypto.NewCipher())
 
 		// Revocation outbox for durable theft-signal delivery
@@ -272,6 +274,7 @@ func main() {
 
 		grantStore = oidc.NewInMemoryGrantStore()
 		sessionStore = oidc.NewInMemorySessionStore()
+        consentStore = oidc.NewInMemoryConsentStore()
 		// revocationOutbox stays nil → NewService defaults to noopRevocationOutbox
 		// (inline-only revocation; no durable delivery in dev mode).
 	}
@@ -289,6 +292,7 @@ func main() {
 		}),
 		Grants:       grantStore,
 		SessionStore: sessionStore,
+        Consents:     consentStore,
 		Outbox:       revocationOutbox, // durable theft-signal delivery (nil → noop in dev mode)
 	})
 
