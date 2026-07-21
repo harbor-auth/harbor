@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-07-21
+goal: Add the RFC 7009 POST /revoke endpoint on harbor-hot (client Basic-auth, revoke access+refresh tokens via the shipped revocation stack, uniform 200 anti-enumeration response, behind the rate limiter)

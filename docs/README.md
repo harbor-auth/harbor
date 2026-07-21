@@ -52,6 +52,11 @@ docs/plans/         → future WHAT — intent not yet built
 | [envelope-encryption-kms](plans/envelope-encryption-kms.md) | in-progress | §4.4, §7.3, §10 | `internal/crypto/` |
 | [token-introspection](plans/token-introspection.md) | draft | §3.3, §3.5, §3.5.2 | `internal/oidcapi/`, `api/openapi/harbor.yaml` |
 | [auth-code-persistence](plans/auth-code-persistence.md) | draft | §4.1, §4.4, §10 | `internal/oidc/`, `internal/clients/`, `cmd/harbor-hot/` |
+| [kms-provider-integration](plans/kms-provider-integration.md) | draft | §4.4, §7.3, §A.4 | `internal/crypto/` |
+| [token-revocation-endpoint](plans/token-revocation-endpoint.md) | draft | §3.5, §3.5.2, §7.4 | `internal/oidcapi/`, `api/openapi/harbor.yaml` |
+| [consent-ledger](plans/consent-ledger.md) | draft | §2.1, §10, §11.3 | `internal/oidc/`, `internal/mgmtapi/`, `db/migrations/` |
+| [dynamic-client-registration](plans/dynamic-client-registration.md) | draft | §3.1, §8, §10 | `internal/mgmtapi/`, `internal/clients/`, `db/migrations/` |
+| [user-audit-trail](plans/user-audit-trail.md) | draft | §2.1, §4.4, §10, §11.6 | `internal/identity/`, `internal/mgmtapi/`, `db/migrations/` |
 
 > A plan appears here until it's implemented, then **`@plan promote`** moves its row into the **Features** table above. Author the next one with **`@plan new <slug>`**.
 

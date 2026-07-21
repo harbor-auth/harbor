@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-07-21
+goal: Replace the fail-closed kmsKeyProvider scaffold with a real regional KEK provider (vendor-neutral kmsClient seam, versioned wrapped-DEK envelope, region-scoped wrap/unwrap that never crosses a jurisdiction, KEK-rotation RewrapDEK primitive) behind the existing KeyProvider interface

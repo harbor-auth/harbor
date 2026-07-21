@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-07-21
+goal: Persist per-(user, client) consent grants with a granted scope set in a new consent_grants table (migration 0011), enforce them at /authorize (skip on a covering grant, re-prompt on no-grant/scope-escalation/revoked, honour prompt=consent/none), expose user-facing list/revoke via harbor-mgmt with an RP-token cascade, and emit structured consent events for the user audit trail — with no cross-user/cross-client leakage and no cross-region lookup
