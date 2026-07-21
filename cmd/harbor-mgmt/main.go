@@ -110,7 +110,15 @@ func main() {
 	// Dev ceremony stores (in-memory). Replace with sqlc-backed implementations
 	// once DATABASE_URL is wired (see docs/plans/user-enrollment.md).
 	store := webauthn.NewInMemoryStore()
-	sessions := webauthn.NewInMemorySessionStore()
+	// WebAuthn session store: Redis for multi-replica safety when REDIS_URL is set,
+	// otherwise an in-memory dev scaffold (docs/plans/webauthn-session-store.md).
+	var sessions webauthn.SessionStore
+	if redisClient != nil {
+		sessions = webauthn.NewRedisSessionStore(redisClient, bffSessionTTL)
+	} else {
+		logger.Warn("REDIS_URL not set — using in-memory WebAuthn session store (dev only; not shared across replicas)")
+		sessions = webauthn.NewInMemorySessionStore()
+	}
 
 	svc, err := webauthn.NewService(webauthn.Config{
 		RPID:          rpID,
