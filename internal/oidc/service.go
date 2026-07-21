@@ -370,11 +370,22 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (*Authori
 			return nil, redirectErr(ErrCodeServerError, "consent decision failed")
 		}
 
-		// If skip=false, the SessionResolver should have handled the consent prompt.
-		// For now, we trust the SessionResolver's approval signal. In the future,
-		// the consent screen will be a separate step that updates the consent store.
-		// When skip=true, we can proceed directly to code issuance.
-		_ = decision // decision.Skip tells us whether consent was skipped
+		// Persist the consent grant on approval. The SessionResolver has already
+		// handled the consent ceremony (approved == true at this point).
+		// - If skip=true, the existing grant already covers the scopes, but we
+		//   still upsert to update the timestamp (last-used tracking).
+		// - If escalation=true, use MergedScopes (existing + newly requested).
+		// - Otherwise, use the requested scopes.
+		scopesToPersist := requestedScopes
+		if decision.Escalation && len(decision.MergedScopes) > 0 {
+			scopesToPersist = decision.MergedScopes
+		}
+		if _, err := s.consents.Upsert(ctx, userID, validated.Client.ID, scopesToPersist); err != nil {
+			s.logger.ErrorContext(ctx, "consent upsert failed",
+				slog.String("client_id", validated.Client.ID),
+				slog.Any("error", err))
+			return nil, redirectErr(ErrCodeServerError, "could not persist consent")
+		}
 	}
 
 	codeStr, err := s.newCode()
