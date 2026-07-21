@@ -86,6 +86,9 @@ type Querier interface {
 	// Returns the single active signing key used for signing new tokens.
 	// The partial unique index idx_signing_keys_one_active guarantees at most one.
 	GetActiveSigningKey(ctx context.Context) (SigningKey, error)
+	// Retrieves the active consent grant for a (user, client) pair.
+	// Returns NULL if no active grant exists (revoked grants are excluded).
+	GetConsentGrantByUserClient(ctx context.Context, arg GetConsentGrantByUserClientParams) (ConsentGrant, error)
 	// Queries for the credentials table (passkeys + optional password; DESIGN §10,
 	// §3.1). The query IS the contract (DESIGN §1.3): `sqlc generate` (via @codegen)
 	// produces typed Go — never hand-write DB types.
@@ -148,6 +151,9 @@ type Querier interface {
 	// ListAuditEventsByUser powers the dashboard audit-log viewer (DESIGN §9).
 	// Newest-first with limit/offset paging, served by idx_audit_events_user_time.
 	ListAuditEventsByUser(ctx context.Context, arg ListAuditEventsByUserParams) ([]AuditEvent, error)
+	// Lists all active consent grants for a user, ordered by most recent first.
+	// Used by harbor-mgmt to show the user their connected apps.
+	ListConsentGrantsByUser(ctx context.Context, userID pgtype.UUID) ([]ConsentGrant, error)
 	ListCredentialsByUser(ctx context.Context, userID pgtype.UUID) ([]Credential, error)
 	// ListGrantsByClient returns all active grants for a specific client. Used
 	// during client deletion (RFC 7592) to identify affected users.
@@ -173,6 +179,9 @@ type Querier interface {
 	// retired_at to now(). Used during scheduled rotation (after overlap window)
 	// or emergency rotation (immediate).
 	RetireSigningKey(ctx context.Context, kid string) (SigningKey, error)
+	// Revokes a consent grant by setting revoked_at. Only affects active grants.
+	// The partial unique index allows a new grant to be created after revocation.
+	RevokeConsentGrant(ctx context.Context, id pgtype.UUID) error
 	RevokeGrant(ctx context.Context, id pgtype.UUID) error
 	// RevokeGrantsByClient revokes all active grants for a specific client. Used
 	// during client deletion (RFC 7592) to clean up user authorizations.
@@ -210,6 +219,15 @@ type Querier interface {
 	// set promoted_at when promoting to active, and retired_at when retiring.
 	// The CHECK constraint signing_keys_state_timestamps enforces invariants.
 	UpdateSigningKeyState(ctx context.Context, arg UpdateSigningKeyStateParams) (SigningKey, error)
+	// Queries for the consent_grants table (DESIGN §11). The query IS the contract
+	// (DESIGN §1.3): `sqlc generate` (via @codegen) produces typed Go — never
+	// hand-write DB types. Tracks per-(user, RP, scope) consent; enforced at
+	// /authorize; grant/revoke exposed via harbor-mgmt.
+	// Inserts a new consent grant or updates an existing active grant's scopes.
+	// The partial unique index idx_consent_grants_user_client_active ensures only
+	// one active grant per (user, client) pair. On conflict, we update scopes and
+	// updated_at to reflect the new consent.
+	UpsertConsentGrant(ctx context.Context, arg UpsertConsentGrantParams) (ConsentGrant, error)
 	UpsertRelyingParty(ctx context.Context, arg UpsertRelyingPartyParams) (RelyingParty, error)
 }
 

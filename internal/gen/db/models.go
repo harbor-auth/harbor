@@ -17,6 +17,16 @@ type AuditEvent struct {
 	OccurredAt pgtype.Timestamptz `json:"occurred_at"`
 }
 
+type ConsentGrant struct {
+	ID        pgtype.UUID        `json:"id"`
+	UserID    pgtype.UUID        `json:"user_id"`
+	ClientID  string             `json:"client_id"`
+	Scopes    []string           `json:"scopes"`
+	GrantedAt pgtype.Timestamptz `json:"granted_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+	RevokedAt pgtype.Timestamptz `json:"revoked_at"`
+}
+
 type Credential struct {
 	ID             pgtype.UUID        `json:"id"`
 	Region         string             `json:"region"`
