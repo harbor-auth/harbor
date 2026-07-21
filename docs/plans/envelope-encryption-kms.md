@@ -1,9 +1,9 @@
 ---
 title: Envelope encryption & KMS (per-user DEK / regional KEK)
-status: in-progress
+status: completed
 design_refs: [§4.4, §7.3, §10]
 targets: [internal/crypto/]
-promoted_to: null
+promoted_to: features/envelope-encryption-kms.md
 openspec: changes/envelope-encryption-kms
 created: 2026-07-10
 ---
@@ -64,16 +64,16 @@ holds KEKs; asymmetric signing keys are a *separate* concern owned by
 
 ## Implementation checklist
 
-- [ ] `Encryptor`/`Decryptor` over AES-256-GCM; nonce is per-message CSPRNG; decrypt fails closed.
-- [ ] `GenerateDEK` (256-bit CSPRNG).
-- [ ] `KeyProvider` interface: `WrapDEK(ctx, region, dek) ([]byte, error)` / `UnwrapDEK(ctx, region, wrapped) ([]byte, error)`.
-- [ ] `localKeyProvider` (HKDF from env secret) — self-identifying, dev-only, refuses to run if the secret is empty.
-- [ ] `kmsKeyProvider` scaffold documenting the HSM boundary (implementation deferred).
-- [ ] Crypto-shred helper / documented pattern (delete `dek_wrapped`).
-- [ ] Frozen golden vectors for GCM round-trips (byte-equality, never regenerated).
-- [ ] Tests: round-trip, tamper-detection (fail-closed), wrong-region rejection, wrap/unwrap identity, crypto-shred renders ciphertext unrecoverable.
-- [ ] Author & verify paired OpenSpec change: `openspec validate envelope-encryption-kms --strict`
-- [ ] Reconcile & promote: `@plan promote envelope-encryption-kms`
+- [x] `Encryptor`/`Decryptor` over AES-256-GCM; nonce is per-message CSPRNG; decrypt fails closed.
+- [x] `GenerateDEK` (256-bit CSPRNG).
+- [x] `KeyProvider` interface: `WrapDEK(ctx, region, dek) ([]byte, error)` / `UnwrapDEK(ctx, region, wrapped) ([]byte, error)`.
+- [x] `localKeyProvider` (HKDF from env secret) — self-identifying, dev-only, refuses to run if the secret is empty.
+- [x] `kmsKeyProvider` scaffold documenting the HSM boundary (implementation deferred — returns `ErrKMSNotImplemented`, fails closed).
+- [x] Crypto-shred helper / documented pattern (delete `dek_wrapped`).
+- [x] Frozen golden vectors for GCM round-trips (byte-equality, never regenerated).
+- [x] Tests: round-trip, tamper-detection (fail-closed), wrong-region rejection, wrap/unwrap identity, crypto-shred renders ciphertext unrecoverable.
+- [x] Author & verify paired OpenSpec change: `openspec validate envelope-encryption-kms --strict`
+- [x] Reconcile & promote: `@plan promote envelope-encryption-kms`
 
 ## Risks & open questions
 
