@@ -487,3 +487,98 @@ func TestDeleteConsentGrant_CascadeError(t *testing.T) {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusInternalServerError)
 	}
 }
+
+// =============================================================================
+// Security Tests — Cross-User Grant Isolation
+// =============================================================================
+
+// TestSecurity_CrossUserGrantLeakage_List verifies that user A cannot see
+// user B's consent grants via GET /consent-grants. This is a critical security
+// invariant: consent grants are user-scoped and must never leak across users.
+func TestSecurity_CrossUserGrantLeakage_List(t *testing.T) {
+	grantedAt := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+	store := &fakeConsentStore{
+		grants: []oidc.ConsentGrant{
+			{
+				ID:        "grant-userA",
+				UserID:    "user-A",
+				ClientID:  "client-shared",
+				Scopes:    []string{"openid", "profile"},
+				GrantedAt: grantedAt,
+			},
+			{
+				ID:        "grant-userB",
+				UserID:    "user-B",
+				ClientID:  "client-shared",
+				Scopes:    []string{"openid", "email"},
+				GrantedAt: grantedAt,
+			},
+		},
+	}
+
+	srv := New(nil, nil).WithConsentStore(store)
+	mux := http.NewServeMux()
+	srv.Routes(mux)
+
+	// User A requests their grants
+	req := httptest.NewRequest("GET", "/consent-grants", nil)
+	req.Header.Set(UserIDHeader, "user-A")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp ConsentGrantsListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	// SECURITY: User A must only see their own grant, not user B's
+	if len(resp.Grants) != 1 {
+		t.Fatalf("SECURITY: user A got %d grants, want 1 (cross-user leakage)", len(resp.Grants))
+	}
+	if resp.Grants[0].ID != "grant-userA" {
+		t.Errorf("SECURITY: user A received grant %q, want grant-userA", resp.Grants[0].ID)
+	}
+}
+
+// TestSecurity_CrossUserGrantLeakage_Revoke verifies that user A cannot revoke
+// user B's consent grant via DELETE /consent-grants/{client_id}. The endpoint
+// must be scoped to the authenticated user's grants only.
+func TestSecurity_CrossUserGrantLeakage_Revoke(t *testing.T) {
+	grantedAt := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
+	store := &fakeConsentStore{
+		grants: []oidc.ConsentGrant{
+			{
+				ID:        "grant-userB",
+				UserID:    "user-B",
+				ClientID:  "client-shared",
+				Scopes:    []string{"openid"},
+				GrantedAt: grantedAt,
+			},
+		},
+	}
+	revoker := &fakeSessionRevoker{}
+
+	srv := New(nil, nil).WithConsentStore(store).WithSessionRevoker(revoker)
+	mux := http.NewServeMux()
+	srv.Routes(mux)
+
+	// User A attempts to revoke client-shared, but only user B has that grant
+	req := httptest.NewRequest("DELETE", "/consent-grants/client-shared", nil)
+	req.Header.Set(UserIDHeader, "user-A")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	// The request succeeds (idempotent) but MUST NOT revoke user B's grant
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+
+	// SECURITY: User B's grant must NOT have been revoked
+	if store.revokedID != "" {
+		t.Errorf("SECURITY: user A revoked grant %q belonging to user B — cross-user revoke leak", store.revokedID)
+	}
+}
