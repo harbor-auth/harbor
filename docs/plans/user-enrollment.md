@@ -1,9 +1,9 @@
 ---
 title: User creation & enrollment (§11.1 signup flow)
-status: draft
+status: promoted
 design_refs: [§11.1, §10, §4.4]
 targets: [internal/identity/, internal/webauthn/, cmd/harbor-mgmt/, db/queries/]
-promoted_to: null
+promoted_to: docs/features/user-enrollment.md
 openspec: changes/user-enrollment
 created: 2026-07-10
 ---

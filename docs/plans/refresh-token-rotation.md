@@ -1,9 +1,9 @@
 ---
 title: Refresh token rotation (§3.5 opaque, rotating, one-time-use)
-status: draft
+status: promoted
 design_refs: [§3.5, §10]
 targets: [internal/oidc/, internal/clients/, db/queries/]
-promoted_to: null
+promoted_to: docs/features/refresh-token-rotation.md
 openspec: changes/refresh-token-rotation
 created: 2026-07-10
 ---

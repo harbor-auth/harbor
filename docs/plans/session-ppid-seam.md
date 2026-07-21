@@ -1,9 +1,9 @@
 ---
 title: Session seam — WebAuthn login → PPID → token subject
-status: approved
+status: promoted
 design_refs: [§3.2, §11.2]
 targets: [internal/oidc/, internal/identity/, internal/webauthn/]
-promoted_to: null
+promoted_to: docs/features/session-ppid-seam.md
 openspec: changes/session-ppid-seam
 created: 2026-07-10
 ---
