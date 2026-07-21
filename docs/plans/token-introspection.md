@@ -1,6 +1,6 @@
 ---
 title: Token introspection (RFC 7662 — POST /introspect)
-status: draft
+status: approved
 design_refs: [§3.3, §3.5, §3.5.2]
 targets: [internal/oidcapi/, api/openapi/harbor.yaml, internal/gen/openapi/]
 promoted_to: null
