@@ -55,8 +55,15 @@ jobs:
       - name: Install pinned Nix toolchain
         uses: DeterminateSystems/nix-installer-action@v16
 
-      - name: Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@v8
+      # No binary-cache action: DeterminateSystems/magic-nix-cache was DEPRECATED
+      # on 2025-02-01 (the underlying GitHub Actions Cache API it relied on was
+      # removed). Its v8 fallback now demands FlakeHub Cache auth — which fails
+      # closed on every run without a FlakeHub account (`Unable to authenticate
+      # to FlakeHub`), and that error poisoned the `drift` step's outcome and
+      # red-gated every PR. We rely on the default `cache.nixos.org` substituter
+      # (which serves the whole pinned toolchain except our two overridden
+      # derivations, golangci-lint + sqlc, that already compile in-job). CI
+      # timings are unchanged because the dead cache action was already a no-op.
 
       # The single source of truth. continue-on-error so we still post the
       # report on failure; the final gate step re-fails the job.
@@ -161,8 +168,9 @@ jobs:
       - name: Install pinned Nix toolchain
         uses: DeterminateSystems/nix-installer-action@v16
 
-      - name: Nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@v8
+      # No binary-cache action — see the agent-check job above for why
+      # DeterminateSystems/magic-nix-cache-action was removed (deprecated
+      # 2025-02-01; FlakeHub-auth failure red-gated every PR).
 
       # Docker + docker compose are preinstalled on GitHub-hosted ubuntu runners.
       # Runs the F8 Go e2e tests only (not the full OIDF certification suite).
