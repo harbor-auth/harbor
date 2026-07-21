@@ -232,3 +232,18 @@ func TestRedisSessionStore_ChallengeBytesFidelity(t *testing.T) {
 		}
 	}
 }
+
+func TestRedisSessionStore_ZeroTTLCoercedToDefault(t *testing.T) {
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() }) //nolint:errcheck // test cleanup; error not actionable
+	// A zero TTL must be coerced to a positive default so expiry is never disabled.
+	store := NewRedisSessionStore(client, 0)
+
+	if err := store.Save(context.Background(), "k", gowebauthn.SessionData{Challenge: "c"}); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+	if ttl := mr.TTL("webauthn_session:k"); ttl <= 0 {
+		t.Errorf("zero TTL not coerced: key TTL = %v, want > 0", ttl)
+	}
+}

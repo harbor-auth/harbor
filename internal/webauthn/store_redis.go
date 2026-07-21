@@ -27,9 +27,20 @@ type RedisSessionStore struct {
 	sessionTTL time.Duration
 }
 
+// defaultSessionTTL bounds ceremony sessions when a non-positive TTL is passed.
+// A zero TTL would make Redis SET NX EX store the key with NO expiration —
+// unbounded, replayable challenges — so we fail closed to a short lifetime
+// (docs/plans/webauthn-session-store.md).
+const defaultSessionTTL = 5 * time.Minute
+
 // NewRedisSessionStore creates a Redis-backed WebAuthn session store.
 // sessionTTL controls how long sessions live before expiring (typically 5 min).
+// A non-positive sessionTTL is coerced to defaultSessionTTL so expiry can never
+// be accidentally disabled (fail-closed).
 func NewRedisSessionStore(client *redis.Client, sessionTTL time.Duration) *RedisSessionStore {
+	if sessionTTL <= 0 {
+		sessionTTL = defaultSessionTTL
+	}
 	return &RedisSessionStore{
 		client:     client,
 		sessionTTL: sessionTTL,
