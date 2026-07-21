@@ -364,7 +364,8 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (*Authori
 		decision, decErr := ConsentDecision(grantPtr, requestedScopes, req.Prompt)
 		if decErr != nil {
 			// ErrInteractionRequired is an *AuthorizeError
-			if authErr, ok := decErr.(*AuthorizeError); ok {
+			var authErr *AuthorizeError
+			if errors.As(decErr, &authErr) {
 				return nil, authErr
 			}
 			return nil, redirectErr(ErrCodeServerError, "consent decision failed")

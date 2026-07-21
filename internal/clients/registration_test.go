@@ -31,6 +31,7 @@ func (f *fakeRegistrationQuerier) CreateRegisteredClient(_ context.Context, arg 
 	if _, exists := f.clients[arg.ClientID]; exists {
 		return db.RelyingParty{}, errors.New("client already exists")
 	}
+	//nolint:staticcheck // explicit field mapping documents the params→row shape for readers
 	rp := db.RelyingParty{
 		ClientID:                    arg.ClientID,
 		Name:                        arg.Name,
@@ -150,7 +151,9 @@ func TestDBClientRegistrationStoreGet(t *testing.T) {
 	// Seed a client.
 	tokenHash := sha256.Sum256([]byte("token"))
 	var createdAt pgtype.Timestamptz
-	_ = createdAt.Scan(time.Now())
+	if err := createdAt.Scan(time.Now()); err != nil {
+		t.Fatalf("scan createdAt: %v", err)
+	}
 	fake.clients["existing-client"] = db.RelyingParty{
 		ClientID:                    "existing-client",
 		Name:                        "Existing",
@@ -189,7 +192,9 @@ func TestDBClientRegistrationStoreVerifyRegToken(t *testing.T) {
 	token := "my-reg-access-token"
 	tokenHash := sha256.Sum256([]byte(token))
 	var createdAt pgtype.Timestamptz
-	_ = createdAt.Scan(time.Now())
+	if err := createdAt.Scan(time.Now()); err != nil {
+		t.Fatalf("scan createdAt: %v", err)
+	}
 
 	fake.clients["token-client"] = db.RelyingParty{
 		ClientID:                    "token-client",
@@ -240,7 +245,9 @@ func TestDBClientRegistrationStoreUpdate(t *testing.T) {
 	// Seed a client.
 	originalTokenHash := sha256.Sum256([]byte("original-token"))
 	var createdAt pgtype.Timestamptz
-	_ = createdAt.Scan(time.Now())
+	if err := createdAt.Scan(time.Now()); err != nil {
+		t.Fatalf("scan createdAt: %v", err)
+	}
 
 	fake.clients["update-client"] = db.RelyingParty{
 		ClientID:                    "update-client",
@@ -343,7 +350,9 @@ func TestDBClientRegistrationStoreDeleteIdempotent(t *testing.T) {
 func TestRowToRegisteredClient(t *testing.T) {
 	now := time.Now().Truncate(time.Microsecond)
 	var createdAt pgtype.Timestamptz
-	_ = createdAt.Scan(now)
+	if err := createdAt.Scan(now); err != nil {
+		t.Fatalf("scan createdAt: %v", err)
+	}
 
 	authMethod := "client_secret_basic"
 	row := db.RelyingParty{

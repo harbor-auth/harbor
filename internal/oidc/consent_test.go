@@ -1,6 +1,7 @@
 package oidc
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -205,7 +206,7 @@ func TestConsentDecision(t *testing.T) {
 			result, err := ConsentDecision(tt.grant, tt.requestedScopes, tt.prompt)
 
 			if tt.wantErr != nil {
-				if err != tt.wantErr {
+				if !errors.Is(err, tt.wantErr) {
 					t.Errorf("ConsentDecision() error = %v, wantErr %v", err, tt.wantErr)
 				}
 				return

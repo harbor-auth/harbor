@@ -142,7 +142,9 @@ func (s *stubTokenIssuer) Issue(_ context.Context, _ IssueParams) (IssuedTokens,
 func TestAuthorize_ConsentSkip_CoveringGrant(t *testing.T) {
 	// Setup: user already has a covering consent grant
 	consents := NewInMemoryConsentStore()
-	_, _ = consents.Upsert(context.Background(), "user-456", "demo-client", []string{"openid", "profile"})
+	if _, err := consents.Upsert(context.Background(), "user-456", "demo-client", []string{"openid", "profile"}); err != nil {
+		t.Fatalf("Upsert failed: %v", err)
+	}
 
 	svc := testServiceWithConsent(consents)
 	req := validAuthorizeReq()
@@ -176,7 +178,9 @@ func TestAuthorize_ConsentPromptNone_NoGrant_InteractionRequired(t *testing.T) {
 func TestAuthorize_ConsentPromptNone_CoveringGrant_Success(t *testing.T) {
 	// Existing covering grant with prompt=none should succeed
 	consents := NewInMemoryConsentStore()
-	_, _ = consents.Upsert(context.Background(), "user-456", "demo-client", []string{"openid", "profile"})
+	if _, err := consents.Upsert(context.Background(), "user-456", "demo-client", []string{"openid", "profile"}); err != nil {
+		t.Fatalf("Upsert failed: %v", err)
+	}
 
 	svc := testServiceWithConsent(consents)
 	req := validAuthorizeReq()
@@ -194,7 +198,9 @@ func TestAuthorize_ConsentPromptNone_CoveringGrant_Success(t *testing.T) {
 func TestAuthorize_ConsentPromptNone_ScopeEscalation_InteractionRequired(t *testing.T) {
 	// Existing grant doesn't cover all requested scopes, prompt=none should fail
 	consents := NewInMemoryConsentStore()
-	_, _ = consents.Upsert(context.Background(), "user-456", "demo-client", []string{"openid"})
+	if _, err := consents.Upsert(context.Background(), "user-456", "demo-client", []string{"openid"}); err != nil {
+		t.Fatalf("Upsert failed: %v", err)
+	}
 
 	svc := testServiceWithConsent(consents)
 	req := validAuthorizeReq()

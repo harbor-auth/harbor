@@ -53,6 +53,7 @@ func (s *DBConsentStore) emit(ctx context.Context, event oidc.ConsentEvent) {
 	if s.emitter == nil {
 		return
 	}
+	//nolint:errcheck // consent event emission is best-effort; failure must not block the grant
 	_ = s.emitter.Emit(ctx, event)
 }
 
@@ -92,6 +93,7 @@ func (s *DBConsentStore) Upsert(ctx context.Context, userID, clientID string, sc
 	// Look up any existing active grant BEFORE writing so we can classify the
 	// resulting event as a first-time grant vs a scope escalation. A lookup
 	// error is non-fatal — we fall back to treating the write as a new grant.
+	//nolint:errcheck // a prior read failure is tolerated; Upsert re-derives state from the write below
 	existing, hadExisting, _ := s.Get(ctx, userID, clientID)
 
 	canonicalScopes := oidc.CanonicalizeScopes(scopes)

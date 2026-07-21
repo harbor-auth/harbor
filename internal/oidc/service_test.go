@@ -571,7 +571,10 @@ func TestService_Authorize_UpsertsConsentOnApproval(t *testing.T) {
 	})
 
 	// No consent exists yet
-	_, found, _ := consents.Get(context.Background(), "user-456", "demo-client")
+	_, found, err := consents.Get(context.Background(), "user-456", "demo-client")
+	if err != nil {
+		t.Fatalf("get consent: %v", err)
+	}
 	if found {
 		t.Fatal("expected no consent before Authorize")
 	}
@@ -611,7 +614,9 @@ func TestService_Authorize_ScopeEscalation_PersistsMergedScopes(t *testing.T) {
 	consents := NewInMemoryConsentStore()
 
 	// Pre-populate consent with only "openid"
-	_, _ = consents.Upsert(context.Background(), "user-456", "demo-client", []string{"openid"})
+	if _, err := consents.Upsert(context.Background(), "user-456", "demo-client", []string{"openid"}); err != nil {
+		t.Fatalf("Upsert failed: %v", err)
+	}
 
 	svc := NewService(ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
