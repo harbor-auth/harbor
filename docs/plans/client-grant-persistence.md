@@ -1,9 +1,9 @@
 ---
 title: Client & grant persistence (RP registry + consent store)
-status: draft
+status: promoted
 design_refs: [§10, §3.2]
 targets: [internal/oidc/, internal/clients/, db/queries/]
-promoted_to: null
+promoted_to: docs/features/client-grant-persistence.md
 openspec: changes/client-grant-persistence
 created: 2026-07-10
 ---

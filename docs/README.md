@@ -34,6 +34,10 @@ docs/plans/         → future WHAT — intent not yet built
 | [revocation-outbox](features/revocation-outbox.md) | implemented | §3.5, §10 | `internal/oidc/`, `internal/clients/`, `db/migrations/` | 2026-07-20 |
 | [grant-id-fk](features/grant-id-fk.md) | implemented | §3.5, §10, §11.3 | `db/migrations/`, `internal/clients/`, `internal/oidc/` | 2026-07-20 |
 | [bloom-filter-revocation](features/bloom-filter-revocation.md) | implemented | §3.5, §7.4 | `internal/oidc/`, `internal/oidcapi/`, `cmd/harbor-hot/` | 2026-07-20 |
+| [client-grant-persistence](features/client-grant-persistence.md) | implemented | §10, §3.2, §11.3 | `internal/clients/`, `internal/oidc/`, `db/queries/` | 2026-07-20 |
+| [user-enrollment](features/user-enrollment.md) | implemented | §11.1, §10, §4.4 | `internal/identity/`, `internal/webauthn/`, `internal/mgmtapi/`, `cmd/harbor-mgmt/` | 2026-07-20 |
+| [session-ppid-seam](features/session-ppid-seam.md) | implemented | §3.2, §11.2 | `internal/oidc/`, `internal/clients/`, `cmd/harbor-hot/` | 2026-07-20 |
+| [refresh-token-rotation](features/refresh-token-rotation.md) | implemented | §3.5, §10, §11.7 | `internal/oidc/`, `internal/clients/`, `cmd/harbor-hot/` | 2026-07-20 |
 
 ## Plans (future / in progress)
 
@@ -44,12 +48,8 @@ docs/plans/         → future WHAT — intent not yet built
 | [envelope-encryption-kms](plans/envelope-encryption-kms.md) | in-progress | §4.4, §7.3, §10 | `internal/crypto/` |
 | [token-introspection](plans/token-introspection.md) | draft | §3.3, §3.5, §3.5.2 | `internal/oidcapi/`, `api/openapi/harbor.yaml` |
 | [auth-code-persistence](plans/auth-code-persistence.md) | draft | §4.1, §4.4, §10 | `internal/oidc/`, `internal/clients/`, `cmd/harbor-hot/` |
-| [client-grant-persistence](plans/client-grant-persistence.md) | draft | §3.2, §10 | `internal/oidc/`, `internal/clients/`, `db/queries/` |
-| [user-enrollment](plans/user-enrollment.md) | draft | §11.1, §10, §4.4 | `internal/identity/`, `internal/webauthn/` |
 | [bff-session-middleware](plans/bff-session-middleware.md) | draft | §9, §11.1, §11.2 | `internal/oidc/`, `internal/webauthn/`, `cmd/harbor-mgmt/` |
 | [userinfo-endpoint](plans/userinfo-endpoint.md) | draft | §3.3, §11.4, §3.1 | `internal/oidcapi/`, `api/openapi/harbor.yaml` |
-| [session-ppid-seam](plans/session-ppid-seam.md) | draft | §3.2, §11.2 | `internal/oidc/`, `internal/identity/` |
-| [refresh-token-rotation](plans/refresh-token-rotation.md) | draft | §3.5, §10 | `internal/oidc/`, `internal/clients/`, `db/queries/` |
 | [oidf-conformance](plans/oidf-conformance.md) | draft | §1.8, §11.7, §3.1 | `internal/oidcapi/`, `internal/oidc/`, `conformance/` |
 
 > A plan appears here until it's implemented, then **`@plan promote`** moves its row into the **Features** table above. Author the next one with **`@plan new <slug>`**.
