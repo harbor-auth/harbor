@@ -1,9 +1,9 @@
 ---
 title: BFF session middleware (§9 — secure browser session, real login identity)
-status: draft
+status: promoted
 design_refs: [§9, §11.1, §11.2]
 targets: [internal/oidc/, internal/webauthn/, cmd/harbor-mgmt/, cmd/harbor-hot/]
-promoted_to: null
+promoted_to: docs/features/bff-session-middleware.md
 openspec: changes/bff-session-middleware
 created: 2026-07-14
 ---
@@ -100,18 +100,25 @@ from logging in without code changes. Does **not** change `DESIGN.md`.
 
 ## Implementation checklist
 
-- [ ] `BFFSessionStore` interface: `Create(ctx, id, record) error`, `Get(ctx, id) (BFFSessionRecord, bool, error)`, `SetUser(ctx, id, userID) error`, `Delete(ctx, id) error`.
-- [ ] Redis implementation of `BFFSessionStore` (TTL = 5 min; JSON encoding).
-- [ ] In-memory implementation of `BFFSessionStore` for dev/test.
-- [ ] `__Host-harbor-bff` cookie helpers: write (Secure, HttpOnly, SameSite=Strict, Path=/), read, clear.
-- [ ] `harbor-hot`: at `/authorize` (after OIDC request validation), write BFF session; redirect to `harbor-mgmt/login?request_id=<id>`.
-- [ ] `harbor-mgmt/login`: read BFF session; call `webauthn.BeginAssertion`; set cookie.
-- [ ] `harbor-mgmt/login/complete`: validate cookie (CSRF); call `webauthn.FinishAssertion`; write `user_id` to BFF session; redirect to `harbor-hot/authorize/complete`.
-- [ ] `harbor-hot/authorize/complete`: read BFF session (must have `user_id`); run `SessionResolver`; delete BFF session; issue auth code.
-- [ ] **Delete** the insecure `user_id` query parameter path from `internal/webauthn/handlers.go`.
-- [ ] Tests: missing cookie ⇒ 401; tampered `request_id` ⇒ 400; replay (deleted session) ⇒ 400; cross-tab (wrong cookie) ⇒ 400; CSRF binding enforced.
-- [ ] Author & verify paired OpenSpec change: `openspec validate bff-session-middleware --strict`
-- [ ] Reconcile & promote: `@plan promote bff-session-middleware`
+- [x] `BFFSessionStore` interface: `Create` / `Get` / `SetUser` / `Delete`.
+- [x] Redis implementation of `BFFSessionStore` (TTL = 5 min; JSON encoding; TTL-preserving `SetUser` Lua).
+- [x] In-memory implementation of `BFFSessionStore` for dev/test.
+- [x] `__Host-harbor-bff` cookie helpers: write (Secure, HttpOnly, SameSite=Strict, Path=/), read, clear.
+- [x] `harbor-hot`: at `/authorize`, write BFF session; redirect to the login UI with `request_id`.
+- [x] `harbor-mgmt/login`: read BFF session; begin passkey assertion; set cookie.
+- [x] `harbor-mgmt/login/complete`: validate cookie (CSRF); finish assertion; write `user_id`; redirect to `harbor-hot/authorize/complete`.
+- [x] `harbor-hot/authorize/complete` (`GetAuthorizeComplete`): read BFF session (must have `user_id`); `AuthorizeWithUser` derives PPID; delete session; issue auth code.
+- [x] **Delete** the insecure `user_id` query parameter path.
+- [x] Tests: missing cookie / unknown `request_id` / replay / complete-before-login all fail closed; CSRF binding enforced; full-flow integration test.
+- [x] Author & verify paired OpenSpec change: `openspec validate bff-session-middleware --strict`
+- [x] Reconcile & promote: `@plan promote bff-session-middleware`
+
+> **Promoted (2026-07-20):** shipped via PR #27 (`weft/bff session middleware`,
+> commit `d9838d9`). As-built behaviour is documented in
+> [docs/features/bff-session-middleware.md](../features/bff-session-middleware.md).
+> The `?user_id` impersonation hole is closed — the authenticated `user_id`
+> comes only from a completed passkey ceremony, written server-side into the
+> BFF session.
 
 ## Risks & open questions
 

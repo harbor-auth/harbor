@@ -1,9 +1,9 @@
 ---
 title: UserInfo endpoint (OIDC Core §5.3 — GET /userinfo)
-status: draft
+status: promoted
 design_refs: [§3.3, §11.4, §3.1]
 targets: [internal/oidcapi/, api/openapi/harbor.yaml, internal/gen/openapi/]
-promoted_to: null
+promoted_to: docs/features/userinfo-endpoint.md
 openspec: changes/userinfo-endpoint
 created: 2026-07-14
 ---
@@ -81,14 +81,20 @@ The pairwise `sub` in the response is the PPID, consistent with §3.2
 
 ## Implementation checklist
 
-- [ ] `@openspec new userinfo-endpoint` — draft the OpenAPI change
-- [ ] Add `GET /userinfo` to `api/openapi/harbor.yaml`; regenerate via `@openspec`
-- [ ] Implement `internal/oidcapi/userinfo.go` — token validation, scope check, user lookup
-- [ ] Register route; verify `go build ./...` clean
-- [ ] Tests: valid token → `200` with `sub` + `email`; no token → `401`; wrong scope → `403`; expired token → `401`
-- [ ] Update `conformance/assert-pass.sh` to gate on userinfo tests now expected to pass
-- [ ] Author & verify paired OpenSpec change: `openspec validate userinfo-endpoint --strict`
-- [ ] Reconcile & promote: `@plan promote userinfo-endpoint`
+- [x] Add `GET /userinfo` to `api/openapi/harbor.yaml`; regenerate `harbor.gen.go`.
+- [x] Implement `internal/oidcapi/userinfo.go` — Bearer parse, ES256 signature verification, scope gate, `sub` response.
+- [x] Register route; `go build ./...` clean.
+- [x] Tests: valid token → `200` with `sub`; no/malformed token → `401`; invalid/expired token → `401`.
+- [x] Update `conformance/assert-pass.sh` to gate on the `oidcc-userinfo-get` module.
+- [x] Author & verify paired OpenSpec change: `openspec validate userinfo-endpoint --strict`
+- [x] Reconcile & promote: `@plan promote userinfo-endpoint`
+
+> **Promoted (2026-07-20):** shipped via PR #28 (`feat(oidc): OIDF OP
+> conformance suite compliance`, commit `bf3abd9`). As-built behaviour is
+> documented in [docs/features/userinfo-endpoint.md](../features/userinfo-endpoint.md).
+> The endpoint verifies the access token's ES256 signature statelessly and
+> returns the pairwise `sub`; grant-backed `email` resolution is a tracked
+> follow-up (`TODO(userinfo)`).
 
 ## Risks & open questions
 

@@ -39,6 +39,9 @@ docs/plans/         → future WHAT — intent not yet built
 | [session-ppid-seam](features/session-ppid-seam.md) | implemented | §3.2, §11.2 | `internal/oidc/`, `internal/clients/`, `cmd/harbor-hot/` | 2026-07-20 |
 | [refresh-token-rotation](features/refresh-token-rotation.md) | implemented | §3.5, §10, §11.7 | `internal/oidc/`, `internal/clients/`, `cmd/harbor-hot/` | 2026-07-20 |
 | [webauthn-session-store](features/webauthn-session-store.md) | implemented | §4.1, §4.4, §9 | `internal/webauthn/`, `cmd/harbor-mgmt/` | 2026-07-20 |
+| [bff-session-middleware](features/bff-session-middleware.md) | implemented | §9, §11.1, §11.2 | `internal/bff/`, `internal/oidcapi/`, `internal/oidc/`, `cmd/harbor-mgmt/` | 2026-07-20 |
+| [userinfo-endpoint](features/userinfo-endpoint.md) | implemented | §3.3, §11.4, §3.1 | `internal/oidcapi/`, `api/openapi/harbor.yaml` | 2026-07-20 |
+| [oidf-conformance](features/oidf-conformance.md) | implemented | §1.8, §11.7, §3.1 | `internal/oidc/`, `internal/oidcapi/`, `conformance/` | 2026-07-20 |
 
 ## Plans (future / in progress)
 
@@ -49,9 +52,6 @@ docs/plans/         → future WHAT — intent not yet built
 | [envelope-encryption-kms](plans/envelope-encryption-kms.md) | in-progress | §4.4, §7.3, §10 | `internal/crypto/` |
 | [token-introspection](plans/token-introspection.md) | draft | §3.3, §3.5, §3.5.2 | `internal/oidcapi/`, `api/openapi/harbor.yaml` |
 | [auth-code-persistence](plans/auth-code-persistence.md) | draft | §4.1, §4.4, §10 | `internal/oidc/`, `internal/clients/`, `cmd/harbor-hot/` |
-| [bff-session-middleware](plans/bff-session-middleware.md) | draft | §9, §11.1, §11.2 | `internal/oidc/`, `internal/webauthn/`, `cmd/harbor-mgmt/` |
-| [userinfo-endpoint](plans/userinfo-endpoint.md) | draft | §3.3, §11.4, §3.1 | `internal/oidcapi/`, `api/openapi/harbor.yaml` |
-| [oidf-conformance](plans/oidf-conformance.md) | draft | §1.8, §11.7, §3.1 | `internal/oidcapi/`, `internal/oidc/`, `conformance/` |
 
 > A plan appears here until it's implemented, then **`@plan promote`** moves its row into the **Features** table above. Author the next one with **`@plan new <slug>`**.
 
