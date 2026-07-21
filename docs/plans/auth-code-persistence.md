@@ -1,9 +1,9 @@
 ---
 title: Authorization code persistence (Redis-backed, multi-replica-safe)
-status: approved
+status: completed
 design_refs: [§4.1, §4.4, §10]
 targets: [internal/oidc/, internal/clients/, cmd/harbor-hot/]
-promoted_to: null
+promoted_to: features/auth-code-persistence.md
 openspec: changes/auth-code-persistence
 created: 2026-07-14
 ---
@@ -86,16 +86,16 @@ Does **not** change `DESIGN.md`.
 
 ## Implementation checklist
 
-- [ ] Add `go.mod` dependency on `github.com/redis/go-redis/v9` (or `miniredis` for tests).
-- [ ] `RedisAuthCodeStore`: `Save` (SET NX EX), `Peek` (GET + consumed check), `Consume` (Lua atomic), `RevokeBySession` (family delete).
-- [ ] Lua script for atomic `Consume`: read code → check consumed marker → set consumed marker → return result; covers `ConsumeOK`, `ConsumeReused`, `ConsumeNotFound` correctly.
-- [ ] Consumed-marker TTL = 2× code TTL so reuse-detection fires even near expiry.
-- [ ] Integration tests (miniredis): round-trip `Save`→`Peek`→`Consume`; double-consume returns `ConsumeReused`; expired code returns `ConsumeNotFound`; `RevokeBySession` deletes all family keys.
-- [ ] Wire `RedisAuthCodeStore` into `cmd/harbor-hot/main.go` when `REDIS_URL` is set; keep `InMemoryAuthCodeStore` for `DATABASE_URL`-absent dev mode (remove the SCAFFOLD warning once real wiring is in place).
-- [ ] Update the existing SCAFFOLD comment/warning in `main.go` to point at this plan's slug once it ships.
-- [ ] Tests: no PII in stored keys/values beyond opaque fields; expiry fires correctly; concurrent `Consume` calls are serialised by Lua script.
-- [ ] Author & verify paired OpenSpec change: `openspec validate auth-code-persistence --strict`
-- [ ] Reconcile & promote: `@plan promote auth-code-persistence`
+- [x] Add `go.mod` dependency on `github.com/redis/go-redis/v9` (or `miniredis` for tests).
+- [x] `RedisAuthCodeStore`: `Save` (SET NX EX), `Peek` (GET + consumed check), `Consume` (Lua atomic), `RevokeBySession` (family delete).
+- [x] Lua script for atomic `Consume`: read code → check consumed marker → set consumed marker → return result; covers `ConsumeFirstUse`, `ConsumeReused`, `ConsumeNotFound` correctly.
+- [x] Consumed-marker TTL = 2× code TTL so reuse-detection fires even near expiry.
+- [x] Integration tests (miniredis): round-trip `Save`→`Peek`→`Consume`; double-consume returns `ConsumeReused`; expired code returns `ConsumeNotFound`; `RevokeBySession` deletes all family keys.
+- [x] Wire `RedisAuthCodeStore` into `cmd/harbor-hot/main.go` when `REDIS_URL` is set; keep `InMemoryAuthCodeStore` for `DATABASE_URL`-absent dev mode (remove the SCAFFOLD warning once real wiring is in place).
+- [x] Update the existing SCAFFOLD comment/warning in `main.go` to point at this plan's slug once it ships.
+- [x] Tests: no PII in stored keys/values beyond opaque fields; expiry fires correctly; concurrent `Consume` calls are serialised by Lua script.
+- [x] Author & verify paired OpenSpec change: `openspec validate auth-code-persistence --strict`
+- [x] Reconcile & promote: `@plan promote auth-code-persistence`
 
 ## Risks & open questions
 
