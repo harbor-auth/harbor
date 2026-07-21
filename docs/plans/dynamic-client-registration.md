@@ -1,6 +1,6 @@
 ---
 title: Dynamic client registration (RFC 7591 / 7592 — POST /register + client management)
-status: draft
+status: completed
 design_refs: [§3.1, §8, §10]
 targets: [internal/mgmtapi/, internal/clients/, db/migrations/, db/queries/]
 promoted_to: null

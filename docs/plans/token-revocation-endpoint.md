@@ -1,6 +1,6 @@
 ---
 title: Token revocation endpoint (RFC 7009 — POST /revoke)
-status: draft
+status: completed
 design_refs: [§3.5, §3.5.2, §7.4]
 targets: [internal/oidcapi/, api/openapi/harbor.yaml, internal/gen/openapi/, internal/oidc/]
 promoted_to: null

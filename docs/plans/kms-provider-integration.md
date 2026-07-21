@@ -1,6 +1,6 @@
 ---
 title: KMS provider integration (real regional KEK — replace the fail-closed scaffold)
-status: draft
+status: completed
 design_refs: [§4.4, §7.3, §A.4]
 targets: [internal/crypto/]
 promoted_to: null

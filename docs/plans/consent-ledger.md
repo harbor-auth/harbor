@@ -1,6 +1,6 @@
 ---
 title: Consent ledger (per-user / per-RP / per-scope consent grants)
-status: draft
+status: completed
 design_refs: [§2.1, §10, §11.3]
 targets: [internal/oidc/, internal/mgmtapi/, internal/clients/, db/migrations/, db/queries/]
 promoted_to: null

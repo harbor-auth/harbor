@@ -1,6 +1,6 @@
 ---
 title: Per-client hot-path rate limiting (abuse & enumeration defense)
-status: draft
+status: completed
 design_refs: [§4.1, §6.1, §11.7]
 targets: [internal/oidcapi/, internal/clients/, cmd/harbor-hot/]
 promoted_to: null
