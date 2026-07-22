@@ -60,6 +60,7 @@ Every skill should carry an **"update this skill" reminder**: if the commands or
 | `docs` | `@docs` | Manage, **query**, and **reconcile** feature docs (`docs/features/`) against the codebase — the agent-consumable memory of the system. |
 | `plan` | `@plan` | Author future-work plans (`docs/plans/`) and **graduate** them into feature docs as they ship — the plan→doc lifecycle. |
 | `openspec` | `@openspec` | Author & **verify** a formal OpenSpec change (proposal + spec deltas + tasks) alongside every plan — spec-driven development gated by `openspec validate --strict`. |
+| `weft` | `@weft` | Launch & manage Harbor feature builds on the Weft orchestrator (runweft.com) — `quick-launch` a plan, model dependency gates as a feature DAG, and monitor/recover runs. |
 | `hippo` | `@hippo` → **spawn `hippo` agent** | Thin pointer — graduated into the dedicated `hippo` agent (see below). Canonical CLI/ritual reference for Hippo persistent memory: recall, `hippo todo` tracking, and friction capture. |
 
 ### Dedicated agents

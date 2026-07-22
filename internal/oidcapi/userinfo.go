@@ -9,8 +9,10 @@ import (
 	"math/big"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/harbor/harbor/internal/gen/openapi"
+	"github.com/harbor/harbor/internal/telemetry"
 )
 
 // userinfoTokenClaims is the subset of access-token claims the /userinfo
@@ -32,14 +34,20 @@ type userinfoTokenClaims struct {
 // — is returned. No PII beyond consented scopes is ever emitted
 // (docs/DESIGN.md §3.2, §6.5).
 func (s *Server) GetUserInfo(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	outcome := telemetry.OutcomeError
+	defer func() { recordRequest(telemetry.EndpointUserinfo, outcome, start) }()
+
 	token, ok := bearerToken(r)
 	if !ok {
+		recordError(telemetry.EndpointUserinfo, "invalid_token")
 		writeUnauthorized(w, "invalid_token", "missing or malformed Authorization header")
 		return
 	}
 
 	claims, err := s.verifyAccessToken(token)
 	if err != nil {
+		recordError(telemetry.EndpointUserinfo, "invalid_token")
 		writeUnauthorized(w, "invalid_token", "access token is invalid")
 		return
 	}
@@ -53,6 +61,7 @@ func (s *Server) GetUserInfo(w http.ResponseWriter, r *http.Request) {
 	// the scope-gating contract, which this satisfies.
 	// TODO(userinfo): resolve email from the consent grant keyed by sub.
 
+	outcome = telemetry.OutcomeSuccess
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")

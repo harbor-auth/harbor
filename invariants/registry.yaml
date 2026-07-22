@@ -285,3 +285,15 @@ invariants:
     design_refs: [§3.5, §3.5.2, §3.5.4]
     description: "Compromised JWTs can be revoked before their natural TTL expires via the bloom filter emergency kill mechanism. The filter is checked on every token verification (~100ns overhead) and returns true if a JTI might be revoked (bloom filter semantics: false positives possible, false negatives impossible). On a positive result, the caller confirms via DB introspection. The bloom filter is rehydrated from revoked_jtis on startup and kept in sync across replicas via Redis pub/sub. POST /admin/revoke-jwt inserts the JTI into the DB (source of truth), adds it to the local filter, and publishes to siblings."
     enforced_by: [internal/oidc:TestBloomRevocationFilter_NoFalseNegatives, internal/oidc:TestBloomRevocationFilter_FalsePositiveRate, internal/oidc:TestBloomRevocationFilter_ConcurrentReadsAndWrites, internal/clients:TestDBRevokedJTIStore_Insert, internal/clients:TestDBRevokedJTIStore_ListActive]
+
+  - id: INV-METRICS-NO-PII-LABELS
+    title: "No metric label is sourced from a PII/quasi-identifier field; the label allow-list stays bounded"
+    design_refs: [§6.5, §6.5.7]
+    description: "Metrics are aggregate-only and zero-PII (observability-metrics REQ-001/REQ-004). No metric label KEY may be a PII or quasi-identifier field (user_id, ppid, email, ip, sub, subject, or any telemetry.DeniedFields entry), and the metric label allow-list (internal/telemetry LabelKey constants) must stay bounded in cardinality. The phantom-typed Label makes a PII label unexpressible in the facade; this invariant guards against a future regression where someone adds a PII-named dimension to the allow-list or lets the dimension set grow unbounded. Enforced by an AST fitness test that parses the telemetry LabelKey allow-list and fails if any value is a known PII field or the dimension count exceeds the ceiling."
+    enforced_by: [internal/arch:TestMetricLabelsNoPII]
+
+  - id: INV-METRICS-AGGREGATE-ONLY
+    title: "Metrics are aggregate-only; small-n suppression prevents low-count buckets from deanonymising"
+    design_refs: [§6.5, §6.5.7]
+    description: "Even an allow-listed label can be a quasi-identifier, so the metrics facade MUST carry a small-n suppression mechanism (observability-metrics REQ-005, design Decision 5): a small-count floor and the suppressor that buckets rare quasi-identifier combinations so no series is emitted at a deanonymising count of one. This structural invariant fails if that machinery (the smallCountFloor const and the suppressor type in internal/telemetry) is ever removed, so the aggregate-only guarantee cannot silently regress into per-user rows."
+    enforced_by: [internal/arch:TestMetricSmallNSuppressionEnforced]

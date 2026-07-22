@@ -9,6 +9,7 @@ import (
 
 	"github.com/harbor/harbor/internal/clients"
 	"github.com/harbor/harbor/internal/gen/openapi"
+	"github.com/harbor/harbor/internal/telemetry"
 )
 
 // defaultRevocationChannel is the Redis pub/sub channel that carries revoked
@@ -43,7 +44,12 @@ type RevocationPublisher interface {
 // never loses — cross-replica propagation. Insert is idempotent (upsert), so a
 // client retry after a publish failure is safe.
 func (s *Server) PostAdminRevokeJwt(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	outcome := telemetry.OutcomeError
+	defer func() { recordRequest(telemetry.EndpointRevoke, outcome, start) }()
+
 	if s.revoked == nil {
+		recordError(telemetry.EndpointRevoke, "server_error")
 		writeError(w, http.StatusServiceUnavailable, "not_configured", "revocation endpoint is not configured")
 		return
 	}
@@ -53,19 +59,23 @@ func (s *Server) PostAdminRevokeJwt(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 8*1024)
 	var body openapi.RevokeJwtRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		recordError(telemetry.EndpointRevoke, "invalid_request")
 		writeError(w, http.StatusBadRequest, "invalid_request", "malformed request body")
 		return
 	}
 
 	if body.Jti == "" {
+		recordError(telemetry.EndpointRevoke, "invalid_request")
 		writeError(w, http.StatusBadRequest, "invalid_request", "jti is required")
 		return
 	}
 	if !validRevokeReason(body.Reason) {
+		recordError(telemetry.EndpointRevoke, "invalid_request")
 		writeError(w, http.StatusBadRequest, "invalid_request", "reason must be one of emergency_kill, key_rotation, user_request")
 		return
 	}
 	if body.ExpiresAt.IsZero() {
+		recordError(telemetry.EndpointRevoke, "invalid_request")
 		writeError(w, http.StatusBadRequest, "invalid_request", "expires_at is required")
 		return
 	}
@@ -73,6 +83,7 @@ func (s *Server) PostAdminRevokeJwt(w http.ResponseWriter, r *http.Request) {
 	row, err := s.revoked.Insert(r.Context(), body.Jti, string(body.Reason), body.ExpiresAt)
 	if err != nil {
 		// Message carries no PII (docs/DESIGN.md §6.5); details go to logs only.
+		recordError(telemetry.EndpointRevoke, "server_error")
 		slog.Default().Error("oidcapi: revoke-jwt insert failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "failed to record revocation")
 		return
@@ -91,6 +102,7 @@ func (s *Server) PostAdminRevokeJwt(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	outcome = telemetry.OutcomeSuccess
 	writeRevokeJwtResponse(w, row)
 }
 

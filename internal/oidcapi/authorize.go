@@ -8,6 +8,7 @@ import (
 	"github.com/harbor/harbor/internal/bff"
 	"github.com/harbor/harbor/internal/gen/openapi"
 	"github.com/harbor/harbor/internal/oidc"
+	"github.com/harbor/harbor/internal/telemetry"
 )
 
 // GetAuthorize serves the OIDC Authorization endpoint (GET /authorize).
@@ -36,8 +37,13 @@ func (s *Server) GetAuthorize(w http.ResponseWriter, r *http.Request, params ope
 // 3. Create a BFF session record in the store
 // 4. Redirect to loginURL?request_id=<id>
 func (s *Server) authorizeWithBFFSession(w http.ResponseWriter, r *http.Request, req oidc.AuthorizeRequest) {
+	start := time.Now()
+	outcome := telemetry.OutcomeError
+	defer func() { recordRequest(telemetry.EndpointAuthorize, outcome, start) }()
+
 	validated, aerr := s.svc.ValidateAuthorizeRequest(r.Context(), req)
 	if aerr != nil {
+		recordError(telemetry.EndpointAuthorize, aerr.Code)
 		if aerr.Channel == oidc.ChannelErrorPage {
 			writeAuthorizeErrorPage(w)
 			return
@@ -75,6 +81,7 @@ func (s *Server) authorizeWithBFFSession(w http.ResponseWriter, r *http.Request,
 	}
 	if err := s.bffSessions.Create(r.Context(), record); err != nil {
 		// Session creation failure — redirect with server_error
+		recordError(telemetry.EndpointAuthorize, oidc.ErrCodeServerError)
 		q := url.Values{}
 		q.Set("error", oidc.ErrCodeServerError)
 		q.Set("error_description", "could not create session")
@@ -91,6 +98,7 @@ func (s *Server) authorizeWithBFFSession(w http.ResponseWriter, r *http.Request,
 	q := loginRedirect.Query()
 	q.Set("request_id", requestID)
 	loginRedirect.RawQuery = q.Encode()
+	outcome = telemetry.OutcomeSuccess
 	http.Redirect(w, r, loginRedirect.String(), http.StatusFound)
 }
 
@@ -98,8 +106,13 @@ func (s *Server) authorizeWithBFFSession(w http.ResponseWriter, r *http.Request,
 // issues a code via the session resolver. This is used when BFF sessions
 // are not configured.
 func (s *Server) authorizeLegacy(w http.ResponseWriter, r *http.Request, req oidc.AuthorizeRequest) {
+	start := time.Now()
+	outcome := telemetry.OutcomeError
+	defer func() { recordRequest(telemetry.EndpointAuthorize, outcome, start) }()
+
 	result, aerr := s.svc.Authorize(r.Context(), req)
 	if aerr != nil {
+		recordError(telemetry.EndpointAuthorize, aerr.Code)
 		if aerr.Channel == oidc.ChannelErrorPage {
 			writeAuthorizeErrorPage(w)
 			return
@@ -127,6 +140,7 @@ func (s *Server) authorizeLegacy(w http.ResponseWriter, r *http.Request, req oid
 	// reject-not-narrow), so the returned scope always equals the requested scope
 	// and inclusion is optional. If scope negotiation (granting a subset) is
 	// added in a future PR, add Scope to AuthorizeResult and set it here.
+	outcome = telemetry.OutcomeSuccess
 	redirectWithQuery(w, r, result.RedirectURI, q)
 }
 
@@ -199,6 +213,10 @@ func writeAuthorizeErrorPage(w http.ResponseWriter) {
 //  5. Clear BFF cookie
 //  6. Redirect to RP with auth code
 func (s *Server) GetAuthorizeComplete(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	outcome := telemetry.OutcomeError
+	defer func() { recordRequest(telemetry.EndpointAuthorize, outcome, start) }()
+
 	requestID := r.URL.Query().Get("request_id")
 	if requestID == "" {
 		writeAuthorizeErrorPage(w)
@@ -229,6 +247,7 @@ func (s *Server) GetAuthorizeComplete(w http.ResponseWriter, r *http.Request) {
 		UserID:              session.UserID,
 	})
 	if aerr != nil {
+		recordError(telemetry.EndpointAuthorize, aerr.Code)
 		if aerr.Channel == oidc.ChannelErrorPage {
 			writeAuthorizeErrorPage(w)
 			return
@@ -244,6 +263,7 @@ func (s *Server) GetAuthorizeComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	outcome = telemetry.OutcomeSuccess
 	// Delete BFF session (one-time use)
 	_ = s.bffSessions.Delete(r.Context(), requestID) //nolint:errcheck // best-effort: session expires via TTL anyway
 

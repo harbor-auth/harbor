@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/harbor/harbor/internal/clients"
+	"github.com/harbor/harbor/internal/telemetry"
 )
 
 // ClientRegistrationStore is the narrow behaviour the POST /register handler
@@ -83,7 +84,12 @@ type registerResponse struct {
 //   - 503 Service Unavailable registration not wired (no store)
 //   - 500 Internal Server Error credential minting or persistence failure
 func (s *Server) PostRegister(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	outcome := telemetry.OutcomeError
+	defer func() { recordRequest(telemetry.EndpointRegister, outcome, start) }()
+
 	if s.clientReg == nil {
+		recordError(telemetry.EndpointRegister, "unavailable")
 		s.writeError(w, http.StatusServiceUnavailable, "unavailable",
 			"dynamic client registration is not configured on this instance")
 		return
@@ -93,6 +99,7 @@ func (s *Server) PostRegister(w http.ResponseWriter, r *http.Request) {
 	// caller must present the token as a Bearer credential; otherwise we return
 	// 401 BEFORE reading the body, so an unauthorized request persists nothing.
 	if !s.initialAccessTokenAuthorized(r) {
+		recordError(telemetry.EndpointRegister, "invalid_token")
 		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
 		s.writeError(w, http.StatusUnauthorized, "invalid_token",
 			"a valid initial access token is required to register a client")
@@ -102,6 +109,7 @@ func (s *Server) PostRegister(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRegisterBody)
 	var req registerRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		recordError(telemetry.EndpointRegister, "invalid_request")
 		s.writeError(w, http.StatusBadRequest, "invalid_request", "malformed JSON request body")
 		return
 	}
@@ -115,6 +123,7 @@ func (s *Server) PostRegister(w http.ResponseWriter, r *http.Request) {
 		ClientName:              req.ClientName,
 	}
 	if err := ValidateClientMetadata(meta); err != nil {
+		recordError(telemetry.EndpointRegister, registrationErrorCode(err))
 		s.writeError(w, http.StatusBadRequest, registrationErrorCode(err), err.Error())
 		return
 	}
@@ -185,6 +194,7 @@ func (s *Server) PostRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	outcome = telemetry.OutcomeSuccess
 	resp := registerResponse{
 		ClientID:                rc.ClientID,
 		ClientSecret:            clientSecret,
@@ -242,6 +252,7 @@ func bearerToken(r *http.Request) string {
 // generic 500 (the error may carry internal detail; docs/DESIGN.md §6.5).
 func (s *Server) registrationServerError(w http.ResponseWriter, r *http.Request, stage string, err error) {
 	s.logger.ErrorContext(r.Context(), "client registration failed", "stage", stage, "error", err)
+	recordError(telemetry.EndpointRegister, "server_error")
 	s.writeError(w, http.StatusInternalServerError, "server_error", "client registration failed")
 }
 

@@ -17,6 +17,8 @@ import (
 	"github.com/harbor/harbor/internal/crypto"
 	"github.com/harbor/harbor/internal/gen/openapi"
 	"github.com/harbor/harbor/internal/oidc"
+	"github.com/harbor/harbor/internal/region"
+	"github.com/harbor/harbor/internal/telemetry"
 )
 
 // DefaultBFFSessionTTL is the default lifetime of BFF session records in the
@@ -140,4 +142,15 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(openapi.Error{Code: code, Message: message})
+}
+
+// WriteRateLimited writes a 429 Too Many Requests response and records the
+// rejection as an AGGREGATE metric by endpoint and region. It is the single
+// call site a rate-limiter (or edge middleware) uses so every 429 is metered
+// consistently. Crucially it NEVER records a per-IP series — abuse visibility
+// without PII (docs/plans/observability-metrics.md, docs/DESIGN.md §6.5). Pass
+// an empty region.Region when the request region is not yet resolved.
+func (s *Server) WriteRateLimited(w http.ResponseWriter, endpoint telemetry.EndpointName, reg region.Region) {
+	recordRateLimited(endpoint, reg)
+	writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
 }
