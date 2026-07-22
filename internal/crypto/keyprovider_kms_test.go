@@ -366,5 +366,190 @@ func TestParseEnvelopeInfoInvalid(t *testing.T) {
 	}
 }
 
+// --- RewrapDEK tests ---
+
+func TestKMSKeyProviderRewrapDEK(t *testing.T) {
+	ctx := context.Background()
+	region := "us-east-1"
+	oldKeyID := "old-kek"
+	newKeyID := "new-kek"
+
+	kmsClient := NewFakeKMSClient()
+
+	// Wrap DEK with old KEK.
+	oldResolver := NewStaticKEKResolver(map[string]string{region: oldKeyID})
+	oldProvider := NewKMSKeyProvider(kmsClient, oldResolver)
+
+	dek, err := GenerateDEK()
+	if err != nil {
+		t.Fatalf("GenerateDEK: %v", err)
+	}
+
+	oldWrapped, err := oldProvider.WrapDEK(ctx, region, dek)
+	if err != nil {
+		t.Fatalf("WrapDEK: %v", err)
+	}
+
+	// Verify old envelope has old KEK.
+	oldInfo, _ := ParseEnvelopeInfo(oldWrapped)
+	if oldInfo.KEKKeyID != oldKeyID {
+		t.Fatalf("old envelope KEK = %q, want %q", oldInfo.KEKKeyID, oldKeyID)
+	}
+
+	// Create provider with new KEK.
+	newResolver := NewStaticKEKResolver(map[string]string{region: newKeyID})
+	newProvider := NewKMSKeyProvider(kmsClient, newResolver)
+
+	// Rewrap under new KEK.
+	newWrapped, err := newProvider.RewrapDEK(ctx, region, oldWrapped)
+	if err != nil {
+		t.Fatalf("RewrapDEK: %v", err)
+	}
+
+	// Verify new envelope has new KEK.
+	newInfo, _ := ParseEnvelopeInfo(newWrapped)
+	if newInfo.KEKKeyID != newKeyID {
+		t.Errorf("new envelope KEK = %q, want %q", newInfo.KEKKeyID, newKeyID)
+	}
+	if newInfo.Region != region {
+		t.Errorf("new envelope region = %q, want %q", newInfo.Region, region)
+	}
+
+	// Unwrap with new provider and verify DEK is preserved.
+	unwrapped, err := newProvider.UnwrapDEK(ctx, region, newWrapped)
+	if err != nil {
+		t.Fatalf("UnwrapDEK after rewrap: %v", err)
+	}
+	if unwrapped != dek {
+		t.Fatalf("DEK mismatch after rewrap: got %x, want %x", unwrapped, dek)
+	}
+}
+
+func TestKMSKeyProviderRewrapDEKNoChangeNeeded(t *testing.T) {
+	ctx := context.Background()
+	region := "us-east-1"
+	keyID := "same-kek"
+
+	kmsClient := NewFakeKMSClient()
+	resolver := NewStaticKEKResolver(map[string]string{region: keyID})
+	provider := NewKMSKeyProvider(kmsClient, resolver)
+
+	dek, err := GenerateDEK()
+	if err != nil {
+		t.Fatalf("GenerateDEK: %v", err)
+	}
+
+	wrapped, err := provider.WrapDEK(ctx, region, dek)
+	if err != nil {
+		t.Fatalf("WrapDEK: %v", err)
+	}
+
+	// Rewrap with same KEK should return original envelope unchanged.
+	rewrapped, err := provider.RewrapDEK(ctx, region, wrapped)
+	if err != nil {
+		t.Fatalf("RewrapDEK: %v", err)
+	}
+
+	// Should be exactly the same bytes.
+	if !bytes.Equal(rewrapped, wrapped) {
+		t.Error("RewrapDEK with same KEK should return identical envelope")
+	}
+}
+
+func TestKMSKeyProviderRewrapDEKRegionMismatch(t *testing.T) {
+	ctx := context.Background()
+	regionA := "us-east-1"
+	regionB := "eu-west-1"
+	keyA := "key-a"
+	keyB := "key-b"
+
+	kmsClient := NewFakeKMSClient()
+
+	// Wrap in region A.
+	resolverA := NewStaticKEKResolver(map[string]string{regionA: keyA})
+	providerA := NewKMSKeyProvider(kmsClient, resolverA)
+
+	dek, _ := GenerateDEK()
+	wrapped, _ := providerA.WrapDEK(ctx, regionA, dek)
+
+	// Try to rewrap with region B - should fail.
+	resolverB := NewStaticKEKResolver(map[string]string{regionB: keyB})
+	providerB := NewKMSKeyProvider(kmsClient, resolverB)
+
+	_, err := providerB.RewrapDEK(ctx, regionB, wrapped)
+	if !errors.Is(err, ErrDecryptFailed) {
+		t.Errorf("cross-region RewrapDEK error = %v, want ErrDecryptFailed", err)
+	}
+}
+
+func TestKMSKeyProviderRewrapDEKInvalidEnvelope(t *testing.T) {
+	ctx := context.Background()
+	region := "us-east-1"
+	keyID := "key-1"
+
+	kmsClient := NewFakeKMSClient()
+	resolver := NewStaticKEKResolver(map[string]string{region: keyID})
+	provider := NewKMSKeyProvider(kmsClient, resolver)
+
+	testCases := []struct {
+		name     string
+		envelope []byte
+	}{
+		{"empty", []byte{}},
+		{"too short", []byte{1, 2}},
+		{"wrong version", buildEnvelope(99, region, keyID, []byte("ct"))},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := provider.RewrapDEK(ctx, region, tc.envelope)
+			if !errors.Is(err, ErrDecryptFailed) {
+				t.Errorf("error = %v, want ErrDecryptFailed", err)
+			}
+		})
+	}
+}
+
+func TestKMSKeyProviderRewrapDEKPreservesDEK(t *testing.T) {
+	// This test verifies that the DEK plaintext is correctly preserved
+	// through the rewrap process by checking the decrypted value.
+	ctx := context.Background()
+	region := "us-east-1"
+	oldKeyID := "old-kek"
+	newKeyID := "new-kek"
+
+	kmsClient := NewFakeKMSClient()
+
+	// Create a known DEK.
+	var dek DEK
+	for i := range dek {
+		dek[i] = byte(i)
+	}
+
+	// Wrap with old KEK.
+	oldResolver := NewStaticKEKResolver(map[string]string{region: oldKeyID})
+	oldProvider := NewKMSKeyProvider(kmsClient, oldResolver)
+	oldWrapped, _ := oldProvider.WrapDEK(ctx, region, dek)
+
+	// Rewrap with new KEK.
+	newResolver := NewStaticKEKResolver(map[string]string{region: newKeyID})
+	newProvider := NewKMSKeyProvider(kmsClient, newResolver)
+	newWrapped, err := newProvider.RewrapDEK(ctx, region, oldWrapped)
+	if err != nil {
+		t.Fatalf("RewrapDEK: %v", err)
+	}
+
+	// Verify DEK is preserved exactly.
+	unwrapped, err := newProvider.UnwrapDEK(ctx, region, newWrapped)
+	if err != nil {
+		t.Fatalf("UnwrapDEK: %v", err)
+	}
+	for i := range unwrapped {
+		if unwrapped[i] != byte(i) {
+			t.Fatalf("DEK byte %d = %d, want %d", i, unwrapped[i], i)
+		}
+	}
+}
+
 // Compile-time assertion that KMSKeyProvider satisfies KeyProvider.
 var _ KeyProvider = (*KMSKeyProvider)(nil)

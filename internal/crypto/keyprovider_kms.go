@@ -251,6 +251,75 @@ func ParseEnvelopeInfo(envelope []byte) (EnvelopeInfo, error) {
 	}, nil
 }
 
+// RewrapDEK re-encrypts a wrapped DEK under the region's current KEK.
+//
+// This is the primitive for KEK rotation: it unwraps the DEK using the
+// envelope's recorded KEK key ID, then re-wraps it under the current KEK
+// for the region. The plaintext DEK exists only transiently in memory.
+//
+// Returns the new envelope with the updated KEK key ID. If the envelope's
+// KEK already matches the current KEK, the original envelope is returned
+// unchanged (no KMS calls are made).
+//
+// Returns ErrDecryptFailed if the envelope is malformed, the region doesn't
+// match, or decryption fails.
+func (p *KMSKeyProvider) RewrapDEK(ctx context.Context, region string, wrapped []byte) ([]byte, error) {
+	// Parse envelope to extract old KEK key ID.
+	envelopeRegion, envelopeKeyID, ciphertext, err := parseEnvelope(wrapped)
+	if err != nil {
+		return nil, ErrDecryptFailed
+	}
+
+	// Validate region matches.
+	if envelopeRegion != region {
+		return nil, ErrDecryptFailed
+	}
+
+	// Resolve current KEK key ID for this region.
+	currentKeyID, err := p.resolver.ResolveKEK(region)
+	if err != nil {
+		return nil, ErrDecryptFailed
+	}
+
+	// Validate current key ID length (same guard as WrapDEK).
+	if len(currentKeyID) > maxKEKKeyIDLen {
+		return nil, fmt.Errorf("crypto: RewrapDEK: KEK key ID too long (%d > %d)", len(currentKeyID), maxKEKKeyIDLen)
+	}
+
+	// If the envelope's KEK matches the current KEK, no rewrap needed.
+	if envelopeKeyID == currentKeyID {
+		return wrapped, nil
+	}
+
+	// Decrypt DEK using the envelope's recorded KEK (the old key).
+	plaintext, err := p.client.Decrypt(ctx, envelopeKeyID, ciphertext)
+	if err != nil {
+		return nil, ErrDecryptFailed
+	}
+
+	// Validate DEK length.
+	if len(plaintext) != 32 {
+		return nil, ErrDecryptFailed
+	}
+
+	// Re-encrypt under the current KEK.
+	newCiphertext, err := p.client.Encrypt(ctx, currentKeyID, plaintext)
+	if err != nil {
+		return nil, fmt.Errorf("crypto: RewrapDEK: KMS encrypt: %w", err)
+	}
+
+	// Build new envelope with the current KEK key ID.
+	newEnvelope := make([]byte, 0, 3+len(region)+len(currentKeyID)+len(newCiphertext))
+	newEnvelope = append(newEnvelope, envelopeVersion)
+	newEnvelope = append(newEnvelope, byte(len(region)))
+	newEnvelope = append(newEnvelope, []byte(region)...)
+	newEnvelope = append(newEnvelope, byte(len(currentKeyID)))
+	newEnvelope = append(newEnvelope, []byte(currentKeyID)...)
+	newEnvelope = append(newEnvelope, newCiphertext...)
+
+	return newEnvelope, nil
+}
+
 // String returns a human-readable description of the provider.
 func (p *KMSKeyProvider) String() string {
 	return "KMSKeyProvider"
