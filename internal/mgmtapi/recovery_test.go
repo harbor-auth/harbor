@@ -90,6 +90,34 @@ func (f *fakeRecoveryFactorLister) ListFactors(_ context.Context, _ string) ([]R
 	return f.factors, nil
 }
 
+// recoveryAuditEvent captures a single LogRecoveryEvent call for assertions.
+type recoveryAuditEvent struct {
+	userID    string
+	region    string
+	eventType string
+}
+
+type fakeRecoveryAuditLogger struct {
+	events []recoveryAuditEvent
+	err    error
+}
+
+func (f *fakeRecoveryAuditLogger) LogRecoveryEvent(_ context.Context, userID, region, eventType string) error {
+	f.events = append(f.events, recoveryAuditEvent{userID: userID, region: region, eventType: eventType})
+	return f.err
+}
+
+// containsAuditEvent reports whether the logger recorded an event of the given
+// type.
+func containsAuditEvent(f *fakeRecoveryAuditLogger, eventType string) bool {
+	for _, e := range f.events {
+		if e.eventType == eventType {
+			return true
+		}
+	}
+	return false
+}
+
 // newRecoveryServer builds a Server with the in-memory ceremony store plus the
 // given fakes wired in.
 func newRecoveryServer(codes RecoveryCodeGenerator, store RecoveryCodeStore, verifier RecoveryVerifier) (*Server, *InMemoryRecoveryCeremonyStore) {
@@ -516,6 +544,149 @@ func TestListCredentialsByUser_Routed(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("routed status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- recovery audit trail ---
+
+func TestPostRecoveryBegin_EmitsBeginAuditEvent(t *testing.T) {
+	audit := &fakeRecoveryAuditLogger{}
+	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s.WithRecoveryAuditLog(audit)
+
+	req := httptest.NewRequest(http.MethodPost, "/recovery/begin", strings.NewReader(`{"user_id":"user-1"}`))
+	req.Host = "eu.harbor.test"
+	rec := httptest.NewRecorder()
+	s.PostRecoveryBegin(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if len(audit.events) != 1 {
+		t.Fatalf("audit events = %d, want 1", len(audit.events))
+	}
+	got := audit.events[0]
+	if got.eventType != auditRecoveryBegin || got.userID != "user-1" || got.region != "eu.harbor.test" {
+		t.Errorf("audit event = %+v, want begin for user-1 @ eu.harbor.test", got)
+	}
+}
+
+func TestPostRecoveryComplete_EmitsSucceededAuditEvent(t *testing.T) {
+	audit := &fakeRecoveryAuditLogger{}
+	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s.WithRecoveryAuditLog(audit)
+
+	id := beginCeremony(t, s, "eu.harbor.test")
+	body := `{"recovery_request_id":"` + id + `","code":"CODE-0000"}`
+	req := httptest.NewRequest(http.MethodPost, "/recovery/complete", strings.NewReader(body))
+	req.Host = "eu.harbor.test"
+	rec := httptest.NewRecorder()
+	s.PostRecoveryComplete(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if !containsAuditEvent(audit, auditRecoverySucceeded) {
+		t.Errorf("expected a %q audit event, got %+v", auditRecoverySucceeded, audit.events)
+	}
+}
+
+func TestPostRecoveryComplete_InvalidCodeEmitsFailedAuditEvent(t *testing.T) {
+	audit := &fakeRecoveryAuditLogger{}
+	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{err: identity.ErrInvalidCode})
+	s.WithRecoveryAuditLog(audit)
+
+	id := beginCeremony(t, s, "eu.harbor.test")
+	body := `{"recovery_request_id":"` + id + `","code":"WRONG"}`
+	req := httptest.NewRequest(http.MethodPost, "/recovery/complete", strings.NewReader(body))
+	req.Host = "eu.harbor.test"
+	rec := httptest.NewRecorder()
+	s.PostRecoveryComplete(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if !containsAuditEvent(audit, auditRecoveryFailed) {
+		t.Errorf("expected a %q audit event, got %+v", auditRecoveryFailed, audit.events)
+	}
+	if containsAuditEvent(audit, auditRecoverySucceeded) {
+		t.Error("must NOT emit succeeded on an invalid code")
+	}
+}
+
+func TestPostRecoveryComplete_LockedOutEmitsFailedAuditEvent(t *testing.T) {
+	audit := &fakeRecoveryAuditLogger{}
+	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{err: identity.ErrUserLocked})
+	s.WithRecoveryAuditLog(audit)
+
+	id := beginCeremony(t, s, "eu.harbor.test")
+	body := `{"recovery_request_id":"` + id + `","code":"CODE-0000"}`
+	req := httptest.NewRequest(http.MethodPost, "/recovery/complete", strings.NewReader(body))
+	req.Host = "eu.harbor.test"
+	rec := httptest.NewRecorder()
+	s.PostRecoveryComplete(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if !containsAuditEvent(audit, auditRecoveryFailed) {
+		t.Errorf("expected a %q audit event on lockout, got %+v", auditRecoveryFailed, audit.events)
+	}
+}
+
+func TestPostRecoveryComplete_RegionMismatchEmitsFailedAuditEvent(t *testing.T) {
+	audit := &fakeRecoveryAuditLogger{}
+	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s.WithRecoveryAuditLog(audit)
+
+	id := beginCeremony(t, s, "eu.harbor.test")
+	body := `{"recovery_request_id":"` + id + `","code":"CODE-0000"}`
+	req := httptest.NewRequest(http.MethodPost, "/recovery/complete", strings.NewReader(body))
+	req.Host = "us.harbor.test"
+	rec := httptest.NewRecorder()
+	s.PostRecoveryComplete(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if !containsAuditEvent(audit, auditRecoveryFailed) {
+		t.Errorf("expected a %q audit event on region mismatch, got %+v", auditRecoveryFailed, audit.events)
+	}
+}
+
+func TestPostRecoveryComplete_UnknownCeremonyEmitsNoAuditEvent(t *testing.T) {
+	audit := &fakeRecoveryAuditLogger{}
+	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s.WithRecoveryAuditLog(audit)
+
+	body := `{"recovery_request_id":"does-not-exist","code":"CODE-0000"}`
+	req := httptest.NewRequest(http.MethodPost, "/recovery/complete", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryComplete(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	// No user is resolved for an unknown ceremony, so nothing can be keyed to a
+	// trail — no event must be recorded.
+	if len(audit.events) != 0 {
+		t.Errorf("audit events = %+v, want none for an unknown ceremony", audit.events)
+	}
+}
+
+// TestRecoveryAudit_WriteErrorIsSwallowed proves that a failing audit logger
+// never fails the ceremony: begin still returns 200.
+func TestRecoveryAudit_WriteErrorIsSwallowed(t *testing.T) {
+	audit := &fakeRecoveryAuditLogger{err: errors.New("audit db down")}
+	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s.WithRecoveryAuditLog(audit)
+
+	req := httptest.NewRequest(http.MethodPost, "/recovery/begin", strings.NewReader(`{"user_id":"user-1"}`))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryBegin(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (audit failure must not fail the ceremony)", rec.Code)
 	}
 }
 

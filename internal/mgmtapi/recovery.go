@@ -93,6 +93,33 @@ type RecoveryRateLimiter interface {
 	Allow(key string) bool
 }
 
+// Recovery-lifecycle audit event types. These are appended to the user-visible,
+// append-only audit trail (audit_events, docs/DESIGN.md §10, §11.6) so an
+// account owner has a truthful history of every recovery attempt on their
+// account.
+const (
+	// auditRecoveryBegin marks the start of a recovery ceremony (POST
+	// /recovery/begin) for the claimed account.
+	auditRecoveryBegin = "auth.recovery_begin"
+	// auditRecoverySucceeded marks a recovery ceremony whose code was verified
+	// (POST /recovery/complete succeeded).
+	auditRecoverySucceeded = "auth.recovery_succeeded"
+	// auditRecoveryFailed marks a recovery ceremony that failed to complete
+	// (wrong/exhausted code, lockout, or region mismatch).
+	auditRecoveryFailed = "auth.recovery_failed"
+)
+
+// RecoveryAuditLogger appends a recovery-lifecycle event to the user-visible
+// audit trail. It is satisfied by a thin adapter over the CreateAuditEvent
+// query. region is the opaque regional pin the ceremony ran against; eventType
+// is one of the audit* constants above. Emission is best-effort: a failure to
+// write the trail must never fail the recovery ceremony (the handler logs and
+// carries on), so implementations should not surface transient errors as
+// user-facing failures.
+type RecoveryAuditLogger interface {
+	LogRecoveryEvent(ctx context.Context, userID, region, eventType string) error
+}
+
 // RecoveryCeremonyStore bridges POST /recovery/begin and POST /recovery/complete
 // by mapping an opaque request id to the user id being recovered plus the
 // region the ceremony is pinned to. The stored region enforces region isolation
@@ -187,6 +214,21 @@ func newRecoveryRequestID() (string, error) {
 // Host yields an empty pin, which still requires begin and complete to match.
 func recoveryRegion(r *http.Request) string {
 	return r.Host
+}
+
+// logRecoveryEvent appends a recovery-lifecycle event to the user-visible audit
+// trail. It is best-effort by design: a nil logger or an empty userID is a
+// no-op, and a write failure is logged (WarnContext) but never propagated, so
+// the audit trail can never break the recovery ceremony itself (docs/DESIGN.md
+// §11.6). An empty userID is skipped because the trail is keyed by user — paths
+// without a resolved user (e.g. an unknown ceremony) have nothing to record.
+func (s *Server) logRecoveryEvent(ctx context.Context, userID, region, eventType string) {
+	if s.recoveryAudit == nil || userID == "" {
+		return
+	}
+	if err := s.recoveryAudit.LogRecoveryEvent(ctx, userID, region, eventType); err != nil {
+		s.logger.WarnContext(ctx, "mgmtapi: recovery audit event write failed", "error", err, "event_type", eventType)
+	}
 }
 
 // --- POST /recovery/codes ---
@@ -333,6 +375,11 @@ func (s *Server) PostRecoveryBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Record the ceremony start on the account's audit trail. Best-effort and
+	// keyed by the claimed user id; a non-existent account simply produces no
+	// durable event in the adapter (no existence is leaked to the caller).
+	s.logRecoveryEvent(r.Context(), req.UserID, recoveryRegion(r), auditRecoveryBegin)
+
 	s.writeJSON(w, http.StatusOK, recoveryBeginResponse{
 		RecoveryRequestID: requestID,
 		ExpiresIn:         int(recoveryCeremonyTTL.Seconds()),
@@ -406,6 +453,7 @@ func (s *Server) PostRecoveryComplete(w http.ResponseWriter, r *http.Request) {
 	// front door it was started on. A mismatch is a uniform failure so it does
 	// not disclose that the ceremony (and thus the account) exists elsewhere.
 	if subtle.ConstantTimeCompare([]byte(pinnedRegion), []byte(recoveryRegion(r))) != 1 {
+		s.logRecoveryEvent(r.Context(), userID, pinnedRegion, auditRecoveryFailed)
 		s.writeRecoveryFailed(w)
 		return
 	}
@@ -415,6 +463,7 @@ func (s *Server) PostRecoveryComplete(w http.ResponseWriter, r *http.Request) {
 		// the response never leaks account existence or lockout state. The
 		// verifier has already recorded the failed attempt / lockout server-side.
 		if errors.Is(err, identity.ErrInvalidCode) || errors.Is(err, identity.ErrUserLocked) {
+			s.logRecoveryEvent(r.Context(), userID, pinnedRegion, auditRecoveryFailed)
 			s.writeRecoveryFailed(w)
 			return
 		}
@@ -451,6 +500,10 @@ func (s *Server) PostRecoveryComplete(w http.ResponseWriter, r *http.Request) {
 			MaxAge:   int(recoveryCeremonyTTL.Seconds()),
 		})
 	}
+
+	// Recovery is complete: record the success on the account's audit trail so
+	// the owner sees exactly when their account was recovered (best-effort).
+	s.logRecoveryEvent(r.Context(), userID, pinnedRegion, auditRecoverySucceeded)
 
 	s.writeJSON(w, http.StatusOK, recoveryCompleteResponse{Status: "recovered"})
 }

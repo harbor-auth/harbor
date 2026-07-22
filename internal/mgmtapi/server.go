@@ -74,6 +74,11 @@ type Server struct {
 	// hardware keys) for GET /recovery/factors. Nil puts that endpoint into a
 	// 503 state.
 	recoveryFactors RecoveryFactorLister
+	// recoveryAudit, when non-nil, appends recovery-lifecycle events
+	// (auth.recovery_begin / _succeeded / _failed) to the user-visible audit
+	// trail. Emission is best-effort — a nil logger simply skips the trail and a
+	// write failure never fails the ceremony.
+	recoveryAudit RecoveryAuditLogger
 	// recoveryLimiter, when non-nil, gates the recovery endpoints. Nil disables
 	// rate limiting.
 	recoveryLimiter RecoveryRateLimiter
@@ -173,6 +178,15 @@ func (s *Server) WithScopedSessionIssuer(issuer ScopedSessionIssuer) *Server {
 // A nil lister puts that endpoint into a 503 state. Returns s for chaining.
 func (s *Server) WithRecoveryFactors(lister RecoveryFactorLister) *Server {
 	s.recoveryFactors = lister
+	return s
+}
+
+// WithRecoveryAuditLog attaches the logger that appends recovery-lifecycle
+// events to the user-visible audit trail (auth.recovery_begin / _succeeded /
+// _failed). A nil logger skips the trail; emission is always best-effort and
+// never fails the ceremony. Returns s for chaining.
+func (s *Server) WithRecoveryAuditLog(logger RecoveryAuditLogger) *Server {
+	s.recoveryAudit = logger
 	return s
 }
 
