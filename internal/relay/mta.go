@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"github.com/emersion/go-smtp"
+
+	"github.com/harbor/harbor/internal/region"
 )
 
 // MTA-related constants and documentation.
@@ -60,6 +62,12 @@ type MTAConfig struct {
 	// ReturnPath is the envelope sender used for forwarded messages. This
 	// should be a relay-owned address so bounces return to the relay.
 	ReturnPath string
+	// Region is the home region this MTA serves. It is used ONLY as an
+	// aggregate, non-PII metric label (never per-user).
+	Region region.Region
+	// RateLimiter enforces per-address token-bucket rate limiting. When nil,
+	// no rate limiting is applied.
+	RateLimiter *RateLimiter
 }
 
 // Backend implements smtp.Backend for the inbound relay MTA.
@@ -76,6 +84,8 @@ type Backend struct {
 	forwarder       Forwarder
 	mappingResolver MappingResolver
 	returnPath      string
+	region          region.Region
+	rateLimiter     *RateLimiter
 }
 
 // NewBackend creates a new SMTP backend for the relay MTA.
@@ -104,6 +114,8 @@ func NewBackend(cfg MTAConfig) *Backend {
 		forwarder:       cfg.Forwarder,
 		mappingResolver: cfg.MappingResolver,
 		returnPath:      cfg.ReturnPath,
+		region:          cfg.Region,
+		rateLimiter:     cfg.RateLimiter,
 	}
 }
 
@@ -231,11 +243,25 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 	// Check if the address can receive mail (Active or BYO-domain state)
 	if !addr.CanReceiveMail() {
 		// Deactivated address — hard bounce (§7.5.4 kill switch)
+		recordBounced(s.backend.region)
 		s.backend.logger.Info("relay: address deactivated, rejecting")
 		return &smtp.SMTPError{
 			Code:         550,
 			EnhancedCode: smtp.EnhancedCode{5, 1, 1},
 			Message:      "recipient no longer accepts mail",
+		}
+	}
+
+	// Per-address token-bucket rate limiting. Metrics are aggregate-only — no
+	// per-address or per-IP series is ever emitted, so abuse is visible without
+	// recreating per-user tracking.
+	if s.backend.rateLimiter != nil && !s.backend.rateLimiter.Allow(token) {
+		recordRateLimited(s.backend.region)
+		s.backend.logger.Info("relay: address rate limited")
+		return &smtp.SMTPError{
+			Code:         450,
+			EnhancedCode: smtp.EnhancedCode{4, 7, 1},
+			Message:      "rate limit exceeded, please retry later",
 		}
 	}
 
@@ -284,8 +310,6 @@ func (s *Session) parseRecipient(to string) (string, error) {
 // No logging of message content occurs. Only minimal routing metadata
 // is kept in memory during processing. The message is buffered transiently
 // for ARC sealing and forwarding, then immediately discarded.
-//
-// TODO: Rate limiting (Task 12)
 func (s *Session) Data(r io.Reader) error {
 	if len(s.recipients) == 0 {
 		return &smtp.SMTPError{
@@ -307,6 +331,7 @@ func (s *Session) Data(r io.Reader) error {
 				Message:      "temporary failure reading message",
 			}
 		}
+		recordAccepted(s.backend.region)
 		s.backend.logger.Info("relay: message accepted",
 			slog.Int("recipient_count", len(s.recipients)))
 		return nil
@@ -347,6 +372,7 @@ func (s *Session) Data(r io.Reader) error {
 			slog.String("spf", string(result.SPF)),
 			slog.String("dkim", string(result.DKIM)),
 			slog.String("dmarc", string(result.DMARC)))
+		recordBounced(s.backend.region)
 		return &smtp.SMTPError{
 			Code:         550,
 			EnhancedCode: smtp.EnhancedCode{5, 7, 1},
@@ -364,6 +390,8 @@ func (s *Session) Data(r io.Reader) error {
 			Message:      "temporary forwarding failure, please retry",
 		}
 	}
+
+	recordAccepted(s.backend.region)
 
 	// Log acceptance with auth verdicts (no PII — only aggregate results).
 	s.backend.logger.Info("relay: message accepted and forwarded",
@@ -416,6 +444,7 @@ func (s *Session) forwardAll(ctx context.Context, msg []byte, authResult *AuthRe
 		if err := s.backend.forwarder.Forward(ctx, returnPath, realEmail, bytes.NewReader(sealed)); err != nil {
 			return err
 		}
+		recordForwarded(s.backend.region)
 	}
 	return nil
 }
