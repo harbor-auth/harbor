@@ -108,3 +108,28 @@ jobs:
             git pull --rebase origin main
             git push
           fi
+
+      # Make both container packages public so RKE2 can pull them without a
+      # pull secret. GITHUB_TOKEN cannot change package visibility (GitHub
+      # limitation), so this step uses GH_TOKEN — a classic PAT with the
+      # `write:packages` scope stored as a repository secret. Create it once:
+      #   GitHub → Settings → Developer settings → Personal access tokens
+      #   (classic) → New → scope: write:packages → copy → repo Settings →
+      #   Secrets → Actions → New secret → name: GH_TOKEN → paste.
+      # The step is non-fatal (|| true) so the workflow succeeds even if the
+      # secret is not yet configured.
+      - name: Set packages visibility to public
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          for pkg in harbor-hot harbor-mgmt; do
+            echo "Setting ghcr.io/harbor-auth/harbor/${pkg} to public..."
+            gh api \
+              --method PATCH \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/orgs/harbor-auth/packages/container/harbor%2F${pkg}" \
+              -f visibility=public \
+              && echo "  ✓ ${pkg} is now public" \
+              || echo "  ⚠ Could not set ${pkg} to public (GH_TOKEN missing or lacks write:packages?)"
+          done
