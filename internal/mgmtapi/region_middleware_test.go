@@ -118,6 +118,34 @@ func TestRegionMiddlewarePassesControlOnSuccess(t *testing.T) {
 	}
 }
 
+// TestRegionMiddlewareExemptsHealthz asserts that a liveness/readiness probe
+// hitting /healthz from a bare pod IP (which does not map to any region) is
+// NOT rejected with 400 — it passes through un-pinned to the next handler.
+// This prevents kubelet probes from being killed by the region gate.
+func TestRegionMiddlewareExemptsHealthz(t *testing.T) {
+	called := false
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	h := RegionMiddleware(telemetry.New(nil))(next)
+
+	// Simulate a kubelet liveness probe: Host is the bare pod IP, path is /healthz.
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	req.Host = "10.42.0.40:8081" // bare pod IP — maps to no region
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if !called {
+		t.Fatal("next handler not called for /healthz on unknown host; probe must not be region-gated")
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for /healthz probe", rec.Code)
+	}
+}
+
 // TestRegionMiddlewareResolvesIssuerStyleHost confirms an issuer-style host
 // with a port still resolves, matching region.Resolve's normalisation.
 func TestRegionMiddlewareResolvesIssuerStyleHost(t *testing.T) {
