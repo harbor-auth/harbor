@@ -78,6 +78,18 @@ type fakeRecoveryLimiter struct {
 
 func (f *fakeRecoveryLimiter) Allow(_ string) bool { return f.allow }
 
+type fakeRecoveryFactorLister struct {
+	factors []RecoveryFactor
+	err     error
+}
+
+func (f *fakeRecoveryFactorLister) ListFactors(_ context.Context, _ string) ([]RecoveryFactor, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.factors, nil
+}
+
 // newRecoveryServer builds a Server with the in-memory ceremony store plus the
 // given fakes wired in.
 func newRecoveryServer(codes RecoveryCodeGenerator, store RecoveryCodeStore, verifier RecoveryVerifier) (*Server, *InMemoryRecoveryCeremonyStore) {
@@ -393,6 +405,117 @@ func TestPostRecoveryComplete_OneTimeUse(t *testing.T) {
 	s.PostRecoveryComplete(rec2, req2)
 	if rec2.Code != http.StatusUnauthorized {
 		t.Fatalf("replay status = %d, want 401", rec2.Code)
+	}
+}
+
+// --- GET /recovery/factors ---
+
+func TestListCredentialsByUser_Success(t *testing.T) {
+	lister := &fakeRecoveryFactorLister{factors: []RecoveryFactor{
+		{ID: "cred-1", Type: "passkey", AAGUID: "AAGUID-1"},
+		{ID: "cred-2", Type: "passkey"},
+	}}
+	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s.WithRecoveryFactors(lister)
+
+	req := httptest.NewRequest(http.MethodGet, "/recovery/factors", nil)
+	req.Header.Set(UserIDHeader, "user-1")
+	rec := httptest.NewRecorder()
+	s.ListCredentialsByUser(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp recoveryFactorsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Count != 2 || len(resp.Factors) != 2 {
+		t.Errorf("count = %d / factors = %d, want 2", resp.Count, len(resp.Factors))
+	}
+	if resp.Factors[0].ID != "cred-1" || resp.Factors[0].Type != "passkey" {
+		t.Errorf("factor[0] = %+v, want {cred-1 passkey ...}", resp.Factors[0])
+	}
+}
+
+func TestListCredentialsByUser_EmptyIsArray(t *testing.T) {
+	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s.WithRecoveryFactors(&fakeRecoveryFactorLister{}) // nil factors
+
+	req := httptest.NewRequest(http.MethodGet, "/recovery/factors", nil)
+	req.Header.Set(UserIDHeader, "user-1")
+	rec := httptest.NewRecorder()
+	s.ListCredentialsByUser(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	// An empty list must serialize as [] (not null) so clients can iterate.
+	if !strings.Contains(rec.Body.String(), `"factors":[]`) {
+		t.Errorf("body = %s, want factors:[]", rec.Body.String())
+	}
+}
+
+func TestListCredentialsByUser_Unauthorized(t *testing.T) {
+	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s.WithRecoveryFactors(&fakeRecoveryFactorLister{})
+	req := httptest.NewRequest(http.MethodGet, "/recovery/factors", nil)
+	rec := httptest.NewRecorder()
+	s.ListCredentialsByUser(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestListCredentialsByUser_Unavailable(t *testing.T) {
+	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	// No factor lister wired.
+	req := httptest.NewRequest(http.MethodGet, "/recovery/factors", nil)
+	req.Header.Set(UserIDHeader, "user-1")
+	rec := httptest.NewRecorder()
+	s.ListCredentialsByUser(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+}
+
+func TestListCredentialsByUser_RateLimited(t *testing.T) {
+	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s.WithRecoveryFactors(&fakeRecoveryFactorLister{})
+	s.WithRecoveryRateLimiter(&fakeRecoveryLimiter{allow: false})
+	req := httptest.NewRequest(http.MethodGet, "/recovery/factors", nil)
+	req.Header.Set(UserIDHeader, "user-1")
+	rec := httptest.NewRecorder()
+	s.ListCredentialsByUser(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+}
+
+func TestListCredentialsByUser_ListError(t *testing.T) {
+	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s.WithRecoveryFactors(&fakeRecoveryFactorLister{err: errors.New("db down")})
+	req := httptest.NewRequest(http.MethodGet, "/recovery/factors", nil)
+	req.Header.Set(UserIDHeader, "user-1")
+	rec := httptest.NewRecorder()
+	s.ListCredentialsByUser(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+}
+
+func TestListCredentialsByUser_Routed(t *testing.T) {
+	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s.WithRecoveryFactors(&fakeRecoveryFactorLister{factors: []RecoveryFactor{{ID: "cred-1", Type: "passkey"}}})
+	mux := http.NewServeMux()
+	s.Routes(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/recovery/factors", nil)
+	req.Header.Set(UserIDHeader, "user-1")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("routed status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 }
 

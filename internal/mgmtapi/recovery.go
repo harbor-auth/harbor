@@ -59,6 +59,33 @@ type ScopedSessionIssuer interface {
 	IssueEnrollmentSession(ctx context.Context, userID string) (token string, err error)
 }
 
+// RecoveryFactor is PII-free metadata describing a single registered recovery
+// factor (a passkey or hardware security key). It deliberately omits the public
+// key and any user identifier — it is only enough for the account owner to tell
+// their registered authenticators apart (docs/DESIGN.md §6.5, §10).
+type RecoveryFactor struct {
+	// ID is an opaque, stable identifier for the credential (its DB id encoded
+	// as a string). It is safe to display and to target for future management
+	// (e.g. revoke this factor).
+	ID string `json:"id"`
+	// Type is the factor kind, e.g. "passkey". It mirrors the credential row's
+	// type column so hardware keys and platform passkeys are distinguishable.
+	Type string `json:"type"`
+	// AAGUID identifies the authenticator model (base64url of the raw AAGUID).
+	// Empty when the authenticator did not report one. It is model-level, not
+	// user-level, so it carries no PII.
+	AAGUID string `json:"aaguid,omitempty"`
+}
+
+// RecoveryFactorLister lists the recovery factors (passkeys / hardware keys)
+// registered to a user via the existing WebAuthn registration path. It is
+// satisfied by a thin adapter over the shipped credential store — Harbor treats
+// every enrolled passkey as an independent recovery factor, so no new WebAuthn
+// code is needed to support fallback authenticators (docs/DESIGN.md §11.1).
+type RecoveryFactorLister interface {
+	ListFactors(ctx context.Context, userID string) ([]RecoveryFactor, error)
+}
+
 // RecoveryRateLimiter gates recovery endpoints. Allow reports whether the call
 // identified by key may proceed. Implementations must be safe for concurrent
 // use and must NOT retain per-caller PII beyond what is needed to rate-limit.
@@ -434,4 +461,60 @@ func (s *Server) PostRecoveryComplete(w http.ResponseWriter, r *http.Request) {
 // response never leaks which of those conditions occurred (docs/DESIGN.md §6.5).
 func (s *Server) writeRecoveryFailed(w http.ResponseWriter) {
 	s.writeError(w, http.StatusUnauthorized, "recovery_failed", "recovery could not be completed")
+}
+
+// --- GET /recovery/factors ---
+
+// recoveryFactorsResponse is the GET /recovery/factors success body. It lists
+// the authenticated user's registered recovery factors (passkeys / hardware
+// keys) so they can confirm which authenticators can recover their account.
+type recoveryFactorsResponse struct {
+	Factors []RecoveryFactor `json:"factors"`
+	Count   int              `json:"count"`
+}
+
+// ListCredentialsByUser handles GET /recovery/factors — it returns the
+// authenticated user's registered recovery factors. Every passkey enrolled via
+// the existing WebAuthn registration path is an independent recovery factor, so
+// this endpoint simply surfaces those credentials as PII-free metadata; it adds
+// no new WebAuthn behaviour (docs/DESIGN.md §11.1). The user id comes from the
+// X-Harbor-User-ID header set by upstream authentication.
+//
+// Responses:
+//   - 200 OK                  on success ({factors, count})
+//   - 401 Unauthorized        missing authenticated user
+//   - 429 Too Many Requests   rate limited
+//   - 503 Service Unavailable recovery factor listing not wired
+//   - 500 Internal Server Error listing failure
+func (s *Server) ListCredentialsByUser(w http.ResponseWriter, r *http.Request) {
+	userID := r.Header.Get(UserIDHeader)
+	if userID == "" {
+		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
+		return
+	}
+
+	if s.recoveryFactors == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "recovery service not configured")
+		return
+	}
+
+	// Rate-limit per authenticated user so listing cannot be abused. The key is
+	// the user id, never an IP (no PII series).
+	if s.recoveryLimiter != nil && !s.recoveryLimiter.Allow("factors:"+userID) {
+		s.writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
+		return
+	}
+
+	factors, err := s.recoveryFactors.ListFactors(r.Context(), userID)
+	if err != nil {
+		s.logger.ErrorContext(r.Context(), "mgmtapi: recovery factor listing failed", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "server_error", "failed to list recovery factors")
+		return
+	}
+
+	// Never emit a null JSON array — an empty list is a valid, expected state.
+	if factors == nil {
+		factors = []RecoveryFactor{}
+	}
+	s.writeJSON(w, http.StatusOK, recoveryFactorsResponse{Factors: factors, Count: len(factors)})
 }

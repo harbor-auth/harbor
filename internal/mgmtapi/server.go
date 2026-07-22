@@ -70,6 +70,10 @@ type Server struct {
 	// scopedSessions establishes the enrollment-only session on a successful
 	// POST /recovery/complete. Nil skips the cookie (dev-scaffold mode).
 	scopedSessions ScopedSessionIssuer
+	// recoveryFactors lists a user's registered recovery factors (passkeys /
+	// hardware keys) for GET /recovery/factors. Nil puts that endpoint into a
+	// 503 state.
+	recoveryFactors RecoveryFactorLister
 	// recoveryLimiter, when non-nil, gates the recovery endpoints. Nil disables
 	// rate limiting.
 	recoveryLimiter RecoveryRateLimiter
@@ -164,6 +168,14 @@ func (s *Server) WithScopedSessionIssuer(issuer ScopedSessionIssuer) *Server {
 	return s
 }
 
+// WithRecoveryFactors attaches the lister that backs GET /recovery/factors,
+// surfacing the user's registered passkeys / hardware keys as recovery factors.
+// A nil lister puts that endpoint into a 503 state. Returns s for chaining.
+func (s *Server) WithRecoveryFactors(lister RecoveryFactorLister) *Server {
+	s.recoveryFactors = lister
+	return s
+}
+
 // WithRecoveryRateLimiter attaches a rate limiter for the recovery endpoints.
 // A nil limiter disables rate limiting. Returns s for chaining.
 func (s *Server) WithRecoveryRateLimiter(limiter RecoveryRateLimiter) *Server {
@@ -184,6 +196,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /recovery/codes", s.PostRecoveryCodes)
 	mux.HandleFunc("POST /recovery/begin", s.PostRecoveryBegin)
 	mux.HandleFunc("POST /recovery/complete", s.PostRecoveryComplete)
+	mux.HandleFunc("GET /recovery/factors", s.ListCredentialsByUser)
 }
 
 // errorResponse is the JSON error envelope for the cold-path API. Messages are
