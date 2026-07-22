@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -47,18 +48,34 @@ type MTAConfig struct {
 	// 550 error. When false (but an Authenticator is set), results are evaluated
 	// and logged but never cause a rejection (monitoring mode).
 	EnforceAuth bool
+	// ARCSealer affixes ARC headers before forwarding (optional). When nil,
+	// messages are forwarded without ARC sealing.
+	ARCSealer *ARCSealer
+	// Forwarder delivers messages to users' real inboxes. When nil, messages
+	// are accepted but not forwarded (useful for testing).
+	Forwarder Forwarder
+	// MappingResolver resolves relay addresses to real email addresses.
+	// Required when Forwarder is set.
+	MappingResolver MappingResolver
+	// ReturnPath is the envelope sender used for forwarded messages. This
+	// should be a relay-owned address so bounces return to the relay.
+	ReturnPath string
 }
 
 // Backend implements smtp.Backend for the inbound relay MTA.
 // It creates a new session for each incoming SMTP connection.
 type Backend struct {
-	lookup        AddressLookup
-	logger        *slog.Logger
-	domain        string
-	maxRecipients int
-	maxMsgBytes   int64
-	auth          *Authenticator
-	enforceAuth   bool
+	lookup          AddressLookup
+	logger          *slog.Logger
+	domain          string
+	maxRecipients   int
+	maxMsgBytes     int64
+	auth            *Authenticator
+	enforceAuth     bool
+	arcSealer       *ARCSealer
+	forwarder       Forwarder
+	mappingResolver MappingResolver
+	returnPath      string
 }
 
 // NewBackend creates a new SMTP backend for the relay MTA.
@@ -76,13 +93,17 @@ func NewBackend(cfg MTAConfig) *Backend {
 		maxMsgBytes = 25 * 1024 * 1024 // 25MB default
 	}
 	return &Backend{
-		lookup:        cfg.Lookup,
-		logger:        logger,
-		domain:        strings.ToLower(cfg.Domain),
-		maxRecipients: maxRecipients,
-		maxMsgBytes:   maxMsgBytes,
-		auth:          cfg.Authenticator,
-		enforceAuth:   cfg.EnforceAuth,
+		lookup:          cfg.Lookup,
+		logger:          logger,
+		domain:          strings.ToLower(cfg.Domain),
+		maxRecipients:   maxRecipients,
+		maxMsgBytes:     maxMsgBytes,
+		auth:            cfg.Authenticator,
+		enforceAuth:     cfg.EnforceAuth,
+		arcSealer:       cfg.ARCSealer,
+		forwarder:       cfg.Forwarder,
+		mappingResolver: cfg.MappingResolver,
+		returnPath:      cfg.ReturnPath,
 	}
 }
 
@@ -97,8 +118,9 @@ func (b *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 
 // recipientInfo holds information about a validated recipient.
 type recipientInfo struct {
-	token   string
-	address *Address
+	token      string
+	address    *Address
+	encMapping []byte // envelope-encrypted real email mapping
 }
 
 // Session implements smtp.Session for a single SMTP connection.
@@ -187,7 +209,7 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 
 	// Look up the relay address
 	ctx := context.Background()
-	addr, _, err := s.backend.lookup.GetByToken(ctx, token)
+	addr, encMapping, err := s.backend.lookup.GetByToken(ctx, token)
 	if err != nil {
 		if errors.Is(err, ErrRelayAddressNotFound) {
 			s.backend.logger.Debug("relay: unknown recipient token")
@@ -219,8 +241,9 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 
 	// Valid recipient — store for DATA phase
 	s.recipients = append(s.recipients, &recipientInfo{
-		token:   token,
-		address: addr,
+		token:      token,
+		address:    addr,
+		encMapping: encMapping,
 	})
 	return nil
 }
@@ -255,15 +278,14 @@ func (s *Session) parseRecipient(to string) (string, error) {
 }
 
 // Data implements smtp.Session. Called when the client sends DATA.
-// This is where we would forward the message to the user's real inbox.
+// This is where we forward the message to the user's real inbox.
 //
 // Privacy note (§7.5.6): The message body is read but NOT retained.
 // No logging of message content occurs. Only minimal routing metadata
-// is kept in memory during processing.
+// is kept in memory during processing. The message is buffered transiently
+// for ARC sealing and forwarding, then immediately discarded.
 //
-// TODO: Implement actual forwarding in a later task:
-// - ARC-seal and forward (Task 11)
-// - Rate limiting (Task 12)
+// TODO: Rate limiting (Task 12)
 func (s *Session) Data(r io.Reader) error {
 	if len(s.recipients) == 0 {
 		return &smtp.SMTPError{
@@ -332,13 +354,69 @@ func (s *Session) Data(r io.Reader) error {
 		}
 	}
 
+	// ARC-seal and forward the message to each recipient's real inbox.
+	// The message buffer is discarded when this method returns (§7.5.6).
+	if err := s.forwardAll(context.Background(), msg, result); err != nil {
+		s.backend.logger.Error("relay: forwarding failed", slog.Any("error", err))
+		return &smtp.SMTPError{
+			Code:         451,
+			EnhancedCode: smtp.EnhancedCode{4, 4, 1},
+			Message:      "temporary forwarding failure, please retry",
+		}
+	}
+
 	// Log acceptance with auth verdicts (no PII — only aggregate results).
-	s.backend.logger.Info("relay: message accepted",
+	s.backend.logger.Info("relay: message accepted and forwarded",
 		slog.Int("recipient_count", len(s.recipients)),
 		slog.String("spf", string(result.SPF)),
 		slog.String("dkim", string(result.DKIM)),
 		slog.String("dmarc", string(result.DMARC)))
 
+	return nil
+}
+
+// forwardAll ARC-seals and forwards the message to each recipient's real inbox.
+// It resolves the encrypted mapping to the real email just-in-time and discards
+// the plaintext immediately after forwarding. Returns the first error encountered.
+func (s *Session) forwardAll(ctx context.Context, msg []byte, authResult *AuthResult) error {
+	// Skip forwarding if no forwarder is configured (test/monitoring mode).
+	if s.backend.forwarder == nil {
+		return nil
+	}
+
+	// ARC-seal the message once (same sealed copy goes to all recipients).
+	sealed := msg
+	if s.backend.arcSealer != nil {
+		var err error
+		sealed, err = s.backend.arcSealer.Seal(msg, authResult)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Use a relay-owned return-path so bounces come back to us and outbound
+	// SPF passes for the relay domain.
+	returnPath := s.backend.returnPath
+	if returnPath == "" {
+		returnPath = "bounces@" + s.backend.domain
+	}
+
+	for _, rcpt := range s.recipients {
+		// Resolve the real email just-in-time; keep plaintext in memory only
+		// for the duration of the Forward call.
+		if s.backend.mappingResolver == nil {
+			continue // no resolver — skip (shouldn't happen in production)
+		}
+		realEmail, err := s.backend.mappingResolver.ResolveRealEmail(ctx, rcpt.address, rcpt.encMapping)
+		if err != nil {
+			return err
+		}
+
+		// Forward the sealed message. The body is streamed and never persisted.
+		if err := s.backend.forwarder.Forward(ctx, returnPath, realEmail, bytes.NewReader(sealed)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
