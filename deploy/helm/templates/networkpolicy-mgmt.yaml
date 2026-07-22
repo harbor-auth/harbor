@@ -5,7 +5,7 @@
 #
 #   Ingress — ONLY from pods in this namespace. Nothing outside the namespace
 #             (and by extension nothing from the internet) can open the port.
-#   Egress  — only Postgres (enrollment writes) and DNS. Everything else denied.
+#   Egress  — Postgres (enrollment writes), Redis (session store), and DNS.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -39,15 +39,24 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-    # Regional PostgreSQL.
+    # Regional PostgreSQL. Label matches the Bitnami postgresql chart pod.
     # SCAFFOLD: podSelector only matches same-namespace postgres pods. If your
     # DB is in another namespace or is managed/external, replace with an ipBlock
     # or add a namespaceSelector — otherwise this egress rule silently blocks.
     - to:
         - podSelector:
             matchLabels:
-              app.kubernetes.io/name: postgres
+              app.kubernetes.io/name: postgresql
       ports:
         - port: 5432
+          protocol: TCP
+    # Redis (BFF sessions + WebAuthn ceremony sessions). Label matches the
+    # Bitnami redis chart pod. Required when REDIS_URL is configured.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: redis
+      ports:
+        - port: 6379
           protocol: TCP
 {{- end }}
