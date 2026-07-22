@@ -190,6 +190,82 @@ func TestInMemoryBFFSessionStore_DeleteNonexistent(t *testing.T) {
 	}
 }
 
+func TestInMemoryBFFSessionStore_SetUserWithRecoveryStatus(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+
+	record := BFFSessionRecord{
+		RequestID: "req-123",
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+
+	if err := store.Create(ctx, record); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	// Test with recovery required = true
+	if err := store.SetUserWithRecoveryStatus(ctx, "req-123", "user-456", true); err != nil {
+		t.Fatalf("SetUserWithRecoveryStatus failed: %v", err)
+	}
+
+	got, err := store.Get(ctx, "req-123")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if got.UserID != "user-456" {
+		t.Errorf("UserID = %q, want %q", got.UserID, "user-456")
+	}
+	if !got.RecoveryRequired {
+		t.Error("RecoveryRequired = false, want true")
+	}
+	if got.SessionScope != SessionScopeEnrollmentOnly {
+		t.Errorf("SessionScope = %q, want %q", got.SessionScope, SessionScopeEnrollmentOnly)
+	}
+}
+
+func TestInMemoryBFFSessionStore_SetUserWithRecoveryStatus_NoRecovery(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+
+	record := BFFSessionRecord{
+		RequestID: "req-456",
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+
+	if err := store.Create(ctx, record); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	// Test with recovery required = false
+	if err := store.SetUserWithRecoveryStatus(ctx, "req-456", "user-789", false); err != nil {
+		t.Fatalf("SetUserWithRecoveryStatus failed: %v", err)
+	}
+
+	got, err := store.Get(ctx, "req-456")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if got.UserID != "user-789" {
+		t.Errorf("UserID = %q, want %q", got.UserID, "user-789")
+	}
+	if got.RecoveryRequired {
+		t.Error("RecoveryRequired = true, want false")
+	}
+	if got.SessionScope != SessionScopeFull {
+		t.Errorf("SessionScope = %q, want %q", got.SessionScope, SessionScopeFull)
+	}
+}
+
+func TestInMemoryBFFSessionStore_SetUserWithRecoveryStatus_NotFound(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+
+	err := store.SetUserWithRecoveryStatus(ctx, "nonexistent", "user-456", true)
+	if !errors.Is(err, ErrBFFSessionNotFound) {
+		t.Errorf("SetUserWithRecoveryStatus(nonexistent) = %v, want ErrBFFSessionNotFound", err)
+	}
+}
+
 func TestInMemoryBFFSessionStore_ConcurrentAccess(t *testing.T) {
 	store := NewInMemoryBFFSessionStore()
 	ctx := context.Background()
