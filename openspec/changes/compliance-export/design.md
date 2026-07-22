@@ -26,16 +26,23 @@ crypto model exists to prevent.
 operator plaintext path); a shared service DEK (rejected — defeats per-user
 isolation and crypto-shred).
 
-### Decision 3: The export bundle is region-pinned and short-lived
+### Decision 3: The export bundle is region-pinned, DEK-encrypted, and short-lived
 **Chosen:** The assembled bundle is region-pinned and short-lived; it is never
-cached cross-region or retained after delivery.
-**Rationale:** The bundle is a complete copy of the user's PII — the most
-sensitive artefact in the system. If it lingered (or crossed a region), it would
-be a second copy of everything crypto-shred is meant to be able to destroy, and
-a §5 residency breach.
+cached cross-region or retained after delivery. The bundle itself is a complete
+copy of the user's PII, so it MUST be encrypted under the **caller's own DEK**
+with a short TTL — there is no operator-readable plaintext bundle at rest.
+Because the bundle is DEK-encrypted, a later crypto-shred (Decision 1) that
+destroys the user's wrapped DEK renders an un-downloaded bundle permanently
+unrecoverable.
+**Rationale:** The bundle is the most sensitive artefact in the system. If it
+lingered (or crossed a region), it would be a second copy of everything
+crypto-shred is meant to be able to destroy, and a §5 residency breach.
+Encrypting it under the user's DEK ties its lifetime to the same key that
+erasure destroys, so it cannot outlive an erase and is never operator-readable.
 **Alternatives considered:** Durable, resumable export downloads (rejected — a
 standing PII store); email the bundle (rejected — sends PII out of region and
-out of the user's control).
+out of the user's control); operator-readable plaintext bundle at rest (rejected
+— reintroduces an operator plaintext path and survives a later crypto-shred).
 
 ### Decision 4: Erasure is irreversible and audited
 **Chosen:** Erasure is a one-way operation; the erase decision is recorded in
@@ -47,6 +54,23 @@ without retaining any erased PII.
 **Alternatives considered:** Soft-erase with an undo window (rejected —
 contradicts irreversibility and leaves recoverable PII); no audit (rejected —
 loses accountability for a destructive, compliance-critical action).
+
+### Decision 5: The crypto-shred survival set contains no recoverable PII
+**Chosen:** Whatever **survives** an erase MUST contain no recoverable PII.
+Concretely: recovery `code_hash` rows (derived from user secrets) are deleted on
+erase; audit-trail rows keyed by a **pseudonymous** `user_id` may survive as
+pseudonymous references, but any free-text / PII fields on them are
+envelope-encrypted under the user DEK so they shred with it; consent-ledger rows
+survive only as pseudonymous references (no plaintext PII).
+**Rationale:** Crypto-shred is only as complete as its survival set is clean. If
+a surviving table held plaintext PII (or a hash derived directly from a user
+secret), erasure would be incomplete and the "right to be forgotten" promise
+would break. Enumerating and constraining the survival set makes the guarantee
+checkable.
+**Alternatives considered:** Assume DEK destruction alone suffices (rejected —
+rows not encrypted under the DEK, e.g. `code_hash`, would survive readable);
+retain audit free-text for debugging (rejected — that free-text is exactly the
+PII erasure must destroy).
 
 ## Interface sketch
 
@@ -67,8 +91,13 @@ func Erase(ctx context.Context, caller UserID) error
 
 - Export decrypts only under the caller's DEK; no operator or cross-user
   plaintext path (Decision 2).
-- The export bundle is region-pinned and short-lived; never cross-region cached
-  or retained (Decision 3).
+- The export bundle is region-pinned, encrypted under the caller's DEK, and
+  short-lived; never cross-region cached or retained, and an un-downloaded
+  bundle dies with a later crypto-shred (Decision 3).
+- The crypto-shred survival set contains no recoverable PII: recovery
+  `code_hash` rows are deleted on erase, and surviving audit/consent rows carry
+  only a pseudonymous `user_id` with any free-text envelope-encrypted under the
+  user DEK (Decision 5).
 - Erase destroys the DEK, making the user's envelope-encrypted PII permanently,
   provably unrecoverable; a prior export cannot re-hydrate it (Decision 1).
 - Erasure is irreversible and the decision is audited without retaining erased

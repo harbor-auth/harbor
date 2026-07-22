@@ -53,10 +53,37 @@ NOT cross-region-join user data in any metric.
 ### Requirement: REQ-004 CI-enforced no-PII-label invariant
 
 The system SHALL include an architecture test asserting that no metric label is
-sourced from a PII field (`user_id`, email, PPID, IP, subject).
+sourced from a PII field (`user_id`, email, PPID, IP, subject), and that
+label-set cardinality bounds / small-n suppression (REQ-005) are enforced.
 
 #### Scenario: Architecture test fails on a PII-sourced label
 
 **Given** the architecture test suite
 **When** a metric label would be sourced from a PII field
 **Then** the architecture test fails
+
+#### Scenario: Architecture test fails on an unbounded-cardinality label
+
+**Given** the architecture test suite
+**When** a label would be emitted without a cardinality bound / small-n suppression
+**Then** the architecture test fails
+
+### Requirement: REQ-005 Small-n suppression of quasi-identifier labels
+
+The system SHALL treat allow-listed labels that can act as quasi-identifiers
+with small-n suppression: `client_id` MUST be emitted only for registered
+clients above a small-count floor (bucketed or omitted below it), and rare
+`region`×`error_code` combinations MUST be suppressed or bucketed rather than
+emitted at count 1, so no label combination resolves to a single user.
+
+#### Scenario: A single-user client's client_id is suppressed
+
+**Given** a registered client with only one user
+**When** a metric that would carry its `client_id` is recorded
+**Then** the `client_id` label is bucketed or omitted (not emitted at count 1), so the row is not effectively per-user
+
+#### Scenario: A rare region×error_code combination is bucketed
+
+**Given** a low-traffic region crossed with a rare `error_code`
+**When** the combination would single out one event
+**Then** it is suppressed or bucketed rather than emitted at count 1

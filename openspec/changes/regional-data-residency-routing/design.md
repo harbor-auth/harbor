@@ -47,6 +47,28 @@ cross-region leak by another name.
 **Alternatives considered:** Region-agnostic global issuer (rejected — breaks
 residency for userinfo/introspection, which resolve the user).
 
+### Decision 5: home_region lives in the per-region store; the guard never does a global user lookup
+**Chosen:** A user's authoritative `home_region` lives ONLY in that user's
+home-region datastore (the per-region user row). The cross-region guard resolves
+the request's region from the host/issuer prefix (Decision 1) and asserts the
+pinned region matches the region of the store it is about to read — it NEVER
+performs a global directory lookup to *discover* a user's region (that lookup
+would itself be the cross-region access we forbid). If a routing index
+(`user_id → region`) is ever introduced, it MUST be PII-free (opaque `user_id` →
+region code only — no email/name/subject) and treated as non-PII routing
+metadata; building such an index is a **non-goal** of this change. A request
+whose pinned region does not match the region of the row a handler is about to
+read fails closed with no partial data.
+**Rationale:** If discovering `home_region` required a global PII-bearing
+directory, that directory would be a cross-region PII store that defeats the
+whole guard — the guard would be theater. Keeping `home_region` authoritative
+only in-region, and deriving request region from the host (never from a user
+lookup), makes residency structural rather than dependent on a global index.
+**Alternatives considered:** A global `user_id→region` directory containing
+contact info (rejected — a cross-region PII index, a direct §5 violation);
+discovering region by probing each region's store (rejected — that probe IS the
+cross-region read).
+
 ## Interface sketch
 
 ```go
@@ -70,3 +92,6 @@ func FromContext(ctx context.Context) (Region, error)
 - A cross-region user read fails closed with no partial data; the event is
   metered without PII (Decision 3).
 - Token `iss` / userinfo / introspect hosts are region-coherent (Decision 4).
+- `home_region` is authoritative only in the user's home-region store; the guard
+  derives request region from the host/issuer and performs no global user
+  lookup; any future routing index is PII-free (Decision 5).
