@@ -46,6 +46,17 @@ var (
 		"OIDC hot-path 429 rate-limit rejections by endpoint and region.",
 		telemetry.DimEndpoint, telemetry.DimRegion,
 	)
+	// oidcRateLimiterUnavailableTotal counts fail-open events where the rate
+	// limiter backend (Redis) was unavailable and the request was allowed
+	// through rather than blocked. It is aggregate-only by endpoint and region —
+	// NO per-IP series is ever emitted (docs/plans/observability-metrics.md,
+	// §6.5). A rising value signals the limiter is not enforcing limits and
+	// abuse defenses are degraded.
+	oidcRateLimiterUnavailableTotal = telemetry.NewCounter(
+		"harbor_oidc_rate_limiter_unavailable_total",
+		"OIDC hot-path rate-limiter fail-open events (backend unavailable) by endpoint and region.",
+		telemetry.DimEndpoint, telemetry.DimRegion,
+	)
 )
 
 // recordRequest emits the per-endpoint request count and duration for a hot-path
@@ -69,6 +80,13 @@ func recordError(endpoint telemetry.EndpointName, code string) {
 // so abuse is visible without a per-IP time series (docs/plans/observability-metrics.md).
 func recordRateLimited(endpoint telemetry.EndpointName, reg region.Region) {
 	oidcRateLimitedTotal.Inc(telemetry.Endpoint(endpoint), telemetry.Region(reg))
+}
+
+// recordRateLimiterUnavailable emits an aggregate fail-open counter by endpoint
+// and region for when the limiter backend is unavailable and the request is
+// allowed through. Like every hot-path counter it carries NO per-IP dimension.
+func recordRateLimiterUnavailable(endpoint telemetry.EndpointName, reg region.Region) {
+	oidcRateLimiterUnavailableTotal.Inc(telemetry.Endpoint(endpoint), telemetry.Region(reg))
 }
 
 // mapErrorCode maps an OAuth/OIDC error code string onto the bounded telemetry

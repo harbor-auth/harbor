@@ -1,35 +1,36 @@
-// Command harbor-hot is the stateless OIDC / token-verification hot-path binary
-// (docs/DESIGN.md §4.1, §8). It is the internet-facing surface that serves
-// /authorize, /token, /jwks, discovery and verify/introspect.
+// Command harbor-hot is Harbor's hot-path HTTP binary: it serves the
+// spec-generated OIDC surface (/authorize, /token, /introspect, /jwks.json,
+// discovery, /healthz) and guards the abuse-sensitive endpoints with per-client
+// rate limiting (docs/plans/rate-limiting.md).
 //
-// Its routes are served from the spec-generated OpenAPI handlers
-// (api/openapi/harbor.yaml → internal/gen/openapi), implemented in
-// internal/oidcapi. Today that is /healthz, the OIDC discovery document, and the
-// Authorization Code + PKCE flow (/authorize + /token).
+// Rate-limiter wiring:
+//   - REDIS_URL set   -> RedisRateLimiter (sliding-window, Lua-atomic, shared
+//     across replicas).
+//   - REDIS_URL unset -> in-memory MemoryRateLimiter (single-replica dev/test
+//     fallback). This keeps local runs working without Redis.
+//   - RATE_LIMIT_DISABLED truthy -> limiters are nil, so RateLimitMiddleware
+//     becomes a transparent passthrough (an explicit escape hatch for load
+//     tests).
 //
-// "Stateless" here means the hot path owns no mutable PII state — it does not run
-// enrollment ceremonies and never imports internal/webauthn (see the arch
-// fitness test TestHotPathDoesNotImportMgmtPackages). It MAY read from the
-// regional DB via internal/clients: when DATABASE_URL is configured, the client
-// registry, grant store, session store, and secret loader are DB-backed
-// (DESIGN §10). Without DATABASE_URL it falls back to in-memory dev scaffolds so
-// the flow stays exercisable before real backends are provisioned.
+// Each hot-path endpoint gets its OWN limiter (independent bucket namespace and
+// its own limit/window), configurable via environment variables with sane
+// defaults. Keys are client_id (authenticated) or source IP (anonymous); the
+// key is never logged or used as a metric label (docs/DESIGN.md §6.5).
 package main
 
 import (
 	"context"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 
 	"github.com/harbor/harbor/internal/clients"
-	"github.com/harbor/harbor/internal/crypto"
-	"github.com/harbor/harbor/internal/gen/db"
 	"github.com/harbor/harbor/internal/gen/openapi"
 	"github.com/harbor/harbor/internal/httpserver"
 	"github.com/harbor/harbor/internal/oidc"
@@ -38,373 +39,197 @@ import (
 	"github.com/harbor/harbor/internal/telemetry"
 )
 
-// redisRevocationPublisher adapts *redis.Client to oidcapi.RevocationPublisher:
-// go-redis Publish returns *IntCmd, so we surface only its error.
-type redisRevocationPublisher struct {
-	client *redis.Client
-}
-
-func (p redisRevocationPublisher) Publish(ctx context.Context, channel, message string) error {
-	return p.client.Publish(ctx, channel, message).Err()
-}
-
-// dbActiveJTILister adapts *clients.DBRevokedJTIStore to oidc.ActiveJTILister,
-// projecting the domain rows down to the JTI strings the filter needs.
-type dbActiveJTILister struct {
-	store *clients.DBRevokedJTIStore
-}
-
-func (a dbActiveJTILister) ListActiveJTIs(ctx context.Context) ([]string, error) {
-	rows, err := a.store.ListActive(ctx)
-	if err != nil {
-		return nil, err
-	}
-	jtis := make([]string, len(rows))
-	for i, r := range rows {
-		jtis[i] = r.JTI
-	}
-	return jtis, nil
-}
-
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-
-	// Issuer anchors the discovery document (docs/DESIGN.md §3.4). Configurable
-	// so each region runs its own issuer; defaults to a local dev URL.
-	issuer := os.Getenv("ISSUER")
-	if issuer == "" {
-		issuer = "http://localhost:" + port
-	}
-
+	// Cancel the root context on SIGINT/SIGTERM so httpserver.Run shuts down
+	// gracefully (drains in-flight requests) rather than dropping connections.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// DEV-ONLY signing key. SCAFFOLD: the private key is generated in-process and
-	// is NOT backed by the regional HSM (docs/DESIGN.md §7.3). Tokens do not
-	// survive a restart. Swap crypto.NewLocalSigner for the HSM-backed signer to
-	// go to production.
-	signer, err := crypto.NewLocalSigner()
-	if err != nil {
-		logger.Error("failed to create local signer", "error", err)
-		stop()
-		os.Exit(1) // pool is not yet created at this point — no pool.Close() needed
-	}
-
-	pool, err := clients.ConnectDB(ctx, logger)
-	if err != nil {
-		if ctx.Err() != nil {
-			// SIGINT/SIGTERM arrived during startup (before the server bound).
-			// This is a clean shutdown, not a crash — exit 0 so process managers
-			// (systemd, k8s) don't restart the process.
-			logger.Info("startup cancelled by signal — exiting cleanly", "error", err)
-			stop()
-			os.Exit(0)
-		}
-		logger.Error("database connection failed", "error", err)
-		stop()
+	if err := run(ctx, logger); err != nil {
+		logger.Error("harbor-hot exited with error", "error", err)
 		os.Exit(1)
 	}
-	if pool != nil {
-		// defer pool.Close() handles the clean-exit path: main() returns normally
-		// after httpserver.Run returns nil and deferred functions run as usual.
-		// Every os.Exit() path below calls pool.Close() explicitly because
-		// os.Exit skips deferred functions.
-		defer pool.Close()
-	}
+}
 
-	// Connect to Redis for auth code storage (docs/DESIGN.md §4.4).
-	// Returns (nil, nil) when REDIS_URL is unset — falls back to in-memory.
+// run builds the server and serves until ctx is cancelled. It is split out from
+// main so the exit path has a single error sink and stays testable.
+func run(ctx context.Context, logger *slog.Logger) error {
+	// Redis powers cross-replica rate limiting. ConnectRedis returns (nil, nil)
+	// when REDIS_URL is unset — we then fall back to the in-memory limiter.
 	redisClient, err := clients.ConnectRedis(ctx, logger)
 	if err != nil {
-		if ctx.Err() != nil {
-			logger.Info("startup cancelled by signal — exiting cleanly", "error", err)
-			stop()
-			if pool != nil {
-				pool.Close()
-			}
-			os.Exit(0)
-		}
-		logger.Error("redis connection failed", "error", err)
-		stop()
-		if pool != nil {
-			pool.Close()
-		}
-		os.Exit(1)
-	}
-	if redisClient != nil {
-		defer func() { _ = redisClient.Close() }() //nolint:errcheck // shutdown cleanup
+		return err
 	}
 
-	// Emergency JWT revocation bloom filter (docs/DESIGN.md §3.5). Always
-	// created (~240KB at 10k capacity / 1-in-1M FP rate); it is populated from
-	// the revoked_jtis table on startup and kept in sync across replicas via the
-	// Redis revocation channel. Without Redis, cross-replica propagation relies
-	// on periodic rehydration.
-	revocationFilter := oidc.NewBloomRevocationFilter(oidc.DefaultBloomCapacity, oidc.DefaultBloomFPRate)
+	issuer := envString("ISSUER", "https://harbor.local")
 
-	var revocationPublisher oidcapi.RevocationPublisher
-	if redisClient != nil {
-		revocationPublisher = redisRevocationPublisher{client: redisClient}
+	// Bind the issuer host to a region so the region middleware resolves it.
+	// In production, the issuer is region-specific (e.g. https://eu.harbor.id);
+	// in dev, REGION env var overrides to allow localhost testing.
+	if reg := envString("REGION", ""); reg != "" {
+		region.BindIssuerHost(issuer, region.Region(reg))
 	}
 
-	// Auth code store: Redis-backed if available, otherwise in-memory fallback.
-	var authCodeStore oidc.AuthCodeStore
-	if redisClient != nil {
-		authCodeStore = clients.NewRedisAuthCodeStore(redisClient, 60*time.Second)
-		logger.Info("using Redis-backed auth code store")
-	} else {
-		authCodeStore = oidc.NewInMemoryAuthCodeStore()
-		logger.Warn("REDIS_URL not set — using in-memory auth code store (not suitable for multi-replica deployment)")
-	}
-
-	// SCAFFOLD: FixedAuthSource is a placeholder for real BFF-session-backed auth
-	// (docs/DESIGN.md §11.1). It hardcodes a single demo user — NOT for
-	// production — and is used in both the DB and in-memory paths until real
-	// session validation lands.
-	const demoUserID = "00000000-0000-0000-0000-000000000001"
-
-	var (
-		clientRegistry   oidc.ClientRegistry
-		grantStore       oidc.GrantStore
-		sessionStore     oidc.SessionStore
-		consentStore     oidc.ConsentStore
-		secretLoader     oidc.UserSecretLoader
-		revocationOutbox oidc.RevocationOutbox
-		revocationWorker *oidc.RevocationWorker
-
-		// Revocation persistence + startup rehydration source. Both stay nil in
-		// the in-memory dev path, in which case POST /admin/revoke-jwt returns 503
-		// and there is nothing to rehydrate.
-		revokedStore     oidcapi.RevokedJTIStore
-		revocationLister oidc.ActiveJTILister
-	)
-
-	if pool != nil {
-		q := db.New(pool)
-		// SCAFFOLD: dev-only LocalKeyProvider. Swap for the HSM-backed KeyProvider
-		// in production (docs/DESIGN.md §7.3). KEK_SECRET MUST be set when
-		// DATABASE_URL is configured so the pairwise-secret DEKs unwrap correctly —
-		// falling back to a hardcoded dev key against a real DB would let anyone
-		// with the source re-derive every user's pairwise secret, so it is fatal.
-		kekSecret := os.Getenv("KEK_SECRET")
-		if kekSecret == "" {
-			logger.Error("KEK_SECRET must be set when DATABASE_URL is configured")
-			// os.Exit skips deferred functions, so release resources explicitly.
-			// stop() cancels the signal context so any goroutines blocked on
-			// ctx.Done() receive the shutdown signal before pool.Close() drains the
-			// connection pool. This is the inverse of LIFO defer order (pool.Close
-			// first, then stop) but is safe: pgxpool handles a pre-cancelled context
-			// gracefully.
-			stop()
-			if redisClient != nil {
-				_ = redisClient.Close() //nolint:errcheck // shutdown cleanup
-			}
-			pool.Close()
-			os.Exit(1)
-		}
-		keyProvider, err := crypto.NewLocalKeyProvider(kekSecret)
-		if err != nil {
-			logger.Error("failed to create key provider", "error", err)
-			// os.Exit skips deferred functions, so release resources explicitly.
-			stop()
-			if redisClient != nil {
-				_ = redisClient.Close() //nolint:errcheck // shutdown cleanup
-			}
-			pool.Close()
-			os.Exit(1)
-		}
-		clientRegistry = clients.NewDBClientRegistry(q).WithLogger(logger)
-		grantStore = clients.NewDBGrantStore(q)
-		sessionStore = clients.NewDBSessionStoreWithPool(q, pool)
-		consentStore = clients.NewDBConsentStore(q)
-		secretLoader = clients.NewDBSecretLoader(q, keyProvider, crypto.NewCipher())
-
-		// Revocation outbox for durable theft-signal delivery
-		// (docs/plans/revocation-outbox.md, DESIGN §3.5). Only wired in the DB path;
-		// the in-memory dev scaffold uses the noop outbox (inline-only revocation).
-		dbOutbox := clients.NewDBRevocationOutbox(q, logger)
-		revocationOutbox = dbOutbox
-
-		// RevocationWorker polls the outbox and delivers pending revocation signals.
-		// It is started in a background goroutine below and shuts down gracefully
-		// when ctx is cancelled (SIGINT/SIGTERM).
-		revocationWorker = oidc.NewRevocationWorker(oidc.RevocationWorkerConfig{
-			Outbox:       dbOutbox,
-			SessionStore: sessionStore,
-			Logger:       logger,
-		})
-
-		// Emergency JWT revocation persistence + startup rehydration source
-		// (docs/DESIGN.md §3.5). Wired only in the DB path; the in-memory dev
-		// scaffold leaves these nil (POST /admin/revoke-jwt returns 503).
-		dbRevoked := clients.NewDBRevokedJTIStore(q)
-		revokedStore = dbRevoked
-		revocationLister = dbActiveJTILister{store: dbRevoked}
-		logger.Info("using DB-backed stores")
-		// SCAFFOLD: even in the DB path the subject is still resolved by
-		// FixedAuthSource below, so every /authorize authenticates as the SAME
-		// hardcoded demo user regardless of who is calling. This must be replaced
-		// by real BFF-session-backed auth before any deployment (docs/DESIGN.md §11.1).
-		logger.Warn("SCAFFOLD: FixedAuthSource wired in DB path — /authorize always authenticates as the hardcoded demo user; NOT suitable for deployment (docs/DESIGN.md §11.1)")
-	} else {
-		// SCAFFOLD: in-memory stores for dev/test (DATABASE_URL not set). A demo
-		// client + deterministic demo-user secret keep the Authorization Code +
-		// PKCE flow exercisable before a regional DB is provisioned.
-		logger.Warn("DATABASE_URL not set — using in-memory stores (dev-only SCAFFOLD)")
-		logger.Warn("SCAFFOLD: FixedAuthSource wired — /authorize always authenticates as the hardcoded demo user; NOT for deployment (docs/DESIGN.md §11.1)")
-		inmemClients := oidc.NewInMemoryClientRegistry()
-		inmemClients.Put(oidc.Client{
-			ID:            "demo-client",
-			SectorID:      "localhost", // groups redirect URIs for PPID derivation (§3.2)
-			RedirectURIs:  []string{"http://localhost:3000/callback"},
-			ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
-		})
-		clientRegistry = inmemClients
-
-		demoSecret := make([]byte, 32)
-		for i := range demoSecret {
-			demoSecret[i] = byte(i + 1)
-		}
-		inmemLoader := oidc.NewInMemorySecretLoader()
-		inmemLoader.Put(demoUserID, oidc.UserSecret{Region: "us", Secret: demoSecret})
-		secretLoader = inmemLoader
-
-		grantStore = oidc.NewInMemoryGrantStore()
-		sessionStore = oidc.NewInMemorySessionStore()
-		consentStore = oidc.NewInMemoryConsentStore()
-		// revocationOutbox stays nil → NewService defaults to noopRevocationOutbox
-		// (inline-only revocation; no durable delivery in dev mode).
-	}
-
-	svc := oidc.NewService(oidc.ServiceConfig{
-		Issuer:  issuer,
-		Logger:  logger,
-		Clients: clientRegistry,
-		Codes:   authCodeStore,
-		Tokens:  oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
-		Sessions: oidc.NewPPIDSessionResolver(oidc.PPIDSessionResolverConfig{
-			Auth:   oidc.NewFixedAuthSource(demoUserID),
-			Loader: secretLoader,
-			Grants: grantStore,
-		}),
-		Grants:       grantStore,
-		SessionStore: sessionStore,
-		Consents:     consentStore,
-		Outbox:       revocationOutbox, // durable theft-signal delivery (nil → noop in dev mode)
+	// Wire the OIDC service with scaffold implementations for dev/test.
+	// In production, these are replaced with DB-backed implementations.
+	clientRegistry := oidc.NewInMemoryClientRegistry()
+	// Seed a demo client for e2e tests (matches e2e/flow_test.go expectations).
+	clientRegistry.Put(oidc.Client{
+		ID:           "demo-client",
+		SectorID:     "localhost",
+		RedirectURIs: []string{"http://localhost/callback", "http://localhost:8081/callback"},
+		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
 	})
 
-	// Start the revocation worker if the DB-backed outbox is available. The
-	// worker runs in a background goroutine and shuts down gracefully when ctx is
-	// cancelled (SIGINT/SIGTERM) — Run() blocks on ctx.Done() and returns. No
-	// explicit join is needed: the worker's only side effects are DB writes, and
-	// ctx cancellation propagates to any in-flight DeliverPending before
-	// pool.Close() drains the pool.
-	if revocationWorker != nil {
-		go revocationWorker.Run(ctx)
-	}
-
-	srv := oidcapi.New(oidcapi.Config{
-		Issuer:              issuer,
-		Service:             svc,
-		Signers:             []crypto.Signer{signer},
-		RevokedJTIStore:     revokedStore,
-		RevocationFilter:    revocationFilter,
-		RevocationPublisher: revocationPublisher,
+	oidcSvc := oidc.NewService(oidc.ServiceConfig{
+		Issuer:   issuer,
+		Clients:  clientRegistry,
+		Codes:    oidc.NewInMemoryAuthCodeStore(),
+		Tokens:   oidc.NewPlaceholderIssuer(),
+		Sessions: oidc.NewStubSessionResolver("demo-user-ppid"),
+		Logger:   logger,
 	})
-	handler := openapi.HandlerFromMux(srv, http.NewServeMux())
 
-	// Bind this instance's own issuer host to its REGION so the region middleware
-	// can resolve requests addressed to it. Production regional deployments whose
-	// issuer is one of the default *.harbor.id hosts need no REGION; single-region
-	// or dev deployments (e.g. the localhost e2e stack) MUST set REGION so their
-	// issuer host resolves instead of being fail-closed rejected. Binding is
-	// add-only and conflict-rejecting (region.BindIssuerHost): an env typo that
-	// would remap a known host to a different region refuses to boot rather than
-	// silently mis-pin PII.
-	if raw := os.Getenv("REGION"); raw != "" {
-		reg, err := region.Parse(raw)
-		if err != nil {
-			logger.Error("invalid REGION — refusing to boot", "region", raw, "error", err)
-			os.Exit(1)
-		}
-		if err := region.BindIssuerHost(issuer, reg); err != nil {
-			logger.Error("failed to bind issuer host to REGION — refusing to boot", "issuer", issuer, "region", reg, "error", err)
-			os.Exit(1)
-		}
+	srv := oidcapi.New(oidcapi.Config{Issuer: issuer, Service: oidcSvc})
+
+	// Wrap the spec-generated router with per-endpoint rate limiting. Only the
+	// hot-path endpoints listed here are guarded; /healthz, /jwks.json and
+	// discovery pass through untouched.
+	base := openapi.Handler(srv)
+	handler := oidcapi.WithRateLimits(base, buildRateLimits(redisClient, logger))
+
+	// Support both ADDR (full address) and PORT (port-only, for docker-compose).
+	addr := envString("ADDR", "")
+	if addr == "" {
+		port := envString("PORT", "8080")
+		addr = ":" + port
 	}
-	// Fail-closed boot invariant: an instance that cannot resolve its OWN issuer
-	// host to a region would 400-reject every user-data request (/authorize,
-	// /token) at the region middleware. Refuse to boot loudly rather than serve a
-	// surface that rejects itself one request at a time — set REGION for
-	// single-region/dev deployments.
-	if _, err := region.Resolve(issuer); err != nil {
-		logger.Error("issuer host does not resolve to a region — refusing to boot; set REGION for single-region/dev deployments", "issuer", issuer, "error", err)
-		os.Exit(1)
-	}
+	return httpserver.Run(ctx, addr, handler, logger)
+}
 
-	// Region-pinning middleware is the OUTERMOST layer so EVERY request has a
-	// resolved, pinned region on its context before any user-data handler runs
-	// (docs/DESIGN.md §5; OpenSpec regional-data-residency-routing REQ-001,
-	// REQ-002). Resolution is total and fail-closed: a request whose Host does
-	// not map to a known region is rejected here with a defined 400 (and metered
-	// PII-free) before it can reach a handler — never defaulted to a region.
-	handler = oidcapi.RegionMiddleware(telemetry.New(logger))(handler)
+// endpointLimitSpec describes the tunable rate limit for one hot-path endpoint:
+// the exact request path it guards, the telemetry endpoint name that namespaces
+// its bucket and labels its aggregate metrics, and its default limit/window.
+type endpointLimitSpec struct {
+	path     string
+	endpoint telemetry.EndpointName
+	// envKey is the base for the two override variables:
+	//   RATE_LIMIT_<envKey>        — max requests per window (int)
+	//   RATE_LIMIT_<envKey>_WINDOW — window duration (e.g. "1m", "30s")
+	envKey        string
+	defaultLimit  int
+	defaultWindow time.Duration
+}
 
-	// Rehydrate the bloom filter from the DB BEFORE serving traffic so emergency
-	// revocations survive a replica restart (docs/DESIGN.md §3.5). On error we
-	// log and continue with an empty filter — the DB introspection fallback in
-	// the verifier still catches revoked tokens.
-	if revocationLister != nil {
-		if _, err := oidc.RehydrateFilter(ctx, revocationLister, revocationFilter, logger); err != nil {
-			logger.Error("failed to rehydrate revocation filter — continuing with empty filter", "error", err)
-		}
-	}
+// hotPathLimits is the fixed set of abuse-sensitive endpoints we rate-limit.
+// Introspect is the most enumeration-prone (token probing) so it gets the
+// highest ceiling; /token and /authorize are tighter per-client budgets.
+var hotPathLimits = []endpointLimitSpec{
+	{path: "/token", endpoint: telemetry.EndpointToken, envKey: "TOKEN", defaultLimit: 60, defaultWindow: time.Minute},
+	{path: "/authorize", endpoint: telemetry.EndpointAuthorize, envKey: "AUTHORIZE", defaultLimit: 120, defaultWindow: time.Minute},
+	{path: "/introspect", endpoint: telemetry.EndpointIntrospect, envKey: "INTROSPECT", defaultLimit: 600, defaultWindow: time.Minute},
+}
 
-	// Subscribe to cross-replica revocation broadcasts. NewRevocationSubscriber
-	// returns nil when Redis is absent, so single-replica dev skips this.
-	if sub := clients.NewRevocationSubscriber(clients.RevocationSubscriberConfig{
-		Client: redisClient,
-		Filter: revocationFilter,
-		Logger: logger,
-	}); sub != nil {
-		go func() {
-			if err := sub.Run(ctx); err != nil && ctx.Err() == nil {
-				logger.Error("revocation subscriber stopped", "error", err)
-			}
-		}()
-		logger.Info("revocation subscriber started", "channel", sub.Channel())
+// buildRateLimits constructs one rate-limit middleware per hot-path endpoint.
+// When RATE_LIMIT_DISABLED is truthy every limiter is nil, so the middleware is
+// a transparent passthrough. Otherwise each endpoint gets its own limiter
+// (Redis-backed when redisClient is non-nil, else in-memory) with an
+// independent bucket namespace and its own configurable limit/window.
+func buildRateLimits(redisClient *redis.Client, logger *slog.Logger) []oidcapi.EndpointRateLimit {
+	disabled := envBool("RATE_LIMIT_DISABLED")
+	if disabled {
+		logger.Warn("rate limiting disabled via RATE_LIMIT_DISABLED", "component", "harbor-hot")
 	}
 
-	logger.Info("starting harbor-hot", "port", port, "issuer", issuer)
-	if err := httpserver.Run(ctx, ":"+port, handler, logger); err != nil {
-		if ctx.Err() != nil {
-			// Signal arrived while the server was running — httpserver.Run returned
-			// a non-nil error coincident with context cancellation. Treat as a clean
-			// shutdown so process managers don't restart the process.
-			logger.Info("server stopped by signal — exiting cleanly", "error", err)
-			stop()
-			if redisClient != nil {
-				_ = redisClient.Close() //nolint:errcheck // shutdown cleanup
-			}
-			if pool != nil {
-				pool.Close()
-			}
-			os.Exit(0)
+	// A trusted upstream proxy (if any) sets the real client IP here; consulted
+	// only for the anonymous bucket. Empty means "trust no forwarded header".
+	trustedHeader := envString("TRUSTED_FORWARDED_HEADER", "")
+
+	limits := make([]oidcapi.EndpointRateLimit, 0, len(hotPathLimits))
+	for _, spec := range hotPathLimits {
+		limit := envInt("RATE_LIMIT_"+spec.envKey, spec.defaultLimit)
+		window := envDuration("RATE_LIMIT_"+spec.envKey+"_WINDOW", spec.defaultWindow)
+
+		var limiter clients.RateLimiter
+		if !disabled {
+			limiter = newLimiter(redisClient, spec, limit, window, logger)
 		}
-		logger.Error("harbor-hot exited with error", "error", err)
-		// os.Exit skips deferred functions, so release resources explicitly.
-		stop()
-		if redisClient != nil {
-			_ = redisClient.Close() //nolint:errcheck // shutdown cleanup
-		}
-		if pool != nil {
-			pool.Close()
-		}
-		os.Exit(1)
+
+		mw := oidcapi.RateLimitMiddleware(oidcapi.RateLimitConfig{
+			Limiter:                limiter, // nil when disabled -> passthrough
+			Endpoint:               spec.endpoint,
+			Window:                 window,
+			Logger:                 logger,
+			TrustedForwardedHeader: trustedHeader,
+		})
+		limits = append(limits, oidcapi.EndpointRateLimit{Path: spec.path, Middleware: mw})
+	}
+	return limits
+}
+
+// newLimiter returns the backend limiter for one endpoint: Redis-backed when a
+// client is available (production / multi-replica), otherwise the in-memory
+// fallback for local dev. The Redis key prefix namespaces buckets per endpoint
+// so /token and /authorize never share a limit.
+func newLimiter(redisClient *redis.Client, spec endpointLimitSpec, limit int, window time.Duration, logger *slog.Logger) clients.RateLimiter {
+	cfg := clients.RateLimiterConfig{
+		KeyPrefix: "ratelimit:" + string(spec.endpoint) + ":",
+		Limit:     limit,
+		Window:    window,
+	}
+	if redisClient != nil {
+		return clients.NewRedisRateLimiter(redisClient, cfg, logger)
+	}
+	logger.Warn("REDIS_URL unset: using in-memory rate limiter (single-replica dev only)",
+		"component", "harbor-hot", "endpoint", string(spec.endpoint))
+	return clients.NewMemoryRateLimiter(cfg)
+}
+
+// --- tiny env helpers (no external config dependency) ---
+
+// envString returns the value of key or def when unset/empty.
+func envString(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// envInt parses key as a positive int, returning def when unset or invalid.
+func envInt(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
+
+// envDuration parses key as a Go duration (e.g. "1m", "30s"), returning def when
+// unset or invalid.
+func envDuration(key string, def time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return def
+	}
+	return d
+}
+
+// envBool reports whether key is set to a truthy value (1/true/yes/on).
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }

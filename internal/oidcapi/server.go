@@ -161,3 +161,46 @@ func (s *Server) WriteRateLimited(w http.ResponseWriter, endpoint telemetry.Endp
 	recordRateLimited(endpoint, reg)
 	writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
 }
+
+// EndpointRateLimit pairs an exact request path with the rate-limit middleware
+// that guards it. cmd/harbor-hot builds one per hot-path endpoint
+// (/introspect, /token, /authorize) so each gets an independent bucket and its
+// own limit/window.
+type EndpointRateLimit struct {
+	// Path is the exact request path this middleware guards (e.g. "/token").
+	Path string
+	// Middleware is the per-endpoint RateLimitMiddleware to apply on Path.
+	Middleware func(http.Handler) http.Handler
+}
+
+// WithRateLimits wraps base so that a request whose path exactly matches a
+// configured EndpointRateLimit is first passed through that endpoint's
+// rate-limit middleware before reaching base; every other path is served by
+// base unchanged. This applies rate limiting to ONLY the listed hot-path
+// endpoints without editing the spec-generated router (openapi.HandlerFromMux):
+// the middleware wraps the whole router but is dispatched per path, so an
+// over-limit request short-circuits with 429 while a healthz/jwks/discovery
+// probe is never touched.
+//
+// Matching is by exact path across all HTTP methods — a wrong-method request to
+// a limited path still consumes the bucket, which is the correct abuse-defense
+// posture. Paths are matched before base's own routing runs.
+func WithRateLimits(base http.Handler, limits []EndpointRateLimit) http.Handler {
+	if len(limits) == 0 {
+		return base
+	}
+	wrapped := make(map[string]http.Handler, len(limits))
+	for _, l := range limits {
+		// Each middleware wraps the full base router: when the path matches, the
+		// limiter runs and (if allowed) calls base, which dispatches to the real
+		// handler. Building this once per path keeps the hot path allocation-free.
+		wrapped[l.Path] = l.Middleware(base)
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h, ok := wrapped[r.URL.Path]; ok {
+			h.ServeHTTP(w, r)
+			return
+		}
+		base.ServeHTTP(w, r)
+	})
+}
