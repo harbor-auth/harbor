@@ -50,11 +50,12 @@ func NewStaticKEKResolver(keys map[string]string) *StaticKEKResolver {
 	return &StaticKEKResolver{keys: m}
 }
 
-// ResolveKEK implements KEKResolver.
+// ResolveKEK implements KEKResolver. Returns ErrUnknownRegion if the region
+// is not configured (fail-closed behavior).
 func (r *StaticKEKResolver) ResolveKEK(region string) (string, error) {
 	keyID, ok := r.keys[region]
 	if !ok {
-		return "", fmt.Errorf("crypto: no KEK configured for region %q", region)
+		return "", fmt.Errorf("%w: %q has no configured KEK", ErrUnknownRegion, region)
 	}
 	return keyID, nil
 }
