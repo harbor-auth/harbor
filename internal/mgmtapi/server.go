@@ -54,7 +54,10 @@ type Server struct {
 	// sessionRevoker cascades consent revocation to active sessions with the RP.
 	// May be nil (dev-scaffold mode); DeleteConsentGrant then skips the cascade.
 	sessionRevoker SessionRevoker
-	logger         *slog.Logger
+	// relays provides access to relay addresses for the authenticated user.
+	// May be nil in dev-scaffold mode; relay endpoints then return 503.
+	relays RelayStore
+	logger *slog.Logger
 }
 
 // New returns a Server. A nil enroller is valid and puts the enrollment route
@@ -123,6 +126,15 @@ func (s *Server) WithSessionRevoker(revoker SessionRevoker) *Server {
 	return s
 }
 
+// WithRelayStore attaches the relay store for relay address management.
+// When set, GET /relay-addresses returns the user's relay addresses and
+// DELETE /relay-addresses/{relay_token} deactivates a relay (kill switch).
+// A nil store returns 503 Service Unavailable. Returns s for chaining.
+func (s *Server) WithRelayStore(relays RelayStore) *Server {
+	s.relays = relays
+	return s
+}
+
 // Routes registers harbor-mgmt's cold-path routes on mux. It is additive: the
 // caller owns the mux (typically httpserver.NewHealthMux) and its /healthz route.
 func (s *Server) Routes(mux *http.ServeMux) {
@@ -133,6 +145,8 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /register/{client_id}", s.DeleteRegister)
 	mux.HandleFunc("GET /consent-grants", s.GetConsentGrants)
 	mux.HandleFunc("DELETE /consent-grants/{client_id}", s.DeleteConsentGrant)
+	mux.HandleFunc("GET /relay-addresses", s.GetRelayAddresses)
+	mux.HandleFunc("DELETE /relay-addresses/{relay_token}", s.DeleteRelayAddress)
 }
 
 // errorResponse is the JSON error envelope for the cold-path API. Messages are
