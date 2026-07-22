@@ -25,6 +25,13 @@ var ErrTokenExpired = errors.New("token has expired")
 // ErrTokenInvalid is returned when a JWT cannot be parsed or verified.
 var ErrTokenInvalid = errors.New("token is invalid")
 
+// ErrIssuerMismatch is returned when a JWT's iss claim does not match the
+// region issuer this verifier is pinned to. It enforces region issuer/host
+// coherence: a token minted on one region (e.g. https://eu.harbor.id) must not
+// verify on another region's surface (OpenSpec regional-data-residency-routing
+// REQ-001, REQ-002).
+var ErrIssuerMismatch = errors.New("token issuer does not match expected region issuer")
+
 // RevokedJTIChecker checks if a JTI is revoked. Used for DB introspection
 // fallback when the bloom filter returns a hit.
 type RevokedJTIChecker interface {
@@ -49,6 +56,7 @@ type JWTVerifier struct {
 	pubKey         *ecdsa.PublicKey
 	filter         RevocationFilter
 	revokedChecker RevokedJTIChecker // nil = skip DB introspection (test mode)
+	expectedIssuer string            // "" = do not enforce issuer coherence
 	now            func() time.Time
 }
 
@@ -65,6 +73,14 @@ type JWTVerifierConfig struct {
 	// RevokedChecker performs DB introspection on bloom filter hits.
 	// If nil, filter hits are treated as confirmed revocations (fail-closed).
 	RevokedChecker RevokedJTIChecker
+
+	// ExpectedIssuer, when non-empty, is the region issuer URL this verifier is
+	// pinned to (e.g. https://eu.harbor.id). Verify rejects any token whose iss
+	// claim differs, enforcing region issuer/host coherence so a token minted on
+	// one region cannot be verified/introspected on another region's surface
+	// (OpenSpec regional-data-residency-routing REQ-001, REQ-002). Empty means
+	// the check is skipped (backwards compatible).
+	ExpectedIssuer string
 
 	// Now overrides the clock for deterministic tests. Defaults to time.Now.
 	Now func() time.Time
@@ -93,6 +109,7 @@ func NewJWTVerifier(cfg JWTVerifierConfig) (*JWTVerifier, error) {
 		pubKey:         pubKey,
 		filter:         cfg.Filter,
 		revokedChecker: cfg.RevokedChecker,
+		expectedIssuer: cfg.ExpectedIssuer,
 		now:            now,
 	}, nil
 }
@@ -149,6 +166,16 @@ func (v *JWTVerifier) Verify(ctx context.Context, token string) (*VerifiedClaims
 	claims, err := v.parseClaims(payload)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrTokenInvalid, err)
+	}
+
+	// Region issuer/host coherence: when the verifier is pinned to a region
+	// issuer, a token whose iss claim names a DIFFERENT region must be rejected
+	// even though its signature is valid (shared/rotated keys do not imply
+	// cross-region acceptance). This prevents a token minted on eu.harbor.id
+	// from being accepted on the us.harbor.id surface (OpenSpec
+	// regional-data-residency-routing REQ-001, REQ-002).
+	if v.expectedIssuer != "" && claims.Issuer != v.expectedIssuer {
+		return nil, fmt.Errorf("%w: token iss %q != expected %q", ErrIssuerMismatch, claims.Issuer, v.expectedIssuer)
 	}
 
 	// Step 3: Check expiry
