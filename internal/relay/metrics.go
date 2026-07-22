@@ -41,6 +41,13 @@ var (
 		"Inbound relay messages rejected by per-address rate limiting, by region.",
 		telemetry.DimRegion,
 	)
+	// relayRepliedTotal counts reply-through messages rewritten and sent
+	// outbound (the user replying from their relay address).
+	relayRepliedTotal = telemetry.NewCounter(
+		"harbor_relay_replied_total",
+		"Reply-through messages rewritten and sent outbound, by region.",
+		telemetry.DimRegion,
+	)
 )
 
 // recordAccepted meters one accepted inbound message for the region.
@@ -54,3 +61,6 @@ func recordForwarded(reg region.Region) { relayForwardedTotal.Inc(telemetry.Regi
 
 // recordRateLimited meters one rate-limited inbound message for the region.
 func recordRateLimited(reg region.Region) { relayRateLimitedTotal.Inc(telemetry.Region(reg)) }
+
+// recordReplied meters one reply-through message sent outbound for the region.
+func recordReplied(reg region.Region) { relayRepliedTotal.Inc(telemetry.Region(reg)) }

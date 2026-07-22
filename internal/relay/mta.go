@@ -68,6 +68,16 @@ type MTAConfig struct {
 	// RateLimiter enforces per-address token-bucket rate limiting. When nil,
 	// no rate limiting is applied.
 	RateLimiter *RateLimiter
+	// ReplyCodec decodes signed wrapped reply addresses for the outbound
+	// (reply-through) path. When nil, the reply path is disabled and all mail
+	// is treated as inbound.
+	ReplyCodec *ReplyAddressCodec
+	// ReplyRewriter rewrites a user's reply so it egresses from their relay
+	// address without leaking the real address. Required for the reply path.
+	ReplyRewriter *ReplyRewriter
+	// OutboundForwarder delivers rewritten replies to external recipients via
+	// the regional outbound SMTP server. Required for the reply path.
+	OutboundForwarder Forwarder
 }
 
 // Backend implements smtp.Backend for the inbound relay MTA.
@@ -86,6 +96,9 @@ type Backend struct {
 	returnPath      string
 	region          region.Region
 	rateLimiter     *RateLimiter
+	replyCodec      *ReplyAddressCodec
+	replyRewriter   *ReplyRewriter
+	outboundFwd     Forwarder
 }
 
 // NewBackend creates a new SMTP backend for the relay MTA.
@@ -116,6 +129,9 @@ func NewBackend(cfg MTAConfig) *Backend {
 		returnPath:      cfg.ReturnPath,
 		region:          cfg.Region,
 		rateLimiter:     cfg.RateLimiter,
+		replyCodec:      cfg.ReplyCodec,
+		replyRewriter:   cfg.ReplyRewriter,
+		outboundFwd:     cfg.OutboundForwarder,
 	}
 }
 
@@ -135,6 +151,13 @@ type recipientInfo struct {
 	encMapping []byte // envelope-encrypted real email mapping
 }
 
+// replyInfo holds a staged reply-through delivery: the relay address to rewrite
+// the user's From header to, and the external recipient to deliver to.
+type replyInfo struct {
+	relayAddr    string // token@relay.<domain> — the From to present outbound
+	extRecipient string // external party the user is replying to
+}
+
 // Session implements smtp.Session for a single SMTP connection.
 // It handles the SMTP transaction: MAIL FROM, RCPT TO, DATA.
 //
@@ -151,6 +174,7 @@ type Session struct {
 	helo       string           // HELO/EHLO hostname, SPF fallback for null senders
 	remoteIP   net.IP           // Connecting client IP, used for SPF
 	recipients []*recipientInfo // Validated recipients for forwarding
+	replies    []*replyInfo     // Staged reply-through (egress) deliveries
 }
 
 // Reset implements smtp.Session. Called when the client sends RSET.
@@ -159,6 +183,7 @@ type Session struct {
 func (s *Session) Reset() {
 	s.from = ""
 	s.recipients = s.recipients[:0]
+	s.replies = s.replies[:0]
 }
 
 // populateConnInfo lazily fills the remote IP and HELO hostname from the
@@ -216,6 +241,15 @@ func (s *Session) Rcpt(to string, opts *smtp.RcptOptions) error {
 			Code:         550,
 			EnhancedCode: smtp.EnhancedCode{5, 1, 1},
 			Message:      "recipient not found",
+		}
+	}
+
+	// Reply/egress path: the recipient local-part may be a signed wrapped reply
+	// address, meaning a user is replying THROUGH their relay address. If it
+	// decodes, handle it here rather than as an inbound delivery.
+	if s.backend.replyCodec != nil {
+		if relayToken, extRecipient, dErr := s.backend.replyCodec.Decode(token); dErr == nil {
+			return s.stageReply(context.Background(), relayToken, extRecipient)
 		}
 	}
 
@@ -311,12 +345,18 @@ func (s *Session) parseRecipient(to string) (string, error) {
 // is kept in memory during processing. The message is buffered transiently
 // for ARC sealing and forwarding, then immediately discarded.
 func (s *Session) Data(r io.Reader) error {
-	if len(s.recipients) == 0 {
+	if len(s.recipients) == 0 && len(s.replies) == 0 {
 		return &smtp.SMTPError{
 			Code:         503,
 			EnhancedCode: smtp.EnhancedCode{5, 5, 1},
 			Message:      "no valid recipients",
 		}
+	}
+
+	// Reply-through (egress) path takes precedence when the transaction was
+	// addressed to a wrapped reply address.
+	if len(s.replies) > 0 {
+		return s.handleReply(context.Background(), r)
 	}
 
 	// Fast path: when no authenticator is configured, read and discard the body
@@ -447,6 +487,153 @@ func (s *Session) forwardAll(ctx context.Context, msg []byte, authResult *AuthRe
 		recordForwarded(s.backend.region)
 	}
 	return nil
+}
+
+// stageReply validates a reply-through (egress) transaction and stages it for
+// the DATA phase. It proves the sender owns the relay address — only the mapped
+// real mailbox may send AS a relay address — before allowing the rewrite.
+func (s *Session) stageReply(ctx context.Context, relayToken, extRecipient string) error {
+	addr, encMapping, err := s.backend.lookup.GetByToken(ctx, relayToken)
+	if err != nil {
+		if errors.Is(err, ErrRelayAddressNotFound) {
+			return &smtp.SMTPError{
+				Code:         550,
+				EnhancedCode: smtp.EnhancedCode{5, 1, 1},
+				Message:      "recipient not found",
+			}
+		}
+		s.backend.logger.Error("relay: reply lookup failed", slog.Any("error", err))
+		return &smtp.SMTPError{
+			Code:         451,
+			EnhancedCode: smtp.EnhancedCode{4, 3, 0},
+			Message:      "temporary failure, please retry",
+		}
+	}
+	if !addr.CanReceiveMail() {
+		recordBounced(s.backend.region)
+		return &smtp.SMTPError{
+			Code:         550,
+			EnhancedCode: smtp.EnhancedCode{5, 1, 1},
+			Message:      "relay address no longer active",
+		}
+	}
+
+	// Ownership check: the envelope sender MUST be the real mailbox mapped to
+	// this relay address. Without a resolver we cannot prove ownership, so the
+	// reply is refused rather than risk letting anyone spoof a relay identity.
+	if s.backend.mappingResolver == nil {
+		s.backend.logger.Error("relay: reply path misconfigured (no mapping resolver)")
+		return &smtp.SMTPError{
+			Code:         451,
+			EnhancedCode: smtp.EnhancedCode{4, 3, 0},
+			Message:      "temporary failure, please retry",
+		}
+	}
+	realEmail, err := s.backend.mappingResolver.ResolveRealEmail(ctx, addr, encMapping)
+	if err != nil {
+		s.backend.logger.Error("relay: reply mapping resolve failed", slog.Any("error", err))
+		return &smtp.SMTPError{
+			Code:         451,
+			EnhancedCode: smtp.EnhancedCode{4, 3, 0},
+			Message:      "temporary failure, please retry",
+		}
+	}
+	if !addrEqualFold(s.from, realEmail) {
+		recordBounced(s.backend.region)
+		s.backend.logger.Info("relay: reply sender not authorized for relay address")
+		return &smtp.SMTPError{
+			Code:         550,
+			EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+			Message:      "not authorized to send from this relay address",
+		}
+	}
+
+	// Rate-limit egress per relay address too (same token-bucket as inbound).
+	if s.backend.rateLimiter != nil && !s.backend.rateLimiter.Allow(relayToken) {
+		recordRateLimited(s.backend.region)
+		s.backend.logger.Info("relay: reply address rate limited")
+		return &smtp.SMTPError{
+			Code:         450,
+			EnhancedCode: smtp.EnhancedCode{4, 7, 1},
+			Message:      "rate limit exceeded, please retry later",
+		}
+	}
+
+	s.replies = append(s.replies, &replyInfo{
+		relayAddr:    relayToken + "@" + s.backend.domain,
+		extRecipient: extRecipient,
+	})
+	return nil
+}
+
+// handleReply reads the user's reply, rewrites its From header to the relay
+// address (scrubbing every real-address leak vector), and delivers it to the
+// external recipient via the regional outbound SMTP server. The body is held in
+// a single transient buffer and discarded when this method returns (§7.5.6).
+func (s *Session) handleReply(ctx context.Context, r io.Reader) error {
+	if s.backend.outboundFwd == nil || s.backend.replyRewriter == nil {
+		// Drain the body so the client isn't left hanging, then fail.
+		_, _ = io.Copy(io.Discard, io.LimitReader(r, s.backend.maxMsgBytes))
+		s.backend.logger.Error("relay: reply path misconfigured (no rewriter/forwarder)")
+		return &smtp.SMTPError{
+			Code:         451,
+			EnhancedCode: smtp.EnhancedCode{4, 3, 0},
+			Message:      "temporary failure, please retry",
+		}
+	}
+
+	msg, err := io.ReadAll(io.LimitReader(r, s.backend.maxMsgBytes))
+	if err != nil {
+		s.backend.logger.Error("relay: failed to read reply body", slog.Any("error", err))
+		return &smtp.SMTPError{
+			Code:         451,
+			EnhancedCode: smtp.EnhancedCode{4, 3, 0},
+			Message:      "temporary failure reading message",
+		}
+	}
+
+	returnPath := s.backend.returnPath
+	if returnPath == "" {
+		returnPath = "bounces@" + s.backend.domain
+	}
+
+	for _, rep := range s.replies {
+		rewritten, err := s.backend.replyRewriter.Rewrite(msg, rep.relayAddr)
+		if err != nil {
+			s.backend.logger.Error("relay: reply rewrite failed", slog.Any("error", err))
+			return &smtp.SMTPError{
+				Code:         451,
+				EnhancedCode: smtp.EnhancedCode{4, 3, 0},
+				Message:      "temporary failure processing message",
+			}
+		}
+		if err := s.backend.outboundFwd.Forward(ctx, returnPath, rep.extRecipient, bytes.NewReader(rewritten)); err != nil {
+			s.backend.logger.Error("relay: reply delivery failed", slog.Any("error", err))
+			return &smtp.SMTPError{
+				Code:         451,
+				EnhancedCode: smtp.EnhancedCode{4, 4, 1},
+				Message:      "temporary delivery failure, please retry",
+			}
+		}
+		recordReplied(s.backend.region)
+	}
+
+	// No PII — only an aggregate count of reply-through deliveries.
+	s.backend.logger.Info("relay: reply sent outbound",
+		slog.Int("reply_count", len(s.replies)))
+	return nil
+}
+
+// addrEqualFold reports whether two email addresses are equal, ignoring case,
+// surrounding whitespace, and angle brackets.
+func addrEqualFold(a, b string) bool {
+	norm := func(s string) string {
+		s = strings.TrimSpace(s)
+		s = strings.TrimPrefix(s, "<")
+		s = strings.TrimSuffix(s, ">")
+		return strings.ToLower(strings.TrimSpace(s))
+	}
+	return norm(a) != "" && norm(a) == norm(b)
 }
 
 // NewServer creates and configures an SMTP server for the relay MTA.
