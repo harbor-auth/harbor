@@ -70,7 +70,12 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	base := openapi.Handler(srv)
 	handler := oidcapi.WithRateLimits(base, buildRateLimits(redisClient, logger))
 
-	addr := envString("ADDR", ":8080")
+	// Support both ADDR (full address) and PORT (port-only, for docker-compose).
+	addr := envString("ADDR", "")
+	if addr == "" {
+		port := envString("PORT", "8080")
+		addr = ":" + port
+	}
 	return httpserver.Run(ctx, addr, handler, logger)
 }
 
