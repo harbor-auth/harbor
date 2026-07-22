@@ -22,6 +22,9 @@ hot:
     enabled: false
   pdb:
     enabled: false
+  networkPolicy:
+    # RKE2 ships the nginx ingress controller in kube-system, not ingress-nginx.
+    ingressControllerNamespace: kube-system
   # Reference the Secret provisioned out-of-band in the harbor namespace
   # (DATABASE_URL / REDIS_URL / KEK_SECRET) rather than committing credentials.
   secrets:
