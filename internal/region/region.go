@@ -27,10 +27,11 @@ var known = map[string]Region{
 	string(APAC): APAC,
 }
 
-// Resolve normalizes and validates a raw region string (case-insensitive,
-// surrounding whitespace trimmed). It returns ErrUnknownRegion for empty or
-// unrecognized input.
-func Resolve(raw string) (Region, error) {
+// Parse normalizes and validates a raw region *code* string (case-insensitive,
+// surrounding whitespace trimmed), e.g. "eu" -> EU. It returns ErrUnknownRegion
+// for empty or unrecognized input. To resolve a region from a request host or
+// issuer prefix instead, use Resolve (resolve.go).
+func Parse(raw string) (Region, error) {
 	normalized := strings.ToUpper(strings.TrimSpace(raw))
 	if r, ok := known[normalized]; ok {
 		return r, nil

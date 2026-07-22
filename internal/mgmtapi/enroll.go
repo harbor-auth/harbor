@@ -67,9 +67,9 @@ func (s *Server) PostEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate the region up front so a bad region is a clean 400 and cannot be
-	// confused with a server-side enrollment failure below. region.Resolve is
-	// pure and deterministic, so this does not race with Enroll's own resolve.
-	if _, err := region.Resolve(req.Region); err != nil {
+	// confused with a server-side enrollment failure below. region.Parse is
+	// pure and deterministic, so this does not race with Enroll's own parse.
+	if _, err := region.Parse(req.Region); err != nil {
 		s.writeError(w, http.StatusBadRequest, "invalid_region", "unknown or unsupported region")
 		return
 	}

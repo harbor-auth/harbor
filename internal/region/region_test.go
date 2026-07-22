@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestResolve(t *testing.T) {
+func TestParse(t *testing.T) {
 	cases := []struct {
 		name    string
 		raw     string
@@ -24,18 +24,18 @@ func TestResolve(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := Resolve(tc.raw)
+			got, err := Parse(tc.raw)
 			if tc.wantErr {
 				if !errors.Is(err, ErrUnknownRegion) {
-					t.Fatalf("Resolve(%q) error = %v, want ErrUnknownRegion", tc.raw, err)
+					t.Fatalf("Parse(%q) error = %v, want ErrUnknownRegion", tc.raw, err)
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("Resolve(%q) unexpected error: %v", tc.raw, err)
+				t.Fatalf("Parse(%q) unexpected error: %v", tc.raw, err)
 			}
 			if got != tc.want {
-				t.Fatalf("Resolve(%q) = %q, want %q", tc.raw, got, tc.want)
+				t.Fatalf("Parse(%q) = %q, want %q", tc.raw, got, tc.want)
 			}
 		})
 	}
