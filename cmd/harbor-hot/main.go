@@ -34,6 +34,7 @@ import (
 	"github.com/harbor/harbor/internal/httpserver"
 	"github.com/harbor/harbor/internal/oidc"
 	"github.com/harbor/harbor/internal/oidcapi"
+	"github.com/harbor/harbor/internal/region"
 	"github.com/harbor/harbor/internal/telemetry"
 )
 
@@ -316,6 +317,35 @@ func main() {
 		RevocationPublisher: revocationPublisher,
 	})
 	handler := openapi.HandlerFromMux(srv, http.NewServeMux())
+
+	// Bind this instance's own issuer host to its REGION so the region middleware
+	// can resolve requests addressed to it. Production regional deployments whose
+	// issuer is one of the default *.harbor.id hosts need no REGION; single-region
+	// or dev deployments (e.g. the localhost e2e stack) MUST set REGION so their
+	// issuer host resolves instead of being fail-closed rejected. Binding is
+	// add-only and conflict-rejecting (region.BindIssuerHost): an env typo that
+	// would remap a known host to a different region refuses to boot rather than
+	// silently mis-pin PII.
+	if raw := os.Getenv("REGION"); raw != "" {
+		reg, err := region.Parse(raw)
+		if err != nil {
+			logger.Error("invalid REGION — refusing to boot", "region", raw, "error", err)
+			os.Exit(1)
+		}
+		if err := region.BindIssuerHost(issuer, reg); err != nil {
+			logger.Error("failed to bind issuer host to REGION — refusing to boot", "issuer", issuer, "region", reg, "error", err)
+			os.Exit(1)
+		}
+	}
+	// Fail-closed boot invariant: an instance that cannot resolve its OWN issuer
+	// host to a region would 400-reject every user-data request (/authorize,
+	// /token) at the region middleware. Refuse to boot loudly rather than serve a
+	// surface that rejects itself one request at a time — set REGION for
+	// single-region/dev deployments.
+	if _, err := region.Resolve(issuer); err != nil {
+		logger.Error("issuer host does not resolve to a region — refusing to boot; set REGION for single-region/dev deployments", "issuer", issuer, "error", err)
+		os.Exit(1)
+	}
 
 	// Region-pinning middleware is the OUTERMOST layer so EVERY request has a
 	// resolved, pinned region on its context before any user-data handler runs

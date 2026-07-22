@@ -52,6 +52,40 @@ func Resolve(host string) (Region, error) {
 	return "", fmt.Errorf("%w: %q", ErrUnknownHost, normalized)
 }
 
+// BindIssuerHost registers issuer's host as resolving to region r. It is the
+// single, explicit, boot-time seam by which a single-region (or dev) deployment
+// teaches the resolver its own issuer host — e.g. a localhost dev instance, or a
+// regional deployment whose issuer host is not one of the default *.harbor.id
+// entries. It is:
+//
+//   - add-only: it never deletes or overwrites an existing binding;
+//   - conflict-rejecting: binding a host already mapped to a DIFFERENT region is
+//     an error (never silently remapped) — the fail-closed guard against an env
+//     typo re-pinning where a jurisdiction's PII resolves;
+//   - idempotent: re-binding a host to the SAME region is a no-op success, so it
+//     is safe to call on every boot.
+//
+// It must be called at startup, BEFORE serving traffic — the resolver's host map
+// is not synchronised for concurrent writes. r MUST be a known region; issuer
+// may be a bare host or a full issuer URL (normalised like Resolve).
+func BindIssuerHost(issuer string, r Region) error {
+	if _, ok := known[string(r)]; !ok {
+		return fmt.Errorf("%w: cannot bind host to unknown region %q", ErrUnknownRegion, r)
+	}
+	host, err := normalizeHost(issuer)
+	if err != nil {
+		return err
+	}
+	if existing, ok := hostMap[host]; ok {
+		if existing == r {
+			return nil
+		}
+		return fmt.Errorf("%w: host %q already maps to region %q, refusing to rebind to %q", ErrInvalidHostMap, host, existing, r)
+	}
+	hostMap[host] = r
+	return nil
+}
+
 // ValidateHostMap checks that a host→region map is safe to serve with: it MUST
 // be non-empty, every host MUST normalise to a non-empty DNS host, every value
 // MUST be a known region, and no two distinct keys may normalise to the same
