@@ -4,7 +4,8 @@
 # Produces:
 #   - ghcr.io/harbor-auth/harbor/harbor-hot:{version,major.minor,major,latest}
 #   - ghcr.io/harbor-auth/harbor/harbor-mgmt:{version,major.minor,major,latest}
-# Images are built for linux/amd64 and linux/arm64 (multi-arch manifest).
+# Images are built for linux/amd64. Multi-arch (arm64) requires the Dockerfiles
+# to honour $TARGETARCH — update them first if arm64 support is needed.
 #
 # A GitHub Release is created automatically with auto-generated release notes
 # (based on PRs / commits since the previous tag).
@@ -59,11 +60,6 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}},enable=${{ !startsWith(github.ref_name, 'v0.') }}
 
-      - name: Set up QEMU (for arm64 cross-build)
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -79,7 +75,7 @@ jobs:
         with:
           context: .
           file: deploy/Dockerfile.hot
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta-hot.outputs.tags }}
           labels: ${{ steps.meta-hot.outputs.labels }}
@@ -91,7 +87,7 @@ jobs:
         with:
           context: .
           file: deploy/Dockerfile.mgmt
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta-mgmt.outputs.tags }}
           labels: ${{ steps.meta-mgmt.outputs.labels }}
