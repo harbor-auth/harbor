@@ -131,7 +131,7 @@ _Data / control plane first:_
 - [ ] Envelope-encrypted, **region-pinned** mapping store (reuse `internal/crypto/` + region seam); mapping **never** replicated cross-region.
 - [ ] Relay state lifecycle (`Active` / `Deactivated` / `BYO-domain`).
 - [ ] Per-app **hard-bounce kill switch** on `Deactivated`, **independent** of the RP login grant (email off ≠ login revoked, and vice versa).
-- [ ] Region DNS scaffolding: `relay.<region>.harbor.id` MX subdomain + SPF/DKIM records for the relay domains (records only).
+- [x] Region DNS scaffolding: `relay.<region>.harbor.id` MX subdomain + SPF/DKIM records for the relay domains (records only). See [email-relay-dns.md](email-relay-dns.md) for operational reference.
 - [ ] `internal/mgmtapi/relay.go`: list addresses + deactivate; aggregate-only per-RP volume view.
 - [ ] Wire the mint/lookup seam behind the consent grant path in `cmd/harbor-hot/main.go` (single call-site).
 
