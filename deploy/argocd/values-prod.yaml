@@ -9,13 +9,11 @@
 global:
   image:
     registry: ghcr.io/harbor-auth/harbor
-    tag: latest
+    tag: e3e54d698230
     pullPolicy: IfNotPresent
-
 # Single-region dev/prod: binds the issuer / RP-origin hosts to a region so the
 # fail-closed region middleware resolves them instead of 400-rejecting.
 region: EU
-
 hot:
   # Single node — one replica. HPA/PDB are meaningless here and are disabled.
   replicaCount: 1
@@ -28,7 +26,6 @@ hot:
   # (DATABASE_URL / REDIS_URL / KEK_SECRET) rather than committing credentials.
   secrets:
     existingSecret: harbor-hot-secrets
-
 mgmt:
   replicaCount: 1
   webauthn:
@@ -39,14 +36,12 @@ mgmt:
     enabled: false
   secrets:
     existingSecret: harbor-mgmt-secrets
-
 ingress:
   enabled: true
   className: nginx
   host: auth.harborauth.com
   # Provisioned by cert-manager (Let's Encrypt) into the harbor namespace.
   tlsSecretName: harbor-tls
-
 # The harbor namespace already exists (created by the initial install); ArgoCD
 # manages resources inside it but must not try to re-create it.
 namespace:
