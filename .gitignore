@@ -30,3 +30,6 @@ debug/
 # Internal tooling state (not for commits)
 .weft/
 .hippo/
+
+# Local deployment notes (machine-specific, never commit)
+deploy/LOCAL.md

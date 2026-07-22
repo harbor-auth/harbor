@@ -77,6 +77,18 @@ type RecoveryCode struct {
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
+type RelayAddress struct {
+	ID            pgtype.UUID        `json:"id"`
+	RelayToken    string             `json:"relay_token"`
+	UserID        pgtype.UUID        `json:"user_id"`
+	ClientID      string             `json:"client_id"`
+	State         string             `json:"state"`
+	EncMapping    []byte             `json:"enc_mapping"`
+	Region        string             `json:"region"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	DeactivatedAt pgtype.Timestamptz `json:"deactivated_at"`
+}
+
 type RelyingParty struct {
 	ClientID                    string             `json:"client_id"`
 	Name                        string             `json:"name"`

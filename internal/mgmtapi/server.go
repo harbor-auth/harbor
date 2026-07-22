@@ -8,6 +8,7 @@ import (
 
 	"github.com/harbor-auth/harbor/internal/identity"
 	"github.com/harbor-auth/harbor/internal/region"
+	"github.com/harbor-auth/harbor/internal/relay"
 	"github.com/harbor-auth/harbor/internal/telemetry"
 )
 
@@ -54,6 +55,19 @@ type Server struct {
 	// sessionRevoker cascades consent revocation to active sessions with the RP.
 	// May be nil (dev-scaffold mode); DeleteConsentGrant then skips the cascade.
 	sessionRevoker SessionRevoker
+	// relays provides access to relay addresses for the authenticated user.
+	// May be nil in dev-scaffold mode; relay endpoints then return 503.
+	relays RelayStore
+	// byoDomains provides access to BYO-domain management for the authenticated user.
+	// May be nil in dev-scaffold mode; BYO-domain endpoints then return 503.
+	byoDomains BYODomainStore
+	// domainVerifier handles DNS TXT challenge verification and setup validation.
+	// May be nil in dev-scaffold mode; verification endpoints then return 503.
+	domainVerifier *relay.DomainVerifier
+	// mtaDomain is the regional MTA domain for BYO-domain setup instructions.
+	mtaDomain string
+	// relayDomain is the regional relay domain for BYO-domain setup instructions.
+	relayDomain string
 
 	// recoveryCodes generates recovery codes for POST /recovery/codes. Nil puts
 	// that endpoint into a 503 state.
@@ -152,6 +166,26 @@ func (s *Server) WithSessionRevoker(revoker SessionRevoker) *Server {
 	return s
 }
 
+// WithRelayStore attaches the relay store for relay address management.
+// When set, GET /relay-addresses returns the user's relay addresses and
+// DELETE /relay-addresses/{relay_token} deactivates a relay (kill switch).
+// A nil store returns 503 Service Unavailable. Returns s for chaining.
+func (s *Server) WithRelayStore(relays RelayStore) *Server {
+	s.relays = relays
+	return s
+}
+
+// WithBYODomainStore attaches the BYO-domain store and verifier for custom
+// domain management. When set, the /byo-domains endpoints are available.
+// A nil store returns 503 Service Unavailable. Returns s for chaining.
+func (s *Server) WithBYODomainStore(store BYODomainStore, verifier *relay.DomainVerifier, mtaDomain, relayDomain string) *Server {
+	s.byoDomains = store
+	s.domainVerifier = verifier
+	s.mtaDomain = mtaDomain
+	s.relayDomain = relayDomain
+	return s
+}
+
 // WithRecovery wires the recovery ceremony endpoints (POST /recovery/codes,
 // /recovery/begin, /recovery/complete). codes+store back code generation,
 // verifier backs code consumption with lockout, and ceremonies bridges
@@ -207,6 +241,13 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /register/{client_id}", s.DeleteRegister)
 	mux.HandleFunc("GET /consent-grants", s.GetConsentGrants)
 	mux.HandleFunc("DELETE /consent-grants/{client_id}", s.DeleteConsentGrant)
+	mux.HandleFunc("GET /relay-addresses", s.GetRelayAddresses)
+	mux.HandleFunc("DELETE /relay-addresses/{relay_token}", s.DeleteRelayAddress)
+	mux.HandleFunc("POST /byo-domains", s.PostBYODomain)
+	mux.HandleFunc("GET /byo-domains", s.GetBYODomains)
+	mux.HandleFunc("POST /byo-domains/{domain}/verify", s.PostBYODomainVerify)
+	mux.HandleFunc("GET /byo-domains/{domain}/dns-status", s.GetBYODomainDNSStatus)
+	mux.HandleFunc("DELETE /byo-domains/{domain}", s.DeleteBYODomain)
 	mux.HandleFunc("POST /recovery/codes", s.PostRecoveryCodes)
 	mux.HandleFunc("POST /recovery/begin", s.PostRecoveryBegin)
 	mux.HandleFunc("POST /recovery/complete", s.PostRecoveryComplete)

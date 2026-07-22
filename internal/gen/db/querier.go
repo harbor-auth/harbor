@@ -258,6 +258,16 @@ type Querier interface {
 	// failed_count or set locked_until after too many failures.
 	UpsertRecoveryAttempts(ctx context.Context, arg UpsertRecoveryAttemptsParams) (RecoveryAttempt, error)
 	UpsertRelyingParty(ctx context.Context, arg UpsertRelyingPartyParams) (RelyingParty, error)
+	// Relay address queries (DESIGN §7.5 — per-RP Hide-My-Email relay).
+	CreateRelayAddress(ctx context.Context, arg CreateRelayAddressParams) (RelayAddress, error)
+	DeactivateRelayAddress(ctx context.Context, id pgtype.UUID) error
+	DeactivateRelayAddressByUserClient(ctx context.Context, arg DeactivateRelayAddressByUserClientParams) error
+	GetActiveRelayAddressByToken(ctx context.Context, relayToken string) (RelayAddress, error)
+	GetRelayAddressByToken(ctx context.Context, relayToken string) (RelayAddress, error)
+	GetRelayAddressByUserClient(ctx context.Context, arg GetRelayAddressByUserClientParams) (RelayAddress, error)
+	ListRelayAddressesByUser(ctx context.Context, userID pgtype.UUID) ([]RelayAddress, error)
+	ReactivateRelayAddress(ctx context.Context, id pgtype.UUID) error
+	SetRelayAddressBYODomain(ctx context.Context, id pgtype.UUID) error
 }
 
 var _ Querier = (*Queries)(nil)
