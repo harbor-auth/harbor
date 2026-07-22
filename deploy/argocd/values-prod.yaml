@@ -9,7 +9,7 @@
 global:
   image:
     registry: ghcr.io/harbor-auth/harbor
-    tag: 68c6f718f6f0
+    tag: 4edd2988c6f7
     pullPolicy: IfNotPresent
 # Single-region dev/prod: binds the issuer / RP-origin hosts to a region so the
 # fail-closed region middleware resolves them instead of 400-rejecting.
