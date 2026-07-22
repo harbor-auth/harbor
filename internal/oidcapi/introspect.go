@@ -3,9 +3,11 @@ package oidcapi
 import (
 	"encoding/json"
 	"net/http"
+	"time"
 
 	"github.com/harbor/harbor/internal/gen/openapi"
 	"github.com/harbor/harbor/internal/oidc"
+	"github.com/harbor/harbor/internal/telemetry"
 )
 
 // PostIntrospect implements the RFC 7662 Token Introspection endpoint.
@@ -18,6 +20,10 @@ import (
 // return 200 with `{"active":false}` for enumeration resistance (DESIGN §3.3,
 // §3.5).
 func (s *Server) PostIntrospect(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	outcome := telemetry.OutcomeError
+	defer func() { recordRequest(telemetry.EndpointIntrospect, outcome, start) }()
+
 	// Step 1: Authenticate the caller via Basic auth or admin Bearer token.
 	var clientID string
 	var isAdmin bool
@@ -25,6 +31,7 @@ func (s *Server) PostIntrospect(w http.ResponseWriter, r *http.Request) {
 	if creds, ok := parseBasicAuth(r); ok {
 		// Validate client credentials against the registry.
 		if s.svc == nil {
+			recordError(telemetry.EndpointIntrospect, "invalid_client")
 			writeIntrospectUnauthorized(w, "introspection not configured")
 			return
 		}
@@ -38,6 +45,7 @@ func (s *Server) PostIntrospect(w http.ResponseWriter, r *http.Request) {
 		// No Basic auth — check for admin Bearer token.
 		// TODO(introspect): wire admin token validation.
 		// For now, admin tokens are not supported; return 401.
+		recordError(telemetry.EndpointIntrospect, "invalid_client")
 		writeIntrospectUnauthorized(w, "client authentication required")
 		return
 	}
@@ -64,10 +72,41 @@ func (s *Server) PostIntrospect(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Step 4: Call the Introspector.
-	// TODO(introspect): wire the Introspector to the Server and call it here.
-	// For now, return inactive since the Introspector is not yet wired.
-	_ = req // suppress unused warning until Introspector is wired
-	writeInactiveIntrospectResponse(w)
+	if s.introspector == nil {
+		// Introspector not configured (no signers) — return inactive.
+		outcome = telemetry.OutcomeSuccess
+		writeInactiveIntrospectResponse(w)
+		return
+	}
+
+	resp := s.introspector.Introspect(r.Context(), req)
+	outcome = telemetry.OutcomeSuccess
+	writeIntrospectResponse(w, resp)
+}
+
+// writeIntrospectResponse writes an introspection response with appropriate headers.
+func writeIntrospectResponse(w http.ResponseWriter, resp oidc.IntrospectResponse) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+
+	// Map domain response to OpenAPI response.
+	apiResp := openapi.IntrospectResponse{Active: resp.Active}
+	if resp.Active {
+		apiResp.Sub = &resp.Sub
+		apiResp.Scope = &resp.Scope
+		apiResp.ClientId = &resp.ClientID
+		apiResp.Exp = intPtr(int(resp.Exp))
+		apiResp.Iat = intPtr(int(resp.Iat))
+		apiResp.Jti = &resp.Jti
+		apiResp.TokenType = &resp.TokenType
+	}
+	_ = json.NewEncoder(w).Encode(apiResp)
+}
+
+// intPtr returns a pointer to the given int.
+func intPtr(i int) *int {
+	return &i
 }
 
 // writeInactiveIntrospectResponse writes a {"active":false} response with
