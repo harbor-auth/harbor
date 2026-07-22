@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 )
@@ -181,6 +184,28 @@ func TestLoadBFFConfig(t *testing.T) {
 		// envDuration falls back to default on invalid input
 		if cfg.SessionTTL != defaultBFFSessionTTL {
 			t.Errorf("SessionTTL = %v, want default %v", cfg.SessionTTL, defaultBFFSessionTTL)
+		}
+	})
+}
+
+func TestBuildBFFDeps(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	t.Run("returns nil deps when DATABASE_URL unset", func(t *testing.T) {
+		t.Setenv("DATABASE_URL", "")
+
+		deps, err := buildBFFDeps(context.Background(), logger)
+		if err != nil {
+			t.Fatalf("buildBFFDeps() error = %v", err)
+		}
+		if deps.pool != nil {
+			t.Error("pool should be nil when DATABASE_URL unset")
+		}
+		if deps.secretLoader != nil {
+			t.Error("secretLoader should be nil when DATABASE_URL unset")
+		}
+		if deps.grantStore != nil {
+			t.Error("grantStore should be nil when DATABASE_URL unset")
 		}
 	})
 }

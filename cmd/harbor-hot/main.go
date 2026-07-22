@@ -30,9 +30,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/harbor-auth/harbor/internal/clients"
+	"github.com/harbor-auth/harbor/internal/crypto"
+	"github.com/harbor-auth/harbor/internal/gen/db"
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
 	"github.com/harbor-auth/harbor/internal/httpserver"
 	"github.com/harbor-auth/harbor/internal/oidc"
@@ -74,6 +77,25 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		"login_url_set", bffCfg.LoginURL != "",
 		"database_url_set", bffCfg.DatabaseURL != "",
 		"bff_session_ttl", bffCfg.SessionTTL.String(),
+	)
+
+	// Open the DB pool and wire the DB-backed dependencies the future
+	// PPIDSessionResolver consumes (docs/DESIGN.md §9): the secret loader
+	// (unwraps each user's pairwise secret for PPID derivation) and the grant
+	// store (consent grants / the pairwise_sub an RP sees). Constructed here so
+	// a later task can swap the insecure demo-user stub resolver for the real
+	// PPIDSessionResolver without re-plumbing DB access. When DATABASE_URL is
+	// unset these are nil and the stub resolver stays (dev only).
+	deps, err := buildBFFDeps(ctx, logger)
+	if err != nil {
+		return err
+	}
+	if deps.pool != nil {
+		defer deps.pool.Close()
+	}
+	logger.Info("BFF DB-backed dependencies wired",
+		"secret_loader_wired", deps.secretLoader != nil,
+		"grant_store_wired", deps.grantStore != nil,
 	)
 
 	// Redis powers cross-replica rate limiting. ConnectRedis returns (nil, nil)
@@ -269,6 +291,61 @@ func (c bffConfig) validate() error {
 		return fmt.Errorf("invalid BFF_SESSION_TTL: must be positive, got %s", c.SessionTTL)
 	}
 	return nil
+}
+
+// bffDeps bundles the DB-backed dependencies the PPIDSessionResolver needs to
+// replace the insecure demo-user stub resolver (docs/DESIGN.md §9, audit
+// blocker 1.1). They are constructed once at startup so a later task can wire
+// the real resolver without re-plumbing DB access. When DATABASE_URL is unset
+// every field is nil and the caller keeps the in-memory dev scaffold.
+type bffDeps struct {
+	// pool is the pgx connection pool. nil in dev (no DATABASE_URL); the caller
+	// closes it on shutdown when non-nil.
+	pool *pgxpool.Pool
+	// secretLoader decrypts a user's pairwise secret for PPID derivation.
+	secretLoader *clients.DBSecretLoader
+	// grantStore reads and writes consent grants (the pairwise_sub an RP sees).
+	grantStore *clients.DBGrantStore
+}
+
+// buildBFFDeps opens the DB pool from DATABASE_URL and constructs the
+// DB-backed secret loader and grant store from a shared db.Queries. It returns
+// zero-value deps (all nil) when DATABASE_URL is unset — the dev path that
+// keeps the stub resolver.
+//
+// A configured DATABASE_URL REQUIRES HARBOR_KMS_SECRET: the secret loader
+// unwraps DEKs that harbor-mgmt's enrollment sealed under that same KMS secret,
+// so the two binaries MUST derive the regional KEK identically or every unwrap
+// fails. A missing secret against a real DB is therefore fatal (mirrors the
+// harbor-mgmt guard) — falling back to a hardcoded dev key would let anyone
+// with the source re-derive every enrolled user's pairwise secret.
+func buildBFFDeps(ctx context.Context, logger *slog.Logger) (bffDeps, error) {
+	pool, err := clients.ConnectDB(ctx, logger)
+	if err != nil {
+		return bffDeps{}, err
+	}
+	if pool == nil {
+		logger.Warn("DATABASE_URL not set — BFF session resolver deps unavailable (dev only; stub resolver retained)")
+		return bffDeps{}, nil
+	}
+
+	kmsSecret := os.Getenv("HARBOR_KMS_SECRET")
+	if kmsSecret == "" {
+		pool.Close()
+		return bffDeps{}, fmt.Errorf("HARBOR_KMS_SECRET must be set when DATABASE_URL is configured — refusing to unwrap user secrets with a dev key against a real DB")
+	}
+	keys, err := crypto.NewLocalKeyProvider(kmsSecret)
+	if err != nil {
+		pool.Close()
+		return bffDeps{}, fmt.Errorf("create key provider: %w", err)
+	}
+
+	q := db.New(pool)
+	return bffDeps{
+		pool:         pool,
+		secretLoader: clients.NewDBSecretLoader(q, keys, crypto.NewCipher()),
+		grantStore:   clients.NewDBGrantStore(q),
+	}, nil
 }
 
 // --- tiny env helpers (no external config dependency) ---
