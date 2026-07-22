@@ -14,12 +14,12 @@ import (
 
 // mockDNSResolver implements DNSResolver for testing.
 type mockDNSResolver struct {
-	txtRecords  map[string][]string
-	mxRecords   map[string][]*net.MX
+	txtRecords   map[string][]string
+	mxRecords    map[string][]*net.MX
 	cnameRecords map[string]string
-	txtErr      error
-	mxErr       error
-	cnameErr    error
+	txtErr       error
+	mxErr        error
+	cnameErr     error
 }
 
 func newMockDNSResolver() *mockDNSResolver {
@@ -189,7 +189,7 @@ func TestDomainVerifier_VerifyTXTChallenge(t *testing.T) {
 
 	t.Run("verifies correct TXT record", func(t *testing.T) {
 		domain, _ := GenerateChallenge(userID, "mail.example.com", region.EU)
-		
+
 		// Set up the mock to return the correct TXT record
 		txtHost := "_harbor-verify.mail.example.com"
 		resolver.txtRecords[txtHost] = []string{"harbor-verify=" + domain.ChallengeToken}
@@ -208,7 +208,7 @@ func TestDomainVerifier_VerifyTXTChallenge(t *testing.T) {
 
 	t.Run("handles TXT record with whitespace", func(t *testing.T) {
 		domain, _ := GenerateChallenge(userID, "whitespace.example.com", region.EU)
-		
+
 		txtHost := "_harbor-verify.whitespace.example.com"
 		resolver.txtRecords[txtHost] = []string{"  harbor-verify=" + domain.ChallengeToken + "  "}
 
@@ -233,7 +233,7 @@ func TestDomainVerifier_VerifyTXTChallenge(t *testing.T) {
 
 	t.Run("returns error for wrong TXT record value", func(t *testing.T) {
 		domain, _ := GenerateChallenge(userID, "wrong.example.com", region.EU)
-		
+
 		txtHost := "_harbor-verify.wrong.example.com"
 		resolver.txtRecords[txtHost] = []string{"harbor-verify=wrong-token"}
 
@@ -265,7 +265,7 @@ func TestDomainVerifier_VerifyTXTChallenge(t *testing.T) {
 
 	t.Run("finds correct record among multiple TXT records", func(t *testing.T) {
 		domain, _ := GenerateChallenge(userID, "multi.example.com", region.EU)
-		
+
 		txtHost := "_harbor-verify.multi.example.com"
 		resolver.txtRecords[txtHost] = []string{
 			"some-other-record",
@@ -289,17 +289,17 @@ func TestDomainVerifier_ValidateDNSSetup(t *testing.T) {
 
 	t.Run("validates complete DNS setup", func(t *testing.T) {
 		domain := "complete.example.com"
-		
+
 		// Set up MX records
 		resolver.mxRecords[domain] = []*net.MX{
 			{Host: "mta-eu.harbor.id.", Pref: 10},
 		}
-		
+
 		// Set up SPF record
 		resolver.txtRecords[domain] = []string{
 			"v=spf1 include:relay.eu.harbor.id ~all",
 		}
-		
+
 		// Set up DKIM CNAME
 		dkimHost := "harbor._domainkey." + domain
 		resolver.cnameRecords[dkimHost] = "harbor._domainkey.relay.eu.harbor.id."
@@ -324,7 +324,7 @@ func TestDomainVerifier_ValidateDNSSetup(t *testing.T) {
 
 	t.Run("detects missing MX record", func(t *testing.T) {
 		domain := "nomx.example.com"
-		
+
 		// Set up SPF and DKIM but not MX
 		resolver.txtRecords[domain] = []string{"v=spf1 include:relay.eu.harbor.id ~all"}
 		dkimHost := "harbor._domainkey." + domain
@@ -344,7 +344,7 @@ func TestDomainVerifier_ValidateDNSSetup(t *testing.T) {
 
 	t.Run("detects wrong MX record", func(t *testing.T) {
 		domain := "wrongmx.example.com"
-		
+
 		resolver.mxRecords[domain] = []*net.MX{
 			{Host: "mail.google.com.", Pref: 10},
 		}
@@ -366,7 +366,7 @@ func TestDomainVerifier_ValidateDNSSetup(t *testing.T) {
 
 	t.Run("detects missing SPF record", func(t *testing.T) {
 		domain := "nospf.example.com"
-		
+
 		resolver.mxRecords[domain] = []*net.MX{{Host: "mta-eu.harbor.id.", Pref: 10}}
 		// No TXT records for SPF
 		dkimHost := "harbor._domainkey." + domain
@@ -383,7 +383,7 @@ func TestDomainVerifier_ValidateDNSSetup(t *testing.T) {
 
 	t.Run("detects invalid SPF record", func(t *testing.T) {
 		domain := "badspf.example.com"
-		
+
 		resolver.mxRecords[domain] = []*net.MX{{Host: "mta-eu.harbor.id.", Pref: 10}}
 		resolver.txtRecords[domain] = []string{"v=spf1 include:other-domain.com ~all"} // Wrong include
 		dkimHost := "harbor._domainkey." + domain
@@ -403,7 +403,7 @@ func TestDomainVerifier_ValidateDNSSetup(t *testing.T) {
 
 	t.Run("detects missing DKIM record", func(t *testing.T) {
 		domain := "nodkim.example.com"
-		
+
 		resolver.mxRecords[domain] = []*net.MX{{Host: "mta-eu.harbor.id.", Pref: 10}}
 		resolver.txtRecords[domain] = []string{"v=spf1 include:relay.eu.harbor.id ~all"}
 		// No DKIM records
@@ -419,10 +419,10 @@ func TestDomainVerifier_ValidateDNSSetup(t *testing.T) {
 
 	t.Run("accepts DKIM TXT record instead of CNAME", func(t *testing.T) {
 		domain := "dkimtxt.example.com"
-		
+
 		resolver.mxRecords[domain] = []*net.MX{{Host: "mta-eu.harbor.id.", Pref: 10}}
 		resolver.txtRecords[domain] = []string{"v=spf1 include:relay.eu.harbor.id ~all"}
-		
+
 		// DKIM as TXT record instead of CNAME
 		dkimHost := "harbor._domainkey." + domain
 		resolver.txtRecords[dkimHost] = []string{"v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A..."}
@@ -439,7 +439,7 @@ func TestDomainVerifier_ValidateDNSSetup(t *testing.T) {
 	t.Run("normalizes domain input", func(t *testing.T) {
 		domain := "  NORMALIZE.EXAMPLE.COM  "
 		normalizedDomain := "normalize.example.com"
-		
+
 		resolver.mxRecords[normalizedDomain] = []*net.MX{{Host: "mta-eu.harbor.id.", Pref: 10}}
 		resolver.txtRecords[normalizedDomain] = []string{"v=spf1 include:relay.eu.harbor.id ~all"}
 		dkimHost := "harbor._domainkey." + normalizedDomain
@@ -473,7 +473,7 @@ func TestBYODomain_StateTransitions(t *testing.T) {
 
 	t.Run("activate requires verified state", func(t *testing.T) {
 		domain, _ := GenerateChallenge(userID, "test.example.com", region.EU)
-		
+
 		// Try to activate from pending state
 		err := domain.ActivateDomain()
 		if err == nil {
@@ -482,7 +482,7 @@ func TestBYODomain_StateTransitions(t *testing.T) {
 
 		// Transition to verified
 		domain.State = BYODomainStateVerified
-		
+
 		// Now activate should work
 		err = domain.ActivateDomain()
 		if err != nil {
@@ -508,7 +508,7 @@ func TestBYODomain_GetInstructions(t *testing.T) {
 	t.Run("TXT record instructions", func(t *testing.T) {
 		domain, _ := GenerateChallenge(userID, "test.example.com", region.EU)
 		instructions := domain.GetTXTRecordInstructions()
-		
+
 		expected := "_harbor-verify.test.example.com IN TXT \"harbor-verify=" + domain.ChallengeToken + "\""
 		if instructions != expected {
 			t.Errorf("GetTXTRecordInstructions() = %q, want %q", instructions, expected)
@@ -614,7 +614,7 @@ func TestDNSLookupErrors(t *testing.T) {
 	t.Run("handles DNS lookup failure for TXT", func(t *testing.T) {
 		userID := uuid.New()
 		domain, _ := GenerateChallenge(userID, "dnsfail.example.com", region.EU)
-		
+
 		resolver.txtErr = errors.New("network error")
 		defer func() { resolver.txtErr = nil }()
 

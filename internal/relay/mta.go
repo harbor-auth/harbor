@@ -208,10 +208,6 @@ func (s *Session) Logout() error {
 	return nil
 }
 
-
-
-
-
 // Mail implements smtp.Session. Called for MAIL FROM command.
 func (s *Session) Mail(from string, opts *smtp.MailOptions) error {
 	s.from = from

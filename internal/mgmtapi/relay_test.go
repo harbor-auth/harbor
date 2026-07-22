@@ -444,13 +444,13 @@ func TestSecurity_CrossUserRelayLeakage_List(t *testing.T) {
 
 // fakeBYODomainStore implements BYODomainStore for testing.
 type fakeBYODomainStore struct {
-	domains       map[string]*relay.BYODomain // keyed by domain name
-	createErr     error
-	getErr        error
-	listErr       error
-	updateErr     error
-	deleteErr     error
-	deletedID     string
+	domains   map[string]*relay.BYODomain // keyed by domain name
+	createErr error
+	getErr    error
+	listErr   error
+	updateErr error
+	deleteErr error
+	deletedID string
 }
 
 func newFakeBYODomainStore() *fakeBYODomainStore {

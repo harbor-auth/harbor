@@ -48,22 +48,22 @@ const (
 
 // BYO-domain errors.
 var (
-	ErrDomainEmpty            = errors.New("relay: domain must be non-empty")
-	ErrDomainInvalid          = errors.New("relay: invalid domain format")
-	ErrDomainNotFound         = errors.New("relay: domain not found")
-	ErrDomainAlreadyExists    = errors.New("relay: domain already registered")
-	ErrChallengeExpired       = errors.New("relay: challenge token has expired")
-	ErrChallengeNotFound      = errors.New("relay: no pending challenge for domain")
-	ErrTXTRecordNotFound      = errors.New("relay: TXT record not found")
-	ErrTXTRecordMismatch      = errors.New("relay: TXT record does not match challenge")
-	ErrMXRecordNotFound       = errors.New("relay: MX record not found")
-	ErrMXRecordInvalid        = errors.New("relay: MX record does not point to Harbor")
-	ErrSPFRecordNotFound      = errors.New("relay: SPF record not found")
-	ErrSPFRecordInvalid       = errors.New("relay: SPF record does not include Harbor")
-	ErrDKIMRecordNotFound     = errors.New("relay: DKIM record not found")
-	ErrDKIMRecordInvalid      = errors.New("relay: DKIM record is invalid")
-	ErrDNSLookupFailed        = errors.New("relay: DNS lookup failed")
-	ErrChallengeGenFailed     = errors.New("relay: failed to generate challenge token")
+	ErrDomainEmpty         = errors.New("relay: domain must be non-empty")
+	ErrDomainInvalid       = errors.New("relay: invalid domain format")
+	ErrDomainNotFound      = errors.New("relay: domain not found")
+	ErrDomainAlreadyExists = errors.New("relay: domain already registered")
+	ErrChallengeExpired    = errors.New("relay: challenge token has expired")
+	ErrChallengeNotFound   = errors.New("relay: no pending challenge for domain")
+	ErrTXTRecordNotFound   = errors.New("relay: TXT record not found")
+	ErrTXTRecordMismatch   = errors.New("relay: TXT record does not match challenge")
+	ErrMXRecordNotFound    = errors.New("relay: MX record not found")
+	ErrMXRecordInvalid     = errors.New("relay: MX record does not point to Harbor")
+	ErrSPFRecordNotFound   = errors.New("relay: SPF record not found")
+	ErrSPFRecordInvalid    = errors.New("relay: SPF record does not include Harbor")
+	ErrDKIMRecordNotFound  = errors.New("relay: DKIM record not found")
+	ErrDKIMRecordInvalid   = errors.New("relay: DKIM record is invalid")
+	ErrDNSLookupFailed     = errors.New("relay: DNS lookup failed")
+	ErrChallengeGenFailed  = errors.New("relay: failed to generate challenge token")
 )
 
 // BYODomain represents a user's custom domain for email relay.
@@ -151,8 +151,8 @@ func (r *NetResolver) LookupCNAME(ctx context.Context, host string) (string, err
 
 // DomainVerifier handles BYO-domain TXT challenge verification and DNS setup validation.
 type DomainVerifier struct {
-	resolver   DNSResolver
-	mtaDomain  string // e.g., "mta-eu.harbor.id" for EU region
+	resolver    DNSResolver
+	mtaDomain   string // e.g., "mta-eu.harbor.id" for EU region
 	relayDomain string // e.g., "relay.EU.harbor.id"
 }
 

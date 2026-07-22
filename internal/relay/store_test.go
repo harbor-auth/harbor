@@ -15,15 +15,15 @@ import (
 
 // mockQuerier implements relayQuerier for testing.
 type mockQuerier struct {
-	createFn                      func(ctx context.Context, arg db.CreateRelayAddressParams) (db.RelayAddress, error)
-	getByTokenFn                  func(ctx context.Context, token string) (db.RelayAddress, error)
-	getActiveByTokenFn            func(ctx context.Context, token string) (db.RelayAddress, error)
-	getByUserClientFn             func(ctx context.Context, arg db.GetRelayAddressByUserClientParams) (db.RelayAddress, error)
-	listByUserFn                  func(ctx context.Context, userID pgtype.UUID) ([]db.RelayAddress, error)
-	deactivateFn                  func(ctx context.Context, id pgtype.UUID) error
-	deactivateByUserClientFn      func(ctx context.Context, arg db.DeactivateRelayAddressByUserClientParams) error
-	reactivateFn                  func(ctx context.Context, id pgtype.UUID) error
-	setBYODomainFn                func(ctx context.Context, id pgtype.UUID) error
+	createFn                 func(ctx context.Context, arg db.CreateRelayAddressParams) (db.RelayAddress, error)
+	getByTokenFn             func(ctx context.Context, token string) (db.RelayAddress, error)
+	getActiveByTokenFn       func(ctx context.Context, token string) (db.RelayAddress, error)
+	getByUserClientFn        func(ctx context.Context, arg db.GetRelayAddressByUserClientParams) (db.RelayAddress, error)
+	listByUserFn             func(ctx context.Context, userID pgtype.UUID) ([]db.RelayAddress, error)
+	deactivateFn             func(ctx context.Context, id pgtype.UUID) error
+	deactivateByUserClientFn func(ctx context.Context, arg db.DeactivateRelayAddressByUserClientParams) error
+	reactivateFn             func(ctx context.Context, id pgtype.UUID) error
+	setBYODomainFn           func(ctx context.Context, id pgtype.UUID) error
 }
 
 func (m *mockQuerier) CreateRelayAddress(ctx context.Context, arg db.CreateRelayAddressParams) (db.RelayAddress, error) {

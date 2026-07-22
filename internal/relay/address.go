@@ -38,12 +38,12 @@ const (
 
 // Errors returned by this package.
 var (
-	ErrInvalidState   = errors.New("relay: invalid state")
-	ErrRandFailure    = errors.New("relay: random number generator failure")
-	ErrEmptyUserID    = errors.New("relay: user_id must be non-empty")
-	ErrEmptyClientID  = errors.New("relay: client_id must be non-empty")
-	ErrEmptyEmail     = errors.New("relay: real email must be non-empty")
-	ErrInvalidRegion  = errors.New("relay: invalid region")
+	ErrInvalidState  = errors.New("relay: invalid state")
+	ErrRandFailure   = errors.New("relay: random number generator failure")
+	ErrEmptyUserID   = errors.New("relay: user_id must be non-empty")
+	ErrEmptyClientID = errors.New("relay: client_id must be non-empty")
+	ErrEmptyEmail    = errors.New("relay: real email must be non-empty")
+	ErrInvalidRegion = errors.New("relay: invalid region")
 )
 
 // Address represents a per-(user, RP) email relay address.

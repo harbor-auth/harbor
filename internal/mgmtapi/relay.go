@@ -181,17 +181,17 @@ type BYODomainRequest struct {
 
 // BYODomainResponse is the JSON representation of a BYO-domain.
 type BYODomainResponse struct {
-	ID             string  `json:"id"`
-	Domain         string  `json:"domain"`
-	State          string  `json:"state"`
-	Region         string  `json:"region"`
-	TXTRecord      string  `json:"txt_record,omitempty"`
-	MXRecord       string  `json:"mx_record,omitempty"`
-	SPFRecord      string  `json:"spf_record,omitempty"`
-	DKIMRecord     string  `json:"dkim_record,omitempty"`
-	CreatedAt      string  `json:"created_at"`
-	VerifiedAt     *string `json:"verified_at,omitempty"`
-	ExpiresAt      string  `json:"expires_at,omitempty"`
+	ID         string  `json:"id"`
+	Domain     string  `json:"domain"`
+	State      string  `json:"state"`
+	Region     string  `json:"region"`
+	TXTRecord  string  `json:"txt_record,omitempty"`
+	MXRecord   string  `json:"mx_record,omitempty"`
+	SPFRecord  string  `json:"spf_record,omitempty"`
+	DKIMRecord string  `json:"dkim_record,omitempty"`
+	CreatedAt  string  `json:"created_at"`
+	VerifiedAt *string `json:"verified_at,omitempty"`
+	ExpiresAt  string  `json:"expires_at,omitempty"`
 }
 
 // BYODomainsListResponse is the JSON envelope for GET /byo-domains.
@@ -599,4 +599,3 @@ func byoDomainToResponse(d *relay.BYODomain, mtaDomain, relayDomain string) BYOD
 
 	return resp
 }
-
