@@ -8,6 +8,7 @@ import (
 
 	"github.com/harbor/harbor/internal/identity"
 	"github.com/harbor/harbor/internal/region"
+	"github.com/harbor/harbor/internal/relay"
 	"github.com/harbor/harbor/internal/telemetry"
 )
 
@@ -57,7 +58,17 @@ type Server struct {
 	// relays provides access to relay addresses for the authenticated user.
 	// May be nil in dev-scaffold mode; relay endpoints then return 503.
 	relays RelayStore
-	logger *slog.Logger
+	// byoDomains provides access to BYO-domain management for the authenticated user.
+	// May be nil in dev-scaffold mode; BYO-domain endpoints then return 503.
+	byoDomains BYODomainStore
+	// domainVerifier handles DNS TXT challenge verification and setup validation.
+	// May be nil in dev-scaffold mode; verification endpoints then return 503.
+	domainVerifier *relay.DomainVerifier
+	// mtaDomain is the regional MTA domain for BYO-domain setup instructions.
+	mtaDomain string
+	// relayDomain is the regional relay domain for BYO-domain setup instructions.
+	relayDomain string
+	logger      *slog.Logger
 }
 
 // New returns a Server. A nil enroller is valid and puts the enrollment route
@@ -135,6 +146,17 @@ func (s *Server) WithRelayStore(relays RelayStore) *Server {
 	return s
 }
 
+// WithBYODomainStore attaches the BYO-domain store and verifier for custom
+// domain management. When set, the /byo-domains endpoints are available.
+// A nil store returns 503 Service Unavailable. Returns s for chaining.
+func (s *Server) WithBYODomainStore(store BYODomainStore, verifier *relay.DomainVerifier, mtaDomain, relayDomain string) *Server {
+	s.byoDomains = store
+	s.domainVerifier = verifier
+	s.mtaDomain = mtaDomain
+	s.relayDomain = relayDomain
+	return s
+}
+
 // Routes registers harbor-mgmt's cold-path routes on mux. It is additive: the
 // caller owns the mux (typically httpserver.NewHealthMux) and its /healthz route.
 func (s *Server) Routes(mux *http.ServeMux) {
@@ -147,6 +169,11 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /consent-grants/{client_id}", s.DeleteConsentGrant)
 	mux.HandleFunc("GET /relay-addresses", s.GetRelayAddresses)
 	mux.HandleFunc("DELETE /relay-addresses/{relay_token}", s.DeleteRelayAddress)
+	mux.HandleFunc("POST /byo-domains", s.PostBYODomain)
+	mux.HandleFunc("GET /byo-domains", s.GetBYODomains)
+	mux.HandleFunc("POST /byo-domains/{domain}/verify", s.PostBYODomainVerify)
+	mux.HandleFunc("GET /byo-domains/{domain}/dns-status", s.GetBYODomainDNSStatus)
+	mux.HandleFunc("DELETE /byo-domains/{domain}", s.DeleteBYODomain)
 }
 
 // errorResponse is the JSON error envelope for the cold-path API. Messages are

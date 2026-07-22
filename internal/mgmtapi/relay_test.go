@@ -1,6 +1,7 @@
 package mgmtapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,8 +12,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/harbor/harbor/internal/relay"
 	"github.com/harbor/harbor/internal/region"
+	"github.com/harbor/harbor/internal/relay"
 )
 
 // fakeRelayStore implements RelayStore for testing.
@@ -434,5 +435,392 @@ func TestSecurity_CrossUserRelayLeakage_List(t *testing.T) {
 	}
 	if resp.Addresses[0].RelayToken != "token-userA" {
 		t.Errorf("SECURITY: user A received token %q, want token-userA", resp.Addresses[0].RelayToken)
+	}
+}
+
+// =============================================================================
+// BYO-Domain Tests
+// =============================================================================
+
+// fakeBYODomainStore implements BYODomainStore for testing.
+type fakeBYODomainStore struct {
+	domains       map[string]*relay.BYODomain // keyed by domain name
+	createErr     error
+	getErr        error
+	listErr       error
+	updateErr     error
+	deleteErr     error
+	deletedID     string
+}
+
+func newFakeBYODomainStore() *fakeBYODomainStore {
+	return &fakeBYODomainStore{
+		domains: make(map[string]*relay.BYODomain),
+	}
+}
+
+func (f *fakeBYODomainStore) CreateDomain(_ context.Context, domain *relay.BYODomain) error {
+	if f.createErr != nil {
+		return f.createErr
+	}
+	if _, exists := f.domains[domain.Domain]; exists {
+		return relay.ErrDomainAlreadyExists
+	}
+	f.domains[domain.Domain] = domain
+	return nil
+}
+
+func (f *fakeBYODomainStore) GetDomainByName(_ context.Context, userID, domain string) (*relay.BYODomain, error) {
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	d, ok := f.domains[domain]
+	if !ok {
+		return nil, relay.ErrDomainNotFound
+	}
+	// Check ownership
+	if d.UserID.String() != userID {
+		return nil, relay.ErrDomainNotFound
+	}
+	return d, nil
+}
+
+func (f *fakeBYODomainStore) ListDomainsByUser(_ context.Context, userID string) ([]*relay.BYODomain, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	var result []*relay.BYODomain
+	for _, d := range f.domains {
+		if d.UserID.String() == userID {
+			result = append(result, d)
+		}
+	}
+	return result, nil
+}
+
+func (f *fakeBYODomainStore) UpdateDomainState(_ context.Context, domainID string, state relay.BYODomainState) error {
+	if f.updateErr != nil {
+		return f.updateErr
+	}
+	for _, d := range f.domains {
+		if d.ID.String() == domainID {
+			d.State = state
+			return nil
+		}
+	}
+	return relay.ErrDomainNotFound
+}
+
+func (f *fakeBYODomainStore) DeleteDomain(_ context.Context, domainID string) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	for name, d := range f.domains {
+		if d.ID.String() == domainID {
+			f.deletedID = domainID
+			delete(f.domains, name)
+			return nil
+		}
+	}
+	return relay.ErrDomainNotFound
+}
+
+func TestPostBYODomain_Success(t *testing.T) {
+	userID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
+	store := newFakeBYODomainStore()
+
+	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id")
+	mux := http.NewServeMux()
+	srv.Routes(mux)
+
+	body := `{"domain": "mail.example.com"}`
+	req := httptest.NewRequest("POST", "/byo-domains", bytes.NewBufferString(body))
+	req.Header.Set(UserIDHeader, userID.String())
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+
+	var resp BYODomainResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if resp.Domain != "mail.example.com" {
+		t.Errorf("domain = %q, want %q", resp.Domain, "mail.example.com")
+	}
+	if resp.State != "pending" {
+		t.Errorf("state = %q, want %q", resp.State, "pending")
+	}
+	if resp.TXTRecord == "" {
+		t.Error("txt_record should be set for pending domain")
+	}
+	if resp.MXRecord == "" {
+		t.Error("mx_record should be set")
+	}
+	if resp.SPFRecord == "" {
+		t.Error("spf_record should be set")
+	}
+	if resp.DKIMRecord == "" {
+		t.Error("dkim_record should be set")
+	}
+}
+
+func TestPostBYODomain_Unauthorized(t *testing.T) {
+	store := newFakeBYODomainStore()
+	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id")
+	mux := http.NewServeMux()
+	srv.Routes(mux)
+
+	body := `{"domain": "mail.example.com"}`
+	req := httptest.NewRequest("POST", "/byo-domains", bytes.NewBufferString(body))
+	// No user ID header
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestPostBYODomain_InvalidDomain(t *testing.T) {
+	userID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
+	store := newFakeBYODomainStore()
+
+	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id")
+	mux := http.NewServeMux()
+	srv.Routes(mux)
+
+	body := `{"domain": "invalid"}`
+	req := httptest.NewRequest("POST", "/byo-domains", bytes.NewBufferString(body))
+	req.Header.Set(UserIDHeader, userID.String())
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestPostBYODomain_ServiceUnavailable(t *testing.T) {
+	userID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
+	// No BYO-domain store configured
+	srv := New(nil, nil)
+	mux := http.NewServeMux()
+	srv.Routes(mux)
+
+	body := `{"domain": "mail.example.com"}`
+	req := httptest.NewRequest("POST", "/byo-domains", bytes.NewBufferString(body))
+	req.Header.Set(UserIDHeader, userID.String())
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestGetBYODomains_Success(t *testing.T) {
+	userID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
+	store := newFakeBYODomainStore()
+
+	// Add a domain for the user
+	domain := &relay.BYODomain{
+		ID:             uuid.New(),
+		Domain:         "mail.example.com",
+		UserID:         userID,
+		ChallengeToken: "test-token",
+		State:          relay.BYODomainStatePending,
+		Region:         region.EU,
+		CreatedAt:      time.Now(),
+		ExpiresAt:      time.Now().Add(72 * time.Hour),
+	}
+	store.domains["mail.example.com"] = domain
+
+	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id")
+	mux := http.NewServeMux()
+	srv.Routes(mux)
+
+	req := httptest.NewRequest("GET", "/byo-domains", nil)
+	req.Header.Set(UserIDHeader, userID.String())
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp BYODomainsListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if len(resp.Domains) != 1 {
+		t.Fatalf("got %d domains, want 1", len(resp.Domains))
+	}
+	if resp.Domains[0].Domain != "mail.example.com" {
+		t.Errorf("domain = %q, want %q", resp.Domains[0].Domain, "mail.example.com")
+	}
+}
+
+func TestDeleteBYODomain_Success(t *testing.T) {
+	userID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
+	store := newFakeBYODomainStore()
+
+	// Add a domain for the user
+	domainID := uuid.New()
+	domain := &relay.BYODomain{
+		ID:             domainID,
+		Domain:         "mail.example.com",
+		UserID:         userID,
+		ChallengeToken: "test-token",
+		State:          relay.BYODomainStatePending,
+		Region:         region.EU,
+		CreatedAt:      time.Now(),
+		ExpiresAt:      time.Now().Add(72 * time.Hour),
+	}
+	store.domains["mail.example.com"] = domain
+
+	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id")
+	mux := http.NewServeMux()
+	srv.Routes(mux)
+
+	req := httptest.NewRequest("DELETE", "/byo-domains/mail.example.com", nil)
+	req.Header.Set(UserIDHeader, userID.String())
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d; body = %s", rec.Code, http.StatusNoContent, rec.Body.String())
+	}
+
+	if store.deletedID != domainID.String() {
+		t.Errorf("deleted ID = %q, want %q", store.deletedID, domainID.String())
+	}
+}
+
+func TestDeleteBYODomain_NotFound(t *testing.T) {
+	userID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
+	store := newFakeBYODomainStore()
+
+	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id")
+	mux := http.NewServeMux()
+	srv.Routes(mux)
+
+	req := httptest.NewRequest("DELETE", "/byo-domains/nonexistent.example.com", nil)
+	req.Header.Set(UserIDHeader, userID.String())
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
+}
+
+// TestSecurity_CrossUserBYODomainAccess verifies that user A cannot access
+// user B's BYO-domains.
+func TestSecurity_CrossUserBYODomainAccess(t *testing.T) {
+	userA := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
+	userB := uuid.MustParse("660e8400-e29b-41d4-a716-446655440000")
+	store := newFakeBYODomainStore()
+
+	// Add a domain for user B
+	store.domains["userb-domain.example.com"] = &relay.BYODomain{
+		ID:             uuid.New(),
+		Domain:         "userb-domain.example.com",
+		UserID:         userB,
+		ChallengeToken: "test-token",
+		State:          relay.BYODomainStatePending,
+		Region:         region.EU,
+		CreatedAt:      time.Now(),
+		ExpiresAt:      time.Now().Add(72 * time.Hour),
+	}
+
+	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id")
+	mux := http.NewServeMux()
+	srv.Routes(mux)
+
+	// User A tries to delete user B's domain
+	req := httptest.NewRequest("DELETE", "/byo-domains/userb-domain.example.com", nil)
+	req.Header.Set(UserIDHeader, userA.String())
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	// SECURITY: Must return 404 to avoid leaking existence
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("SECURITY: status = %d, want %d (cross-user access should return 404)", rec.Code, http.StatusNotFound)
+	}
+
+	// SECURITY: Domain must NOT have been deleted
+	if _, exists := store.domains["userb-domain.example.com"]; !exists {
+		t.Error("SECURITY: user A deleted user B's domain — cross-user attack")
+	}
+}
+
+// TestSecurity_CrossUserBYODomainList verifies that user A cannot see
+// user B's BYO-domains via GET /byo-domains.
+func TestSecurity_CrossUserBYODomainList(t *testing.T) {
+	userA := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
+	userB := uuid.MustParse("660e8400-e29b-41d4-a716-446655440000")
+	store := newFakeBYODomainStore()
+
+	// Add domains for both users
+	store.domains["usera-domain.example.com"] = &relay.BYODomain{
+		ID:        uuid.New(),
+		Domain:    "usera-domain.example.com",
+		UserID:    userA,
+		State:     relay.BYODomainStatePending,
+		Region:    region.EU,
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(72 * time.Hour),
+	}
+	store.domains["userb-domain.example.com"] = &relay.BYODomain{
+		ID:        uuid.New(),
+		Domain:    "userb-domain.example.com",
+		UserID:    userB,
+		State:     relay.BYODomainStatePending,
+		Region:    region.EU,
+		CreatedAt: time.Now(),
+		ExpiresAt: time.Now().Add(72 * time.Hour),
+	}
+
+	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id")
+	mux := http.NewServeMux()
+	srv.Routes(mux)
+
+	// User A requests their domains
+	req := httptest.NewRequest("GET", "/byo-domains", nil)
+	req.Header.Set(UserIDHeader, userA.String())
+	rec := httptest.NewRecorder()
+
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var resp BYODomainsListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	// SECURITY: User A must only see their own domain
+	if len(resp.Domains) != 1 {
+		t.Fatalf("SECURITY: user A got %d domains, want 1 (cross-user leakage)", len(resp.Domains))
+	}
+	if resp.Domains[0].Domain != "usera-domain.example.com" {
+		t.Errorf("SECURITY: user A received domain %q, want usera-domain.example.com", resp.Domains[0].Domain)
 	}
 }
