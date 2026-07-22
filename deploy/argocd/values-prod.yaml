@@ -1,0 +1,57 @@
+# Production Helm value overrides for the single-node RKE2 deployment
+# (ns31170412 / harbor.51.89.98.90.nip.io), consumed by the ArgoCD Application
+# in this directory.
+#
+# global.image.tag is pinned automatically by .github/workflows/publish.yml on
+# every push to main. Do not edit it manually — CI overwrites it with the
+# immutable commit SHA of the images it just built.
+#
+# To move to a real domain, change `ingress.host`, `hot.issuer`, and the three
+# `mgmt.webauthn.*` values together (they must all agree), then provision the
+# matching TLS cert into `ingress.tlsSecretName`.
+
+global:
+  image:
+    registry: ghcr.io/harbor-auth/harbor
+    tag: latest
+    pullPolicy: IfNotPresent
+
+# Single-region dev/prod: binds the issuer / RP-origin hosts to a region so the
+# fail-closed region middleware resolves them instead of 400-rejecting.
+region: EU
+
+hot:
+  # Single node — one replica. HPA/PDB are meaningless here and are disabled.
+  replicaCount: 1
+  issuer: https://harbor.51.89.98.90.nip.io
+  hpa:
+    enabled: false
+  pdb:
+    enabled: false
+  # Reference the Secret provisioned out-of-band in the harbor namespace
+  # (DATABASE_URL / REDIS_URL / KEK_SECRET) rather than committing credentials.
+  secrets:
+    existingSecret: harbor-hot-secrets
+
+mgmt:
+  replicaCount: 1
+  webauthn:
+    rpId: harbor.51.89.98.90.nip.io
+    rpName: Harbor
+    rpOrigin: https://harbor.51.89.98.90.nip.io
+  pdb:
+    enabled: false
+  secrets:
+    existingSecret: harbor-mgmt-secrets
+
+ingress:
+  enabled: true
+  className: nginx
+  host: harbor.51.89.98.90.nip.io
+  # Provisioned by cert-manager (Let's Encrypt) into the harbor namespace.
+  tlsSecretName: harbor-tls
+
+# The harbor namespace already exists (created by the initial install); ArgoCD
+# manages resources inside it but must not try to re-create it.
+namespace:
+  create: false

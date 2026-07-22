@@ -1,0 +1,42 @@
+# ArgoCD Application: the GitOps entrypoint for the Harbor deployment.
+#
+# ArgoCD watches this repo and renders the Helm chart at deploy/helm with the
+# prod overrides in deploy/argocd/values-prod.yaml. When publish.yml pins a new
+# image SHA into that values file, automated sync runs `helm upgrade` and RKE2
+# rolls out the new images — no imperative kubectl/helm step in the loop.
+#
+# Apply once (after this file is on main):
+#   kubectl apply -f deploy/argocd/application.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: harbor
+  namespace: argocd
+  # Ensure child resources are garbage-collected if the Application is deleted.
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/harbor-auth/harbor.git
+    targetRevision: HEAD
+    path: deploy/helm
+    helm:
+      # Relative to the chart path (deploy/helm), so this resolves to
+      # deploy/argocd/values-prod.yaml.
+      valueFiles:
+        - ../argocd/values-prod.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: harbor
+  syncPolicy:
+    automated:
+      # Delete resources the chart no longer renders, and revert manual drift.
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # The harbor namespace already exists; do not let ArgoCD create it.
+      - CreateNamespace=false
+      # Server-side apply cleanly adopts the resources from the initial
+      # (imperative) Helm install without ownership conflicts.
+      - ServerSideApply=true
