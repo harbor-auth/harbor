@@ -1,7 +1,9 @@
 package clients
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"testing"
 	"time"
@@ -18,15 +20,20 @@ type fakeRecoveryQuerier struct {
 	codes            []db.RecoveryCode
 	attempts         *db.RecoveryAttempt
 	consumedCodeID   pgtype.UUID
-	consumeErr       error
-	getCodesErr      error
-	getAttemptsErr   error
+	// lastGetCodesUser records the userID the last GetRecoveryCodesByUser was
+	// scoped to, so tests can prove the store queries per-user (cross-user
+	// isolation is enforced by the DB WHERE user_id = $1 clause).
+	lastGetCodesUser  pgtype.UUID
+	consumeErr        error
+	getCodesErr       error
+	getAttemptsErr    error
 	upsertAttemptsErr error
-	resetAttemptsErr error
-	deleteCodesErr   error
+	resetAttemptsErr  error
+	deleteCodesErr    error
 }
 
-func (f *fakeRecoveryQuerier) GetRecoveryCodesByUser(_ context.Context, _ pgtype.UUID) ([]db.RecoveryCode, error) {
+func (f *fakeRecoveryQuerier) GetRecoveryCodesByUser(_ context.Context, userID pgtype.UUID) ([]db.RecoveryCode, error) {
+	f.lastGetCodesUser = userID
 	if f.getCodesErr != nil {
 		return nil, f.getCodesErr
 	}
@@ -38,10 +45,16 @@ func (f *fakeRecoveryQuerier) ConsumeRecoveryCode(_ context.Context, id pgtype.U
 		return db.RecoveryCode{}, f.consumeErr
 	}
 	f.consumedCodeID = id
-	for _, code := range f.codes {
-		if code.ID == id {
-			code.UsedAt = pgtype.Timestamptz{Time: time.Now(), Valid: true}
-			return code, nil
+	// Mutate by index so consumption persists — this models the DB's atomic
+	// "UPDATE ... WHERE id = $1 AND used_at IS NULL RETURNING *": a second
+	// consume of an already-used code returns no rows.
+	for i := range f.codes {
+		if f.codes[i].ID == id {
+			if f.codes[i].UsedAt.Valid {
+				return db.RecoveryCode{}, pgx.ErrNoRows
+			}
+			f.codes[i].UsedAt = pgtype.Timestamptz{Time: time.Now(), Valid: true}
+			return f.codes[i], nil
 		}
 	}
 	return db.RecoveryCode{}, pgx.ErrNoRows
@@ -291,5 +304,100 @@ func TestDBRecoveryStore_StoreRecoveryCodes(t *testing.T) {
 
 	if len(inserter.insertedCodes) != 3 {
 		t.Errorf("inserted %d codes, want 3", len(inserter.insertedCodes))
+	}
+}
+
+// TestDBRecoveryStore_StoreRecoveryCodes_HashOnly proves the store persists
+// ONLY salted hashes: each inserted row carries the code's SHA-256 hash and a
+// salt, and never the plaintext (there is no plaintext column to write).
+//
+//harbor:invariant INV-RECOVERY-HASH-ONLY
+func TestDBRecoveryStore_StoreRecoveryCodes_HashOnly(t *testing.T) {
+	q := &fakeRecoveryQuerier{}
+	inserter := &fakeInserter{}
+	store := NewDBRecoveryStore(q, inserter)
+
+	mgr := identity.NewRecoveryManager()
+	codes, err := mgr.GenerateCodes(3)
+	if err != nil {
+		t.Fatalf("GenerateCodes: %v", err)
+	}
+	if err := store.StoreRecoveryCodes(context.Background(), "550e8400-e29b-41d4-a716-446655440000", codes); err != nil {
+		t.Fatalf("StoreRecoveryCodes: %v", err)
+	}
+	if len(inserter.insertedCodes) != 3 {
+		t.Fatalf("inserted %d codes, want 3", len(inserter.insertedCodes))
+	}
+	for i, p := range inserter.insertedCodes {
+		if !bytes.Equal(p.CodeHash, codes[i].Hash) {
+			t.Errorf("code %d: persisted hash != generated hash", i)
+		}
+		if len(p.CodeHash) != sha256.Size {
+			t.Errorf("code %d: persisted hash is %d bytes, want %d", i, len(p.CodeHash), sha256.Size)
+		}
+		if bytes.Equal(p.CodeHash, []byte(codes[i].Plaintext)) {
+			t.Errorf("code %d: plaintext persisted as the stored hash", i)
+		}
+		if len(p.Salt) == 0 {
+			t.Errorf("code %d: salt not persisted", i)
+		}
+	}
+}
+
+// TestDBRecoveryStore_FindAndConsumeCode_ScopesByUser proves the store scopes
+// its code lookup to the given user (cross-user isolation): the DB query is
+// issued with that user's UUID, so another user's codes are never considered.
+//
+//harbor:invariant INV-RECOVERY-CROSS-USER-REJECT
+func TestDBRecoveryStore_FindAndConsumeCode_ScopesByUser(t *testing.T) {
+	mgr := identity.NewRecoveryManager()
+	codes, err := mgr.GenerateCodes(1)
+	if err != nil {
+		t.Fatalf("GenerateCodes: %v", err)
+	}
+	code := codes[0]
+	var codeID pgtype.UUID
+	_ = codeID.Scan("550e8400-e29b-41d4-a716-446655440001")
+	q := &fakeRecoveryQuerier{
+		codes: []db.RecoveryCode{{ID: codeID, CodeHash: code.Hash, Salt: code.Salt}},
+	}
+	store := NewDBRecoveryStore(q, nil)
+
+	const userID = "550e8400-e29b-41d4-a716-446655440000"
+	if _, err := store.FindAndConsumeCode(context.Background(), userID, code.Plaintext); err != nil {
+		t.Fatalf("FindAndConsumeCode: %v", err)
+	}
+	var want pgtype.UUID
+	_ = want.Scan(userID)
+	if q.lastGetCodesUser != want {
+		t.Errorf("GetRecoveryCodesByUser userID = %v, want %v (lookup must scope by user)", q.lastGetCodesUser, want)
+	}
+}
+
+// TestDBRecoveryStore_FindAndConsumeCode_Replay proves a code is single-use at
+// the store layer: after a successful consume the same code fails closed.
+//
+//harbor:invariant INV-RECOVERY-CODE-SINGLE-USE
+func TestDBRecoveryStore_FindAndConsumeCode_Replay(t *testing.T) {
+	mgr := identity.NewRecoveryManager()
+	codes, err := mgr.GenerateCodes(1)
+	if err != nil {
+		t.Fatalf("GenerateCodes: %v", err)
+	}
+	code := codes[0]
+	var codeID pgtype.UUID
+	_ = codeID.Scan("550e8400-e29b-41d4-a716-446655440001")
+	q := &fakeRecoveryQuerier{
+		codes: []db.RecoveryCode{{ID: codeID, CodeHash: code.Hash, Salt: code.Salt}},
+	}
+	store := NewDBRecoveryStore(q, nil)
+
+	const userID = "550e8400-e29b-41d4-a716-446655440000"
+	if _, err := store.FindAndConsumeCode(context.Background(), userID, code.Plaintext); err != nil {
+		t.Fatalf("first consume: %v", err)
+	}
+	// Replay of the same code must be rejected (it is now marked used).
+	if _, err := store.FindAndConsumeCode(context.Background(), userID, code.Plaintext); !errors.Is(err, ErrCodeNotFound) {
+		t.Fatalf("replay = %v, want ErrCodeNotFound", err)
 	}
 }

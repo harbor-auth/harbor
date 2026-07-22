@@ -390,6 +390,71 @@ func TestPostRecoveryComplete_RegionMismatch(t *testing.T) {
 	}
 }
 
+// TestPostRecoveryComplete_RateLimited_DoesNotVerify proves the rate limiter
+// throttles brute force fail-closed: when the limiter denies, the request is
+// rejected with 429 and the code is NEVER checked.
+//
+//harbor:invariant INV-RECOVERY-RATE-LIMITED
+func TestPostRecoveryComplete_RateLimited_DoesNotVerify(t *testing.T) {
+	verifier := &fakeRecoveryVerifier{}
+	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, verifier)
+	id := beginCeremony(t, s, "eu.harbor.test")
+	// Deny only after the ceremony exists so we reach the complete rate-limit gate.
+	s.WithRecoveryRateLimiter(&fakeRecoveryLimiter{allow: false})
+
+	body := `{"recovery_request_id":"` + id + `","code":"CODE-0000"}`
+	req := httptest.NewRequest(http.MethodPost, "/recovery/complete", strings.NewReader(body))
+	req.Host = "eu.harbor.test"
+	rec := httptest.NewRecorder()
+	s.PostRecoveryComplete(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+	if verifier.called {
+		t.Error("verifier must NOT be called when rate-limited (brute-force throttle)")
+	}
+}
+
+// TestPostRecoveryComplete_UniformFailureBodies proves every failure mode —
+// invalid code, lockout, region mismatch, and unknown ceremony — returns a
+// byte-identical response, so the endpoint is not an oracle for account
+// existence, lockout state, or how close a code was (docs/DESIGN.md §6.5).
+//
+//harbor:invariant INV-RECOVERY-UNIFORM-FAILURE
+func TestPostRecoveryComplete_UniformFailureBodies(t *testing.T) {
+	// fail runs one /recovery/complete failure path and returns (status, body).
+	// A non-empty reqID skips beginCeremony (used for the unknown-ceremony case).
+	fail := func(verifierErr error, beginHost, completeHost, reqID string) (int, string) {
+		s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{err: verifierErr})
+		id := reqID
+		if id == "" {
+			id = beginCeremony(t, s, beginHost)
+		}
+		body := `{"recovery_request_id":"` + id + `","code":"CODE-0000"}`
+		req := httptest.NewRequest(http.MethodPost, "/recovery/complete", strings.NewReader(body))
+		req.Host = completeHost
+		rec := httptest.NewRecorder()
+		s.PostRecoveryComplete(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+
+	invalidStatus, invalidBody := fail(identity.ErrInvalidCode, "eu.harbor.test", "eu.harbor.test", "")
+	lockedStatus, lockedBody := fail(identity.ErrUserLocked, "eu.harbor.test", "eu.harbor.test", "")
+	mismatchStatus, mismatchBody := fail(nil, "eu.harbor.test", "us.harbor.test", "")
+	unknownStatus, unknownBody := fail(nil, "", "eu.harbor.test", "does-not-exist")
+
+	if invalidStatus != http.StatusUnauthorized || lockedStatus != http.StatusUnauthorized ||
+		mismatchStatus != http.StatusUnauthorized || unknownStatus != http.StatusUnauthorized {
+		t.Fatalf("statuses differ: invalid=%d locked=%d mismatch=%d unknown=%d",
+			invalidStatus, lockedStatus, mismatchStatus, unknownStatus)
+	}
+	if invalidBody != lockedBody || invalidBody != mismatchBody || invalidBody != unknownBody {
+		t.Errorf("failure bodies differ (oracle!):\n invalid=%q\n locked=%q\n mismatch=%q\n unknown=%q",
+			invalidBody, lockedBody, mismatchBody, unknownBody)
+	}
+}
+
 func TestPostRecoveryComplete_MissingFields(t *testing.T) {
 	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
 	req := httptest.NewRequest(http.MethodPost, "/recovery/complete", strings.NewReader(`{"code":"CODE-0000"}`))
