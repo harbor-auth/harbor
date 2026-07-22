@@ -77,9 +77,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	clientRegistry := oidc.NewInMemoryClientRegistry()
 	// Seed a demo client for e2e tests (matches e2e/flow_test.go expectations).
 	clientRegistry.Put(oidc.Client{
-		ID:           "demo-client",
-		SectorID:     "localhost",
-		RedirectURIs: []string{"http://localhost/callback", "http://localhost:8081/callback"},
+		ID:            "demo-client",
+		SectorID:      "localhost",
+		RedirectURIs:  []string{"http://localhost/callback", "http://localhost:8081/callback"},
 		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
 	})
 

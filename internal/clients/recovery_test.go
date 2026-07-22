@@ -17,9 +17,9 @@ import (
 
 // fakeRecoveryQuerier is a test double for recoveryQuerier.
 type fakeRecoveryQuerier struct {
-	codes            []db.RecoveryCode
-	attempts         *db.RecoveryAttempt
-	consumedCodeID   pgtype.UUID
+	codes          []db.RecoveryCode
+	attempts       *db.RecoveryAttempt
+	consumedCodeID pgtype.UUID
 	// lastGetCodesUser records the userID the last GetRecoveryCodesByUser was
 	// scoped to, so tests can prove the store queries per-user (cross-user
 	// isolation is enforced by the DB WHERE user_id = $1 clause).

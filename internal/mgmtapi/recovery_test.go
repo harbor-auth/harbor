@@ -47,10 +47,10 @@ func (f *fakeRecoveryCodeStore) StoreRecoveryCodes(_ context.Context, _ string, 
 }
 
 type fakeRecoveryVerifier struct {
-	err        error
-	gotUserID  string
-	gotCode    string
-	called     bool
+	err       error
+	gotUserID string
+	gotCode   string
+	called    bool
 }
 
 func (f *fakeRecoveryVerifier) ConsumeCode(_ context.Context, userID, code string) error {
