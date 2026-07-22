@@ -121,9 +121,12 @@ func TestRegionMiddlewarePassesControlOnSuccess(t *testing.T) {
 // TestRegionMiddlewareResolvesIssuerStyleHost confirms an issuer-style host
 // with a port still resolves, matching region.Resolve's normalisation.
 func TestRegionMiddlewareResolvesIssuerStyleHost(t *testing.T) {
-	var got region.Region
+	var (
+		got    region.Region
+		gotErr error
+	)
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got, _ = region.FromContext(r.Context())
+		got, gotErr = region.FromContext(r.Context())
 		w.WriteHeader(http.StatusOK)
 	})
 	h := RegionMiddleware(telemetry.New(nil))(next)
@@ -131,6 +134,9 @@ func TestRegionMiddlewareResolvesIssuerStyleHost(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, newRegionTestRequest("us.harbor.id:443"))
 
+	if gotErr != nil {
+		t.Fatalf("FromContext downstream error = %v, want nil", gotErr)
+	}
 	if got != region.US {
 		t.Fatalf("pinned region = %q, want %q", got, region.US)
 	}

@@ -64,7 +64,7 @@ func ValidateHostMap(m map[string]Region) error {
 	for host, r := range m {
 		normalized, err := normalizeHost(host)
 		if err != nil {
-			return fmt.Errorf("%w: host %q: %v", ErrInvalidHostMap, host, err)
+			return fmt.Errorf("%w: host %q: %w", ErrInvalidHostMap, host, err)
 		}
 		if _, ok := known[string(r)]; !ok {
 			return fmt.Errorf("%w: host %q maps to unknown region %q", ErrInvalidHostMap, host, r)
@@ -88,7 +88,7 @@ func normalizeHost(host string) (string, error) {
 	if strings.Contains(h, "://") {
 		u, err := url.Parse(h)
 		if err != nil {
-			return "", fmt.Errorf("%w: %v", ErrUnknownHost, err)
+			return "", fmt.Errorf("%w: %w", ErrUnknownHost, err)
 		}
 		h = u.Host
 	}
