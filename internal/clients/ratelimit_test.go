@@ -620,3 +620,83 @@ func TestMemoryRateLimiter_Sweep(t *testing.T) {
 func TestMemoryRateLimiter_InterfaceCompliance(t *testing.T) {
 	var _ RateLimiter = (*MemoryRateLimiter)(nil)
 }
+
+// --- No PII in limiter keys tests ---
+
+// TestRateLimitKey_NoPII verifies that rate limit keys are constructed from
+// non-PII identifiers (client_id or IP) and endpoint names, never from
+// user-identifying information like email, user_id, or PPID.
+//
+// This is a documentation/design test: the RateLimitKey function takes an
+// endpoint and identifier, where identifier should be client_id (for
+// authenticated requests) or IP (for anonymous requests) — both are non-PII
+// or quasi-identifiers that don't directly identify a user.
+func TestRateLimitKey_NoPII(t *testing.T) {
+	// Valid keys: endpoint + client_id (RP identifier, not user identifier)
+	key1 := RateLimitKey("token", "client-abc123")
+	if key1 != "token:client-abc123" {
+		t.Errorf("unexpected key format: %s", key1)
+	}
+
+	// Valid keys: endpoint + IP (anonymous request)
+	key2 := RateLimitKey("authorize", "192.168.1.100")
+	if key2 != "authorize:192.168.1.100" {
+		t.Errorf("unexpected key format: %s", key2)
+	}
+
+	// Valid keys: endpoint + IPv6
+	key3 := RateLimitKey("introspect", "2001:db8::1")
+	if key3 != "introspect:2001:db8::1" {
+		t.Errorf("unexpected key format: %s", key3)
+	}
+
+	// The key format is simple and predictable - no user_id, email, PPID, or
+	// other PII should ever be passed as the identifier. The rate limiter
+	// keys by client_id (authenticated) or IP (anonymous), both of which are
+	// acceptable for rate limiting without creating per-user tracking.
+	//
+	// This test documents the expected usage pattern. The actual enforcement
+	// that PII is never passed here happens at the call sites (middleware),
+	// which extract client_id from the authenticated request or IP from the
+	// connection.
+}
+
+// TestRateLimiter_KeysAreIsolated verifies that rate limiting works correctly
+// with the expected key patterns (client_id and IP-based keys), ensuring that
+// different clients/IPs are tracked independently.
+func TestRateLimiter_KeysAreIsolated(t *testing.T) {
+	limiter, _ := testRateLimiter(t, RateLimiterConfig{
+		KeyPrefix: "test:",
+		Limit:     2,
+		Window:    time.Minute,
+	})
+	ctx := context.Background()
+
+	// Simulate different clients hitting the token endpoint
+	clientAKey := RateLimitKey("token", "client-a")
+	clientBKey := RateLimitKey("token", "client-b")
+	ipKey := RateLimitKey("token", "10.0.0.1")
+
+	// Exhaust limit for client-a
+	for i := 0; i < 2; i++ {
+		allowed, _, _ := limiter.Allow(ctx, clientAKey)
+		if !allowed {
+			t.Fatalf("client-a request %d should be allowed", i)
+		}
+	}
+
+	// client-a should be denied
+	if allowed, _, _ := limiter.Allow(ctx, clientAKey); allowed {
+		t.Fatal("client-a should be rate limited")
+	}
+
+	// client-b should still be allowed (separate key)
+	if allowed, _, _ := limiter.Allow(ctx, clientBKey); !allowed {
+		t.Fatal("client-b should be allowed (independent limit)")
+	}
+
+	// IP-based key should also be independent
+	if allowed, _, _ := limiter.Allow(ctx, ipKey); !allowed {
+		t.Fatal("IP-based key should be allowed (independent limit)")
+	}
+}
