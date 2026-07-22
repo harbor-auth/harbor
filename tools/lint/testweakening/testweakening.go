@@ -123,10 +123,17 @@ func run(name string, args ...string) (string, error) {
 func analyze(diff string) []finding {
 	var findings []finding
 
-	// Per-file sets of removed / added test-function names. A pure rename that
-	// re-adds the same name nets out; a genuine deletion surfaces by name.
+	// Per-file sets of removed test-function names (for reporting WHICH file lost
+	// a test) plus a GLOBAL set of every added name across all files. Netting is
+	// cross-file: a name removed in one file and re-added ANYWHERE in the diff
+	// nets out (a pure rename OR a legitimate cross-file move). Only a name that
+	// is removed and never re-added anywhere surfaces as a real deletion. A
+	// cross-file move still emits a plain informational note (not a finding) so a
+	// human can eyeball it. addedTests stays per-file so a same-file rename can be
+	// distinguished from a cross-file relocation for that note.
 	removedTests := map[string]map[string]bool{}
 	addedTests := map[string]map[string]bool{}
+	addedGlobal := map[string]bool{}
 	fileOrder := []string{}
 	seenFile := map[string]bool{}
 
@@ -178,6 +185,7 @@ func analyze(diff string) []finding {
 					addedTests[curFile] = map[string]bool{}
 				}
 				addedTests[curFile][name] = true
+				addedGlobal[name] = true
 			}
 		}
 
@@ -218,8 +226,14 @@ func analyze(diff string) []finding {
 		}
 	}
 
-	// Removed test functions not re-added in the same file (deterministic order).
-	// Listing names lets a human adjudicate a rename vs a real deletion.
+	// Removed test functions not re-added ANYWHERE in the diff (deterministic
+	// order). Netting is cross-file/global: a name re-added in any file nets out,
+	// so a rename or a legitimate cross-file move is not flagged — only a name
+	// removed and never re-added surfaces as a real deletion. Listing names lets a
+	// human adjudicate. A cross-file move (removed here, re-added in a DIFFERENT
+	// file) emits a plain stdout note — not a finding — so it stays green while
+	// remaining visible for review.
+	var relocationNotes []string
 	for _, f := range fileOrder {
 		removed := removedTests[f]
 		if len(removed) == 0 {
@@ -228,8 +242,14 @@ func analyze(diff string) []finding {
 		added := addedTests[f]
 		var removedOnly []string
 		for name := range removed {
-			if !added[name] {
+			switch {
+			case !addedGlobal[name]:
+				// Removed and never re-added anywhere — a genuine deletion.
 				removedOnly = append(removedOnly, name)
+			case !added[name]:
+				// Re-added elsewhere in the diff — a cross-file move. Net-zero; note it.
+				relocationNotes = append(relocationNotes,
+					fmt.Sprintf("testweakening: note — test %q moved out of %s (re-added elsewhere in the diff); net-zero, not flagged", name, f))
 			}
 		}
 		if len(removedOnly) == 0 {
@@ -241,6 +261,12 @@ func analyze(diff string) []finding {
 			msg:  fmt.Sprintf("removed test/benchmark/fuzz function(s): %s", strings.Join(removedOnly, ", ")),
 			high: true,
 		})
+	}
+	if len(relocationNotes) > 0 {
+		sort.Strings(relocationNotes)
+		for _, n := range relocationNotes {
+			fmt.Println(n)
+		}
 	}
 
 	// De-duplicate frozen-vector findings (one per file is enough).

@@ -28,6 +28,12 @@
 # Frozen crypto golden vectors (F2) — a change here is a crypto-output change.
 **/testdata/*vectors*.json      @harbor/maintainers
 
+# Test files — the sanctioned human-signoff escape hatch for a legitimate test
+# move/rename the F5 tamper guard flags. Netting is cross-file (a moved test
+# nets out), but a genuine deletion still requires a reviewer to adjudicate
+# deletion vs. an intended removal.
+**/*_test.go                    @harbor/maintainers
+
 # The deny-by-default PII allow-list (F10).
 /internal/telemetry/            @harbor/maintainers
 
