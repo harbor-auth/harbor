@@ -48,6 +48,10 @@ type Server struct {
 	filter     oidc.RevocationFilter
 	publisher  RevocationPublisher
 	revChannel string
+
+	// introspector handles RFC 7662 token introspection. May be nil if
+	// introspection is not configured (no signers).
+	introspector *oidc.Introspector
 }
 
 // Config holds the settings needed to serve the OIDC surface.
@@ -86,6 +90,9 @@ type Config struct {
 	// RevocationChannel is the Redis pub/sub channel for revocations. Defaults
 	// to "revocation_channel" when empty.
 	RevocationChannel string
+	// RevokedJTIChecker performs DB introspection on bloom filter hits for
+	// token introspection. May be nil (filter hits treated as revoked).
+	RevokedJTIChecker oidc.RevokedJTIChecker
 }
 
 // New returns a Server that serves the generated OpenAPI contract. The JWKS
@@ -115,6 +122,16 @@ func New(cfg Config) *Server {
 	if channel == "" {
 		channel = defaultRevocationChannel
 	}
+	// Build the Introspector if signers are configured.
+	var introspector *oidc.Introspector
+	if len(cfg.Signers) > 0 {
+		introspector = oidc.NewIntrospector(oidc.IntrospectConfig{
+			Signers:        cfg.Signers,
+			Filter:         cfg.RevocationFilter,
+			RevokedChecker: cfg.RevokedJTIChecker,
+		})
+	}
+
 	return &Server{
 		issuer:        cfg.Issuer,
 		svc:           cfg.Service,
@@ -128,6 +145,7 @@ func New(cfg Config) *Server {
 		filter:        cfg.RevocationFilter,
 		publisher:     cfg.RevocationPublisher,
 		revChannel:    channel,
+		introspector:  introspector,
 	}
 }
 
