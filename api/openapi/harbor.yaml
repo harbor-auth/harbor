@@ -309,6 +309,45 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /revoke:
+    post:
+      operationId: postRevoke
+      summary: Token revocation (RFC 7009)
+      description: >-
+        Revokes an access token or refresh token. Clients must authenticate via
+        Basic auth (client_id:client_secret). The endpoint always returns 200 on
+        successful processing — even if the token was invalid, already revoked,
+        or not issued to the calling client — to prevent token-fishing attacks
+        (RFC 7009 §2.2). For refresh tokens, revocation deletes the token from
+        the database so no new access tokens can be minted. For access tokens
+        (JWTs), the `jti` is added to the revocation bloom filter for immediate
+        invalidation across all harbor-hot replicas (DESIGN §3.5).
+      security:
+        - basicAuth: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/RevokeRequest"
+      responses:
+        "200":
+          description: >-
+            Token revocation processed. Returns empty body on success per
+            RFC 7009 §2.2. This response is returned even if the token was
+            invalid, expired, or not issued to the calling client.
+        "400":
+          description: Invalid request (missing token parameter or malformed body).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
+        "401":
+          description: Missing or invalid client credentials.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
   /introspect:
     post:
       operationId: postIntrospect
@@ -717,6 +756,27 @@ components:
         reason:
           type: string
           description: The reason provided for revocation.
+    RevokeRequest:
+      type: object
+      description: >-
+        Token revocation request (RFC 7009 §2.1). The `token` field is required;
+        `token_type_hint` is optional and helps the server optimize lookup order.
+      required:
+        - token
+      properties:
+        token:
+          type: string
+          description: >-
+            The access token or refresh token to revoke. May be a JWT (access
+            token) or an opaque string (refresh token).
+        token_type_hint:
+          type: string
+          description: >-
+            Hint about the token type. If omitted, the server tries both.
+            Providing the correct hint may speed up processing.
+          enum:
+            - access_token
+            - refresh_token
     IntrospectRequest:
       type: object
       description: >-
