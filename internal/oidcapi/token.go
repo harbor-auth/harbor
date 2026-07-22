@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/harbor/harbor/internal/gen/openapi"
 	"github.com/harbor/harbor/internal/oidc"
+	"github.com/harbor/harbor/internal/telemetry"
 )
 
 // PostToken serves the OIDC Token endpoint (POST /token). It parses the
@@ -15,10 +17,15 @@ import (
 // (RFC 6749 §5.2). All responses set Cache-Control: no-store (docs/DESIGN.md
 // §11.7).
 func (s *Server) PostToken(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	outcome := telemetry.OutcomeError
+	defer func() { recordRequest(telemetry.EndpointToken, outcome, start) }()
+
 	// Cap the request body before parsing so a flooded /token can't exhaust
 	// memory (docs/DESIGN.md §6.5). 64KB is far beyond any legitimate form.
 	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	if err := r.ParseForm(); err != nil {
+		recordError(telemetry.EndpointToken, oidc.ErrCodeInvalidRequest)
 		writeOAuthError(w, &oidc.TokenError{
 			Code:        oidc.ErrCodeInvalidRequest,
 			Description: "malformed request body",
@@ -50,10 +57,18 @@ func (s *Server) PostToken(w http.ResponseWriter, r *http.Request) {
 		tokens, terr = s.svc.Token(r.Context(), req)
 	}
 	if terr != nil {
+		recordError(telemetry.EndpointToken, terr.Code)
+		if gk, ok := mapGrantType(req.GrantType); ok {
+			oidcTokensIssuedTotal.Inc(telemetry.GrantType(gk), telemetry.Outcome(telemetry.OutcomeError))
+		}
 		writeOAuthError(w, terr)
 		return
 	}
 
+	if gk, ok := mapGrantType(req.GrantType); ok {
+		oidcTokensIssuedTotal.Inc(telemetry.GrantType(gk), telemetry.Outcome(telemetry.OutcomeSuccess))
+	}
+	outcome = telemetry.OutcomeSuccess
 	writeTokenResponse(w, tokens)
 }
 
