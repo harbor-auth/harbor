@@ -57,6 +57,12 @@ docs/plans/         → future WHAT — intent not yet built
 | [consent-ledger](plans/consent-ledger.md) | draft | §2.1, §10, §11.3 | `internal/oidc/`, `internal/mgmtapi/`, `db/migrations/` |
 | [dynamic-client-registration](plans/dynamic-client-registration.md) | draft | §3.1, §8, §10 | `internal/mgmtapi/`, `internal/clients/`, `db/migrations/` |
 | [user-audit-trail](plans/user-audit-trail.md) | draft | §2.1, §4.4, §10, §11.6 | `internal/identity/`, `internal/mgmtapi/`, `db/migrations/` |
+| [regional-data-residency-routing](plans/regional-data-residency-routing.md) | draft | §5, §4, §11.2 | `internal/region/`, `internal/oidcapi/`, `internal/mgmtapi/`, `cmd/harbor-hot/` |
+| [observability-metrics](plans/observability-metrics.md) | draft | §6.5, §5, §11.2 | `internal/telemetry/`, `internal/oidcapi/`, `internal/mgmtapi/` |
+| [user-account-recovery](plans/user-account-recovery.md) | draft | §11.7, §11.6, §4 | `db/migrations/`, `internal/identity/`, `internal/webauthn/`, `internal/mgmtapi/` |
+| [consent-management-ui](plans/consent-management-ui.md) | draft | §2.1, §11.4, §9 | `internal/bff/`, `internal/mgmtapi/`, `web/` |
+| [compliance-export](plans/compliance-export.md) | draft | §11.5, §11.6, §11.2 | `internal/mgmtapi/`, `internal/identity/`, `internal/crypto/` |
+| [email-relay-service](plans/email-relay-service.md) | draft | §7.5, §5, §11.2 | `db/migrations/`, `internal/relay/`, `internal/mgmtapi/`, `cmd/harbor-hot/` |
 
 > A plan appears here until it's implemented, then **`@plan promote`** moves its row into the **Features** table above. Author the next one with **`@plan new <slug>`**.
 

@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-07-22
+goal: Ship a user-authenticated privacy dashboard on the BFF composed entirely from shipped user-scoped primitives — a connected-apps view listing the caller's consent_grants (scopes, granted-at) with a revoke action that calls the shipped consent-revoke (cascading the RP token/session revocation), an activity view rendering the caller's OWN decrypted user-audit-trail events (no operator plaintext path, strictly caller-scoped), a sessions-and-devices view to revoke sessions/authenticators, and a soft per-RP email-relay toggle that degrades gracefully when relay isn't deployed — introducing no new data store, doing region-pinned reads only, and emitting aggregate-only UI metrics, realising §2.1 user-controlled consent

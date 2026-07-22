@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-07-22
+goal: Provide a single privacy-safe metrics facade in internal/telemetry/ that makes aggregate-only, zero-PII observability the only expressible path — Counter/Histogram/Gauge helpers whose labels are drawn from a compile-time allow-list of low-cardinality non-PII dimensions (region, endpoint, outcome, grant_type, error_code, non-user-linked client_id) with no free-form label API, a region dimension for per-region aggregates, instrumentation of hot-path and Wave-5 feature events through the facade, and an internal/arch enforcement test asserting no metric label is ever sourced from a PII field (user_id, email, PPID, IP, subject) — realising §6.1 visibility without violating §5/§11.2
