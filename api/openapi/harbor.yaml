@@ -385,6 +385,128 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/OAuthError"
+  /end_session:
+    get:
+      operationId: getEndSession
+      summary: RP-Initiated Logout (GET)
+      description: >-
+        RP-Initiated Logout endpoint (OIDC RP-Initiated Logout 1.0). Terminates
+        the user's session and optionally redirects to a registered post-logout
+        URI. The `id_token_hint` is REQUIRED to identify the user and client —
+        Harbor does not support session cookies, so the hint is the only way to
+        know which session to revoke. If `post_logout_redirect_uri` is provided,
+        it MUST exactly match one of the client's registered `logout_uris`;
+        otherwise the request redirects to the issuer's default logged-out page.
+        The `state` parameter is echoed back verbatim if provided (anti-CSRF).
+      parameters:
+        - name: id_token_hint
+          in: query
+          required: true
+          description: >-
+            Previously issued ID token. Used to identify the user and client
+            for session revocation. The signature is verified but expiry is
+            ignored (users may log out with expired tokens).
+          schema:
+            type: string
+        - name: post_logout_redirect_uri
+          in: query
+          required: false
+          description: >-
+            URI to redirect to after logout. Must exactly match one of the
+            client's registered `logout_uris`. If omitted or invalid, redirects
+            to the issuer's default logged-out page.
+          schema:
+            type: string
+            format: uri
+        - name: state
+          in: query
+          required: false
+          description: >-
+            Opaque value echoed back to the post_logout_redirect_uri. Use for
+            anti-CSRF or to restore RP state after logout.
+          schema:
+            type: string
+        - name: client_id
+          in: query
+          required: false
+          description: >-
+            Client identifier. Optional when id_token_hint is provided (the
+            client is extracted from the token's `aud` claim). May be required
+            in future if Harbor supports logout without id_token_hint.
+          schema:
+            type: string
+      responses:
+        "302":
+          description: >-
+            Redirect to the post_logout_redirect_uri (if valid) or the issuer's
+            default logged-out page. The `state` parameter is echoed back if
+            provided.
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+        "400":
+          description: >-
+            Invalid request — missing or malformed id_token_hint, or signature
+            verification failed.
+          content:
+            text/html:
+              schema:
+                type: string
+    post:
+      operationId: postEndSession
+      summary: RP-Initiated Logout (POST)
+      description: >-
+        RP-Initiated Logout endpoint (OIDC RP-Initiated Logout 1.0), POST
+        variant. Identical behavior to GET but accepts form-encoded body.
+        Useful for RPs that prefer POST or need to avoid URL length limits.
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required:
+                - id_token_hint
+              properties:
+                id_token_hint:
+                  type: string
+                  description: >-
+                    Previously issued ID token. Used to identify the user and
+                    client for session revocation.
+                post_logout_redirect_uri:
+                  type: string
+                  format: uri
+                  description: >-
+                    URI to redirect to after logout. Must exactly match one of
+                    the client's registered `logout_uris`.
+                state:
+                  type: string
+                  description: >-
+                    Opaque value echoed back to the post_logout_redirect_uri.
+                client_id:
+                  type: string
+                  description: >-
+                    Client identifier. Optional when id_token_hint is provided.
+      responses:
+        "302":
+          description: >-
+            Redirect to the post_logout_redirect_uri (if valid) or the issuer's
+            default logged-out page.
+          headers:
+            Location:
+              schema:
+                type: string
+                format: uri
+        "400":
+          description: >-
+            Invalid request — missing or malformed id_token_hint, or signature
+            verification failed.
+          content:
+            text/html:
+              schema:
+                type: string
   /jwks.json:
     get:
       operationId: getJwks
