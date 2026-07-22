@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"strings"
 
 	"github.com/emersion/go-smtp"
@@ -39,6 +40,13 @@ type MTAConfig struct {
 	MaxRecipients int
 	// MaxMessageBytes is the maximum message size in bytes (default: 25MB).
 	MaxMessageBytes int64
+	// Authenticator verifies SPF/DKIM/DMARC for inbound messages. When nil,
+	// authentication is skipped entirely (messages are accepted without checks).
+	Authenticator *Authenticator
+	// EnforceAuth causes messages that fail authentication to be rejected with a
+	// 550 error. When false (but an Authenticator is set), results are evaluated
+	// and logged but never cause a rejection (monitoring mode).
+	EnforceAuth bool
 }
 
 // Backend implements smtp.Backend for the inbound relay MTA.
@@ -49,6 +57,8 @@ type Backend struct {
 	domain        string
 	maxRecipients int
 	maxMsgBytes   int64
+	auth          *Authenticator
+	enforceAuth   bool
 }
 
 // NewBackend creates a new SMTP backend for the relay MTA.
@@ -71,6 +81,8 @@ func NewBackend(cfg MTAConfig) *Backend {
 		domain:        strings.ToLower(cfg.Domain),
 		maxRecipients: maxRecipients,
 		maxMsgBytes:   maxMsgBytes,
+		auth:          cfg.Authenticator,
+		enforceAuth:   cfg.EnforceAuth,
 	}
 }
 
@@ -78,6 +90,7 @@ func NewBackend(cfg MTAConfig) *Backend {
 func (b *Backend) NewSession(c *smtp.Conn) (smtp.Session, error) {
 	return &Session{
 		backend:    b,
+		conn:       c,
 		recipients: make([]*recipientInfo, 0, 1),
 	}, nil
 }
@@ -95,18 +108,40 @@ type recipientInfo struct {
 // reads and discards the message body after processing. Only minimal
 // routing metadata is kept in memory during the transaction.
 //
-// Note: The `from` field is staged for SPF validation in a later task.
+// Note: The `from`, `helo`, and `remoteIP` fields feed SPF/DMARC validation.
 // The `recipientInfo.address` field is staged for forwarding in a later task.
 type Session struct {
 	backend    *Backend
-	from       string           // Staged for SPF check (Task 10)
+	conn       *smtp.Conn       // Underlying connection (nil in unit tests)
+	from       string           // Envelope sender (MAIL FROM), used for SPF
+	helo       string           // HELO/EHLO hostname, SPF fallback for null senders
+	remoteIP   net.IP           // Connecting client IP, used for SPF
 	recipients []*recipientInfo // Validated recipients for forwarding
 }
 
 // Reset implements smtp.Session. Called when the client sends RSET.
+// Only transaction-level state (envelope sender, recipients) is cleared;
+// connection-level state (HELO, remote IP) persists across RSET.
 func (s *Session) Reset() {
 	s.from = ""
 	s.recipients = s.recipients[:0]
+}
+
+// populateConnInfo lazily fills the remote IP and HELO hostname from the
+// underlying connection. It is a no-op when there is no connection (unit tests
+// may set s.remoteIP / s.helo directly instead).
+func (s *Session) populateConnInfo() {
+	if s.conn == nil {
+		return
+	}
+	if s.remoteIP == nil {
+		if tcp, ok := s.conn.Conn().RemoteAddr().(*net.TCPAddr); ok {
+			s.remoteIP = tcp.IP
+		}
+	}
+	if s.helo == "" {
+		s.helo = s.conn.Hostname()
+	}
 }
 
 // Logout implements smtp.Session. Called when the client disconnects.
@@ -227,7 +262,6 @@ func (s *Session) parseRecipient(to string) (string, error) {
 // is kept in memory during processing.
 //
 // TODO: Implement actual forwarding in a later task:
-// - SPF/DKIM/DMARC validation (Task 10)
 // - ARC-seal and forward (Task 11)
 // - Rate limiting (Task 12)
 func (s *Session) Data(r io.Reader) error {
@@ -239,13 +273,26 @@ func (s *Session) Data(r io.Reader) error {
 		}
 	}
 
-	// Read and discard the message body (no content retention per §7.5.6).
-	// In the full implementation, this would:
-	// 1. Validate SPF/DKIM/DMARC
-	// 2. ARC-seal the message
-	// 3. Forward to the user's real inbox
-	// For now, we just accept the message after validation.
-	_, err := io.Copy(io.Discard, r)
+	// Fast path: when no authenticator is configured, read and discard the body
+	// without retaining any content (§7.5.6).
+	if s.backend.auth == nil {
+		if _, err := io.Copy(io.Discard, r); err != nil {
+			s.backend.logger.Error("relay: failed to read message body",
+				slog.Any("error", err))
+			return &smtp.SMTPError{
+				Code:         451,
+				EnhancedCode: smtp.EnhancedCode{4, 3, 0},
+				Message:      "temporary failure reading message",
+			}
+		}
+		s.backend.logger.Info("relay: message accepted",
+			slog.Int("recipient_count", len(s.recipients)))
+		return nil
+	}
+
+	// Buffer the message transiently in memory for authentication. The buffer is
+	// discarded when this method returns and is never persisted (§7.5.6).
+	msg, err := io.ReadAll(io.LimitReader(r, s.backend.maxMsgBytes))
 	if err != nil {
 		s.backend.logger.Error("relay: failed to read message body",
 			slog.Any("error", err))
@@ -256,9 +303,41 @@ func (s *Session) Data(r io.Reader) error {
 		}
 	}
 
-	// Log acceptance (no PII — only counts for aggregate metrics)
+	s.populateConnInfo()
+	result, err := s.backend.auth.Authenticate(context.Background(), AuthInput{
+		RemoteIP: s.remoteIP,
+		MailFrom: s.from,
+		Helo:     s.helo,
+		Message:  msg,
+	})
+	if err != nil {
+		s.backend.logger.Error("relay: authentication error", slog.Any("error", err))
+		return &smtp.SMTPError{
+			Code:         451,
+			EnhancedCode: smtp.EnhancedCode{4, 7, 0},
+			Message:      "temporary authentication failure, please retry",
+		}
+	}
+
+	if s.backend.enforceAuth && result.ShouldReject() {
+		// Do not log PII (sender/recipient). Only aggregate auth verdicts.
+		s.backend.logger.Info("relay: message rejected by authentication policy",
+			slog.String("spf", string(result.SPF)),
+			slog.String("dkim", string(result.DKIM)),
+			slog.String("dmarc", string(result.DMARC)))
+		return &smtp.SMTPError{
+			Code:         550,
+			EnhancedCode: smtp.EnhancedCode{5, 7, 1},
+			Message:      "message failed sender authentication (SPF/DKIM/DMARC)",
+		}
+	}
+
+	// Log acceptance with auth verdicts (no PII — only aggregate results).
 	s.backend.logger.Info("relay: message accepted",
-		slog.Int("recipient_count", len(s.recipients)))
+		slog.Int("recipient_count", len(s.recipients)),
+		slog.String("spf", string(result.SPF)),
+		slog.String("dkim", string(result.DKIM)),
+		slog.String("dmarc", string(result.DMARC)))
 
 	return nil
 }

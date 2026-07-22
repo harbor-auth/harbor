@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"strings"
 	"testing"
 
 	"github.com/emersion/go-smtp"
 	"github.com/google/uuid"
+	"github.com/mileusna/spf"
 
 	"github.com/harbor/harbor/internal/region"
 )
@@ -538,5 +540,133 @@ func TestSession_Data_ReadError(t *testing.T) {
 	}
 	if smtpErr.Code != 451 {
 		t.Errorf("Data() error code = %d, want 451", smtpErr.Code)
+	}
+}
+
+// TestSession_Data_WithAuthenticator tests that authentication is invoked when
+// an Authenticator is configured on the backend.
+func TestSession_Data_WithAuthenticator(t *testing.T) {
+	lookup := newMockLookup()
+	lookup.addAddress("valid-token", StateActive)
+
+	// Create an authenticator with stubs that return pass for everything
+	auth := newAuthenticatorWithResolvers(
+		func(_ net.IP, _, _, _ string) spf.Result { return spf.Pass },
+		buildLookupTXT(map[string][]string{
+			"_dmarc.example.com": {"v=DMARC1; p=none"},
+		}),
+	)
+
+	backend := NewBackend(MTAConfig{
+		Lookup:        lookup,
+		Domain:        "relay.eu.harbor.id",
+		Authenticator: auth,
+		EnforceAuth:   false, // monitoring mode
+	})
+
+	session, _ := backend.NewSession(nil)
+	s := session.(*Session)
+
+	// Set connection info directly (no real connection in unit tests)
+	s.remoteIP = net.ParseIP("192.0.2.1")
+	s.helo = "mail.example.com"
+
+	s.Mail("sender@example.com", nil)
+	err := s.Rcpt("valid-token@relay.eu.harbor.id", nil)
+	if err != nil {
+		t.Fatalf("Rcpt() error = %v", err)
+	}
+
+	messageBody := "From: sender@example.com\r\nTo: valid-token@relay.eu.harbor.id\r\nSubject: Test\r\n\r\nHello, World!"
+	err = s.Data(strings.NewReader(messageBody))
+	if err != nil {
+		t.Fatalf("Data() error = %v", err)
+	}
+}
+
+// TestSession_Data_AuthReject tests that messages are rejected when
+// authentication fails and EnforceAuth is true.
+func TestSession_Data_AuthReject(t *testing.T) {
+	lookup := newMockLookup()
+	lookup.addAddress("valid-token", StateActive)
+
+	// Create an authenticator that fails SPF and has no DMARC record
+	auth := newAuthenticatorWithResolvers(
+		func(_ net.IP, _, _, _ string) spf.Result { return spf.Fail },
+		buildLookupTXT(map[string][]string{}), // No DMARC record
+	)
+
+	backend := NewBackend(MTAConfig{
+		Lookup:        lookup,
+		Domain:        "relay.eu.harbor.id",
+		Authenticator: auth,
+		EnforceAuth:   true, // enforcement mode
+	})
+
+	session, _ := backend.NewSession(nil)
+	s := session.(*Session)
+
+	s.remoteIP = net.ParseIP("192.0.2.1")
+	s.helo = "mail.example.com"
+
+	s.Mail("sender@example.com", nil)
+	err := s.Rcpt("valid-token@relay.eu.harbor.id", nil)
+	if err != nil {
+		t.Fatalf("Rcpt() error = %v", err)
+	}
+
+	messageBody := "From: sender@example.com\r\nTo: valid-token@relay.eu.harbor.id\r\nSubject: Test\r\n\r\nHello, World!"
+	err = s.Data(strings.NewReader(messageBody))
+	if err == nil {
+		t.Fatal("Data() expected error for failed authentication")
+	}
+
+	var smtpErr *smtp.SMTPError
+	if !errors.As(err, &smtpErr) {
+		t.Fatalf("Data() error is not SMTPError: %T", err)
+	}
+	if smtpErr.Code != 550 {
+		t.Errorf("Data() error code = %d, want 550", smtpErr.Code)
+	}
+	if !strings.Contains(smtpErr.Message, "authentication") {
+		t.Errorf("Data() error message = %q, want contains 'authentication'", smtpErr.Message)
+	}
+}
+
+// TestSession_Data_AuthMonitoringMode tests that messages are accepted even
+// when authentication fails if EnforceAuth is false (monitoring mode).
+func TestSession_Data_AuthMonitoringMode(t *testing.T) {
+	lookup := newMockLookup()
+	lookup.addAddress("valid-token", StateActive)
+
+	// Create an authenticator that fails SPF
+	auth := newAuthenticatorWithResolvers(
+		func(_ net.IP, _, _, _ string) spf.Result { return spf.Fail },
+		buildLookupTXT(map[string][]string{}),
+	)
+
+	backend := NewBackend(MTAConfig{
+		Lookup:        lookup,
+		Domain:        "relay.eu.harbor.id",
+		Authenticator: auth,
+		EnforceAuth:   false, // monitoring mode — should accept anyway
+	})
+
+	session, _ := backend.NewSession(nil)
+	s := session.(*Session)
+
+	s.remoteIP = net.ParseIP("192.0.2.1")
+	s.helo = "mail.example.com"
+
+	s.Mail("sender@example.com", nil)
+	err := s.Rcpt("valid-token@relay.eu.harbor.id", nil)
+	if err != nil {
+		t.Fatalf("Rcpt() error = %v", err)
+	}
+
+	messageBody := "From: sender@example.com\r\nTo: valid-token@relay.eu.harbor.id\r\nSubject: Test\r\n\r\nHello, World!"
+	err = s.Data(strings.NewReader(messageBody))
+	if err != nil {
+		t.Fatalf("Data() error = %v, want nil (monitoring mode)", err)
 	}
 }
