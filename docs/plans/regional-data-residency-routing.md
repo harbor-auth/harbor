@@ -54,6 +54,17 @@ Make region a **first-class, request-scoped, fail-closed** property.
 4. **Issuer/host coherence** — the issued token's `iss` and any `userinfo` /
    `introspect` host MUST be region-coherent with the resolving host, so a token
    minted in `eu` is only ever verified/introspected on the `eu` issuer surface.
+5. **`home_region` source of truth (decided)** — a user's authoritative
+   `home_region` lives **only** in that user's home-region datastore (the
+   per-region user row); there is **no** global user directory. The guard
+   derives the request's region from the host/issuer prefix (item 1) and asserts
+   it matches the region of the store it is about to read — it **never** performs
+   a global `user_id → region` lookup to *discover* a user's region (that lookup
+   would itself be the cross-region PII access we forbid, making the guard
+   theater). Building such a global directory is a **non-goal**; if one is ever
+   introduced it MUST be **PII-free** (opaque `user_id` → region code only — no
+   email, name, or subject) and treated as non-PII routing metadata. See
+   OpenSpec Decision 5 / REQ-005 for the normative statement.
 
 ## DESIGN alignment
 
@@ -83,9 +94,10 @@ and §11.2 (data-subject data stays in-region). Does **not** change `DESIGN.md` 
 - [ ] Bind datastore/handle selection to the pinned region so a handler cannot reach another region's store.
 - [ ] Cross-region PII guard middleware (`internal/oidcapi/`, `internal/mgmtapi/`): region mismatch → defined error, metered, never partial data.
 - [ ] Issuer/host coherence: `iss`, userinfo, and introspect hosts are region-coherent with the resolving host.
+- [ ] `home_region` stays per-region authoritative: the guard resolves region from the host/issuer prefix and does **no** global `user_id → region` lookup on the guard path (no global user directory is built).
 - [ ] Wire region middleware in `cmd/harbor-hot/main.go` (and mgmt) ahead of user-data handlers.
 - [ ] Tests: known host resolves to the right region; unknown host is rejected (not defaulted); a handler reading a user from a foreign region fails closed with no data returned; issuer/host region coherence holds.
-- [ ] Tests (privacy): no cross-region datastore access is reachable from a region-pinned request.
+- [ ] Tests (privacy): no cross-region datastore access is reachable from a region-pinned request; the guard path performs no global `user_id → region` directory lookup.
 - [ ] Author & verify paired OpenSpec change: `openspec validate regional-data-residency-routing --strict`
 - [ ] Reconcile & promote: `@plan promote regional-data-residency-routing`
 
@@ -95,9 +107,12 @@ and §11.2 (data-subject data stays in-region). Does **not** change `DESIGN.md` 
   traffic. Mitigate with an explicit, tested host→region table and a loud
   startup validation (refuse to boot with an empty/ambiguous map) rather than a
   silent runtime default.
-- **Region source of truth** — host-prefix is the chosen signal; if an edge/LB
-  rewrites Host, the trusted forwarded-host chain must be used (coordinate with
-  ingress). A spoofable Host header must never select a region.
+- **Region source of truth** — host-prefix is the chosen signal for the *request*
+  region; a user's authoritative `home_region` is per-region-store-only, and the
+  guard never does a global user lookup to find it (decided — see Proposed
+  approach item 5). If an edge/LB rewrites Host, the trusted forwarded-host
+  chain must be used (coordinate with ingress). A spoofable Host header must
+  never select a region.
 - **Multi-region operator endpoints** — operator/aggregate surfaces are
   control-plane and must be explicitly exempt from the user-PII guard while
   still never reading user PII cross-region (they read only aggregate,
