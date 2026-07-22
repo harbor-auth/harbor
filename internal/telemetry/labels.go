@@ -67,19 +67,19 @@ func (l Label) Value() string { return l.value }
 type EndpointName string
 
 const (
-	EndpointAuthorize    EndpointName = "authorize"
-	EndpointToken        EndpointName = "token"
-	EndpointIntrospect   EndpointName = "introspect"
-	EndpointRevoke       EndpointName = "revoke"
-	EndpointUserinfo     EndpointName = "userinfo"
-	EndpointJWKS         EndpointName = "jwks"
-	EndpointDiscovery    EndpointName = "discovery"
-	EndpointHealth       EndpointName = "health"
-	EndpointRegister     EndpointName = "register"
-	EndpointConsent      EndpointName = "consent"
-	EndpointEnroll       EndpointName = "enroll"
-	EndpointSession      EndpointName = "session"
-	EndpointWebAuthn     EndpointName = "webauthn"
+	EndpointAuthorize  EndpointName = "authorize"
+	EndpointToken      EndpointName = "token"
+	EndpointIntrospect EndpointName = "introspect"
+	EndpointRevoke     EndpointName = "revoke"
+	EndpointUserinfo   EndpointName = "userinfo"
+	EndpointJWKS       EndpointName = "jwks"
+	EndpointDiscovery  EndpointName = "discovery"
+	EndpointHealth     EndpointName = "health"
+	EndpointRegister   EndpointName = "register"
+	EndpointConsent    EndpointName = "consent"
+	EndpointEnroll     EndpointName = "enroll"
+	EndpointSession    EndpointName = "session"
+	EndpointWebAuthn   EndpointName = "webauthn"
 )
 
 // OutcomeKind is the closed set of coarse operation outcomes.
