@@ -254,6 +254,65 @@ func (v *JWTVerifier) VerifyAccessToken(ctx context.Context, token string) (*Ver
 	return claims, nil
 }
 
+// VerifySignatureOnly verifies a JWT's signature and issuer but SKIPS the
+// expiry check. This is used for id_token_hint validation in RP-Initiated
+// Logout (OIDC RP-Initiated Logout 1.0) where users may log out with expired
+// tokens — the signature proves the token was genuinely issued by Harbor, and
+// the sub claim identifies the user/client pair for session revocation.
+//
+// Returns the verified claims on success, or an error if:
+//   - The JWT is malformed (ErrTokenInvalid)
+//   - The signature is invalid (ErrTokenInvalid)
+//   - The issuer doesn't match (ErrIssuerMismatch)
+//
+// NOTE: This method does NOT check revocation status since id_token_hint
+// validation doesn't need it — we're revoking sessions, not granting access.
+func (v *JWTVerifier) VerifySignatureOnly(ctx context.Context, token string) (*VerifiedClaims, error) {
+	// Step 1: Parse the JWT
+	header, payload, sig, err := parseCompactJWT(token)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrTokenInvalid, err)
+	}
+
+	// Verify header algorithm
+	var h jwtHeader
+	if err := json.Unmarshal(header, &h); err != nil {
+		return nil, fmt.Errorf("%w: invalid header", ErrTokenInvalid)
+	}
+	if h.Alg != "ES256" {
+		return nil, fmt.Errorf("%w: unsupported algorithm %s", ErrTokenInvalid, h.Alg)
+	}
+
+	// Step 2: Verify signature
+	if v.pubKey == nil {
+		return nil, fmt.Errorf("%w: no public key configured", ErrTokenInvalid)
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("%w: invalid format", ErrTokenInvalid)
+	}
+	signingInput := parts[0] + "." + parts[1]
+	if !verifyES256Signature(v.pubKey, []byte(signingInput), sig) {
+		return nil, fmt.Errorf("%w: signature verification failed", ErrTokenInvalid)
+	}
+
+	// Parse claims
+	claims, err := v.parseClaims(payload)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrTokenInvalid, err)
+	}
+
+	// Step 3: Check issuer coherence (skip expiry check intentionally)
+	if v.expectedIssuer != "" && claims.Issuer != v.expectedIssuer {
+		return nil, fmt.Errorf("%w: token iss %q != expected %q", ErrIssuerMismatch, claims.Issuer, v.expectedIssuer)
+	}
+
+	// NOTE: Expiry check is intentionally skipped — users may log out with
+	// expired tokens, and we only need the signature to prove authenticity.
+
+	return claims, nil
+}
+
 // DBRevokedJTIChecker adapts DBRevokedJTIStore to the RevokedJTIChecker interface.
 type DBRevokedJTIChecker struct {
 	store interface {
