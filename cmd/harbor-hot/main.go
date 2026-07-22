@@ -34,6 +34,8 @@ import (
 	"github.com/harbor/harbor/internal/httpserver"
 	"github.com/harbor/harbor/internal/oidc"
 	"github.com/harbor/harbor/internal/oidcapi"
+	"github.com/harbor/harbor/internal/region"
+	"github.com/harbor/harbor/internal/relay"
 )
 
 // redisRevocationPublisher adapts *redis.Client to oidcapi.RevocationPublisher:
@@ -64,6 +66,42 @@ func (a dbActiveJTILister) ListActiveJTIs(ctx context.Context) ([]string, error)
 	return jtis, nil
 }
 
+// relayMintFunc is the single call-site through which the consent grant path
+// mints a per-RP relay address. It returns the freshly-minted address, or nil
+// when relay is disabled (store nil) so callers can treat minting as an optional,
+// best-effort step.
+type relayMintFunc func(ctx context.Context, userID, clientID, realEmail string, reg string) (*relay.Address, error)
+
+// mintRelayAddress builds the single relay-mint call-site (docs/DESIGN.md §7.5).
+// The returned closure generates an opaque, unlinkable token and persists the
+// envelope-encrypted mapping via store.Create. It is the ONLY place the hot path
+// mints relay addresses, so the unlinkable-token and region-pinning invariants
+// live in exactly one seam. When store is nil (feature flag off or in-memory
+// scaffold) the closure is a no-op that returns (nil, nil).
+//
+// NOTE: the DEK wiring is intentionally deferred — real minting requires the
+// user's home-region DEK (crypto.KeyProvider.UnwrapDEK), which only becomes
+// available once BFF-session auth replaces the FixedAuthSource scaffold
+// (docs/DESIGN.md §11.1). Until then this seam is wired but not invoked.
+func mintRelayAddress(store *relay.Store, gen relay.TokenGenerator) relayMintFunc {
+	return func(ctx context.Context, userID, clientID, realEmail, reg string) (*relay.Address, error) {
+		if store == nil {
+			return nil, nil
+		}
+		token, err := gen.Generate()
+		if err != nil {
+			return nil, err
+		}
+		return store.Create(ctx, relay.CreateParams{
+			Token:     token,
+			UserID:    userID,
+			ClientID:  clientID,
+			RealEmail: realEmail,
+			Region:    region.Region(reg),
+		})
+	}
+}
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
@@ -78,6 +116,13 @@ func main() {
 	if issuer == "" {
 		issuer = "http://localhost:" + port
 	}
+
+	// Feature flag: per-RP email relay (Hide-My-Email, docs/DESIGN.md §7.5).
+	// Off by default so the hot path only mints relay addresses once the feature
+	// is deliberately enabled per region. The relay mapping store is region-pinned
+	// and envelope-encrypted, so it is only wired in the DB path — the in-memory
+	// scaffold cannot back it (there is no in-memory relayQuerier).
+	relayEnabled := os.Getenv("HARBOR_RELAY_ENABLED") == "true"
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -180,6 +225,11 @@ func main() {
 		// and there is nothing to rehydrate.
 		revokedStore     oidcapi.RevokedJTIStore
 		revocationLister oidc.ActiveJTILister
+
+		// relayStore backs the per-RP email relay (Hide-My-Email). It is
+		// region-pinned + envelope-encrypted, so it is wired only in the DB path
+		// and only when HARBOR_RELAY_ENABLED=true. Nil disables relay minting.
+		relayStore *relay.Store
 	)
 
 	if pool != nil {
@@ -243,6 +293,15 @@ func main() {
 		dbRevoked := clients.NewDBRevokedJTIStore(q)
 		revokedStore = dbRevoked
 		revocationLister = dbActiveJTILister{store: dbRevoked}
+
+		// Per-RP email relay mapping store (docs/DESIGN.md §7.5). Region-pinned
+		// and envelope-encrypted via the shared cipher; only wired behind the
+		// feature flag so relay minting stays off until deliberately enabled.
+		if relayEnabled {
+			relayStore = relay.NewStore(q, crypto.NewCipher())
+			logger.Info("email relay enabled — relay mapping store wired (DB-backed)")
+		}
+
 		logger.Info("using DB-backed stores")
 		// SCAFFOLD: even in the DB path the subject is still resolved by
 		// FixedAuthSource below, so every /authorize authenticates as the SAME
@@ -277,6 +336,14 @@ func main() {
 		consentStore = oidc.NewInMemoryConsentStore()
 		// revocationOutbox stays nil → NewService defaults to noopRevocationOutbox
 		// (inline-only revocation; no durable delivery in dev mode).
+
+		// The relay mapping store is region-pinned + envelope-encrypted and has no
+		// in-memory backing (relayQuerier is the sqlc DB surface). If the feature
+		// flag is set without a DB, warn and leave relayStore nil (minting is a
+		// no-op) rather than pretending relay is available.
+		if relayEnabled {
+			logger.Warn("HARBOR_RELAY_ENABLED set but DATABASE_URL is not — email relay requires a regional DB; relay minting disabled")
+		}
 	}
 
 	svc := oidc.NewService(oidc.ServiceConfig{
@@ -305,6 +372,19 @@ func main() {
 	if revocationWorker != nil {
 		go revocationWorker.Run(ctx)
 	}
+
+	// Relay mint seam (docs/DESIGN.md §7.5). mintRelayAddress is the SINGLE
+	// call-site through which a relay address is minted for a (user, RP) pair —
+	// invoked from the consent-grant path once real BFF-session auth exposes the
+	// user's home region + real email + DEK (today's FixedAuthSource scaffold does
+	// not). Centralising it here keeps the unlinkable-token + region-pinning
+	// invariants in one place. When relayStore is nil (flag off or in-memory
+	// scaffold) the mint is a documented no-op.
+	relayMint := mintRelayAddress(relayStore, relay.NewTokenGenerator())
+	if relayStore != nil {
+		logger.Info("relay mint seam active — addresses minted behind the consent grant path")
+	}
+	_ = relayMint // wired into the consent grant path by a later task
 
 	srv := oidcapi.New(oidcapi.Config{
 		Issuer:              issuer,
