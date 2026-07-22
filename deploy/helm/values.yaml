@@ -1,0 +1,176 @@
+# Default values for the Harbor chart. Mirrors the reference manifests in
+# deploy/k8s/ but parameterized for reuse across environments.
+#
+# Apply with:  helm install harbor deploy/helm/ -n harbor --create-namespace
+#          or: helm template harbor deploy/helm/ | kubectl apply -f -
+#
+# SCAFFOLD: for a real deployment you MUST at minimum:
+#   1. pin global.image.tag to an immutable @sha256 digest (per component);
+#   2. provide real secrets (hot.secrets.* / mgmt.secrets.*) or wire
+#      existingSecret to a secrets manager (Vault / External Secrets Operator);
+#   3. provision the Ingress TLS cert (ingress.tlsSecretName) via cert-manager;
+#   4. set hot.issuer / ingress.host / mgmt.webauthn.* to your real domain.
+
+# ---------------------------------------------------------------------------
+# Global image settings (can be overridden per-component below).
+# ---------------------------------------------------------------------------
+global:
+  image:
+    # Registry + repository prefix shared by both binaries.
+    registry: ghcr.io/harbor-auth/harbor
+    # SCAFFOLD: ':latest' defeats rollbacks and lets a re-pull silently change
+    # the running binary. Pin to an immutable digest in production, or set a
+    # per-component `digest:` below.
+    tag: latest
+    pullPolicy: IfNotPresent
+
+# ---------------------------------------------------------------------------
+# Region this deployment serves. Binds the issuer/RP-origin hosts to a region
+# so the fail-closed region middleware in both binaries resolves them instead
+# of 400-rejecting (harbor-mgmt refuses to boot if its RP origin does not
+# resolve). Single-region/dev deployments MUST set this. One of: EU, US, etc.
+# ---------------------------------------------------------------------------
+region: EU
+
+# ---------------------------------------------------------------------------
+# harbor-hot: the stateless, internet-facing OIDC hot path
+# (/authorize, /token, /jwks, discovery). Owns no mutable PII state, so it
+# scales horizontally freely — the HPA drives the real replica count.
+# ---------------------------------------------------------------------------
+hot:
+  # Initial/floor replica count. When hpa.enabled is true the HPA owns scaling
+  # above this (this value is ignored on subsequent reconciles).
+  replicaCount: 3
+  image:
+    repository: harbor-hot
+    # digest: ""   # optional: "@sha256:..." to pin the image immutably
+  # Container port harbor-hot listens on (PORT env).
+  port: 8080
+  # ISSUER anchors the OIDC discovery document. MUST be the public HTTPS URL
+  # clients reach (matches ingress.host below), and MUST be per-region in a
+  # multi-region deployment.
+  issuer: https://auth.example.com
+  resources:
+    requests:
+      cpu: 100m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  hpa:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+    # Scale in slowly to avoid thrashing under bursty auth traffic.
+    scaleDownStabilizationWindowSeconds: 300
+  pdb:
+    enabled: true
+    minAvailable: 2
+  networkPolicy:
+    enabled: true
+    # Value of the kubernetes.io/metadata.name label on the namespace running
+    # your ingress controller. SCAFFOLD: adjust to match your cluster.
+    ingressControllerNamespace: ingress-nginx
+  # Credentials — set these directly, OR set existingSecret to reference a
+  # Secret you manage out-of-band (recommended for production).
+  secrets:
+    # If set, the chart does NOT create a Secret and instead references this one
+    # (which must expose DATABASE_URL / REDIS_URL / KEK_SECRET keys).
+    existingSecret: ""
+    # postgres://… DSN. harbor-hot reads clients/grants/sessions/secrets here.
+    databaseUrl: ""
+    # redis://… URL. REQUIRED when replicaCount > 1: without it auth codes live
+    # in-process and cross-replica /token exchanges fail.
+    redisUrl: ""
+    # 256-bit hex key-encryption-key wrapping per-user pairwise-secret DEKs.
+    # Generate: openssl rand -hex 32
+    kekSecret: ""
+
+# ---------------------------------------------------------------------------
+# harbor-mgmt: the cold-path management binary (passkey ceremonies, user
+# enrollment, dashboard/BFF, consent/audit). NOT internet-facing — reached only
+# via the cluster-internal Service and locked down by NetworkPolicy.
+# ---------------------------------------------------------------------------
+mgmt:
+  # Pinned to 1 until the ceremony/session store is DB-backed — harbor-mgmt uses
+  # in-memory WebAuthn state that does not survive restarts or cross-pod routing
+  # (a ceremony begun on one pod fails when finished on another). Do not raise
+  # above 1 until then. See docs/plans/user-enrollment.md.
+  replicaCount: 1
+  image:
+    repository: harbor-mgmt
+    # digest: ""
+  port: 8081
+  # WebAuthn Relying Party config.
+  webauthn:
+    # Effective domain (no scheme/port). Passkeys are scoped to this; it MUST be
+    # a registrable suffix of rpOrigin.
+    rpId: example.com
+    # Human-facing Relying Party name shown in browser passkey prompts.
+    rpName: Harbor
+    # Fully-qualified origin permitted to run ceremonies (the dashboard/BFF
+    # origin, NOT the issuer).
+    rpOrigin: https://dashboard.example.com
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  pdb:
+    enabled: true
+    minAvailable: 1
+  networkPolicy:
+    enabled: true
+  secrets:
+    existingSecret: ""
+    databaseUrl: ""
+    # 256-bit hex key-encryption-key sealing enrolled users' pairwise-secret
+    # DEKs. Generate: openssl rand -hex 32
+    kekSecret: ""
+
+# ---------------------------------------------------------------------------
+# Ingress for harbor-hot ONLY. harbor-mgmt is deliberately cluster-internal and
+# has no Ingress.
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: true
+  className: nginx
+  # MUST match hot.issuer (minus the scheme), or OIDC discovery will advertise
+  # endpoints under a different origin than clients reach.
+  host: auth.example.com
+  # SCAFFOLD: provision this cert (e.g. via cert-manager) — the Secret must
+  # exist before the Ingress can terminate TLS.
+  tlsSecretName: harbor-tls
+  annotations:
+    # Force TLS: an OIDC issuer over plaintext leaks codes/tokens.
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    # Keep proxy timeouts tight — hot-path requests are fast.
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "5"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "30"
+
+# ---------------------------------------------------------------------------
+# Namespace. Set create: false if the namespace already exists (e.g. Helm is
+# installed with `-n harbor` into a pre-existing namespace).
+# ---------------------------------------------------------------------------
+namespace:
+  create: true
+  # Pod Security Standards profile enforced namespace-wide. The Deployment
+  # securityContexts already comply with 'restricted'.
+  podSecurityProfile: restricted
+
+# ---------------------------------------------------------------------------
+# ServiceAccounts (one per binary, both with token automounting disabled —
+# neither binary calls the Kubernetes API). Set create: false to bring your own.
+# ---------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  automountServiceAccountToken: false
+
+# Extra labels merged onto every chart-managed resource.
+extraLabels: {}

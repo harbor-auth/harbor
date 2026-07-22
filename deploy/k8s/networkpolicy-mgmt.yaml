@@ -1,0 +1,56 @@
+# NetworkPolicy: defense-in-depth for harbor-mgmt (the PII-handling cold path).
+# Even though there's no Ingress for mgmt, this makes the isolation explicit and
+# enforced at the network layer rather than relying on the absence of a route.
+#
+#   Ingress — ONLY from pods in the harbor namespace (podSelector: {}). Nothing
+#             outside the namespace (and by extension nothing from the internet)
+#             can open :8081. Tighten `from` to a specific dashboard/BFF pod
+#             label if/when that component is labelled.
+#   Egress  — only what mgmt actually needs: Postgres (5432) for enrollment
+#             writes, and DNS (53) for service discovery. Everything else is
+#             denied, so a compromised mgmt pod can't exfiltrate freely.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: harbor-mgmt
+  namespace: harbor
+  labels:
+    app.kubernetes.io/name: harbor-mgmt
+    app.kubernetes.io/part-of: harbor
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: harbor-mgmt
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        # Same-namespace pods only. An empty podSelector selects all pods in
+        # THIS namespace (NetworkPolicy `from` is namespace-scoped by default).
+        - podSelector: {}
+      ports:
+        # Numeric port (not the named 'http') — NetworkPolicy named-port
+        # resolution is fragile across CNIs, so pin the container port directly.
+        - port: 8081
+          protocol: TCP
+  egress:
+    # DNS resolution (kube-dns / CoreDNS). Both UDP and TCP on 53.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Regional PostgreSQL.
+    # SCAFFOLD: podSelector only matches same-namespace postgres pods. If your
+    # DB is in another namespace or is managed/external, replace with an ipBlock
+    # or add a namespaceSelector — otherwise this egress rule silently blocks.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgres
+      ports:
+        - port: 5432
+          protocol: TCP

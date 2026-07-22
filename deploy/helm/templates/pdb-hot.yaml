@@ -1,0 +1,17 @@
+{{- if .Values.hot.pdb.enabled }}
+# PDB: during voluntary disruptions (node drains, upgrades) keep enough
+# harbor-hot pods serving so sign-in stays available. Pairs with
+# maxUnavailable: 0 in the Deployment for zero-drop rollouts.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "harbor.fullname" . }}-hot
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.hot.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.hot.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "harbor.hot.selectorLabels" . | nindent 6 }}
+{{- end }}

@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-07-22
+goal: Make region a first-class, request-scoped, fail-closed property — a total host/issuer → region resolver (unknown host rejected, never defaulted), a request-scoped region context that pins datastore selection so a handler cannot reach another region's store, a cross-region PII guard that returns a defined error (metered, never partial data) on a region mismatch, and issuer/host coherence so a token minted in one region is only ever verified/introspected on that region's issuer surface — realising the §5 residency boundary with no cross-region replication or lookup

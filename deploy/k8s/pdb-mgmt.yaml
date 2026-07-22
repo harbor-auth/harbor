@@ -1,0 +1,15 @@
+# PDB: keep at least 1 harbor-mgmt pod up through voluntary disruptions so
+# enrollment / passkey ceremonies aren't fully unavailable during a drain.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: harbor-mgmt
+  namespace: harbor
+  labels:
+    app.kubernetes.io/name: harbor-mgmt
+    app.kubernetes.io/part-of: harbor
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harbor-mgmt

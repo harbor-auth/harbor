@@ -1,0 +1,962 @@
+package oidc
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
+	"log/slog"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// SessionResolver stands in for the passkey-login + consent step of the flow
+// (docs/DESIGN.md §11.2). It returns the resolved subject (PPID) for the user
+// authenticating to this client, and whether they approved consent.
+//
+// SCAFFOLD SEAM: the real implementation runs the hosted auth UI — WebAuthn
+// login (internal/webauthn), MFA/step-up, and the consent screen — and derives
+// the per-RP PPID (internal/identity). The stub below auto-approves a fixed demo
+// subject so /authorize is exercisable before that UI exists.
+type SessionResolver interface {
+	Resolve(ctx context.Context, client Client, scope string) (subject, userID string, approved bool, err error)
+}
+
+// stubSessionResolver auto-approves a fixed subject. SCAFFOLD only.
+type stubSessionResolver struct{ subject string }
+
+// NewStubSessionResolver returns a SessionResolver that always authenticates and
+// consents as subject. SCAFFOLD — replace with real passkey login + consent.
+func NewStubSessionResolver(subject string) SessionResolver {
+	return stubSessionResolver{subject: subject}
+}
+
+// Resolve always returns userID="" (empty). This is intentional for unit-test
+// simplicity — Token() gates issueRefreshToken on `result.Code.UserID != ""`
+// (docs/DESIGN.md §3.5), so any test using stubSessionResolver will NEVER
+// receive a refresh token through a full Authorize→Token flow. Use
+// PPIDSessionResolver with a FixedAuthSource for refresh-token integration
+// tests (see newRefreshFlowServerWithStore in refresh_rotation_test.go).
+func (r stubSessionResolver) Resolve(_ context.Context, _ Client, _ string) (string, string, bool, error) {
+	return r.subject, "", true, nil
+}
+
+// RevocationSink receives the theft signal when an authorization code is reused:
+// every token minted from that code must be revoked (docs/DESIGN.md §11.7, §3.5).
+type RevocationSink interface {
+	RevokeCodeFamily(ctx context.Context, code AuthCode) error
+}
+
+// OutboxEntry is the domain type for a revocation signal queued in the outbox.
+// Defined here (not in internal/clients) to avoid circular imports.
+type OutboxEntry struct {
+	Reason   string // "refresh_reuse" | "code_reuse"
+	UserID   string
+	ClientID string
+	GrantID  string // may be empty if grant-id-fk is not yet wired
+}
+
+// RevocationOutbox enqueues durable revocation signals via the transactional
+// outbox pattern (docs/plans/revocation-outbox.md, DESIGN §3.5). The background
+// worker (RevocationWorker) polls DeliverPending to retry failed deliveries.
+type RevocationOutbox interface {
+	// Enqueue inserts a revocation signal into the outbox for durable delivery.
+	Enqueue(ctx context.Context, entry OutboxEntry) error
+}
+
+// noopRevocationSink is the default when no sink is wired.
+type noopRevocationSink struct{}
+
+func (noopRevocationSink) RevokeCodeFamily(context.Context, AuthCode) error { return nil }
+
+// noopRevocationOutbox is the default when no outbox is wired (dev/test only).
+// In production, wire DBRevocationOutbox for durable theft-signal delivery.
+type noopRevocationOutbox struct{}
+
+func (noopRevocationOutbox) Enqueue(context.Context, OutboxEntry) error { return nil }
+
+// RecordingRevocationSink records revoked code families in memory. Useful for
+// tests and dev wiring that want to assert the theft signal fired.
+type RecordingRevocationSink struct {
+	mu      sync.Mutex
+	revoked []AuthCode
+}
+
+// NewRecordingRevocationSink returns an empty recorder.
+func NewRecordingRevocationSink() *RecordingRevocationSink { return &RecordingRevocationSink{} }
+
+// RevokeCodeFamily implements RevocationSink.
+func (s *RecordingRevocationSink) RevokeCodeFamily(_ context.Context, code AuthCode) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.revoked = append(s.revoked, code)
+	return nil
+}
+
+// Revoked returns a copy of the revoked code families recorded so far.
+func (s *RecordingRevocationSink) Revoked() []AuthCode {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]AuthCode, len(s.revoked))
+	copy(out, s.revoked)
+	return out
+}
+
+// defaultCodeTTL is the authorization-code lifetime (~30–60s; docs/DESIGN.md
+// §11.7). Codes are single-use and short-lived.
+const defaultCodeTTL = 60 * time.Second
+
+// ServiceConfig wires the Service's collaborators. Clients, Codes, Tokens, and
+// Sessions are required; Revocations, NewCode, Now, and CodeTTL default to
+// sensible values (the last three are seams for deterministic tests).
+// Logger defaults to slog.Default() — never nil, never a no-op discard
+// (a silent default would re-introduce the error-swallow the field is here
+// to prevent; see docs/design/principles/error-handling.md §1.11).
+type ServiceConfig struct {
+	Issuer       string
+	Clients      ClientRegistry
+	Codes        AuthCodeStore
+	Tokens       TokenIssuer
+	Sessions     SessionResolver
+	SessionStore SessionStore     // optional; defaults to noopSessionStore (no refresh tokens)
+	Grants       GrantStore       // optional; defaults to noopGrantStore
+	Consents     ConsentStore     // optional; defaults to noopConsentStore (skip consent check)
+	Revocations  RevocationSink   // optional; defaults to noopRevocationSink
+	Outbox       RevocationOutbox // optional; defaults to noopRevocationOutbox (no durable delivery)
+	Logger       *slog.Logger
+	NewCode      func() (string, error)
+	NewSessionID func() (string, error) // optional; defaults to uuid.NewString
+	Now          func() time.Time
+	CodeTTL      time.Duration
+}
+
+// Service coordinates the pure validators (authorize.go, token.go, pkce.go) with
+// the stores and issuer. It holds no per-request state and performs no HTTP —
+// the thin HTTP layer is internal/oidcapi.
+type Service struct {
+	issuer       string
+	clients      ClientRegistry
+	codes        AuthCodeStore
+	tokens       TokenIssuer
+	sessions     SessionResolver
+	sessionStore SessionStore
+	grants       GrantStore
+	consents     ConsentStore
+	revocations  RevocationSink
+	outbox       RevocationOutbox
+	logger       *slog.Logger
+	newCode      func() (string, error)
+	newSessionID func() (string, error)
+	now          func() time.Time
+	codeTTL      time.Duration
+}
+
+// NewService builds a Service, applying defaults for the optional config fields.
+func NewService(cfg ServiceConfig) *Service {
+	svc := &Service{
+		issuer:       cfg.Issuer,
+		clients:      cfg.Clients,
+		codes:        cfg.Codes,
+		tokens:       cfg.Tokens,
+		sessions:     cfg.Sessions,
+		sessionStore: cfg.SessionStore,
+		grants:       cfg.Grants,
+		consents:     cfg.Consents,
+		revocations:  cfg.Revocations,
+		outbox:       cfg.Outbox,
+		logger:       cfg.Logger,
+		newCode:      cfg.NewCode,
+		newSessionID: cfg.NewSessionID,
+		now:          cfg.Now,
+		codeTTL:      cfg.CodeTTL,
+	}
+	if svc.grants == nil {
+		svc.grants = noopGrantStore{}
+	}
+	if svc.consents == nil {
+		svc.consents = noopConsentStore{}
+	}
+	if svc.sessionStore == nil {
+		svc.sessionStore = noopSessionStore{}
+	}
+	if svc.revocations == nil {
+		svc.revocations = noopRevocationSink{}
+	}
+	if svc.outbox == nil {
+		svc.outbox = noopRevocationOutbox{}
+	}
+	if svc.logger == nil {
+		svc.logger = slog.Default()
+	}
+	if svc.newCode == nil {
+		svc.newCode = defaultNewCode
+	}
+	if svc.newSessionID == nil {
+		// Session IDs must be valid UUIDs — DBSessionStore stores them in a
+		// uuid column and rejects any non-UUID string. defaultNewCode returns
+		// a base64url string, which would fail every DB CreateSession/Rotate.
+		svc.newSessionID = func() (string, error) { return uuid.NewString(), nil }
+	}
+	if svc.now == nil {
+		svc.now = time.Now
+	}
+	if svc.codeTTL == 0 {
+		svc.codeTTL = defaultCodeTTL
+	}
+	// Misconfiguration guard (catches both cfg.Grants == nil and the typed-non-nil
+	// bypass where the caller passes cfg.Grants = noopGrantStore{} explicitly).
+	// A real SessionStore with noopGrantStore means every Refresh() returns
+	// invalid_grant (noopGrantStore returns found=false for every lookup) — an
+	// invisible production outage. Panic at construction so the bug surfaces at
+	// startup rather than silently in production traffic.
+	// The inverse (Grants without SessionStore) is legitimate: PPID resolution
+	// uses grants; refresh tokens are independently optional.
+	if cfg.SessionStore != nil {
+		if _, isNoop := svc.grants.(noopGrantStore); isNoop {
+			panic("oidc: ServiceConfig.SessionStore is set but Grants is noopGrantStore — " +
+				"Refresh() will return invalid_grant for every valid token; " +
+				"wire both or neither")
+		}
+	}
+	return svc
+}
+
+// AuthorizeResult is a successful /authorize outcome: a redirect back to the RP
+// carrying the freshly-issued code and echoed state.
+type AuthorizeResult struct {
+	RedirectURI string
+	Code        string
+	State       string
+}
+
+// AuthorizeWithUserRequest is the input for AuthorizeWithUser, used by the BFF
+// flow to issue a code after the user has already authenticated via passkey.
+type AuthorizeWithUserRequest struct {
+	ClientID            string
+	RedirectURI         string
+	Scope               string
+	State               string
+	Nonce               string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	// UserID is the authenticated user's internal ID from the BFF session.
+	UserID string
+}
+
+// ValidateAuthorizeRequest validates an /authorize request without running login/consent
+// or issuing a code. This is used by the BFF flow to validate the request before
+// creating a BFF session and redirecting to the login UI.
+//
+// On success, returns the validated request data needed to create a BFF session.
+// On failure, returns an *AuthorizeError whose Channel tells the HTTP layer whether
+// it is safe to redirect (docs/DESIGN.md §11.7).
+func (s *Service) ValidateAuthorizeRequest(ctx context.Context, req AuthorizeRequest) (*ValidatedAuthorize, *AuthorizeError) {
+	var client *Client
+	if c, ok := s.clients.Lookup(ctx, req.ClientID); ok {
+		client = &c
+	}
+	return ValidateAuthorize(req, client)
+}
+
+// AuthorizeWithUser issues a code for a pre-authenticated user (BFF flow).
+// This is called by /authorize/complete after the passkey ceremony has set the
+// user_id in the BFF session. It runs the SessionResolver with the known user_id
+// to derive the PPID and record consent.
+//
+// On any validation failure it returns an *AuthorizeError whose Channel tells
+// the HTTP layer whether it is safe to redirect (docs/DESIGN.md §11.7).
+func (s *Service) AuthorizeWithUser(ctx context.Context, req AuthorizeWithUserRequest) (*AuthorizeResult, *AuthorizeError) {
+	var client *Client
+	if c, ok := s.clients.Lookup(ctx, req.ClientID); ok {
+		client = &c
+	}
+	if client == nil {
+		return nil, &AuthorizeError{
+			Code:        ErrCodeUnauthorizedClient,
+			Description: "unknown client",
+			Channel:     ChannelErrorPage,
+		}
+	}
+
+	// The user is already authenticated — run the session resolver to derive PPID
+	// and record consent. The resolver uses the user_id from the BFF session.
+	subject, _, approved, err := s.sessions.Resolve(ctx, *client, req.Scope)
+	if err != nil {
+		return nil, redirectErr(ErrCodeServerError, "login could not be completed")
+	}
+	if !approved {
+		return nil, redirectErr(ErrCodeAccessDenied, "the user did not grant consent")
+	}
+
+	codeStr, err := s.newCode()
+	if err != nil {
+		return nil, redirectErr(ErrCodeServerError, "could not issue authorization code")
+	}
+
+	code := AuthCode{
+		Code:                codeStr,
+		ClientID:            req.ClientID,
+		RedirectURI:         req.RedirectURI,
+		Scope:               req.Scope,
+		Subject:             subject,
+		UserID:              req.UserID,
+		Nonce:               req.Nonce,
+		CodeChallenge:       req.CodeChallenge,
+		CodeChallengeMethod: req.CodeChallengeMethod,
+		ExpiresAt:           s.now().Add(s.codeTTL),
+	}
+	if err := s.codes.Save(ctx, code); err != nil {
+		return nil, redirectErr(ErrCodeServerError, "could not persist authorization code")
+	}
+
+	return &AuthorizeResult{
+		RedirectURI: req.RedirectURI,
+		Code:        codeStr,
+		State:       req.State,
+	}, nil
+}
+
+// Authorize validates the request, runs the (stubbed) login/consent step, then
+// issues and stores a single-use authorization code. On any validation failure
+// it returns an *AuthorizeError whose Channel tells the HTTP layer whether it is
+// safe to redirect (docs/DESIGN.md §11.7).
+func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (*AuthorizeResult, *AuthorizeError) {
+	var client *Client
+	if c, ok := s.clients.Lookup(ctx, req.ClientID); ok {
+		client = &c
+	}
+
+	validated, aerr := ValidateAuthorize(req, client)
+	if aerr != nil {
+		return nil, aerr
+	}
+
+	// Login + consent (SCAFFOLD: auto-approves a demo subject). A real rejection
+	// here is access_denied, redirected back to the RP (docs/DESIGN.md §11.7).
+	subject, userID, approved, err := s.sessions.Resolve(ctx, validated.Client, validated.Scope)
+	if err != nil {
+		return nil, redirectErr(ErrCodeServerError, "login could not be completed")
+	}
+	if !approved {
+		return nil, redirectErr(ErrCodeAccessDenied, "the user did not grant consent")
+	}
+
+	// Consent check: lookup existing consent and apply decision logic.
+	// This runs AFTER authentication (userID is known) but BEFORE code issuance.
+	if userID != "" {
+		requestedScopes := strings.Fields(validated.Scope)
+		existingGrant, found, err := s.consents.Get(ctx, userID, validated.Client.ID)
+		if err != nil {
+			s.logger.ErrorContext(ctx, "consent lookup failed",
+				slog.String("client_id", validated.Client.ID),
+				slog.Any("error", err))
+			return nil, redirectErr(ErrCodeServerError, "could not check consent status")
+		}
+
+		var grantPtr *ConsentGrant
+		if found {
+			grantPtr = &existingGrant
+		}
+
+		decision, decErr := ConsentDecision(grantPtr, requestedScopes, req.Prompt)
+		if decErr != nil {
+			// ErrInteractionRequired is an *AuthorizeError
+			var authErr *AuthorizeError
+			if errors.As(decErr, &authErr) {
+				return nil, authErr
+			}
+			return nil, redirectErr(ErrCodeServerError, "consent decision failed")
+		}
+
+		// Persist the consent grant on approval. The SessionResolver has already
+		// handled the consent ceremony (approved == true at this point).
+		// - If skip=true, the existing grant already covers the scopes, but we
+		//   still upsert to update the timestamp (last-used tracking).
+		// - If escalation=true, use MergedScopes (existing + newly requested).
+		// - Otherwise, use the requested scopes.
+		scopesToPersist := requestedScopes
+		if decision.Escalation && len(decision.MergedScopes) > 0 {
+			scopesToPersist = decision.MergedScopes
+		}
+		if _, err := s.consents.Upsert(ctx, userID, validated.Client.ID, scopesToPersist); err != nil {
+			s.logger.ErrorContext(ctx, "consent upsert failed",
+				slog.String("client_id", validated.Client.ID),
+				slog.Any("error", err))
+			return nil, redirectErr(ErrCodeServerError, "could not persist consent")
+		}
+	}
+
+	codeStr, err := s.newCode()
+	if err != nil {
+		return nil, redirectErr(ErrCodeServerError, "could not issue authorization code")
+	}
+
+	authTime := s.now()
+	code := AuthCode{
+		Code:                codeStr,
+		ClientID:            validated.Client.ID,
+		RedirectURI:         validated.RedirectURI,
+		Scope:               validated.Scope,
+		Subject:             subject,
+		UserID:              userID,
+		Nonce:               validated.Nonce,
+		CodeChallenge:       validated.CodeChallenge,
+		CodeChallengeMethod: validated.CodeChallengeMethod,
+		ExpiresAt:           authTime.Add(s.codeTTL),
+		AuthTime:            authTime,
+		// TODO(webauthn): populate ACR/AMR from the actual authentication ceremony.
+		// For now, hardcode WebAuthn values for OIDF conformance testing.
+		ACR: "urn:harbor:ac:webauthn",
+		AMR: []string{"hwk", "user"},
+	}
+	if err := s.codes.Save(ctx, code); err != nil {
+		return nil, redirectErr(ErrCodeServerError, "could not persist authorization code")
+	}
+
+	return &AuthorizeResult{
+		RedirectURI: validated.RedirectURI,
+		Code:        codeStr,
+		State:       validated.State,
+	}, nil
+}
+
+// Token exchanges an authorization code for tokens. The ordering is the
+// auth-code-DoS defense (docs/DESIGN.md §11.7): a request that fails binding or
+// PKCE must NOT burn a valid one-time code, or an attacker holding a stolen code
+// could lock the legitimate user out. So we:
+//
+//  1. validate params (grant_type + presence);
+//  2. PEEK the code (no mutation) — unknown → invalid_grant; already consumed →
+//     theft signal (revoke the code family) + invalid_grant;
+//  3. validate binding + expiry + PKCE against the peeked code — on failure
+//     return WITHOUT consuming (the code stays valid for its real owner);
+//  4. only on success CONSUME (single-use). A racing second exchange that wins
+//     the tombstone here still surfaces as reuse (revoke + invalid_grant).
+func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *TokenError) {
+	if terr := ValidateTokenParams(req); terr != nil {
+		return nil, terr
+	}
+
+	stored, found, consumed, err := s.codes.Peek(ctx, req.Code)
+	if err != nil {
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not read authorization code", Status: 500}
+	}
+	if !found {
+		return nil, invalidGrant("authorization code is invalid")
+	}
+	if consumed {
+		// Assume theft: revoke everything minted from this code.
+		// Raw ctx: signalCodeReuse self-enforces context.WithoutCancel + 10 s timeout internally.
+		s.signalCodeReuse(ctx, stored)
+		return nil, invalidGrant("authorization code has already been used")
+	}
+
+	// Validate against the STORED code before burning it. A failure here leaves
+	// the code intact for the legitimate owner.
+	if terr := ValidateTokenExchange(req, stored, s.now()); terr != nil {
+		return nil, terr
+	}
+
+	// Only now consume (single-use). Handle a lost race on the tombstone.
+	result, err := s.codes.Consume(ctx, req.Code)
+	if err != nil {
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not consume authorization code", Status: 500}
+	}
+	switch result.Status {
+	case ConsumeNotFound:
+		return nil, invalidGrant("authorization code is invalid")
+	case ConsumeReused:
+		// Raw ctx: signalCodeReuse self-enforces context.WithoutCancel + 10 s timeout internally.
+		s.signalCodeReuse(ctx, result.Code)
+		return nil, invalidGrant("authorization code has already been used")
+	}
+
+	tokens, err := s.tokens.Issue(ctx, IssueParams{
+		Issuer:   s.issuer,
+		Subject:  result.Code.Subject,
+		ClientID: result.Code.ClientID,
+		Scope:    result.Code.Scope,
+		Nonce:    result.Code.Nonce,
+		AuthTime: result.Code.AuthTime.Unix(),
+		ACR:      result.Code.ACR,
+		AMR:      result.Code.AMR,
+	})
+	if err != nil {
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not issue tokens", Status: 500}
+	}
+
+	// Issue an opaque, rotating refresh token ONLY when offline_access was
+	// granted AND we captured a real user_id at consent time (docs/DESIGN.md
+	// §3.5). A refresh-token store or generation failure must NOT fail the token
+	// response — the access/ID tokens are already valid — but it is logged, never
+	// silently swallowed.
+	if scopeHasOfflineAccess(result.Code.Scope) && result.Code.UserID != "" {
+		s.issueRefreshToken(ctx, &tokens, result.Code)
+	}
+	return &tokens, nil
+}
+
+// issueRefreshToken mints an opaque refresh token, stores only its hash, and
+// (on success) attaches the plaintext + TTL to tokens. Best-effort: a failure is
+// logged and leaves tokens without a refresh token rather than failing the
+// whole exchange.
+//
+// The user's home region is recovered from the consent grant (just created by
+// PPIDSessionResolver.Resolve) so the session satisfies the user-owned-row
+// contract (DESIGN §10). Fail-closed on region: if the grant cannot be found
+// (consent revoked in the ~60s code-TTL window, or noopGrantStore dev wiring)
+// the refresh token is skipped — an unregioned session would propagate forever
+// through RotateSession's `newSession.Region = session.Region` copy.
+// The H9-2 panic guard ensures that in production (real SessionStore) a real
+// GrantStore is always wired, so the not-found path is a genuine edge case.
+func (s *Service) issueRefreshToken(ctx context.Context, tokens *IssuedTokens, code AuthCode) {
+	// Recover the region from the consent grant. Fail-closed: if the grant is
+	// gone (consent revoked between /authorize and /token, or noopGrantStore
+	// dev wiring), skip the refresh token rather than creating an unregioned
+	// session that propagates the empty region forever via RotateSession.
+	grant, found, err := s.grants.FindGrant(ctx, code.UserID, code.ClientID)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "failed to recover grant region for refresh session — skipping refresh token",
+			slog.String("client_id", code.ClientID),
+			slog.Any("error", err))
+		return
+	}
+	if !found {
+		// Consent was revoked between Authorize and Token (race), or this is a
+		// noopGrantStore dev wiring (SessionStore also noop in that case per the
+		// NewService panic guard). Either way, skip the refresh token.
+		s.logger.WarnContext(ctx, "skipping refresh token: no active grant found — consent may have been revoked between /authorize and /token",
+			slog.String("client_id", code.ClientID))
+		return
+	}
+
+	plaintext, hash, err := newOpaqueToken()
+	if err != nil {
+		s.logger.ErrorContext(ctx, "failed to generate refresh token", slog.Any("error", err))
+		return
+	}
+	sessionID, err := s.newSessionID()
+	if err != nil {
+		s.logger.ErrorContext(ctx, "failed to generate refresh session id", slog.Any("error", err))
+		return
+	}
+	rs := RefreshSession{
+		ID:        sessionID,
+		Region:    grant.Region,
+		UserID:    code.UserID,
+		ClientID:  code.ClientID,
+		GrantID:   grant.ID,
+		TokenHash: hash,
+		ExpiresAt: s.now().Add(defaultRefreshTTL),
+		AuthTime:  code.AuthTime.Unix(),
+		ACR:       code.ACR,
+		AMR:       code.AMR,
+	}
+	if err := s.sessionStore.CreateSession(ctx, rs); err != nil {
+		s.logger.ErrorContext(ctx, "failed to store refresh session",
+			slog.String("client_id", code.ClientID),
+			slog.Any("error", err))
+		return
+	}
+	tokens.RefreshToken = encodeRefreshToken(plaintext)
+	tokens.RefreshExpiresIn = int(defaultRefreshTTL.Seconds())
+}
+
+// scopeHasOfflineAccess reports whether the space-delimited scope string
+// contains offline_access — the gate for issuing a refresh token (§3.5).
+func scopeHasOfflineAccess(scope string) bool {
+	for _, s := range strings.Fields(scope) {
+		if s == "offline_access" {
+			return true
+		}
+	}
+	return false
+}
+
+// Refresh rotates a refresh token (grant_type=refresh_token; docs/DESIGN.md
+// §3.5). The ordering mirrors the auth-code DoS/theft defense in Token():
+//
+//  1. Decode + hash the presented opaque token (never store/log the plaintext).
+//  2. Look it up. Unknown/expired -> invalid_grant. Already-revoked -> THEFT
+//     signal: revoke the whole (user, client) session family + invalid_grant.
+//  3. Validate client binding + expiry against the stored session.
+//  4. Rotate one-time: revoke old, create new (fresh opaque token), then mint a
+//     fresh access/ID token from the frozen grant.
+//
+// Reuse of a rotated token is caught in step 2 because RevokeSession tombstones
+// (rather than deletes) the old session.
+func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens, *TokenError) {
+	// ValidateTokenParams is called here (not only at the oidcapi HTTP layer) so
+	// that svc.Refresh() is safe to call directly — e.g. in unit tests or any
+	// future non-HTTP caller — without relying on the routing guard in oidcapi.
+	// It also catches an empty RefreshToken or ClientID before hashing them
+	// (which would otherwise cause a spurious DB lookup on a SHA-256 of empty
+	// bytes). Do NOT remove this call even though oidcapi/token.go already
+	// routes on grant_type before calling Refresh().
+	if terr := ValidateTokenParams(req); terr != nil {
+		return nil, terr
+	}
+	raw, err := decodeRefreshToken(req.RefreshToken)
+	if err != nil {
+		return nil, invalidGrant("refresh token is invalid")
+	}
+	hash := hashRefreshToken(raw)
+
+	session, err := s.sessionStore.GetSessionByTokenHash(ctx, hash)
+	if err != nil {
+		if errors.Is(err, ErrRefreshTokenRevoked) {
+			// A rotated (revoked) token was replayed: assume theft, revoke family.
+			// Raw ctx: signalRefreshReuse self-enforces context.WithoutCancel + 10 s timeout internally.
+			s.signalRefreshReuse(ctx, session)
+			return nil, invalidGrant("refresh token is invalid")
+		}
+		if errors.Is(err, ErrRefreshTokenNotFound) {
+			return nil, invalidGrant("refresh token is invalid")
+		}
+		// Transient DB error — propagate as 5xx, not invalid_grant.
+		// Masking a DB outage as invalid_grant would silently reject valid
+		// tokens during an outage and trigger a mass-logout (docs/DESIGN.md §10).
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not look up session", Status: 500}
+	}
+
+	if terr := ValidateRefreshParams(req, session, s.now()); terr != nil {
+		return nil, terr
+	}
+
+	// Re-validate that the client still exists in the registry. The session was
+	// bound to session.ClientID at issuance, but clients can be removed after a
+	// refresh token is issued. Without this check, a removed client's tokens would
+	// remain redeemable for their full 14-day TTL.
+	// Note: ClientRegistry.Lookup returns (Client, bool) — no error. A registry
+	// failure (e.g. DB error in DBClientRegistry) returns (Client{}, false) and
+	// is indistinguishable from a missing client (INV-DB-CLIENT-ERROR-NOT-
+	// REDIRECTED). This is fail-closed: a registry outage on the refresh path
+	// returns invalid_client rather than server_error, which is conservative.
+	// ACCEPTED LIMITATION (M20-1): the client's enabled/disabled status and
+	// redirect URIs are not re-validated on every refresh — only existence is
+	// checked. Full re-validation would require exposing the Client struct to the
+	// refresh path, adding complexity for marginal benefit in the current model
+	// where clients are rarely mutated post-registration.
+	//
+	// H22-1 GUARD: pre-check ctx.Err() before calling Lookup so that a cancelled
+	// context (client disconnect mid-request, SIGINT during shutdown) does not
+	// produce a false invalid_client. DBClientRegistry.Lookup swallows context
+	// errors and returns (Client{}, false), which is indistinguishable from a
+	// genuine deregistration. A transient server_error is more correct for a
+	// cancelled request than a permanent invalid_client (which client SDKs may
+	// interpret as "re-authorize from scratch"). A TOCTOU window remains (ctx
+	// could be cancelled between this check and Lookup) but eliminates the most
+	// common case of an already-cancelled ctx before the call.
+	if ctx.Err() != nil {
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "context cancelled (client disconnect or shutdown)", Status: 500}
+	}
+	if _, ok := s.clients.Lookup(ctx, session.ClientID); !ok {
+		return nil, &TokenError{Code: ErrCodeInvalidClient, Description: "client is no longer registered", Status: 401}
+	}
+
+	// All fallible reads and computations happen BEFORE RotateSession so that
+	// a failure at any of these steps still leaves the old refresh token valid
+	// and the client can simply retry (docs/DESIGN.md §3.5).
+	//
+	// Step A: recover the frozen PPID + scopes from the consent grant.
+	grant, found, err := s.grants.FindGrant(ctx, session.UserID, session.ClientID)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "refresh: grant lookup failed",
+			slog.String("client_id", session.ClientID),
+			slog.Any("error", err))
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not recover grant for token issuance", Status: 500}
+	}
+	if !found {
+		// The user revoked consent after the refresh token was issued. This is
+		// invalid_grant (RFC 6749 §5.2) — the authorization is gone permanently.
+		// Returning server_error here would cause well-behaved clients to retry
+		// indefinitely, never learning that re-consent is required.
+		//
+		// Best-effort cleanup: revoke the orphaned refresh session so it does not
+		// occupy DB storage for its full 14-day TTL after consent was revoked.
+		// This is non-fatal — failure is logged at WARN and the session naturally
+		// expires. PII note: only client_id and error are logged (§6.5.7).
+		if rErr := s.sessionStore.RevokeSession(ctx, session.ID); rErr != nil {
+			s.logger.WarnContext(ctx, "refresh: best-effort session revoke after consent revocation failed — session will expire naturally",
+				slog.String("client_id", session.ClientID),
+				slog.Any("error", rErr))
+		}
+		return nil, invalidGrant("consent grant has been revoked")
+	}
+
+	// Step B: mint the new access/ID tokens — depends only on grant + session,
+	// NOT on the new refresh session that RotateSession will create. Doing this
+	// before rotation means that if signing fails the old token is still live.
+	//
+	// Scope-narrowing (RFC 6749 §6): TokenRequest has no Scope field, so a
+	// client requesting a narrower scope on a refresh_token grant is currently
+	// silently ignored — the full frozen grant scopes are always returned. This
+	// is a known intentional omission: scope narrowing is NEVER broader than the
+	// original grant (so it is not a security violation), and the DESIGN.md §3.5
+	// does not require it. If scope-narrowing support is added in a future PR,
+	// parse req.Scope here and intersect it against grant.Scopes, returning
+	// invalid_scope on any requested scope not in the grant.
+	scopeStr := strings.Join(grant.Scopes, " ")
+	tokens, err := s.tokens.Issue(ctx, IssueParams{
+		Issuer:   s.issuer,
+		Subject:  grant.PairwiseSub,
+		ClientID: session.ClientID,
+		Scope:    scopeStr,
+		// Nonce is intentionally omitted: OIDC Core §12.2 specifies that the
+		// nonce claim is only required in the initial ID token (from /authorize)
+		// and MUST NOT be included in tokens issued via refresh_token grant.
+		AuthTime: session.AuthTime,
+		ACR:      session.ACR,
+		AMR:      session.AMR,
+	})
+	if err != nil {
+		s.logger.ErrorContext(ctx, "refresh: token signing failed",
+			slog.String("client_id", session.ClientID),
+			slog.Any("error", err))
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not issue tokens", Status: 500}
+	}
+
+	// offline_access guard: only rotate and re-issue a refresh token when
+	// offline_access is still present in the grant's frozen scopes.
+	// A grant scope downgrade after issuance is handled conservatively:
+	// the freshly-signed access/ID tokens are returned (so the request
+	// succeeds) but no new refresh token is issued and the old session is
+	// NOT revoked (so the client can retry on expiry without being locked
+	// out). SECURITY NOTE: to stop a client from ever refreshing again,
+	// operators must REVOKE the consent grant entirely — a partial scope
+	// removal leaves the existing refresh session valid until its natural
+	// TTL (up to 14 days). Matches the Token() gate (scopeHasOfflineAccess)
+	// and prevents a refresh_token response whose scope omits offline_access
+	// (RFC 6749 §3.3 protocol violation).
+	//
+	// NOTE: this path (grant exists but offline_access is absent) is currently
+	// only reachable via direct DB manipulation — there is no grant-update API.
+	// If a grant-update endpoint is ever added, this decision (leave the refresh
+	// session live) should be revisited in that PR before merging.
+	if !scopeHasOfflineAccess(scopeStr) {
+		return &tokens, nil
+	}
+
+	// Step C: generate new opaque refresh-token material.
+	newPlaintext, newHash, err := newOpaqueToken()
+	if err != nil {
+		s.logger.ErrorContext(ctx, "refresh: failed to generate refresh token material",
+			slog.String("client_id", session.ClientID),
+			slog.Any("error", err))
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not generate refresh token", Status: 500}
+	}
+	newSessionID, err := s.newSessionID()
+	if err != nil {
+		s.logger.ErrorContext(ctx, "refresh: failed to generate session id",
+			slog.String("client_id", session.ClientID),
+			slog.Any("error", err))
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not generate session id", Status: 500}
+	}
+	newSession := RefreshSession{
+		ID:          newSessionID,
+		Region:      session.Region,
+		UserID:      session.UserID,
+		ClientID:    session.ClientID,
+		GrantID:     session.GrantID,
+		DeviceLabel: session.DeviceLabel,
+		TokenHash:   newHash,
+		ExpiresAt:   s.now().Add(defaultRefreshTTL),
+		AuthTime:    session.AuthTime,
+		ACR:         session.ACR,
+		AMR:         session.AMR,
+	}
+
+	// Step D: RotateSession is the commit point — everything before here can
+	// fail without locking the client out. After this call the old token is
+	// revoked, so the only remaining operations are infallible assignments.
+	// With a pool-wired DBSessionStore this is a single transaction; with
+	// InMemorySessionStore it is atomic under the store's mutex.
+	if err := s.sessionStore.RotateSession(ctx, session.ID, newSession); err != nil {
+		s.logger.ErrorContext(ctx, "refresh: session rotation failed",
+			slog.String("client_id", session.ClientID),
+			slog.Any("error", err))
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not rotate session", Status: 500}
+	}
+
+	// After RotateSession the old token is gone. No more fallible operations.
+	// ACCEPTED RISK (RFC 6749 §10.4): if the HTTP response write fails after
+	// this point, the client loses the new token and cannot retry — presenting
+	// the (now-revoked) old token fires the theft signal and revokes the family.
+	// This is the standard refresh-rotation trade-off. A durable outbox pattern
+	// (write pending→after-commit→send) would eliminate the window but adds
+	// significant complexity. Documented in docs/DESIGN.md §3.5 for future
+	// revisit when SLA requirements are known.
+	tokens.RefreshToken = encodeRefreshToken(newPlaintext)
+	tokens.RefreshExpiresIn = int(defaultRefreshTTL.Seconds())
+	return &tokens, nil
+}
+
+// zeroUUID is the sentinel returned by clients.uuidToString() (internal/clients/
+// grants.go and sessions.go) when pgtype.UUID.Valid is false. It must be
+// treated the same as the empty string for the theft-signal guard: a zero-UUID
+// UserID would silently match zero rows in RevokeSessionsByUserClient,
+// suppressing the family revoke.
+//
+// COUPLING NOTE: this constant must match the sentinel in clients.uuidToString.
+// If that function changes its return value for !Valid UUIDs, this constant
+// must change too. The two are in separate packages (oidc cannot import
+// clients) so there is no shared definition — a comment cross-reference is
+// the intended coupling mechanism.
+const zeroUUID = "00000000-0000-0000-0000-000000000000"
+
+// signalRefreshReuse fires the theft signal when a revoked refresh token is
+// replayed: it revokes every active session in the same (user, client) family
+// and logs the event. PII constraint (§6.5.7): only client_id + the error are
+// logged — never UserID, GrantID, or the token/hash.
+//
+// Durable delivery: the revocation signal is enqueued to the outbox FIRST so
+// that even if the inline attempt fails, the background worker will retry.
+// This eliminates the window where a transient failure silently drops the
+// revocation signal (docs/plans/revocation-outbox.md, DESIGN §3.5).
+//
+// Self-enforcing context isolation: the first thing this function does is
+// bind a 10 s timeout on a cancel-detached context
+// (context.WithTimeout(context.WithoutCancel(ctx), 10s)) so the family revoke
+// completes even on client disconnect or SIGINT, and a hung DB cannot block the
+// response goroutine indefinitely. Callers pass the raw request ctx; no
+// call-site discipline is required.
+func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession) {
+	// Detach and bound: context.WithoutCancel ensures client disconnect does not
+	// abort RevokeSessionsByUserClient; the explicit 10 s timeout caps the
+	// worst-case latency added to the caller (this function runs synchronously
+	// and blocks the caller for up to 10 s if the DB hangs —
+	// context.WithoutCancel strips the parent deadline, so an explicit timeout
+	// is required to restore the bound).
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	// Defensive guard: an empty or zero-UUID UserID/ClientID would make
+	// RevokeSessionsByUserClient match zero rows and silently suppress the theft
+	// signal. The empty-string case catches in-memory store bugs; the zero-UUID
+	// case ("00000000-...") catches a NULL pgtype.UUID that survived rowToRefreshSession
+	// via uuidToString. Both signal a latent store bug — surface loudly.
+	//
+	// Note on ErrorContext: this call uses the detached ctx (not the original
+	// request ctx), which strips any request-scoped log enrichers (e.g.
+	// request-ID middleware). This is intentional — the guard fires on the
+	// detached context for the same reason the revoke does: request cancellation
+	// must not suppress the log. Request-ID loss is an accepted trade-off.
+	//
+	// Asymmetry note: the zero-UUID sentinel ("00000000-...") specifically
+	// guards against a NULL pgtype.UUID surviving DBSessionStore.rowToRefreshSession
+	// → uuidToString. ClientID is a plain VARCHAR column and is never routed
+	// through uuidToString, so the empty-string check is sufficient for it.
+	if session.UserID == "" || session.UserID == zeroUUID ||
+		session.ClientID == "" {
+		s.logger.ErrorContext(ctx, "refresh-reuse signal: session has empty/zero UserID or empty ClientID — family revoke skipped (latent store bug)",
+			slog.String("session_id", session.ID))
+		return
+	}
+
+	// Enqueue to durable outbox FIRST — guarantees delivery even if inline fails.
+	// Note: we do NOT mark as delivered on inline success; the background worker
+	// will re-deliver, but RevokeSessionsByUserClient is idempotent so double-
+	// revocation is harmless. This simplifies the interface (no return ID needed).
+	if err := s.outbox.Enqueue(ctx, OutboxEntry{
+		Reason:   "refresh_reuse",
+		UserID:   session.UserID,
+		ClientID: session.ClientID,
+		GrantID:  session.GrantID,
+	}); err != nil {
+		s.logger.ErrorContext(ctx, "refresh-reuse signal: outbox enqueue failed — falling back to inline-only",
+			slog.String("client_id", session.ClientID),
+			slog.Any("error", err))
+		// Continue to inline attempt even if enqueue fails.
+	}
+
+	// Inline best-effort attempt (immediate revocation when possible).
+	if err := s.sessionStore.RevokeSessionsByUserClient(ctx, session.UserID, session.ClientID); err != nil {
+		s.logger.ErrorContext(ctx, "refresh-family revocation failed after reuse detected",
+			slog.String("client_id", session.ClientID),
+			slog.Any("error", err))
+	}
+}
+
+// signalCodeReuse fires the theft signal when a code is presented twice: it
+// attempts to revoke every token minted from the code family and logs any
+// failure at ERROR level (docs/design/principles/error-handling.md §1.11,
+// docs/DESIGN.md §11.7). The caller always returns invalid_grant regardless of
+// whether revocation succeeds — the primary client response is independent of
+// the side-effect — but the failure is NOT silently discarded.
+//
+// PII constraint (§6.5.7): only client_id + the error value are logged.
+// Never log Subject (PPID), Code (a secret), or Nonce.
+//
+// Durable delivery: the revocation signal is enqueued to the outbox FIRST so
+// that even if the inline attempt fails, the background worker will retry.
+// This eliminates the window where a transient failure silently drops the
+// revocation signal (docs/plans/revocation-outbox.md, DESIGN §3.5).
+//
+// Self-enforcing context isolation: mirrors signalRefreshReuse — the function
+// immediately detaches from the caller's context so code-family revocation
+// completes even on client disconnect or SIGINT. Callers pass the raw ctx.
+func (s *Service) signalCodeReuse(ctx context.Context, code AuthCode) {
+	// Detach and bound: context.WithoutCancel ensures client disconnect does not
+	// abort RevokeCodeFamily; the explicit 10 s timeout caps the worst-case
+	// latency added to the caller (this function runs synchronously and blocks
+	// the caller for up to 10 s if the DB hangs — context.WithoutCancel strips
+	// the parent deadline, so an explicit timeout is required to restore the
+	// bound).
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	// Defensive guard (parity with signalRefreshReuse): an empty ClientID would
+	// make RevokeCodeFamily target the wrong family or match nothing — surface it
+	// loudly rather than silently suppressing the theft signal.
+	//
+	// Asymmetry note: signalRefreshReuse also guards against a zero/empty UserID
+	// because RevokeSessionsByUserClient(userID, clientID) uses both as direct
+	// lookup keys. Here, the full AuthCode struct is passed to RevokeCodeFamily;
+	// the RevocationSink implementation determines how code.Subject is used. In
+	// all current implementations (noopRevocationSink, RecordingRevocationSink),
+	// Subject is not a filter key, so only ClientID is validated here. If a
+	// future RevocationSink uses code.Subject as a lookup key, add a guard here
+	// and update INV-CODE-THEFT-SIGNAL-EMPTY-CLIENT-GUARD.
+	if code.ClientID == "" {
+		s.logger.ErrorContext(ctx, "code-reuse signal: code has empty ClientID — family revoke skipped (latent store bug)")
+		return
+	}
+
+	// Enqueue to durable outbox FIRST — guarantees delivery even if inline fails.
+	// Note: code-reuse signals use UserID from the AuthCode for outbox tracking,
+	// but the actual revocation is done via RevokeCodeFamily which may use
+	// different lookup logic depending on the RevocationSink implementation.
+	// Guard: codes without a UserID (e.g. stubSessionResolver in tests) cannot
+	// be tracked durably — they get inline-only revocation.
+	if code.UserID != "" {
+		// Note: we do NOT mark as delivered on inline success; the background worker
+		// will re-deliver, but revocation is idempotent so this is harmless.
+		if err := s.outbox.Enqueue(ctx, OutboxEntry{
+			Reason:   "code_reuse",
+			UserID:   code.UserID,
+			ClientID: code.ClientID,
+		}); err != nil {
+			s.logger.ErrorContext(ctx, "code-reuse signal: outbox enqueue failed — falling back to inline-only",
+				slog.String("client_id", code.ClientID),
+				slog.Any("error", err))
+			// Continue to inline attempt even if enqueue fails.
+		}
+	}
+
+	// Inline best-effort attempt (immediate revocation when possible).
+	if err := s.revocations.RevokeCodeFamily(ctx, code); err != nil {
+		s.logger.ErrorContext(ctx, "code-family revocation failed after reuse detected",
+			slog.String("client_id", code.ClientID),
+			slog.Any("error", err))
+	}
+}
+
+// defaultNewCode returns a 256-bit random, URL-safe authorization code.
+func defaultNewCode() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}

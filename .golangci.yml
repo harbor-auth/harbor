@@ -1,0 +1,55 @@
+# Harbor — golangci-lint v2 configuration.
+#
+# modules-download-mode: mod avoids "go.mod: updates needed" errors when the
+# build cache is cold (golangci-lint runs `go list` internally).
+#
+# run.go is intentionally NOT set here. golangci-lint reads the go directive
+# from go.mod (currently go 1.25.0, required by grpc v1.82+, webauthn v0.17+,
+# pgx v5.10+) and configures the type-checker accordingly. nixpkgs 25.05 ships
+# golangci-lint v2.1.6 compiled with go1.25 (the channel default since the
+# 2026-01-02 revision), so go1.25 modules are handled natively.
+version: "2"
+
+run:
+  modules-download-mode: mod
+  # e2e/flow_test.go carries a `//go:build e2e` constraint (it needs a live
+  # server, so it's excluded from the default `go test ./...`). Without this,
+  # golangci-lint silently never sees that file at all — a build-tagged file
+  # with 0 analyzed lines reports "0 issues" whether or not it has real
+  # problems (§1.11: a linter that can't see code is a silent-failure gap,
+  # not a pass). Adding the tag here makes `golangci-lint run ./...` (the
+  # command make validate/agent-check/CI all use) actually analyze it.
+  build-tags:
+    - e2e
+
+linters:
+  # Explicitly enable the error-handling linters (§1.11).
+  # These are additive — golangci-lint v2 defaults remain active.
+  enable:
+    - nilerr      # catches `if err != nil { return nil }` (swallowing errors)
+    - errorlint   # catches `err == sentinel` instead of errors.Is; %v instead of %w
+
+  settings:
+    errcheck:
+      # Flag explicit `_ = f()` blank assignments, not just unchecked calls.
+      # This enforces §1.11: every error must be handled, returned, or fall
+      # into one of the two documented narrow exceptions below.
+      check-blank: true
+      # Narrow permitted discards (docs/design/principles/error-handling.md §1.11):
+      #   1. HTTP response body writes — if the connection is gone the error
+      #      cannot be delivered anywhere; the OS reclaims the socket.
+      #   2. Deferred Close() on a consumed body — close errors are benign;
+      #      the runtime's connection pool handles recycling.
+      # Any proposed addition here is a code-review trigger.
+      exclude-functions:
+        - (net/http.ResponseWriter).Write
+        - (*encoding/json.Encoder).Encode
+        - (io.ReadCloser).Close
+        - (github.com/redis/go-redis/v9.Client).Close
+        - (*github.com/redis/go-redis/v9.Client).Close
+
+  exclusions:
+    # Skip linting auto-generated protobuf/gRPC stubs — they use `_ =
+    # protoimpl.EnforceVersion(...)` by design and are never edited by hand.
+    paths:
+      - internal/gen/

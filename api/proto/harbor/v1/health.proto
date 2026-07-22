@@ -1,0 +1,37 @@
+// Package harbor.v1 defines Harbor's internal gRPC contracts.
+//
+// Source of truth for internal service stubs (DESIGN §1.2). Go + gRPC code is
+// GENERATED via `buf generate` into internal/gen/proto and never hand-edited.
+syntax = "proto3";
+
+package harbor.v1;
+
+option go_package = "github.com/harbor-auth/harbor/internal/gen/proto/harbor/v1;harborv1";
+
+// HealthService reports whether an internal component is serving.
+service HealthService {
+  // Check returns the current serving status of the component.
+  rpc Check(CheckRequest) returns (CheckResponse);
+}
+
+// CheckRequest asks for the status of a named component.
+message CheckRequest {
+  // component is the logical name to check (empty means the whole process).
+  string component = 1;
+}
+
+// CheckResponse carries the serving status.
+message CheckResponse {
+  // ServingStatus enumerates the possible health states.
+  enum ServingStatus {
+    // SERVING_STATUS_UNSPECIFIED is the default, unset value.
+    SERVING_STATUS_UNSPECIFIED = 0;
+    // SERVING_STATUS_SERVING means the component is healthy.
+    SERVING_STATUS_SERVING = 1;
+    // SERVING_STATUS_NOT_SERVING means the component is unhealthy.
+    SERVING_STATUS_NOT_SERVING = 2;
+  }
+
+  // status is the current serving status.
+  ServingStatus status = 1;
+}

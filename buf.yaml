@@ -1,0 +1,11 @@
+# buf module config (v2). Governs Protobuf lint + breaking-change checks
+# (DESIGN §1.5). Run via `@codegen`: `buf lint`, `buf breaking`, `buf generate`.
+version: v2
+modules:
+  - path: api/proto
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE

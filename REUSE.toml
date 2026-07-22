@@ -1,0 +1,49 @@
+# Harbor — REUSE 3.0 license map (https://reuse.software).
+#
+# This is the AUTHORITATIVE, machine-readable declaration of every file's
+# copyright + license. `reuse lint` verifies the whole tree against it.
+#
+# PRECEDENCE: when multiple [[annotations]] match a path, the LAST match wins.
+# So the repo-wide AGPL-3.0-only default is declared FIRST, and the more
+# specific subtree overrides follow and take precedence.
+
+version = 1
+
+# --- Default: everything is AGPL-3.0-only unless overridden below -----------
+[[annotations]]
+path = "**"
+SPDX-FileCopyrightText = "2026 The Harbor Authors"
+SPDX-License-Identifier = "AGPL-3.0-only"
+
+# --- Overrides (declared after the default so they win) ---------------------
+
+# Public API contracts — permissive for broad client / SDK generation.
+[[annotations]]
+path = "api/**"
+SPDX-FileCopyrightText = "2026 The Harbor Authors"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Documentation & prose — reusable with attribution.
+[[annotations]]
+path = "docs/**"
+SPDX-FileCopyrightText = "2026 The Harbor Authors"
+SPDX-License-Identifier = "CC-BY-4.0"
+
+# Agent skills & workflow tooling — maximally reusable.
+[[annotations]]
+path = ".agents/**"
+SPDX-FileCopyrightText = "2026 The Harbor Authors"
+SPDX-License-Identifier = "MIT"
+
+# Developer tooling — maximally reusable.
+[[annotations]]
+path = "tools/**"
+SPDX-FileCopyrightText = "2026 The Harbor Authors"
+SPDX-License-Identifier = "MIT"
+
+# Reference deployment (Dockerfiles, generic Helm chart, K8s manifests) —
+# permissive so self-hosters can derive their own infra without AGPL constraint.
+[[annotations]]
+path = "deploy/**"
+SPDX-FileCopyrightText = "2026 The Harbor Authors"
+SPDX-License-Identifier = "Apache-2.0"

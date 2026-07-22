@@ -1,0 +1,15 @@
+# oapi-codegen config — generates Go types + std-http server from harbor.yaml.
+#
+# Invoked by `@codegen`:
+#   oapi-codegen -config api/openapi/oapi-codegen.yaml api/openapi/harbor.yaml
+#
+# Output lands under internal/gen/** and is NEVER hand-edited (DESIGN §1.3).
+package: openapi
+output: internal/gen/openapi/harbor.gen.go
+generate:
+  models: true
+  std-http-server: true
+  embedded-spec: true
+output-options:
+  skip-fmt: false
+  skip-prune: false

@@ -1,0 +1,3 @@
+# token-revocation-endpoint
+
+RFC 7009 `POST /revoke` on `harbor-hot` (`internal/oidcapi/`), OpenAPI-first, authenticated by client Basic-auth, that revokes access and refresh tokens by feeding the already-shipped revocation stack (revocation-outbox → revoked_jtis, grant-id-fk / session `revoked_at`, bloom-filter-revocation). Well-formed authenticated requests always return `200` with an empty body — including unknown, expired, already-revoked, and cross-client tokens — as a deliberate anti-enumeration control. Sits behind the rate limiter; hard-gated on `token-introspection` and `rate-limiting`.

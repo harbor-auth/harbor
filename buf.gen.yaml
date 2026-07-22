@@ -1,0 +1,14 @@
+# buf codegen config (v2). Generates Go + gRPC stubs from api/proto into
+# internal/gen/proto. Invoked by `@codegen` (`buf generate`). Generated code is
+# never hand-edited (DESIGN §1.3).
+version: v2
+plugins:
+  # Remote plugin versions are PINNED (never floating) so codegen is
+  # reproducible and the drift check (`make generate-check`) is deterministic
+  # across machines and CI (DESIGN §1.5). Bump deliberately, in a reviewed PR.
+  - remote: buf.build/protocolbuffers/go:v1.36.6
+    out: internal/gen/proto
+    opt: paths=source_relative
+  - remote: buf.build/grpc/go:v1.6.2
+    out: internal/gen/proto
+    opt: paths=source_relative

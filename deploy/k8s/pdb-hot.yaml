@@ -1,0 +1,16 @@
+# PDB: during voluntary disruptions (node drains, upgrades) keep at least 2
+# harbor-hot pods serving so sign-in stays available. Pairs with maxUnavailable:
+# 0 in the Deployment for zero-drop rollouts.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: harbor-hot
+  namespace: harbor
+  labels:
+    app.kubernetes.io/name: harbor-hot
+    app.kubernetes.io/part-of: harbor
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: harbor-hot

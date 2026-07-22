@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-07-21
+goal: Add RFC 7591 POST /register and RFC 7592 GET/PUT/DELETE /register/{client_id} on harbor-mgmt over the shipped client registry — minting client_id (+ hashed client_secret for confidential clients) and a per-client hashed registration_access_token (migration 0012) that authorises subsequent management with no cross-client leakage, strict redirect-URI validation, an optional initial-access-token gate on registration, and a DELETE that cascade-revokes the client's grants

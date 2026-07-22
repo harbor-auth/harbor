@@ -1,0 +1,24 @@
+# Non-sensitive config for harbor-mgmt.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "harbor.fullname" . }}-mgmt-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.mgmt.labels" . | nindent 4 }}
+data:
+  PORT: {{ .Values.mgmt.port | quote }}
+  # REGION binds this instance's RP origin host to a region so the fail-closed
+  # region middleware resolves it (harbor-mgmt refuses to boot otherwise).
+  REGION: {{ .Values.region | default "EU" | quote }}
+  # WebAuthn Relying Party config. Env var names MUST match what harbor-mgmt
+  # reads (cmd/harbor-mgmt/main.go): WEBAUTHN_RP_ID, WEBAUTHN_RP_DISPLAY_NAME,
+  # and WEBAUTHN_RP_ORIGINS (plural, comma-separated).
+  #   RP_ID           — effective domain (no scheme/port). MUST be a registrable
+  #                     suffix of the origin below.
+  #   RP_ORIGINS      — fully-qualified dashboard/BFF origin(s) permitted to run
+  #                     ceremonies (comma-separated).
+  #   RP_DISPLAY_NAME — human-facing Relying Party name shown in passkey prompts.
+  WEBAUTHN_RP_ID: {{ .Values.mgmt.webauthn.rpId | quote }}
+  WEBAUTHN_RP_DISPLAY_NAME: {{ .Values.mgmt.webauthn.rpName | quote }}
+  WEBAUTHN_RP_ORIGINS: {{ .Values.mgmt.webauthn.rpOrigin | quote }}

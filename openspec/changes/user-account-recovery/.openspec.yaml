@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-07-22
+goal: Ship a safe Phase-1 account-recovery path for passkey users who lose their authenticators — a recovery_codes table (migration 0015) storing only salted SHA-256 hashes of single-use codes (plaintext shown once, never persisted, never operator-readable), fallback authenticators (additional passkey / hardware key registered via the shipped WebAuthn path), and a fail-closed recovery ceremony that accepts a valid unused code or a fallback factor, re-authenticates, and REQUIRES enrolling a fresh passkey before clearing users.recovery_required — rate-limited, region-pinned, metered aggregate-only, and audited via user-audit-trail, with social/M-of-N recovery explicitly deferred

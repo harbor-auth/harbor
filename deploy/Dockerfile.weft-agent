@@ -1,0 +1,79 @@
+# syntax=docker/dockerfile:1
+# Harbor — Weft Agent Environment (Go toolchain)
+#
+# KEY RULES for Weft custom Dockerfiles:
+#   1. No apt-get (port 80 blocked in BuildKit sandbox; use HTTPS/443 only).
+#   2. Do NOT use FROM weft-agent-base as the final base.
+#   3. Do NOT set USER agent at the end — Weft auto-compose sets it.
+#      But Weft does NOT set ENTRYPOINT, so WE must set it explicitly.
+#   4. Pre-create /build owned by agent so recompose "mkdir -p /build" is a
+#      no-op even when Weft auto-compose runs as the agent user.
+#   5. Explicitly set ENTRYPOINT [/app/entrypoint.sh] — the golang base image
+#      defaults to CMD [bash]; without an explicit ENTRYPOINT the container
+#      exits immediately and weft-daemon never connects.
+
+# ── Stage 1: Install Go dev tools ────────────────────────────────────────────
+FROM golang:1.24-bookworm AS go-tools
+
+# protoc-gen-go + grpc
+RUN go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.4
+RUN go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+
+# sqlc
+RUN go install github.com/sqlc-dev/sqlc/cmd/sqlc@v1.29.0
+
+# oapi-codegen v2 (binary is named oapi-codegen, lives in /go/bin)
+RUN go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.4.1
+
+# golangci-lint v2 via pre-built binary (avoids compiling its huge dep-tree)
+RUN curl -fsSL https://github.com/golangci/golangci-lint/releases/download/v2.1.6/golangci-lint-2.1.6-linux-amd64.tar.gz \
+    | tar -xz --strip-components=1 -C /go/bin golangci-lint-2.1.6-linux-amd64/golangci-lint
+
+# buf (protobuf toolkit)
+RUN curl -fsSL "https://github.com/bufbuild/buf/releases/download/v1.47.2/buf-Linux-x86_64" -o /go/bin/buf \
+    && chmod +x /go/bin/buf
+
+# ── Stage 2: Weft agent base (binaries + config) ─────────────────────────────
+FROM ghcr.io/reillyse/weft-agent-base:latest AS weft-base
+
+# ── Stage 3: Final image ─────────────────────────────────────────────────────
+# Use golang:1.24-bookworm so Go is available at runtime (go build, go test).
+# Do NOT use FROM weft-agent-base: Weft auto-composes /build/node_modules after
+# your stage; if weft-agent-base already has it, the symlink fails.
+FROM golang:1.24-bookworm
+
+# ── Weft infrastructure (required) ───────────────────────────────────────────
+# Weft only auto-injects codebuff-lite + /build/node_modules symlink.
+# Everything else must be copied manually from weft-agent-base.
+COPY --from=weft-base /app/weft-daemon       /app/weft-daemon
+COPY --from=weft-base /app/entrypoint.sh     /app/entrypoint.sh
+COPY --from=weft-base /app/config/agent.yaml /app/config/agent.yaml
+COPY --from=weft-base /usr/local/bin/weft-agent /usr/local/bin/weft-agent
+COPY --from=weft-base /usr/local/bin/hippo   /usr/local/bin/hippo
+
+# ── Harbor Go tools ───────────────────────────────────────────────────────────
+# GOPATH=/go in golang:* images; binaries land in /go/bin.
+COPY --from=go-tools /go/bin/protoc-gen-go       /usr/local/bin/protoc-gen-go
+COPY --from=go-tools /go/bin/protoc-gen-go-grpc  /usr/local/bin/protoc-gen-go-grpc
+COPY --from=go-tools /go/bin/sqlc               /usr/local/bin/sqlc
+COPY --from=go-tools /go/bin/oapi-codegen       /usr/local/bin/oapi-codegen
+COPY --from=go-tools /go/bin/golangci-lint       /usr/local/bin/golangci-lint
+COPY --from=go-tools /go/bin/buf                /usr/local/bin/buf
+
+# ── Agent user and workspace ──────────────────────────────────────────────────
+# Create agent user (uid 1001). Pre-create /build owned by agent so Weft
+# auto-compose "mkdir -p /build" (which runs as agent) is a no-op.
+# Do NOT set USER agent here — Weft auto-compose sets it after injecting
+# codebuff-lite and creating /build/node_modules symlink.
+RUN groupadd -g 1001 agent 2>/dev/null || true && \
+    useradd -u 1001 -g agent -s /bin/bash -m agent && \
+    mkdir -p /workspace /build && \
+    chown -R agent:agent /workspace /app /home/agent /build
+
+WORKDIR /workspace
+
+# IMPORTANT: Set ENTRYPOINT explicitly.
+# The golang base image defaults to CMD [bash]; without an explicit ENTRYPOINT
+# the container exits immediately and weft-daemon never connects to the server.
+# Weft auto-compose does NOT set ENTRYPOINT, so we must set it here.
+ENTRYPOINT ["/app/entrypoint.sh"]

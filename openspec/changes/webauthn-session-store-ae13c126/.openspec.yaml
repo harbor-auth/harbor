@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-07-20
+goal: Implement Redis-backed RedisSessionStore for WebAuthn ceremony challenges, replacing InMemorySessionStore for multi-replica safety

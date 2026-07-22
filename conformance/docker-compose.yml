@@ -1,0 +1,45 @@
+# Harbor — OIDF conformance: the OP UNDER TEST (harbor-hot).
+#
+# This compose file stands up ONLY harbor-hot (the issuer the OpenID Foundation
+# conformance suite drives as a client). The OIDF suite itself (mongodb + server
+# + nginx on :8443) is a heavy external dependency and is brought up separately
+# by conformance/run-plan.sh (prebuilt image, else a pinned clone) — it is NOT
+# vendored here. run-plan.sh owns the full lifecycle (up → run-test-plan → down).
+#
+# NETWORKING (the crux): the suite runs in Docker and must reach harbor-hot AND
+# see a discovery document whose endpoints it can also reach. So harbor-hot's
+# ISSUER is `http://host.docker.internal:8080` (NOT localhost): the suite reaches
+# the host-published :8080 via host.docker.internal, and discovery then advertises
+# the SAME host so authorize/token/JWKS are reachable from inside the suite. On
+# Linux (CI) the SUITE container needs `host.docker.internal` wired to the host
+# gateway — run-plan.sh adds that `extra_hosts` mapping to the suite container it
+# starts. harbor-hot itself only publishes :8080 and does not need the mapping.
+#
+# harbor-hot's flow backends are in-memory scaffolds today (demo-client, stub
+# session, unsigned placeholder tokens), so this runs with no DB. The OIDF OP
+# suite will legitimately stay RED until harbor-hot reaches real OIDC compliance
+# (asymmetric-signed tokens, pairwise subjects) — that is the honest gate.
+services:
+  harbor-hot:
+    image: golang:1.26
+    working_dir: /src
+    command: ["go", "run", "./cmd/harbor-hot"]
+    environment:
+      PORT: "8080"
+      # Issuer MUST match how the suite reaches harbor-hot (see NETWORKING note).
+      ISSUER: "http://host.docker.internal:8080"
+    ports:
+      - "8080:8080"
+    volumes:
+      # Mount the repo read-only; go run compiles from source inside the pinned
+      # golang image so the conformance run needs no local Go toolchain.
+      - ..:/src:ro
+    # Same /healthz contract as e2e/docker-compose.yml, so `up -d --wait` blocks
+    # until harbor-hot is READY. start_period covers the cold `go run` compile so
+    # early (pre-ready) failures don't count against retries.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      start_period: 120s

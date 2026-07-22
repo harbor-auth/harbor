@@ -1,0 +1,16 @@
+{{- if .Values.mgmt.pdb.enabled }}
+# PDB: keep at least one harbor-mgmt pod up through voluntary disruptions so
+# enrollment / passkey ceremonies aren't fully unavailable during a drain.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "harbor.fullname" . }}-mgmt
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.mgmt.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.mgmt.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "harbor.mgmt.selectorLabels" . | nindent 6 }}
+{{- end }}

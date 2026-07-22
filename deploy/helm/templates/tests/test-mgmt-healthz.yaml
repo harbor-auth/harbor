@@ -1,0 +1,57 @@
+# Helm test: harbor-mgmt connectivity smoke check.
+#
+# harbor-mgmt is DELIBERATELY cluster-internal (no Ingress) and its
+# NetworkPolicy only admits same-namespace ingress. This test Pod runs inside
+# the release namespace, so it is exactly the caller shape the NetworkPolicy is
+# meant to allow — it verifies both that a mgmt replica is Ready AND that the
+# in-namespace reachability contract holds. A failure here often means the
+# NetworkPolicy is too strict or no mgmt pod is Ready, not that /healthz is
+# broken.
+#
+# Same hook + cleanup semantics as the hot test: repeatable, and a failed Pod
+# is left behind for log inspection.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "harbor.fullname" . }}-test-mgmt-healthz
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.mgmt.labels" . | nindent 4 }}
+    app.kubernetes.io/component: test
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ include "harbor.mgmt.serviceAccountName" . }}
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: curl
+      image: curlimages/curl:8.6.0
+      imagePullPolicy: IfNotPresent
+      command:
+        - curl
+        - --fail
+        - --silent
+        - --show-error
+        - --max-time
+        - "5"
+        - http://{{ include "harbor.fullname" . }}-mgmt.{{ .Release.Namespace }}.svc.cluster.local/healthz
+      resources:
+        requests:
+          cpu: 100m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 32Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL

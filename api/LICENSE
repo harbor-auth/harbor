@@ -1,0 +1,12 @@
+SPDX-FileCopyrightText: 2026 The Harbor Authors
+SPDX-License-Identifier: Apache-2.0
+
+The contents of this directory — Harbor's public API contracts (OpenAPI and
+Protobuf) — are licensed under the Apache License 2.0, overriding the
+repository-wide AGPL-3.0-only default.
+
+    Copyright (C) 2026 The Harbor Authors
+    SPDX-License-Identifier: Apache-2.0
+
+Full text:   ../LICENSES/Apache-2.0.txt
+License map: ../REUSE.toml

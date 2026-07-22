@@ -1,0 +1,3 @@
+# Generated code lands here (internal/gen/**) from `@codegen`.
+# Contents are GENERATED and are not hand-edited. This .gitkeep only preserves
+# the directory; regenerate with `make generate` (see .agents/codegen.md).

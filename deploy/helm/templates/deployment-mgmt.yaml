@@ -1,0 +1,95 @@
+# Deployment: harbor-mgmt — the cold-path management binary (passkey ceremonies,
+# user enrollment, dashboard/BFF, consent/audit). NOT internet-facing: reached
+# only via the cluster-internal Service and locked down by NetworkPolicy.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "harbor.fullname" . }}-mgmt
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.mgmt.labels" . | nindent 4 }}
+spec:
+  # SCAFFOLD: set mgmt.replicaCount to 1 until the ceremony/session store is
+  # DB-backed (in-memory WebAuthn state does not survive restarts or cross-pod
+  # routing). See docs/plans/user-enrollment.md.
+  replicas: {{ .Values.mgmt.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "harbor.mgmt.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "harbor.mgmt.labels" . | nindent 8 }}
+    spec:
+      # Dedicated SA with no auto-mounted API token (harbor-mgmt never calls the
+      # K8s API).
+      serviceAccountName: {{ include "harbor.mgmt.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              {{- include "harbor.mgmt.selectorLabels" . | nindent 14 }}
+      containers:
+        - name: harbor-mgmt
+          image: {{ include "harbor.mgmt.image" . }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.mgmt.port }}
+          # No REDIS_URL here: harbor-mgmt does not use the auth-code store.
+          # Config (incl. WEBAUTHN_RP_*) then secrets (DATABASE_URL/
+          # HARBOR_KEK_SECRET).
+          envFrom:
+            - configMapRef:
+                name: {{ include "harbor.fullname" . }}-mgmt-config
+            - secretRef:
+                name: {{ include "harbor.mgmt.secretName" . }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sleep", "5"]
+          resources:
+            {{- toYaml .Values.mgmt.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

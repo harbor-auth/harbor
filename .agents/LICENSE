@@ -1,0 +1,12 @@
+SPDX-FileCopyrightText: 2026 The Harbor Authors
+SPDX-License-Identifier: MIT
+
+The contents of this directory — Harbor's agent skills and workflow tooling —
+are licensed under the MIT License, overriding the repository-wide AGPL-3.0-only
+default.
+
+    Copyright (C) 2026 The Harbor Authors
+    SPDX-License-Identifier: MIT
+
+Full text:   ../LICENSES/MIT.txt
+License map: ../REUSE.toml

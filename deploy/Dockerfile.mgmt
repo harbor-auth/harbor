@@ -1,0 +1,25 @@
+# Runtime image for harbor-mgmt — the cold-path management binary (passkey
+# ceremonies, enrollment, dashboard/BFF, consent/audit).
+#
+# Multi-stage: the build stage cross-compiles a static (CGO-off) linux/amd64
+# binary using the pinned Go toolchain; the runtime stage is a minimal Alpine
+# image. Alpine (not scratch/distroless) is deliberate: the Deployment's
+# preStop hook runs `/bin/sleep 5` to drain in-flight requests, which needs a
+# real shell/coreutils.
+#
+# Build:
+#   docker buildx build --platform linux/amd64 -t harbor-mgmt:local \
+#     -f deploy/Dockerfile.mgmt . --load
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags='-s -w' -o /out/harbor-mgmt ./cmd/harbor-mgmt
+
+FROM alpine:3.20
+# Non-root uid/gid matches the Deployment securityContext (runAsUser 65532).
+RUN addgroup -g 65532 nonroot && adduser -u 65532 -G nonroot -D -H nonroot
+COPY --from=build /out/harbor-mgmt /harbor-mgmt
+USER 65532
+EXPOSE 8081
+ENTRYPOINT ["/harbor-mgmt"]

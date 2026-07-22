@@ -1,0 +1,178 @@
+# Harbor — CI: the agent-readable outer loop (Foundation F7).
+#
+# This is the one loop an agent cannot skip. It runs the SAME command in the SAME
+# pinned toolchain as local development:
+#
+#     nix develop -c make agent-check      (F3 pinned env + F6 structured verdict)
+#
+# so the local and CI verdicts are identical by construction. It then runs the
+# anti-Goodhart guards (F5) against the real PR base and `make generate-check`
+# (codegen-drift) — both need git history, so they live here rather than inside
+# the git-history-free agent-check — and posts check-results.json as a sticky PR
+# comment so the outcome is legible at a glance.
+#
+# spectral (OpenAPI spec-lint) also runs as a dedicated CI-side step, but for a
+# different reason: nixpkgs REMOVED the `spectral-cli` package, so it can no
+# longer be pinned into the `nix develop` shell (and is therefore no longer in
+# the agent-check suite). CI runs it via `npx @stoplight/spectral-cli@6.16.1`
+# (exact-version-pinned, the runner's native Node); `make validate` uses the
+# identical command locally.
+#
+# The docs-integrity checks (docs-design-refs, docs-links) are part of the
+# agent-check suite itself (see tools/agentcheck/main.go) — they have no
+# git-history dependency — so they appear in check-results.json and need no
+# separate CI step.
+#
+# A separate, Docker-enabled `e2e` job runs the composed OIDC conformance harness
+# (Foundation F8) via `nix develop -c make conformance` — the same §1.8 Stage-7
+# gate as local — exercising authorize→token→JWKS + the §11.7 negatives against a
+# live harbor-hot on every PR.
+#
+# Branch protection: require BOTH the `agent-check` and `e2e` jobs on the default
+# branch. That is what gives the F5 tamper guards + CODEOWNERS their teeth — a red
+# check-results, a tamper finding, or a broken assembled flow blocks the merge.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  agent-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history for tamper-check diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Actions are pinned to release tags (not @main) — bump deliberately.
+      - name: Install pinned Nix toolchain
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      # No binary-cache action: DeterminateSystems/magic-nix-cache was DEPRECATED
+      # on 2025-02-01 (the underlying GitHub Actions Cache API it relied on was
+      # removed). Its v8 fallback now demands FlakeHub Cache auth — which fails
+      # closed on every run without a FlakeHub account (`Unable to authenticate
+      # to FlakeHub`), and that error poisoned the `drift` step's outcome and
+      # red-gated every PR. We rely on the default `cache.nixos.org` substituter
+      # (which serves the whole pinned toolchain except our two overridden
+      # derivations, golangci-lint + sqlc, that already compile in-job). CI
+      # timings are unchanged because the dead cache action was already a no-op.
+
+      # The single source of truth. continue-on-error so we still post the
+      # report on failure; the final gate step re-fails the job.
+      - name: Run agent-check (pinned env)
+        id: agentcheck
+        continue-on-error: true
+        run: nix develop -c make agent-check
+
+      - name: Anti-Goodhart tamper-check (vs PR base)
+        id: tamper
+        continue-on-error: true
+        run: nix develop -c make tamper-check BASE=origin/${{ github.base_ref || github.event.repository.default_branch }}
+
+      - name: Coverage ratchet
+        id: coverage
+        continue-on-error: true
+        run: nix develop -c make coverage-ratchet
+
+      - name: Codegen drift (generated code matches specs)
+        id: drift
+        continue-on-error: true
+        run: nix develop -c make generate-check
+
+      # spectral (OpenAPI spec-lint) runs here, OUTSIDE the pinned shell, because
+      # nixpkgs removed the `spectral-cli` package — it can no longer be pinned in
+      # flake.nix. Pinned to an exact version via npx (the runner's native Node)
+      # so it stays reproducible; `make validate` uses the identical command.
+      - name: Spec-lint OpenAPI (spectral)
+        id: spectral
+        continue-on-error: true
+        run: npx --yes @stoplight/spectral-cli@6.16.1 lint 'api/openapi/**/*.yaml'
+
+      # Compose the full PR-comment body (outcome summary + the raw verdict) into
+      # a file, so the sticky comment can include check-results.json verbatim —
+      # Actions expressions can't read file contents inline.
+      - name: Build PR comment body
+        if: always()
+        run: |
+          {
+            echo '## Harbor `agent-check`'
+            echo ''
+            echo "- agent-check: **${{ steps.agentcheck.outcome }}**"
+            echo "- tamper-check (F5): **${{ steps.tamper.outcome }}**"
+            echo "- coverage-ratchet (F5): **${{ steps.coverage.outcome }}**"
+            echo "- codegen-drift (F7): **${{ steps.drift.outcome }}**"
+            echo "- spec-lint/spectral: **${{ steps.spectral.outcome }}**"
+            echo ''
+            echo '<details><summary>check-results.json</summary>'
+            echo ''
+            echo '```json'
+            cat check-results.json 2>/dev/null || echo '{ "overall": "error", "note": "check-results.json not produced" }'
+            echo '```'
+            echo ''
+            echo '</details>'
+          } | tee comment.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post sticky PR comment
+        if: always() && github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: harbor-agent-check
+          path: comment.md
+
+      - name: Gate — fail if any check failed
+        if: always()
+        run: |
+          if [ "${{ steps.agentcheck.outcome }}" != "success" ] \
+            || [ "${{ steps.tamper.outcome }}" != "success" ] \
+            || [ "${{ steps.coverage.outcome }}" != "success" ] \
+            || [ "${{ steps.drift.outcome }}" != "success" ] \
+            || [ "${{ steps.spectral.outcome }}" != "success" ]; then
+            echo "One or more checks failed (see the sticky comment / check-results.json)."
+            exit 1
+          fi
+
+  # helm-lint — validates the Helm chart on every PR. Helm is pre-installed on
+  # ubuntu-latest runners so no Nix shell is needed. Runs independently of the
+  # Nix-based checks so a chart syntax error doesn't block the Go test output.
+  helm-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Lint Helm chart
+        run: helm lint deploy/helm/
+
+  # e2e — Foundation F8: the composed OIDC harness run on every PR.
+  # Runs `make e2e` (docker-compose + `go test -tags=e2e ./e2e/...`) in the
+  # pinned toolchain, exercising authorize→token→JWKS + the §11.7 negatives
+  # against a live harbor-hot. `make conformance` (the full OIDF OP certification
+  # suite) is the manual release gate and requires a prebuilt OIDF image
+  # (CONFORMANCE_SUITE_IMAGE) — it is not run in PR CI.
+  # No continue-on-error: a failing assembled flow fails the job directly.
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Actions are pinned to release tags (not @main) — bump deliberately.
+      - name: Install pinned Nix toolchain
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      # No binary-cache action — see the agent-check job above for why
+      # DeterminateSystems/magic-nix-cache-action was removed (deprecated
+      # 2025-02-01; FlakeHub-auth failure red-gated every PR).
+
+      # Docker + docker compose are preinstalled on GitHub-hosted ubuntu runners.
+      # Runs the F8 Go e2e tests only (not the full OIDF certification suite).
+      - name: Run e2e OIDC harness (F8)
+        run: nix develop -c make e2e
