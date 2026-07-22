@@ -54,7 +54,27 @@ type Server struct {
 	// sessionRevoker cascades consent revocation to active sessions with the RP.
 	// May be nil (dev-scaffold mode); DeleteConsentGrant then skips the cascade.
 	sessionRevoker SessionRevoker
-	logger         *slog.Logger
+
+	// recoveryCodes generates recovery codes for POST /recovery/codes. Nil puts
+	// that endpoint into a 503 state.
+	recoveryCodes RecoveryCodeGenerator
+	// recoveryStore persists recovery code hashes for POST /recovery/codes. Nil
+	// puts that endpoint into a 503 state.
+	recoveryStore RecoveryCodeStore
+	// recoveryVerifier consumes recovery codes (with lockout) for POST
+	// /recovery/complete. Nil puts that endpoint into a 503 state.
+	recoveryVerifier RecoveryVerifier
+	// recoveryCeremonies bridges POST /recovery/begin and POST /recovery/complete.
+	// Nil puts both endpoints into a 503 state.
+	recoveryCeremonies RecoveryCeremonyStore
+	// scopedSessions establishes the enrollment-only session on a successful
+	// POST /recovery/complete. Nil skips the cookie (dev-scaffold mode).
+	scopedSessions ScopedSessionIssuer
+	// recoveryLimiter, when non-nil, gates the recovery endpoints. Nil disables
+	// rate limiting.
+	recoveryLimiter RecoveryRateLimiter
+
+	logger *slog.Logger
 }
 
 // New returns a Server. A nil enroller is valid and puts the enrollment route
@@ -123,6 +143,34 @@ func (s *Server) WithSessionRevoker(revoker SessionRevoker) *Server {
 	return s
 }
 
+// WithRecovery wires the recovery ceremony endpoints (POST /recovery/codes,
+// /recovery/begin, /recovery/complete). codes+store back code generation,
+// verifier backs code consumption with lockout, and ceremonies bridges
+// begin→complete. Any nil dependency puts the affected endpoints into a 503
+// state. Returns s for chaining.
+func (s *Server) WithRecovery(codes RecoveryCodeGenerator, store RecoveryCodeStore, verifier RecoveryVerifier, ceremonies RecoveryCeremonyStore) *Server {
+	s.recoveryCodes = codes
+	s.recoveryStore = store
+	s.recoveryVerifier = verifier
+	s.recoveryCeremonies = ceremonies
+	return s
+}
+
+// WithScopedSessionIssuer attaches the issuer that establishes the scoped
+// enrollment-only session on a successful POST /recovery/complete. A nil issuer
+// skips the cookie. Returns s for chaining.
+func (s *Server) WithScopedSessionIssuer(issuer ScopedSessionIssuer) *Server {
+	s.scopedSessions = issuer
+	return s
+}
+
+// WithRecoveryRateLimiter attaches a rate limiter for the recovery endpoints.
+// A nil limiter disables rate limiting. Returns s for chaining.
+func (s *Server) WithRecoveryRateLimiter(limiter RecoveryRateLimiter) *Server {
+	s.recoveryLimiter = limiter
+	return s
+}
+
 // Routes registers harbor-mgmt's cold-path routes on mux. It is additive: the
 // caller owns the mux (typically httpserver.NewHealthMux) and its /healthz route.
 func (s *Server) Routes(mux *http.ServeMux) {
@@ -133,6 +181,9 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /register/{client_id}", s.DeleteRegister)
 	mux.HandleFunc("GET /consent-grants", s.GetConsentGrants)
 	mux.HandleFunc("DELETE /consent-grants/{client_id}", s.DeleteConsentGrant)
+	mux.HandleFunc("POST /recovery/codes", s.PostRecoveryCodes)
+	mux.HandleFunc("POST /recovery/begin", s.PostRecoveryBegin)
+	mux.HandleFunc("POST /recovery/complete", s.PostRecoveryComplete)
 }
 
 // errorResponse is the JSON error envelope for the cold-path API. Messages are
