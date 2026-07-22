@@ -13,6 +13,8 @@ import (
 // that same region and MUST be denied when the data lives in any other region
 // (OpenSpec REQ-003). Same-region pairs succeed; cross-region pairs fail closed
 // with ErrCrossRegionAccess.
+//
+//harbor:invariant INV-REGION-NO-CROSS-ACCESS
 func TestAssertRegionAllCombinations(t *testing.T) {
 	regions := []Region{EU, US, APAC}
 	for _, pinned := range regions {
