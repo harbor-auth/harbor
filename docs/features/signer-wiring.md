@@ -1,7 +1,7 @@
 ---
 title: Hot-Path Signer Wiring (KeyRotator + JWTIssuer in harbor-hot)
 status: draft
-design_refs: [§3.3, §3.5, §3.5.4, §4.1, §7.3]
+design_refs: [§3.3, §3.5, §4.1, §7.3]
 targets:
   - cmd/harbor-hot/main.go
   - internal/oidcapi/server.go
