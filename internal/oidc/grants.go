@@ -44,6 +44,12 @@ type GrantStore interface {
 	// pair. found=false means the user has not (yet) consented.
 	FindGrant(ctx context.Context, userID, clientID string) (Grant, bool, error)
 
+	// FindGrantByPPID looks up the active (non-revoked) grant by pairwise_sub
+	// (PPID) and clientID. Used during RP-Initiated Logout to reverse-lookup
+	// the userID from the id_token_hint's sub claim. found=false means no
+	// active grant exists for this PPID+client pair.
+	FindGrantByPPID(ctx context.Context, ppid, clientID string) (Grant, bool, error)
+
 	// CreateGrant records a new consent. The store mints the grant ID.
 	CreateGrant(ctx context.Context, g NewGrant) (Grant, error)
 
@@ -63,6 +69,9 @@ type noopGrantStore struct{}
 func (noopGrantStore) FindGrant(_ context.Context, _, _ string) (Grant, bool, error) {
 	// Always returns not-found. See NewService panic guard in service.go for why
 	// this must NOT be paired with a real SessionStore.
+	return Grant{}, false, nil
+}
+func (noopGrantStore) FindGrantByPPID(_ context.Context, _, _ string) (Grant, bool, error) {
 	return Grant{}, false, nil
 }
 func (noopGrantStore) CreateGrant(_ context.Context, _ NewGrant) (Grant, error) {
@@ -105,6 +114,21 @@ func (s *InMemoryGrantStore) FindGrant(_ context.Context, userID, clientID strin
 	out := *g
 	out.Scopes = append([]string(nil), g.Scopes...)
 	return out, true, nil
+}
+
+// FindGrantByPPID implements GrantStore. Searches by pairwise_sub (PPID) and
+// clientID for reverse-lookup during RP-Initiated Logout.
+func (s *InMemoryGrantStore) FindGrantByPPID(_ context.Context, ppid, clientID string) (Grant, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, g := range s.byID {
+		if g.PairwiseSub == ppid && g.ClientID == clientID && g.RevokedAt == nil {
+			out := *g
+			out.Scopes = append([]string(nil), g.Scopes...)
+			return out, true, nil
+		}
+	}
+	return Grant{}, false, nil
 }
 
 // CreateGrant implements GrantStore. Mints a sequential string ID.

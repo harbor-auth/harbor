@@ -95,6 +95,10 @@ type Querier interface {
 	// rows to avoid long transactions. Only fetches rows whose next_attempt_at
 	// has passed (respecting exponential backoff).
 	FetchPendingRevocations(ctx context.Context, limit int32) ([]RevocationOutbox, error)
+	// FindGrantByPPID looks up an active grant by its pairwise_sub (PPID) and
+	// client_id. Used during RP-Initiated Logout to reverse-lookup the userID from
+	// the id_token_hint's sub claim without exposing internal user IDs to RPs.
+	FindGrantByPPID(ctx context.Context, arg FindGrantByPPIDParams) (Grant, error)
 	FindGrantByUserClient(ctx context.Context, arg FindGrantByUserClientParams) (Grant, error)
 	// GCExpiredRevokedJTIs deletes entries for JWTs that have expired — their JTIs
 	// no longer need revocation (the JWT itself is invalid). Run nightly as

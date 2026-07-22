@@ -18,6 +18,7 @@ import (
 // needs. Production code passes *db.Queries; tests pass a small fake.
 type grantQuerier interface {
 	FindGrantByUserClient(ctx context.Context, arg db.FindGrantByUserClientParams) (db.Grant, error)
+	FindGrantByPPID(ctx context.Context, arg db.FindGrantByPPIDParams) (db.Grant, error)
 	CreateGrant(ctx context.Context, arg db.CreateGrantParams) (db.Grant, error)
 	RevokeGrant(ctx context.Context, id pgtype.UUID) error
 	ListGrantsByUser(ctx context.Context, userID pgtype.UUID) ([]db.Grant, error)
@@ -53,6 +54,23 @@ func (s *DBGrantStore) FindGrant(ctx context.Context, userID, clientID string) (
 			return oidc.Grant{}, false, nil
 		}
 		return oidc.Grant{}, false, fmt.Errorf("clients: FindGrant: %w", err)
+	}
+	return rowToGrant(row), true, nil
+}
+
+// FindGrantByPPID implements oidc.GrantStore. Looks up an active grant by its
+// pairwise_sub (PPID) and clientID. Used during RP-Initiated Logout to
+// reverse-lookup the userID from the id_token_hint's sub claim.
+func (s *DBGrantStore) FindGrantByPPID(ctx context.Context, ppid, clientID string) (oidc.Grant, bool, error) {
+	row, err := s.q.FindGrantByPPID(ctx, db.FindGrantByPPIDParams{
+		PairwiseSub: ppid,
+		ClientID:    clientID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return oidc.Grant{}, false, nil
+		}
+		return oidc.Grant{}, false, fmt.Errorf("clients: FindGrantByPPID: %w", err)
 	}
 	return rowToGrant(row), true, nil
 }

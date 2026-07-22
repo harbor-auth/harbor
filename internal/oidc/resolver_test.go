@@ -264,6 +264,10 @@ func (s errGrantStore) ListGrantsByUser(_ context.Context, _ string) ([]Grant, e
 	return nil, nil
 }
 
+func (s errGrantStore) FindGrantByPPID(_ context.Context, _, _ string) (Grant, bool, error) {
+	return Grant{}, false, nil
+}
+
 func TestPPIDSessionResolverFindGrantError(t *testing.T) {
 	const userID = "00000000-0000-0000-0000-000000000001"
 	loader := NewInMemorySecretLoader()
