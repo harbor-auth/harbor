@@ -95,7 +95,7 @@ func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
 }
 
 func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
-func (h *capturingHandler) WithGroup(string) slog.Handler       { return h }
+func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }
 
 func (h *capturingHandler) attrsOf(i int) map[string]string {
 	h.mu.Lock()
