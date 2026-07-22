@@ -3,9 +3,6 @@ package region
 import (
 	"context"
 	"errors"
-	"log/slog"
-
-	"github.com/harbor/harbor/internal/telemetry"
 )
 
 // ErrCrossRegionAccess is returned by AssertRegion when a handler would read a
@@ -16,10 +13,12 @@ import (
 // Decision 3).
 var ErrCrossRegionAccess = errors.New("region: cross-region access denied")
 
-// crossRegionDeniedCode is the stable, non-PII error code emitted when a
-// cross-region access is denied. It is safe for aggregate metering and for the
-// telemetry allow-list.
-const crossRegionDeniedCode = "cross_region_denied"
+// CrossRegionDeniedCode is the stable, non-PII error code a caller emits when
+// metering an AssertRegion cross-region denial. It is exported so the
+// middleware/handler layer — which owns denial metering now that the guard is
+// pure (see AssertRegion) — can reference it instead of re-hardcoding the
+// string. It is safe for aggregate metering and is on the telemetry allow-list.
+const CrossRegionDeniedCode = "cross_region_denied"
 
 // AssertRegion asserts that dataRegion — the region of the store or record a
 // handler is about to read — matches the region pinned on ctx by the region
@@ -34,11 +33,19 @@ const crossRegionDeniedCode = "cross_region_denied"
 //   - If the pinned region differs from dataRegion (or dataRegion is not a
 //     known region), access is denied and ErrCrossRegionAccess is returned.
 //
-// On a match it returns nil and the caller may proceed. In every denial case
-// the event is metered through the allow-listed telemetry wrapper using only
-// aggregate, non-PII fields (event, error_code, component, and the request's
-// own pinned region) — neither user identity nor the foreign region's data is
-// ever logged, and no partial data is returned.
+// On a match it returns nil and the caller may proceed. In every denial case it
+// returns a typed error and NO partial data.
+//
+// AssertRegion is intentionally PURE: it performs no telemetry, no logging, and
+// no I/O — it is a total, deterministic comparison of the pinned region against
+// the caller-supplied dataRegion. This keeps the region package free of a
+// dependency on telemetry (which itself types its metric labels on
+// region.Region, so a region -> telemetry edge would form an import cycle).
+// Metering a cross-region denial is the CALLER's responsibility at the
+// middleware/handler layer (which already imports both region and telemetry);
+// callers should emit the stable, non-PII CrossRegionDeniedCode on this error
+// with aggregate fields only (event, error_code, component, and the request's
+// own pinned region) — never the foreign dataRegion or any user identity.
 //
 // The guard performs NO global user_id -> region lookup (REQ-005, Decision 5):
 // it compares only the host-derived pinned region against the caller-supplied
@@ -48,36 +55,15 @@ func AssertRegion(ctx context.Context, dataRegion Region) error {
 	pinned, err := FromContext(ctx)
 	if err != nil {
 		// No pinned region -> residency decision cannot be made -> deny.
-		meterCrossRegionDenied("")
 		return err
 	}
 	if _, ok := known[string(dataRegion)]; !ok {
 		// An unknown/empty data region cannot match a valid pinned region and
 		// is treated as a mismatch -> deny.
-		meterCrossRegionDenied(pinned)
 		return ErrCrossRegionAccess
 	}
 	if pinned != dataRegion {
-		meterCrossRegionDenied(pinned)
 		return ErrCrossRegionAccess
 	}
 	return nil
-}
-
-// meterCrossRegionDenied records a cross-region denial with aggregate, non-PII
-// fields only. The request's pinned region is on the telemetry allow-list and
-// is safe to emit; the foreign dataRegion and any user identity are
-// deliberately NOT logged so no cross-region or user detail leaks into
-// telemetry. The telemetry logger is constructed at call time so the (rare)
-// denial path always meters through the current slog default handler.
-func meterCrossRegionDenied(pinned Region) {
-	attrs := []slog.Attr{
-		slog.String("event", "cross_region_denied"),
-		slog.String("error_code", crossRegionDeniedCode),
-		slog.String("component", "region"),
-	}
-	if pinned != "" {
-		attrs = append(attrs, slog.String("region", string(pinned)))
-	}
-	telemetry.New(nil).Warn("cross-region access denied", attrs...)
 }

@@ -97,21 +97,13 @@ func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
 func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }
 
-func (h *capturingHandler) attrsOf(i int) map[string]string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	out := map[string]string{}
-	h.records[i].Attrs(func(a slog.Attr) bool {
-		out[a.Key] = a.Value.String()
-		return true
-	})
-	return out
-}
-
-// TestAssertRegionMetersDenial verifies that a cross-region denial is metered
-// through the telemetry wrapper with aggregate, non-PII fields only: the event,
-// error_code, component, and the request's own pinned region are emitted, while
-// the foreign data region and any user identity are NOT.
+// TestAssertRegionMetersDenial pins the guard's purity contract: a cross-region
+// denial returns ErrCrossRegionAccess and the guard itself emits NO telemetry.
+// Metering is the caller's (middleware) responsibility — the guard must stay
+// free of any telemetry dependency so region never imports telemetry (which
+// types its metric labels on region.Region; the reverse edge would be an import
+// cycle). The capturing handler proves the guard writes nothing to the default
+// slog sink on the denial path.
 func TestAssertRegionMetersDenial(t *testing.T) {
 	h := &capturingHandler{}
 	prev := slog.Default()
@@ -123,33 +115,16 @@ func TestAssertRegionMetersDenial(t *testing.T) {
 		t.Fatalf("AssertRegion(EU, US) = %v, want ErrCrossRegionAccess", err)
 	}
 
-	if len(h.records) != 1 {
-		t.Fatalf("metered %d records, want exactly 1", len(h.records))
-	}
-	attrs := h.attrsOf(0)
-	if got := attrs["event"]; got != "cross_region_denied" {
-		t.Errorf("event = %q, want cross_region_denied", got)
-	}
-	if got := attrs["error_code"]; got != crossRegionDeniedCode {
-		t.Errorf("error_code = %q, want %q", got, crossRegionDeniedCode)
-	}
-	if got := attrs["component"]; got != "region" {
-		t.Errorf("component = %q, want region", got)
-	}
-	// The pinned region is allow-listed and expected; the foreign data region
-	// (US here) must never appear as a value, and neither may any user field.
-	if got := attrs["region"]; got != string(EU) {
-		t.Errorf("region = %q, want EU (the pinned region)", got)
-	}
-	for _, k := range []string{"user_id", "sub", "email", "data_region"} {
-		if _, present := attrs[k]; present {
-			t.Errorf("denial record leaked forbidden field %q", k)
-		}
+	// The pure guard must not meter: a caller does that at the middleware layer
+	// using CrossRegionDeniedCode. Asserting zero records here is what keeps the
+	// region -> telemetry edge from creeping back in.
+	if len(h.records) != 0 {
+		t.Fatalf("pure guard metered %d records, want 0 (metering is the caller's job, code=%q)", len(h.records), CrossRegionDeniedCode)
 	}
 }
 
-// TestAssertRegionSuccessNotMetered ensures the happy path emits no denial
-// telemetry — metering is reserved for actual residency violations.
+// TestAssertRegionSuccessNotMetered ensures the happy path returns nil and, like
+// the denial path, emits no telemetry from the guard itself.
 func TestAssertRegionSuccessNotMetered(t *testing.T) {
 	h := &capturingHandler{}
 	prev := slog.Default()
