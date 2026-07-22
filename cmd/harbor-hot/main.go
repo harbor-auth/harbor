@@ -69,7 +69,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// In production, the issuer is region-specific (e.g. https://eu.harbor.id);
 	// in dev, REGION env var overrides to allow localhost testing.
 	if reg := envString("REGION", ""); reg != "" {
-		region.BindIssuerHost(issuer, region.Region(reg))
+		if err := region.BindIssuerHost(issuer, region.Region(reg)); err != nil {
+			return err
+		}
 	}
 
 	// Wire the OIDC service with scaffold implementations for dev/test.
@@ -77,9 +79,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	clientRegistry := oidc.NewInMemoryClientRegistry()
 	// Seed a demo client for e2e tests (matches e2e/flow_test.go expectations).
 	clientRegistry.Put(oidc.Client{
-		ID:           "demo-client",
-		SectorID:     "localhost",
-		RedirectURIs: []string{"http://localhost/callback", "http://localhost:8081/callback"},
+		ID:            "demo-client",
+		SectorID:      "localhost",
+		RedirectURIs:  []string{"http://localhost/callback", "http://localhost:8081/callback"},
 		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
 	})
 

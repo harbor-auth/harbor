@@ -216,7 +216,10 @@ func TestRecoveryCeremonyEndToEnd(t *testing.T) {
 	completeResp := completeRecovery(t, recoverClient, requestID, codes[0])
 	defer func() { _ = completeResp.Body.Close() }()
 	if completeResp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(completeResp.Body)
+		raw, readErr := io.ReadAll(completeResp.Body)
+		if readErr != nil {
+			t.Fatalf("read /recovery/complete body: %v", readErr)
+		}
 		t.Fatalf("POST /recovery/complete = %d, want 200\n%s", completeResp.StatusCode, raw)
 	}
 	if !hasCookie(completeResp, recoveryScopedSessionCookie) {
@@ -301,7 +304,10 @@ func TestRecoveryInvalidCodeFailsClosed(t *testing.T) {
 	resp := completeRecovery(t, recoverClient, requestID, "WRONG-CODE-0000-0000-0000-0000-0000")
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusUnauthorized {
-		raw, _ := io.ReadAll(resp.Body)
+		raw, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			t.Logf("read response body: %v", readErr)
+		}
 		t.Fatalf("invalid-code /recovery/complete = %d, want 401 (fail closed)\n%s", resp.StatusCode, raw)
 	}
 	if hasCookie(resp, recoveryScopedSessionCookie) {

@@ -347,7 +347,7 @@ func TestRedisRateLimiter_RetryAfterAccuracy(t *testing.T) {
 	mr.FastForward(retryAfter + 100*time.Millisecond)
 
 	// Should now be allowed (sliding window effect)
-	allowed, _, err = limiter.Allow(ctx, "client-1")
+	_, _, err = limiter.Allow(ctx, "client-1")
 	if err != nil {
 		t.Fatalf("Allow after retry-after: %v", err)
 	}
@@ -455,14 +455,14 @@ func TestMemoryRateLimiter_SeparateKeys(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 3; i++ {
-		if allowed, _, _ := lim.Allow(ctx, "client-1"); !allowed {
+		if allowed, _, _ := lim.Allow(ctx, "client-1"); !allowed { //nolint:errcheck // in-memory limiter never errors
 			t.Fatalf("client-1 Allow %d: expected allowed=true", i)
 		}
 	}
-	if allowed, _, _ := lim.Allow(ctx, "client-1"); allowed {
+	if allowed, _, _ := lim.Allow(ctx, "client-1"); allowed { //nolint:errcheck // in-memory limiter never errors
 		t.Fatal("client-1 at limit: expected allowed=false")
 	}
-	if allowed, _, _ := lim.Allow(ctx, "client-2"); !allowed {
+	if allowed, _, _ := lim.Allow(ctx, "client-2"); !allowed { //nolint:errcheck // in-memory limiter never errors
 		t.Fatal("client-2: expected allowed=true")
 	}
 }
@@ -474,18 +474,18 @@ func TestMemoryRateLimiter_WindowExpiry(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 3; i++ {
-		if allowed, _, _ := lim.Allow(ctx, "client-1"); !allowed {
+		if allowed, _, _ := lim.Allow(ctx, "client-1"); !allowed { //nolint:errcheck // in-memory limiter never errors
 			t.Fatalf("Allow %d: expected allowed=true", i)
 		}
 	}
-	if allowed, _, _ := lim.Allow(ctx, "client-1"); allowed {
+	if allowed, _, _ := lim.Allow(ctx, "client-1"); allowed { //nolint:errcheck // in-memory limiter never errors
 		t.Fatal("Allow at limit: expected allowed=false")
 	}
 
 	// Advance past both the current and previous window so history is gone.
 	advance(4 * time.Second)
 
-	if allowed, _, _ := lim.Allow(ctx, "client-1"); !allowed {
+	if allowed, _, _ := lim.Allow(ctx, "client-1"); !allowed { //nolint:errcheck // in-memory limiter never errors
 		t.Fatal("Allow after expiry: expected allowed=true")
 	}
 }
@@ -499,7 +499,7 @@ func TestMemoryRateLimiter_SlidingWindow(t *testing.T) {
 	// Align to a window boundary so overlap math is predictable.
 	// Fill 8 requests in the current window.
 	for i := 0; i < 8; i++ {
-		if allowed, _, _ := lim.Allow(ctx, "client-1"); !allowed {
+		if allowed, _, _ := lim.Allow(ctx, "client-1"); !allowed { //nolint:errcheck // in-memory limiter never errors
 			t.Fatalf("Allow %d: expected allowed=true", i)
 		}
 	}
@@ -509,18 +509,18 @@ func TestMemoryRateLimiter_SlidingWindow(t *testing.T) {
 
 	// Two more should be allowed (effective 8 → 9 → 10).
 	for i := 0; i < 2; i++ {
-		if allowed, _, _ := lim.Allow(ctx, "client-1"); !allowed {
+		if allowed, _, _ := lim.Allow(ctx, "client-1"); !allowed { //nolint:errcheck // in-memory limiter never errors
 			t.Fatalf("Allow at boundary %d: expected allowed=true", i)
 		}
 	}
 	// Now effective ≈ 2 + 8*1 = 10 → denied.
-	if allowed, _, _ := lim.Allow(ctx, "client-1"); allowed {
+	if allowed, _, _ := lim.Allow(ctx, "client-1"); allowed { //nolint:errcheck // in-memory limiter never errors
 		t.Fatal("Allow at sliding limit: expected allowed=false")
 	}
 
 	// Advance past the previous window entirely: previous history gone.
 	advance(4 * time.Second)
-	if allowed, _, _ := lim.Allow(ctx, "client-1"); !allowed {
+	if allowed, _, _ := lim.Allow(ctx, "client-1"); !allowed { //nolint:errcheck // in-memory limiter never errors
 		t.Fatal("Allow after full slide: expected allowed=true")
 	}
 }
@@ -679,24 +679,24 @@ func TestRateLimiter_KeysAreIsolated(t *testing.T) {
 
 	// Exhaust limit for client-a
 	for i := 0; i < 2; i++ {
-		allowed, _, _ := limiter.Allow(ctx, clientAKey)
+		allowed, _, _ := limiter.Allow(ctx, clientAKey) //nolint:errcheck // miniredis is up in this test
 		if !allowed {
 			t.Fatalf("client-a request %d should be allowed", i)
 		}
 	}
 
 	// client-a should be denied
-	if allowed, _, _ := limiter.Allow(ctx, clientAKey); allowed {
+	if allowed, _, _ := limiter.Allow(ctx, clientAKey); allowed { //nolint:errcheck // miniredis is up in this test
 		t.Fatal("client-a should be rate limited")
 	}
 
 	// client-b should still be allowed (separate key)
-	if allowed, _, _ := limiter.Allow(ctx, clientBKey); !allowed {
+	if allowed, _, _ := limiter.Allow(ctx, clientBKey); !allowed { //nolint:errcheck // miniredis is up in this test
 		t.Fatal("client-b should be allowed (independent limit)")
 	}
 
 	// IP-based key should also be independent
-	if allowed, _, _ := limiter.Allow(ctx, ipKey); !allowed {
+	if allowed, _, _ := limiter.Allow(ctx, ipKey); !allowed { //nolint:errcheck // miniredis is up in this test
 		t.Fatal("IP-based key should be allowed (independent limit)")
 	}
 }

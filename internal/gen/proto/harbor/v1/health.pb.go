@@ -185,7 +185,7 @@ const file_harbor_v1_health_proto_rawDesc = "" +
 	"\x16SERVING_STATUS_SERVING\x10\x01\x12\x1e\n" +
 	"\x1aSERVING_STATUS_NOT_SERVING\x10\x022K\n" +
 	"\rHealthService\x12:\n" +
-	"\x05Check\x12\x17.harbor.v1.CheckRequest\x1a\x18.harbor.v1.CheckResponseB@Z>github.com/harbor-auth/harbor/internal/gen/proto/harbor/v1;harborv1b\x06proto3"
+	"\x05Check\x12\x17.harbor.v1.CheckRequest\x1a\x18.harbor.v1.CheckResponseBEZCgithub.com/harbor-auth/harbor/internal/gen/proto/harbor/v1;harborv1b\x06proto3"
 
 var (
 	file_harbor_v1_health_proto_rawDescOnce sync.Once

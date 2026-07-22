@@ -261,16 +261,18 @@ func (s *RecoveryService) ConsumeCode(ctx context.Context, userID, submittedCode
 			lockUntil = &t
 		}
 		if recordErr := s.store.RecordFailedAttempt(ctx, userID, newCount, lockUntil); recordErr != nil {
-			// Log but don't fail the request — the code was still invalid.
+			// Best-effort: log but don't surface — the code was still invalid.
 			// In production, this would be logged for alerting.
+			_ = recordErr
 		}
 		return ErrInvalidCode
 	}
 
 	// Step 4: Success — reset failed attempts.
 	if err := s.store.ResetFailedAttempts(ctx, userID); err != nil {
-		// Log but don't fail — the code was consumed successfully.
+		// Best-effort: log but don't surface — the code was consumed successfully.
 		// In production, this would be logged for alerting.
+		_ = err
 	}
 
 	return nil

@@ -293,10 +293,10 @@ func (m *MemoryRateLimiter) Allow(_ context.Context, key string) (bool, time.Dur
 	// Roll the window forward to the current one, carrying `current` into
 	// `previous` when we advance exactly one window, and clearing both when the
 	// entry is older than the previous window (fully aged out).
-	switch {
-	case e.windowStart == currentWindowStart:
+	switch e.windowStart {
+	case currentWindowStart:
 		// same window — no roll needed
-	case e.windowStart == previousWindowStart:
+	case previousWindowStart:
 		e.previous = e.current
 		e.current = 0
 		e.windowStart = currentWindowStart
@@ -334,7 +334,7 @@ func (m *MemoryRateLimiter) retryAfter(e *memWindow, elapsed, windowMs int64) ti
 		targetElapsed := float64(windowMs) * (1 - targetOverlap)
 		retryMs = int64(math.Ceil(targetElapsed - float64(elapsed)))
 	} else {
-		retryMs = int64(math.Ceil(float64(windowMs - elapsed)))
+		retryMs = windowMs - elapsed
 	}
 	if retryMs < 1 {
 		retryMs = 1

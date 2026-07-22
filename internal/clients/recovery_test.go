@@ -17,9 +17,9 @@ import (
 
 // fakeRecoveryQuerier is a test double for recoveryQuerier.
 type fakeRecoveryQuerier struct {
-	codes            []db.RecoveryCode
-	attempts         *db.RecoveryAttempt
-	consumedCodeID   pgtype.UUID
+	codes          []db.RecoveryCode
+	attempts       *db.RecoveryAttempt
+	consumedCodeID pgtype.UUID
 	// lastGetCodesUser records the userID the last GetRecoveryCodesByUser was
 	// scoped to, so tests can prove the store queries per-user (cross-user
 	// isolation is enforced by the DB WHERE user_id = $1 clause).
@@ -204,7 +204,9 @@ func TestDBRecoveryStore_FindAndConsumeCode_Success(t *testing.T) {
 	code := codes[0]
 
 	var codeID pgtype.UUID
-	_ = codeID.Scan("550e8400-e29b-41d4-a716-446655440001")
+	if err := codeID.Scan("550e8400-e29b-41d4-a716-446655440001"); err != nil {
+		t.Fatalf("codeID.Scan: %v", err)
+	}
 
 	q := &fakeRecoveryQuerier{
 		codes: []db.RecoveryCode{
@@ -247,7 +249,9 @@ func TestDBRecoveryStore_FindAndConsumeCode_AlreadyUsed(t *testing.T) {
 	code := codes[0]
 
 	var codeID pgtype.UUID
-	_ = codeID.Scan("550e8400-e29b-41d4-a716-446655440001")
+	if err := codeID.Scan("550e8400-e29b-41d4-a716-446655440001"); err != nil {
+		t.Fatalf("codeID.Scan: %v", err)
+	}
 
 	q := &fakeRecoveryQuerier{
 		codes: []db.RecoveryCode{
@@ -357,7 +361,9 @@ func TestDBRecoveryStore_FindAndConsumeCode_ScopesByUser(t *testing.T) {
 	}
 	code := codes[0]
 	var codeID pgtype.UUID
-	_ = codeID.Scan("550e8400-e29b-41d4-a716-446655440001")
+	if err := codeID.Scan("550e8400-e29b-41d4-a716-446655440001"); err != nil {
+		t.Fatalf("codeID.Scan: %v", err)
+	}
 	q := &fakeRecoveryQuerier{
 		codes: []db.RecoveryCode{{ID: codeID, CodeHash: code.Hash, Salt: code.Salt}},
 	}
@@ -368,7 +374,9 @@ func TestDBRecoveryStore_FindAndConsumeCode_ScopesByUser(t *testing.T) {
 		t.Fatalf("FindAndConsumeCode: %v", err)
 	}
 	var want pgtype.UUID
-	_ = want.Scan(userID)
+	if err := want.Scan(userID); err != nil {
+		t.Fatalf("want.Scan: %v", err)
+	}
 	if q.lastGetCodesUser != want {
 		t.Errorf("GetRecoveryCodesByUser userID = %v, want %v (lookup must scope by user)", q.lastGetCodesUser, want)
 	}
@@ -386,7 +394,9 @@ func TestDBRecoveryStore_FindAndConsumeCode_Replay(t *testing.T) {
 	}
 	code := codes[0]
 	var codeID pgtype.UUID
-	_ = codeID.Scan("550e8400-e29b-41d4-a716-446655440001")
+	if err := codeID.Scan("550e8400-e29b-41d4-a716-446655440001"); err != nil {
+		t.Fatalf("codeID.Scan: %v", err)
+	}
 	q := &fakeRecoveryQuerier{
 		codes: []db.RecoveryCode{{ID: codeID, CodeHash: code.Hash, Salt: code.Salt}},
 	}
