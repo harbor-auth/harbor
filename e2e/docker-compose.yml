@@ -22,6 +22,11 @@ services:
     environment:
       PORT: "8080"
       ISSUER: "http://localhost:8080"
+      # This single-region dev stack serves its issuer at localhost, which is not
+      # in the default *.harbor.id host map. REGION binds the issuer host to a
+      # region at boot so the fail-closed region middleware resolves /authorize
+      # and /token instead of 400-rejecting them (region.BindIssuerHost).
+      REGION: "EU"
     ports:
       - "8080:8080"
     volumes:

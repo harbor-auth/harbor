@@ -309,6 +309,43 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /introspect:
+    post:
+      operationId: postIntrospect
+      summary: Token introspection (RFC 7662)
+      description: >-
+        Validates an access or refresh token and returns its active status and
+        metadata. Callers must authenticate via Basic auth (client_id:client_secret)
+        or an admin Bearer token. Anonymous callers receive 401. Cross-client
+        isolation is enforced: a client may only introspect tokens whose `aud`
+        matches its own `client_id`; cross-client queries return `{"active":false}`
+        (no information leakage). Admin tokens can introspect any token. All
+        negative responses (expired, revoked, invalid, cross-client) return 200
+        with `{"active":false}` for enumeration resistance (DESIGN §3.3, §3.5).
+      security:
+        - basicAuth: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/IntrospectRequest"
+      responses:
+        "200":
+          description: >-
+            Introspection result. Active tokens include metadata; inactive tokens
+            return only `{"active":false}` with no additional claims.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IntrospectResponse"
+        "401":
+          description: Missing or invalid client credentials.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OAuthError"
   /jwks.json:
     get:
       operationId: getJwks
@@ -339,6 +376,12 @@ paths:
                 $ref: "#/components/schemas/Error"
 components:
   securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+      description: >-
+        HTTP Basic authentication using client_id as username and client_secret
+        as password. Used for token introspection by registered clients.
     bearerAuth:
       type: http
       scheme: bearer
@@ -674,6 +717,78 @@ components:
         reason:
           type: string
           description: The reason provided for revocation.
+    IntrospectRequest:
+      type: object
+      description: >-
+        Token introspection request (RFC 7662 §2.1). The `token` field is
+        required; `token_type_hint` is optional and helps the server optimize
+        lookup order.
+      required:
+        - token
+      properties:
+        token:
+          type: string
+          description: >-
+            The access token or refresh token to introspect. May be a JWT
+            (access token) or an opaque string (refresh token).
+        token_type_hint:
+          type: string
+          description: >-
+            Hint about the token type. If omitted, the server tries both.
+          enum:
+            - access_token
+            - refresh_token
+    IntrospectResponse:
+      type: object
+      description: >-
+        Token introspection response (RFC 7662 §2.2). The `active` field is
+        always present. Additional claims are only included for active tokens.
+        Inactive responses contain only `{"active":false}` for enumeration
+        resistance.
+      required:
+        - active
+      properties:
+        active:
+          type: boolean
+          description: >-
+            True if the token is valid, not expired, and not revoked. False
+            otherwise (expired, revoked, malformed, or cross-client query).
+        sub:
+          type: string
+          description: >-
+            Pairwise subject identifier (PPID) for the token's user. Only
+            present when `active` is true.
+        scope:
+          type: string
+          description: >-
+            Space-delimited list of granted scopes. Only present when `active`
+            is true.
+        client_id:
+          type: string
+          description: >-
+            The client_id that the token was issued to. Only present when
+            `active` is true.
+        exp:
+          type: integer
+          description: >-
+            Token expiration time as Unix timestamp (seconds since epoch).
+            Only present when `active` is true.
+        iat:
+          type: integer
+          description: >-
+            Token issuance time as Unix timestamp (seconds since epoch).
+            Only present when `active` is true.
+        jti:
+          type: string
+          description: >-
+            Unique token identifier (JWT ID). Only present when `active` is
+            true and the token is a JWT.
+        token_type:
+          type: string
+          description: >-
+            Type of the token (e.g., "Bearer"). Only present when `active`
+            is true.
+          example: Bearer
     Error:
       type: object
       description: Standard error envelope.

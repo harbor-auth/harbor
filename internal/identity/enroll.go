@@ -70,7 +70,7 @@ func PairwiseSecretAAD(userID string) []byte {
 //  6. Encrypt the pairwise secret with the DEK (AAD = user ID).
 //  7. Delegate persistence of the sealed record to UserPersister.
 func (e *Enroller) Enroll(ctx context.Context, rawRegion string) (EnrollResult, error) {
-	r, err := region.Resolve(rawRegion)
+	r, err := region.Parse(rawRegion)
 	if err != nil {
 		return EnrollResult{}, fmt.Errorf("identity: invalid region %q: %w", rawRegion, err)
 	}
