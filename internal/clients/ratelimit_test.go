@@ -380,3 +380,243 @@ func TestRateLimitKey(t *testing.T) {
 func TestRedisRateLimiter_InterfaceCompliance(t *testing.T) {
 	var _ RateLimiter = (*RedisRateLimiter)(nil)
 }
+
+// --- MemoryRateLimiter tests ---
+
+// newTestMemoryLimiter creates a MemoryRateLimiter with a controllable clock so
+// window advancement can be tested deterministically without sleeping.
+func newTestMemoryLimiter(cfg RateLimiterConfig) (*MemoryRateLimiter, func(d time.Duration)) {
+	lim := NewMemoryRateLimiter(cfg)
+	var mu sync.Mutex
+	now := time.Unix(1_700_000_000, 0) // fixed, window-aligned-ish base
+	lim.nowFn = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	advance := func(d time.Duration) {
+		mu.Lock()
+		defer mu.Unlock()
+		now = now.Add(d)
+	}
+	return lim, advance
+}
+
+// TestMemoryRateLimiter_AllowUnderLimit verifies requests under the limit pass.
+func TestMemoryRateLimiter_AllowUnderLimit(t *testing.T) {
+	lim, _ := newTestMemoryLimiter(RateLimiterConfig{Limit: 10, Window: time.Minute})
+	ctx := context.Background()
+
+	for i := 0; i < 10; i++ {
+		allowed, retryAfter, err := lim.Allow(ctx, "client-1")
+		if err != nil {
+			t.Fatalf("Allow %d: unexpected error: %v", i, err)
+		}
+		if !allowed {
+			t.Fatalf("Allow %d: expected allowed=true", i)
+		}
+		if retryAfter != 0 {
+			t.Fatalf("Allow %d: expected retryAfter=0, got %v", i, retryAfter)
+		}
+	}
+}
+
+// TestMemoryRateLimiter_DenyAtLimit verifies the limit is enforced with a
+// positive retry-after.
+func TestMemoryRateLimiter_DenyAtLimit(t *testing.T) {
+	lim, _ := newTestMemoryLimiter(RateLimiterConfig{Limit: 5, Window: time.Minute})
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		allowed, _, err := lim.Allow(ctx, "client-1")
+		if err != nil {
+			t.Fatalf("Allow %d: %v", i, err)
+		}
+		if !allowed {
+			t.Fatalf("Allow %d: expected allowed=true", i)
+		}
+	}
+
+	allowed, retryAfter, err := lim.Allow(ctx, "client-1")
+	if err != nil {
+		t.Fatalf("Allow at limit: %v", err)
+	}
+	if allowed {
+		t.Fatal("Allow at limit: expected allowed=false")
+	}
+	if retryAfter <= 0 || retryAfter > time.Minute {
+		t.Fatalf("Allow at limit: retryAfter %v out of range (0, 1m]", retryAfter)
+	}
+}
+
+// TestMemoryRateLimiter_SeparateKeys verifies keys are limited independently.
+func TestMemoryRateLimiter_SeparateKeys(t *testing.T) {
+	lim, _ := newTestMemoryLimiter(RateLimiterConfig{Limit: 3, Window: time.Minute})
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		if allowed, _, _ := lim.Allow(ctx, "client-1"); !allowed {
+			t.Fatalf("client-1 Allow %d: expected allowed=true", i)
+		}
+	}
+	if allowed, _, _ := lim.Allow(ctx, "client-1"); allowed {
+		t.Fatal("client-1 at limit: expected allowed=false")
+	}
+	if allowed, _, _ := lim.Allow(ctx, "client-2"); !allowed {
+		t.Fatal("client-2: expected allowed=true")
+	}
+}
+
+// TestMemoryRateLimiter_WindowExpiry verifies the limit resets after the window
+// fully ages out.
+func TestMemoryRateLimiter_WindowExpiry(t *testing.T) {
+	lim, advance := newTestMemoryLimiter(RateLimiterConfig{Limit: 3, Window: 2 * time.Second})
+	ctx := context.Background()
+
+	for i := 0; i < 3; i++ {
+		if allowed, _, _ := lim.Allow(ctx, "client-1"); !allowed {
+			t.Fatalf("Allow %d: expected allowed=true", i)
+		}
+	}
+	if allowed, _, _ := lim.Allow(ctx, "client-1"); allowed {
+		t.Fatal("Allow at limit: expected allowed=false")
+	}
+
+	// Advance past both the current and previous window so history is gone.
+	advance(4 * time.Second)
+
+	if allowed, _, _ := lim.Allow(ctx, "client-1"); !allowed {
+		t.Fatal("Allow after expiry: expected allowed=true")
+	}
+}
+
+// TestMemoryRateLimiter_SlidingWindow verifies the previous window contributes
+// proportionally to the effective count.
+func TestMemoryRateLimiter_SlidingWindow(t *testing.T) {
+	lim, advance := newTestMemoryLimiter(RateLimiterConfig{Limit: 10, Window: 2 * time.Second})
+	ctx := context.Background()
+
+	// Align to a window boundary so overlap math is predictable.
+	// Fill 8 requests in the current window.
+	for i := 0; i < 8; i++ {
+		if allowed, _, _ := lim.Allow(ctx, "client-1"); !allowed {
+			t.Fatalf("Allow %d: expected allowed=true", i)
+		}
+	}
+
+	// Advance a full window: previous=8, current=0, overlap≈1.0 → effective≈8.
+	advance(2 * time.Second)
+
+	// Two more should be allowed (effective 8 → 9 → 10).
+	for i := 0; i < 2; i++ {
+		if allowed, _, _ := lim.Allow(ctx, "client-1"); !allowed {
+			t.Fatalf("Allow at boundary %d: expected allowed=true", i)
+		}
+	}
+	// Now effective ≈ 2 + 8*1 = 10 → denied.
+	if allowed, _, _ := lim.Allow(ctx, "client-1"); allowed {
+		t.Fatal("Allow at sliding limit: expected allowed=false")
+	}
+
+	// Advance past the previous window entirely: previous history gone.
+	advance(4 * time.Second)
+	if allowed, _, _ := lim.Allow(ctx, "client-1"); !allowed {
+		t.Fatal("Allow after full slide: expected allowed=true")
+	}
+}
+
+// TestMemoryRateLimiter_ConcurrentRequests verifies goroutine safety and exact
+// accounting under concurrent load.
+func TestMemoryRateLimiter_ConcurrentRequests(t *testing.T) {
+	lim, _ := newTestMemoryLimiter(RateLimiterConfig{Limit: 50, Window: time.Minute})
+	ctx := context.Background()
+
+	const goroutines = 20
+	const perGoroutine = 5
+	var wg sync.WaitGroup
+	results := make(chan bool, goroutines*perGoroutine)
+
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < perGoroutine; j++ {
+				allowed, _, err := lim.Allow(ctx, "client-concurrent")
+				if err != nil {
+					t.Errorf("Allow error: %v", err)
+					return
+				}
+				results <- allowed
+			}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	var allowedCount, deniedCount int
+	for allowed := range results {
+		if allowed {
+			allowedCount++
+		} else {
+			deniedCount++
+		}
+	}
+	if allowedCount != 50 {
+		t.Errorf("expected 50 allowed, got %d", allowedCount)
+	}
+	if deniedCount != 50 {
+		t.Errorf("expected 50 denied, got %d", deniedCount)
+	}
+}
+
+// TestMemoryRateLimiter_DefaultConfig verifies defaults are applied.
+func TestMemoryRateLimiter_DefaultConfig(t *testing.T) {
+	lim := NewMemoryRateLimiter(RateLimiterConfig{})
+	if lim.limit != 100 {
+		t.Errorf("expected default limit 100, got %d", lim.limit)
+	}
+	if lim.window != time.Minute {
+		t.Errorf("expected default window 1m, got %v", lim.window)
+	}
+}
+
+// TestMemoryRateLimiter_Sweep verifies stale entries are pruned so the map does
+// not grow unbounded.
+func TestMemoryRateLimiter_Sweep(t *testing.T) {
+	lim, advance := newTestMemoryLimiter(RateLimiterConfig{Limit: 5, Window: time.Second})
+	ctx := context.Background()
+
+	// Touch several distinct keys.
+	for i := 0; i < 10; i++ {
+		if _, _, err := lim.Allow(ctx, RateLimitKey("token", string(rune('a'+i)))); err != nil {
+			t.Fatalf("Allow: %v", err)
+		}
+	}
+
+	lim.mu.Lock()
+	before := len(lim.entries)
+	lim.mu.Unlock()
+	if before == 0 {
+		t.Fatal("expected entries to be tracked")
+	}
+
+	// Advance well past the sweep interval, then trigger a sweep via a new key.
+	advance(10 * time.Second)
+	if _, _, err := lim.Allow(ctx, "trigger-sweep"); err != nil {
+		t.Fatalf("Allow trigger: %v", err)
+	}
+
+	lim.mu.Lock()
+	after := len(lim.entries)
+	lim.mu.Unlock()
+	// All the old keys should have been swept; only the trigger key remains.
+	if after >= before {
+		t.Errorf("expected sweep to prune stale entries: before=%d after=%d", before, after)
+	}
+}
+
+// TestMemoryRateLimiter_InterfaceCompliance verifies MemoryRateLimiter
+// implements the RateLimiter interface.
+func TestMemoryRateLimiter_InterfaceCompliance(t *testing.T) {
+	var _ RateLimiter = (*MemoryRateLimiter)(nil)
+}
