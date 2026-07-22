@@ -47,12 +47,6 @@ ingress:
   tlsSecretName: harbor-tls
 # migrate Job uses harbor-hot's Secret by default (shares the same DATABASE_URL).
 # The DB user must have DDL privileges (CREATE/ALTER TABLE). Set
-# migrate.enabled=false here to manage schema migrations out-of-band.
-# migrate:
-#   secrets:
-#     existingSecret: harbor-hot-secrets  # default; no override needed
-# migrate Job uses harbor-hot's Secret by default (shares the same DATABASE_URL).
-# The DB user must have DDL privileges (CREATE/ALTER TABLE). Set
 # migrate.enabled=false to manage schema migrations out-of-band.
 #
 # ONE-TIME BOOTSTRAP (first automated deploy after manual psql seed):
