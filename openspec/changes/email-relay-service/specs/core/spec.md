@@ -83,3 +83,25 @@ volume only as aggregate counts — never message contents or per-sender trackin
 **Given** a relay address that received several messages
 **When** the user views per-RP email volume
 **Then** only an aggregate count is shown (e.g. "12 emails this week"), with no message contents or sender-level tracking
+
+### Requirement: REQ-006 Inbound receive+route is feature-flag-gated and fails closed
+
+The inbound receive+route path (a large attack surface — spam, SSRF-via-bounce,
+MIME/parser exploits) SHALL be gated behind its own feature flag, **separate**
+from the outbound minting/kill-switch path. The inbound flag MUST default **off**
+until the inbound threat-model checklist (sender-auth enforcement, bounce-handling
+SSRF guards, parser hardening, per-address rate limits, MTA IP-reputation/warmup
+readiness) is satisfied. When the inbound flag is off, the MTA MUST fail closed
+(reject/hard-bounce inbound mail) rather than forward.
+
+#### Scenario: Inbound is off by default and fails closed
+
+**Given** a deployment where the inbound feature flag has not been enabled
+**When** mail arrives for an otherwise-valid relay address
+**Then** the inbound MTA fails closed (rejects / hard-bounces) and forwards nothing, while outbound relay-address minting and the kill switch remain available
+
+#### Scenario: Inbound routes only once its threat model is satisfied
+
+**Given** the inbound threat-model checklist (sender-auth, bounce SSRF guard, parser hardening, rate limits, MTA warmup) is satisfied and the inbound flag is enabled
+**When** SPF/DKIM/DMARC-aligned mail arrives
+**Then** it is ARC-sealed and forwarded per REQ-003, with no content retention

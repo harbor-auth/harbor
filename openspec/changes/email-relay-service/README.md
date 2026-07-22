@@ -14,4 +14,4 @@ PII-processing managed API) looks up the mapping, authenticates the sender via
 retention** (bodies are never logged or stored). Deactivating an address is an
 instant **hard-bounce kill switch**, **independent** of the RP login grant.
 Abuse is contained with **per-address rate limiting** and users see only
-**aggregate-only** per-RP volume. Reserves migration prefix `0014`.
+**aggregate-only** per-RP volume. Reserves migration prefix `0016`.

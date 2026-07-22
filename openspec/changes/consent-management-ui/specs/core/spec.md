@@ -21,17 +21,28 @@ It MUST NOT expose any other user's data.
 **When** user A opens the dashboard
 **Then** A sees only A's grants, activity, and sessions — never B's
 
-### Requirement: REQ-002 Revoke-app cascades RP revocation
+### Requirement: REQ-002 Revoke-app cascades LIVE RP revocation, fail-closed
 
 The system SHALL, when the user revokes a connected app, call the shipped
-consent-revoke, which cascades an RP token/session revocation, and reflect the
-change in the view.
+consent-revoke, which MUST invalidate **live** artifacts — not merely write a
+ledger row. The cascade is: ledger revoke event → client-grant row invalidation
+→ refresh-token family invalidation → active session invalidation. Revocation
+MUST NOT be cosmetic (i.e. must not wait for natural token expiry). If any step
+of the cascade fails mid-way, the grant is treated as **revoked / access
+denied** (fail closed), the cascade is retried, and no partial "still-live"
+state is silently left behind. The change is reflected in the view.
 
-#### Scenario: Revoking an app cuts it off
+#### Scenario: Revoking an app cuts it off immediately
 
-**Given** a connected app with an active grant
+**Given** a connected app with an active grant, live refresh-token family, and active session
 **When** the user revokes it from the dashboard
-**Then** the RP's tokens/sessions are revoked and the app no longer appears as connected
+**Then** the ledger revoke event is written, the client-grant row is invalidated, the refresh-token family and active sessions are invalidated (not left live until expiry), and the app no longer appears as connected
+
+#### Scenario: A mid-cascade failure fails closed
+
+**Given** a revocation whose refresh-token or session invalidation step fails mid-cascade
+**When** the cascade cannot complete
+**Then** the grant is treated as revoked / access-denied, the cascade is retried, and no partial still-live artifact is silently left usable
 
 ### Requirement: REQ-003 Activity decrypts under the caller's DEK only
 

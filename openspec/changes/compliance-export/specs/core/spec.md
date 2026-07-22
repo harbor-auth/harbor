@@ -27,16 +27,26 @@ expose any cross-user read or operator plaintext path.
 **When** an export is assembled
 **Then** there is no path by which the operator obtains the user's plaintext
 
-### Requirement: REQ-002 Region-pinned, short-lived bundle
+### Requirement: REQ-002 Region-pinned, DEK-encrypted, short-lived bundle
 
 The system SHALL keep the export bundle region-pinned and short-lived; it MUST
-NOT be cached cross-region or retained after delivery.
+NOT be cached cross-region or retained after delivery. The bundle itself is PII
+at rest and therefore MUST be encrypted under the **caller's own DEK** with a
+short TTL — there is no operator-readable plaintext bundle at rest. Because the
+bundle is DEK-encrypted, a later crypto-shred (REQ-003) that destroys the
+user's wrapped DEK renders an un-downloaded bundle permanently unrecoverable.
 
-#### Scenario: Bundle stays in-region and expires
+#### Scenario: Bundle is DEK-encrypted, in-region, and expires
 
 **Given** an `eu` user's export bundle
 **When** the bundle is produced
-**Then** it is region-pinned to `eu`, is short-lived, and is not retained after delivery
+**Then** it is encrypted under the caller's DEK, region-pinned to `eu`, short-lived, and is not retained (as operator-readable plaintext) after delivery
+
+#### Scenario: A later erase kills an un-downloaded bundle
+
+**Given** a DEK-encrypted export bundle that was produced but never downloaded
+**When** the user is subsequently erased (crypto-shred destroys `users.dek_wrapped`)
+**Then** the un-downloaded bundle can no longer be decrypted and is permanently unrecoverable
 
 ### Requirement: REQ-003 Crypto-shred erasure is permanent and provable
 
@@ -56,6 +66,25 @@ erased data, and the erasure MUST be irreversible.
 **Given** an export bundle produced before erasure
 **When** the user has since been erased
 **Then** the erased data cannot be re-hydrated into the system from the bundle
+
+### Requirement: REQ-005 Crypto-shred survival set contains no recoverable PII
+
+Erasure crypto-shreds the user's DEK, so everything decryptable only under that
+DEK becomes unrecoverable. The system SHALL guarantee that whatever **survives**
+an erase contains **no recoverable PII**:
+
+- Recovery `code_hash` rows (derived from user secrets) MUST be deleted on erase.
+- Audit-trail rows keyed by a **pseudonymous** `user_id` may survive as
+  pseudonymous references; any free-text / PII fields on them MUST be
+  envelope-encrypted under the user DEK so they shred with it.
+- Consent-ledger rows may survive only as pseudonymous references (no plaintext
+  PII).
+
+#### Scenario: Nothing recoverable-PII survives an erase
+
+**Given** an erased user
+**When** the surviving rows (audit-trail, consent-ledger, any recovery bookkeeping) are inspected
+**Then** recovery `code_hash` rows are gone, surviving rows carry only a pseudonymous `user_id`, and any free-text/PII fields on them are unrecoverable (shredded with the DEK)
 
 ### Requirement: REQ-004 Export & erase are region-pinned, metered, and audited
 

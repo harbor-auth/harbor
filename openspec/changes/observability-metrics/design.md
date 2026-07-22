@@ -36,13 +36,30 @@ regional health); a `region`×`user` breakdown (rejected — reintroduces per-us
 tracking).
 
 ### Decision 4: CI-enforced via an architecture test
-**Chosen:** Extend `internal/arch/` to assert no metric label is sourced from a
-PII field.
+**Chosen:** Extend `internal/arch/` to assert BOTH (a) no metric label is
+sourced from a PII field AND (b) label-set cardinality bounds / small-n
+suppression (Decision 5) are enforced — not just PII-field provenance.
 **Rationale:** The allow-list makes PII labels unexpressible in the facade; the
 arch test guards against a future bypass (e.g. someone adding a raw metrics
-backend call). Defence in depth: type system + CI.
+backend call) and against a quasi-identifier label whose cardinality resolves to
+a single user. Defence in depth: type system + CI.
 **Alternatives considered:** Rely on the type system alone (rejected — a raw
-backend import could bypass the facade; the arch test catches that).
+backend import could bypass the facade, and the type system cannot see that a
+technically-non-PII label resolves to one user; the arch test catches both).
+
+### Decision 5: Quasi-identifier labels get small-n suppression and bounded cardinality
+**Chosen:** Even allow-listed labels can be quasi-identifiers: `client_id` for a
+client with a single user makes every row effectively per-user, and a low-traffic
+`region` crossed with a rare `error_code` can single out one event. `client_id`
+is emitted ONLY for registered clients above a small-count floor (below the floor
+it is bucketed/omitted); label-set cardinality is bounded, and rare combinations
+are suppressed/bucketed rather than emitted at count 1.
+**Rationale:** Invariant 3 (aggregate-only) is about *effect*, not just field
+provenance — a technically-non-PII label that resolves to one user violates it
+in spirit. Small-n suppression closes the quasi-identifier gap.
+**Alternatives considered:** Emit `client_id` unconditionally (rejected —
+single-user clients become per-user series); drop `client_id` entirely (rejected
+— loses legitimate per-client operational insight above the floor).
 
 ## Interface sketch
 
@@ -68,3 +85,6 @@ func (c *Counter) Inc(labels ...Label)
 - Only aggregate instruments exist; no per-event unique id is retained.
 - Abuse metering exposes only aggregate `429` counts by `endpoint`/`region`,
   never a per-IP series.
+- Quasi-identifier labels are small-n suppressed: `client_id` is emitted only
+  above a small-count floor and rare `region`×`error_code` combinations are
+  bucketed, so no label resolves to a single user (Decision 5).

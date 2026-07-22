@@ -49,6 +49,23 @@ XSS that could exfiltrate another view's data.
 are attacker-controlled); client-side sanitisation only (rejected — must escape
 at render in the correct context).
 
+### Decision 5: Revocation cascade invalidates live artifacts, fail-closed
+**Chosen:** Revoking a connected app runs an explicit cascade that invalidates
+**live** artifacts, not just a ledger row: ledger revoke event → client-grant
+row invalidation → refresh-token family invalidation → active session
+invalidation. Revocation is NOT cosmetic — it MUST NOT wait for natural token
+expiry. If any step fails mid-cascade, the grant is treated as revoked /
+access-denied (fail closed), the cascade is retried, and no partial
+"still-live" state is silently left behind.
+**Rationale:** A revoke that only writes a ledger row leaves the RP's live
+refresh tokens and sessions usable until expiry — a user who clicks "revoke"
+reasonably expects immediate cut-off. Cascading to the live artifacts (and
+failing closed mid-cascade) makes the control honest.
+**Alternatives considered:** Ledger-only revoke relying on short token TTLs
+(rejected — leaves a live-access window that contradicts the user's intent);
+best-effort cascade that ignores mid-step failures (rejected — a failed step
+silently leaves the app connected).
+
 ## Interface sketch
 
 ```go
@@ -69,3 +86,5 @@ func DashboardData(ctx context.Context, caller UserID) (Dashboard, error)
 - Reads are region-pinned; UI metrics are aggregate-only; no PII in client
   logs/analytics.
 - RP/user-supplied strings are contextually escaped (Decision 4).
+- Revocation cascades to live artifacts (ledger → grant → refresh-token family →
+  session) and fails closed mid-cascade — it is never cosmetic (Decision 5).

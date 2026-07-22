@@ -17,7 +17,7 @@ created: 2026-07-22
 > `consent-management-ui` (feature-detected — the dashboard degrades gracefully
 > if relay isn't live). Inherits the **Gate-1 guardrails**: every mapping read is
 > region-pinned (`regional-data-residency-routing`) and every counter is
-> aggregate-only (`observability-metrics`). Reserves migration prefix **`0014`**.
+> aggregate-only (`observability-metrics`). Reserves migration prefix **`0016`**.
 > This is a **single full-scope** plan: the implementation checklist sequences
 > the **data/control plane first** (mapping, lifecycle, kill-switch, DNS
 > scaffolding) and the **inbound mail plane second** (regional MTA, SPF/DKIM/
@@ -67,7 +67,7 @@ Build the relay as two internally-sequenced planes in one feature.
      per `(user, RP)` grant. The token is **randomly generated and unlinkable** —
      **not** derived from the user id in any RP-reversible way; two RPs' relay
      addresses for the same user look completely unrelated.
-   - **Mapping store (`0014_relay_addresses`)** — a `relay_address → user →
+   - **Mapping store (`0016_relay_addresses`)** — a `relay_address → user →
      client_id` row **envelope-encrypted at rest** in the user's **home region**,
      **never** cross-region replicated (§5). The mapping table is the only link
      from a relay address back to a person and lives behind the same regional
@@ -104,7 +104,7 @@ the relay states; this plan builds the missing service.
 
 ## Target code paths
 
-- `db/migrations/0014_relay_addresses.up.sql` / `.down.sql` — `relay_addresses`
+- `db/migrations/0016_relay_addresses.up.sql` / `.down.sql` — `relay_addresses`
   (`relay_token`, `user_id`, `client_id`, `state`, `enc_mapping`, `region`,
   `created_at`, `deactivated_at`).
 - `db/queries/relay_addresses.sql` — mint (one per `(user, client)`), lookup by
@@ -125,7 +125,7 @@ the relay states; this plan builds the missing service.
 
 _Data / control plane first:_
 
-- [ ] Migration `0014_relay_addresses` (up/down): `relay_addresses(relay_token, user_id, client_id, state, enc_mapping, region, created_at, deactivated_at)`; unique `(user_id, client_id)`; index on `relay_token`.
+- [ ] Migration `0016_relay_addresses` (up/down): `relay_addresses(relay_token, user_id, client_id, state, enc_mapping, region, created_at, deactivated_at)`; unique `(user_id, client_id)`; index on `relay_token`.
 - [ ] `db/queries/relay_addresses.sql` + `make codegen`: mint-one-per-(user, client), region-pinned lookup-by-token, deactivate, list-for-user.
 - [ ] Opaque **unlinkable** token generation (random; **not** derived from `user_id` in any RP-reversible way); two RPs' addresses for one user are uncorrelated.
 - [ ] Envelope-encrypted, **region-pinned** mapping store (reuse `internal/crypto/` + region seam); mapping **never** replicated cross-region.

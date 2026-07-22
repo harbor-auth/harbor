@@ -61,6 +61,27 @@ body only transiently.
 standing PII store and a tracking vector); log headers with addresses (rejected —
 headers carry PII and the relay linkage).
 
+### Decision 6: Inbound receive+route is feature-flag-gated with its own threat model; the MTA needs warmup
+**Chosen:** The inbound receive+route path — a large attack surface (spam,
+SSRF-via-bounce, MIME/parser exploits) — is gated behind its **own** feature
+flag, SEPARATE from the outbound minting/kill-switch path. The inbound flag
+defaults **off** until an inbound threat-model checklist (sender-auth
+enforcement, bounce-handling SSRF guards, parser hardening, per-address rate
+limits, MTA IP-reputation/warmup readiness) is satisfied, and the MTA fails
+closed (reject / hard-bounce) while the flag is off. The self-hosted in-region
+MTA additionally needs an IP-reputation / warmup operational plan for
+deliverability, called out here as an operational prerequisite.
+**Rationale:** Outbound minting and the kill switch are low-risk and
+well-motivated; inbound mail processing is where the exploitable surface lives.
+Decoupling the flags lets the safe outbound path ship while inbound stays dark
+until its threat model is met, and failing closed when off means a
+half-configured deploy never silently forwards. IP warmup is a real deliverability
+prerequisite a self-hosted MTA cannot skip.
+**Alternatives considered:** A single flag for the whole service (rejected —
+couples the safe outbound path to the risky inbound one); inbound on by default
+(rejected — ships the attack surface before its guards); ignore MTA warmup
+(rejected — cold-IP mail lands in spam, silently breaking the feature).
+
 ## Interface sketch
 
 ```go
@@ -90,3 +111,7 @@ func Deactivate(ctx context.Context, userID UserID, addr Address) error
 - A deactivated address hard-bounces; the kill switch is independent of the
   login grant (Decision 4).
 - No external SaaS is on the inbound PII path (Decision 3).
+- The inbound receive+route path is feature-flag-gated separately from outbound,
+  defaults off until its threat-model checklist is met, and fails closed when
+  off; the self-hosted MTA has an IP-reputation/warmup prerequisite
+  (Decision 6).

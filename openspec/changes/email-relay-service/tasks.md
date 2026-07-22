@@ -8,16 +8,16 @@
   (`regional-data-residency-routing` region-pinning, `observability-metrics`
   aggregate-only). Its per-RP toggle is soft-surfaced by
   `consent-management-ui`.
-- [ ] **Migration prefix `0014` is reserved** for this change
-  (`db/migrations/0014_relay_addresses.up.sql` / `.down.sql`). Do not reuse
-  `0014` elsewhere (consent-ledger 0011, dynamic-client-registration 0012,
+- [ ] **Migration prefix `0016` is reserved** for this change
+  (`db/migrations/0016_relay_addresses.up.sql` / `.down.sql`). Do not reuse
+  `0016` elsewhere (consent-ledger 0011, dynamic-client-registration 0012,
   user-audit-trail 0013, user-account-recovery 0015).
 
 ## Implementation
 
 _Data / control plane first:_
 
-- [ ] Migration `0014_relay_addresses` (up/down): `relay_addresses(relay_token,
+- [ ] Migration `0016_relay_addresses` (up/down): `relay_addresses(relay_token,
   user_id, client_id, state, enc_mapping, region, created_at, deactivated_at)`;
   unique `(user_id, client_id)`; index on `relay_token`.
 - [ ] `db/queries/relay_addresses.sql` + `make codegen`: mint-one-per-(user,

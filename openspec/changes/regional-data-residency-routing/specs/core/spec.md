@@ -69,3 +69,24 @@ region is only ever verified or introspected on that region's issuer surface.
 **Given** a token minted on the `eu` issuer
 **When** it is introspected
 **Then** it is accepted only on the `eu` introspection surface and its `iss` is the `eu` issuer
+
+### Requirement: REQ-005 home_region is per-region authoritative; no cross-region user lookup on the guard path
+
+A user's authoritative `home_region` SHALL be stored only in that user's
+home-region datastore. The cross-region guard MUST derive the request's region
+from the host/issuer prefix and MUST NOT perform any global user-directory
+lookup to discover a user's region. If a routing index (`user_id → region`) is
+ever introduced, it MUST be PII-free (opaque `user_id` → region code only — no
+email/name/subject).
+
+#### Scenario: Guard fails closed without a cross-region lookup
+
+**Given** a request pinned to region `eu` targeting a user resident in region `us`
+**When** the guard evaluates the read
+**Then** it derives the request region from the host, performs no global directory lookup to discover the user's region, and fails closed with no partial data
+
+#### Scenario: Any routing index is PII-free
+
+**Given** an optional `user_id → region` routing index
+**When** its rows are inspected
+**Then** each row holds only an opaque `user_id` and a region code — no email, name, or subject

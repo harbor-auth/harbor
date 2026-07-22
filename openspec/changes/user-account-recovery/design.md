@@ -44,6 +44,25 @@ delivers the recovery capability without the harder risk surface.
 **Alternatives considered:** Ship social recovery now (rejected — scope + threat
 model too large for a safe Phase 1).
 
+### Decision 5: Scoped enrollment-only recovery session; ≥128-bit codes; DB-stored lockout
+**Chosen:** A successful recovery establishes a **scoped enrollment-only
+session** that may ONLY enroll a fresh passkey — it MUST NOT grant access to the
+consent dashboard, compliance export, email change, or any other authenticated
+surface — until `recovery_required` is cleared by that fresh passkey enrollment.
+Recovery codes carry **≥128 bits of entropy** (so salted SHA-256 at rest is
+adequate). Per-user attempt lockout is stored in the **regional DB**, not derived
+from metrics/counters.
+**Rationale:** Without a scoped session, a stolen recovery code would be a full
+account-takeover window the moment it is entered — the fresh-factor requirement
+(Decision 2) only bounds the *final* state, so the *interim* session must be
+locked down to enrollment alone. ≥128-bit entropy makes the hash preimage-safe;
+DB-stored lockout keeps rate-limit state authoritative and PII-free (metrics are
+aggregate-only and must not carry per-user counters).
+**Alternatives considered:** A normal session post-recovery (rejected — stolen
+code == takeover until enrollment); shorter codes relying on rate-limiting alone
+(rejected — thin margin if the store leaks); lockout counters in metrics
+(rejected — reintroduces per-user telemetry).
+
 ## Interface sketch
 
 ```go
@@ -68,3 +87,8 @@ type RecoveryManager interface {
   enrolled (Decision 2).
 - Recovery is rate-limited, region-pinned, metered aggregate-only, and audited;
   endpoints do not reveal user/code existence.
+- The post-recovery session is scoped enrollment-only — it may only enroll a
+  fresh passkey and denies every other authenticated surface until
+  `recovery_required` is cleared (Decision 5).
+- Recovery codes carry ≥128 bits of entropy; per-user attempt lockout is stored
+  in the regional DB, never derived from metrics (Decision 5).

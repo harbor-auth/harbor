@@ -42,14 +42,23 @@ losing one authenticator does not lock the account.
 ### Requirement: REQ-003 Fail-closed ceremony keeps recovery_required until a fresh factor
 
 The system SHALL, on a successful recovery via code or fallback factor,
-re-establish an authenticated session but keep the account `recovery_required`
-until the user enrolls a fresh passkey; only then is the guard cleared.
+re-establish a **scoped enrollment-only** session that may ONLY enroll a fresh
+passkey, and keep the account `recovery_required` until that fresh passkey is
+enrolled; only then is the guard cleared. The scoped session MUST deny every
+other authenticated surface (consent dashboard, compliance export, email change,
+etc.) until `recovery_required` is cleared.
 
 #### Scenario: Account stays gated until a fresh passkey is enrolled
 
 **Given** a user who recovers using a recovery code
 **When** the recovery session is established
 **Then** the account remains `recovery_required` until a new passkey is enrolled, after which the guard is cleared
+
+#### Scenario: The scoped session denies non-enrollment surfaces
+
+**Given** an active scoped enrollment-only recovery session
+**When** the user attempts to open the consent dashboard or request a compliance export
+**Then** the attempt is denied because `recovery_required` is not yet cleared
 
 #### Scenario: Invalid code grants nothing
 
@@ -75,3 +84,21 @@ code exists, and no code MUST satisfy a different user.
 **Given** a recovery code belonging to user `A`
 **When** user `B` presents it
 **Then** it does not satisfy `B`'s recovery
+
+### Requirement: REQ-005 Code entropy ≥128 bits and DB-stored attempt lockout
+
+The system SHALL generate recovery codes with at least 128 bits of entropy each
+(so salted SHA-256 at rest is adequate), and SHALL enforce per-user attempt
+lockout from regional DB state — never derived from metrics or counters.
+
+#### Scenario: Codes carry sufficient entropy
+
+**Given** a batch of generated recovery codes
+**When** their entropy is measured
+**Then** each code carries at least 128 bits of entropy
+
+#### Scenario: Lockout is enforced from DB state
+
+**Given** repeated failed recovery attempts for a user
+**When** the attempt threshold is exceeded
+**Then** the account is locked out based on regional DB state, not on any metrics counter
