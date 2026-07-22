@@ -1,14 +1,10 @@
 # Production Helm value overrides for the single-node RKE2 deployment
-# (ns31170412 / harbor.51.89.98.90.nip.io), consumed by the ArgoCD Application
+# (ns31170412 / auth.harborauth.com), consumed by the ArgoCD Application
 # in this directory.
 #
 # global.image.tag is pinned automatically by .github/workflows/publish.yml on
 # every push to main. Do not edit it manually — CI overwrites it with the
 # immutable commit SHA of the images it just built.
-#
-# To move to a real domain, change `ingress.host`, `hot.issuer`, and the three
-# `mgmt.webauthn.*` values together (they must all agree), then provision the
-# matching TLS cert into `ingress.tlsSecretName`.
 
 global:
   image:
@@ -23,7 +19,7 @@ region: EU
 hot:
   # Single node — one replica. HPA/PDB are meaningless here and are disabled.
   replicaCount: 1
-  issuer: https://harbor.51.89.98.90.nip.io
+  issuer: https://auth.harborauth.com
   hpa:
     enabled: false
   pdb:
@@ -36,9 +32,9 @@ hot:
 mgmt:
   replicaCount: 1
   webauthn:
-    rpId: harbor.51.89.98.90.nip.io
+    rpId: auth.harborauth.com
     rpName: Harbor
-    rpOrigin: https://harbor.51.89.98.90.nip.io
+    rpOrigin: https://auth.harborauth.com
   pdb:
     enabled: false
   secrets:
@@ -47,7 +43,7 @@ mgmt:
 ingress:
   enabled: true
   className: nginx
-  host: harbor.51.89.98.90.nip.io
+  host: auth.harborauth.com
   # Provisioned by cert-manager (Let's Encrypt) into the harbor namespace.
   tlsSecretName: harbor-tls
 
