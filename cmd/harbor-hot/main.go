@@ -33,6 +33,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/harbor-auth/harbor/internal/bff"
 	"github.com/harbor-auth/harbor/internal/clients"
 	"github.com/harbor-auth/harbor/internal/crypto"
 	"github.com/harbor-auth/harbor/internal/gen/db"
@@ -136,7 +137,28 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		Logger:   logger,
 	})
 
-	srv := oidcapi.New(oidcapi.Config{Issuer: issuer, Service: oidcSvc})
+	// Wire the BFF login flow when LOGIN_URL is configured: /authorize then
+	// creates a BFF session and redirects to the login UI instead of issuing a
+	// code for the demo user (audit blocker 1.1, auth bypass). The session store
+	// shares the "bff_session:" Redis namespace with harbor-mgmt, so a login
+	// completed on the cold path (harbor-mgmt /login/complete) is visible to
+	// /authorize here. When LOGIN_URL is unset (dev/e2e) the BFF flow stays off
+	// and /authorize keeps its current direct-issuance behavior — the real
+	// PPIDSessionResolver swap and fail-closed startup guard land in later tasks.
+	apiCfg := oidcapi.Config{Issuer: issuer, Service: oidcSvc}
+	if bffCfg.LoginURL != "" {
+		apiCfg.BFFSessions = newBFFSessionStore(redisClient, bffCfg.SessionTTL, logger)
+		apiCfg.LoginURL = bffCfg.LoginURL
+		apiCfg.BFFSessionTTL = bffCfg.SessionTTL
+		logger.Info("BFF login flow enabled",
+			"bff_session_store_redis", redisClient != nil,
+			"bff_session_ttl", bffCfg.SessionTTL.String(),
+		)
+	} else {
+		logger.Warn("LOGIN_URL not set — BFF login flow disabled; /authorize will not redirect to login (dev only)")
+	}
+
+	srv := oidcapi.New(apiCfg)
 
 	// Wrap the spec-generated router with per-endpoint rate limiting. Only the
 	// hot-path endpoints listed here are guarded; /healthz, /jwks.json and
@@ -346,6 +368,20 @@ func buildBFFDeps(ctx context.Context, logger *slog.Logger) (bffDeps, error) {
 		secretLoader: clients.NewDBSecretLoader(q, keys, crypto.NewCipher()),
 		grantStore:   clients.NewDBGrantStore(q),
 	}, nil
+}
+
+// newBFFSessionStore returns the BFF session store the hot-path /authorize flow
+// reads to find the user a login ceremony authenticated. It shares the
+// "bff_session:" Redis namespace with harbor-mgmt's writer so a login completed
+// on the cold path is visible here (docs/plans/bff-session-middleware.md).
+// Redis-backed for multi-replica safety when REDIS_URL is set, otherwise an
+// in-memory dev scaffold (single-replica only; not shared across replicas).
+func newBFFSessionStore(redisClient *redis.Client, ttl time.Duration, logger *slog.Logger) bff.BFFSessionStore {
+	if redisClient != nil {
+		return bff.NewRedisBFFSessionStore(redisClient, ttl)
+	}
+	logger.Warn("REDIS_URL not set — using in-memory BFF session store (dev only; not shared across replicas)")
+	return bff.NewInMemoryBFFSessionStore()
 }
 
 // --- tiny env helpers (no external config dependency) ---
