@@ -22,8 +22,9 @@ FROM alpine:3.20
 # Non-root uid/gid matches the Deployment securityContext (runAsUser 65532).
 RUN addgroup -g 65532 nonroot && adduser -u 65532 -G nonroot -D -H nonroot
 COPY --from=build /root/go/bin/migrate /migrate
-# Embed the SQL up-migrations. Down-migrations are intentionally excluded from
-# the production image — rollbacks must be deliberate and performed out-of-band.
+# Embed all migration files. golang-migrate only runs *.up.sql when invoked
+# with "up"; *.down.sql files are present for the rare out-of-band rollback
+# case but are never executed by the pre-upgrade Job.
 COPY db/migrations /migrations
 USER 65532
 ENTRYPOINT ["/migrate"]

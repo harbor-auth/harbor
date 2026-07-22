@@ -150,7 +150,8 @@ migrate:
   # key (must be a superuser/owner DSN able to run DDL).
   secrets:
     existingSecret: ""
-  # Retry a failed migration (e.g. DB not yet reachable) up to this many times.
+  # Max retries on transient failure (e.g. DB not yet reachable). With
+  # restartPolicy: Never, total Pod attempts = backoffLimit + 1 = 4.
   backoffLimit: 3
   # Hard ceiling on total Job runtime; fail (and surface) rather than hang a
   # deploy forever if migrations wedge.

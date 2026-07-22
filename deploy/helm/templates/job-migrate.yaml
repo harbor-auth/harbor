@@ -2,14 +2,15 @@
 # Job: harbor-migrate — applies pending DB schema migrations before the app
 # pods start, so harbor-hot / harbor-mgmt never boot against a stale schema.
 #
-# Lifecycle: this is BOTH a Helm hook and an ArgoCD hook, so it runs whether the
-# chart is applied with `helm upgrade` or synced by ArgoCD:
-#   * helm.sh/hook pre-install,pre-upgrade — Helm runs it (and waits for it to
-#     succeed) before rendering the Deployments.
-#   * argocd.argoproj.io/hook PreSync      — ArgoCD runs it before the main sync
-#     wave.
-# Both hook-delete-policies clean the finished Job up so the next deploy starts
-# clean and stale Jobs don't accumulate.
+# Lifecycle:
+#   * Pure Helm:   helm.sh/hook pre-install,pre-upgrade fires before all normal
+#     resources, and hook-delete-policy cleans it up on success.
+#   * ArgoCD:      ArgoCD does not run Helm's hook machinery. Instead it reads
+#     argocd.argoproj.io/hook: PreSync and runs the Job before the sync wave.
+#     Both annotations are present so the chart works in either context.
+# Failed Jobs are deliberately NOT deleted (hook-delete-policy omits "hook-failed")
+# so operators can inspect logs via `kubectl logs -n harbor job/harbor-migrate`.
+# The Job is removed by `before-hook-creation` on the next deploy attempt.
 #
 # Idempotent: golang-migrate records the applied version in a schema_migrations
 # table and no-ops when already current, so re-running on every deploy is safe.
@@ -34,10 +35,15 @@ metadata:
     "argocd.argoproj.io/hook": PreSync
     "argocd.argoproj.io/hook-delete-policy": HookSucceeded
 spec:
-  # Retry transient failures (e.g. Postgres not yet reachable) a few times...
+  # With restartPolicy: Never, Kubernetes creates a new Pod per retry attempt.
+  # Total Pod attempts = backoffLimit + 1 (see values.yaml for the default).
   backoffLimit: {{ .Values.migrate.backoffLimit }}
-  # ...but never hang a deploy forever.
+  # Hard ceiling so a wedged migration fails the deploy rather than hanging it.
   activeDeadlineSeconds: {{ .Values.migrate.activeDeadlineSeconds }}
+  # Safety net: auto-delete finished Jobs when run outside Helm hook context
+  # (e.g. raw kubectl apply). Helm's hook-delete-policy takes precedence when
+  # the chart is applied normally.
+  ttlSecondsAfterFinished: 600
   template:
     metadata:
       labels:
@@ -59,8 +65,10 @@ spec:
         - name: migrate
           image: {{ include "harbor.migrate.image" . }}
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
-          # ENTRYPOINT is /migrate; $(DATABASE_URL) is substituted by kubelet
-          # from the env var below.
+          # $(DATABASE_URL) is substituted by the kubelet before exec, so the
+          # resolved DSN appears in the process arg list. The risk is low — the
+          # container is single-process, unprivileged, and short-lived — but
+          # prefer this over a shell wrapper which would add a shell layer.
           args:
             - "-path"
             - "/migrations"

@@ -147,10 +147,15 @@ Secret the migrate Job reads DATABASE_URL from. Defaults to harbor-hot's Secret
 {{- end -}}
 {{- end -}}
 
-{{/* Full label set for the migrate Job. */}}
-{{- define "harbor.migrate.labels" -}}
-{{ include "harbor.labels" . }}
+{{/* Immutable selector subset for harbor-migrate (safe for .spec.selector). */}}
+{{- define "harbor.migrate.selectorLabels" -}}
 app.kubernetes.io/name: harbor-migrate
 app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end -}}
+
+{{/* Full label set for harbor-migrate resources. */}}
+{{- define "harbor.migrate.labels" -}}
+{{ include "harbor.labels" . }}
+{{ include "harbor.migrate.selectorLabels" . }}
 app.kubernetes.io/component: migrate
 {{- end -}}
