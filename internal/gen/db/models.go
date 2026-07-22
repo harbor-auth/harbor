@@ -102,6 +102,8 @@ type RelyingParty struct {
 	ResponseTypes               []string           `json:"response_types"`
 	TokenEndpointAuthMethod     *string            `json:"token_endpoint_auth_method"`
 	CreatedAt                   pgtype.Timestamptz `json:"created_at"`
+	// Registered post-logout redirect URIs for RP-Initiated Logout (exact match only).
+	LogoutUris []string `json:"logout_uris"`
 }
 
 type RevocationOutbox struct {

@@ -80,6 +80,7 @@ func rowToClient(row db.RelyingParty) oidc.Client {
 		ID:            row.ClientID,
 		SectorID:      row.SectorID,
 		RedirectURIs:  row.RedirectUris,
+		LogoutURIs:    row.LogoutUris,
 		ScopesAllowed: row.ScopesAllowed,
 	}
 }
