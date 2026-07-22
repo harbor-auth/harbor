@@ -1,0 +1,117 @@
+# Harbor — Release: build & publish versioned images, create GitHub Release.
+#
+# Triggers on a `v*` tag push (e.g. `git tag v1.0.0 && git push --tags`).
+# Produces:
+#   - ghcr.io/harbor-auth/harbor/harbor-hot:{version,major.minor,major,latest}
+#   - ghcr.io/harbor-auth/harbor/harbor-mgmt:{version,major.minor,major,latest}
+# Images are built for linux/amd64 and linux/arm64 (multi-arch manifest).
+#
+# A GitHub Release is created automatically with auto-generated release notes
+# (based on PRs / commits since the previous tag).
+#
+# Versioning convention:  vMAJOR.MINOR.PATCH  (semver, no build metadata)
+# Pre-release tags:       v1.0.0-beta.1  (semver pre-release, not tagged latest)
+#
+# GITHUB_TOKEN scopes needed (set in `permissions` below):
+#   packages: write  — push to GHCR
+#   contents: write  — create the GitHub Release
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # create GitHub Release
+  packages: write   # push to GHCR
+
+env:
+  REGISTRY: ghcr.io/harbor-auth/harbor
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # docker/metadata-action derives image tags from the git tag:
+      #   v1.2.3        → :1.2.3  :1.2  :1  :latest
+      #   v1.2.3-beta.1 → :1.2.3-beta.1  (no :latest — semver pre-release)
+      - name: Extract Docker metadata — harbor-hot
+        id: meta-hot
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/harbor-hot
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref_name, 'v0.') }}
+
+      - name: Extract Docker metadata — harbor-mgmt
+        id: meta-mgmt
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/harbor-mgmt
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref_name, 'v0.') }}
+
+      - name: Set up QEMU (for arm64 cross-build)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push harbor-hot
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.hot
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-hot.outputs.tags }}
+          labels: ${{ steps.meta-hot.outputs.labels }}
+          cache-from: type=gha,scope=harbor-hot-release
+          cache-to: type=gha,scope=harbor-hot-release,mode=max
+
+      - name: Build & push harbor-mgmt
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.mgmt
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-mgmt.outputs.tags }}
+          labels: ${{ steps.meta-mgmt.outputs.labels }}
+          cache-from: type=gha,scope=harbor-mgmt-release
+          cache-to: type=gha,scope=harbor-mgmt-release,mode=max
+
+      # Create the GitHub Release with auto-generated notes (PRs + commits
+      # since the previous tag). For pre-release tags (semver pre-release
+      # component present), the Release is marked as a pre-release.
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body: |
+            ## Docker images
+
+            ```
+            docker pull ghcr.io/harbor-auth/harbor/harbor-hot:${{ github.ref_name }}
+            docker pull ghcr.io/harbor-auth/harbor/harbor-mgmt:${{ github.ref_name }}
+            ```
+
+            See [SECURITY.md](https://github.com/harbor-auth/harbor/blob/main/SECURITY.md) before deploying — Harbor is pre-production software.
