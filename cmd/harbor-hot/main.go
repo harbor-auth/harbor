@@ -33,7 +33,9 @@ import (
 	"github.com/harbor/harbor/internal/clients"
 	"github.com/harbor/harbor/internal/gen/openapi"
 	"github.com/harbor/harbor/internal/httpserver"
+	"github.com/harbor/harbor/internal/oidc"
 	"github.com/harbor/harbor/internal/oidcapi"
+	"github.com/harbor/harbor/internal/region"
 	"github.com/harbor/harbor/internal/telemetry"
 )
 
@@ -62,7 +64,35 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 
 	issuer := envString("ISSUER", "https://harbor.local")
-	srv := oidcapi.New(oidcapi.Config{Issuer: issuer})
+
+	// Bind the issuer host to a region so the region middleware resolves it.
+	// In production, the issuer is region-specific (e.g. https://eu.harbor.id);
+	// in dev, REGION env var overrides to allow localhost testing.
+	if reg := envString("REGION", ""); reg != "" {
+		region.BindIssuerHost(issuer, region.Region(reg))
+	}
+
+	// Wire the OIDC service with scaffold implementations for dev/test.
+	// In production, these are replaced with DB-backed implementations.
+	clientRegistry := oidc.NewInMemoryClientRegistry()
+	// Seed a demo client for e2e tests (matches e2e/flow_test.go expectations).
+	clientRegistry.Put(oidc.Client{
+		ID:           "demo-client",
+		SectorID:     "localhost",
+		RedirectURIs: []string{"http://localhost/callback", "http://localhost:8081/callback"},
+		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
+	})
+
+	oidcSvc := oidc.NewService(oidc.ServiceConfig{
+		Issuer:   issuer,
+		Clients:  clientRegistry,
+		Codes:    oidc.NewInMemoryAuthCodeStore(),
+		Tokens:   oidc.NewPlaceholderIssuer(),
+		Sessions: oidc.NewStubSessionResolver("demo-user-ppid"),
+		Logger:   logger,
+	})
+
+	srv := oidcapi.New(oidcapi.Config{Issuer: issuer, Service: oidcSvc})
 
 	// Wrap the spec-generated router with per-endpoint rate limiting. Only the
 	// hot-path endpoints listed here are guarded; /healthz, /jwks.json and
