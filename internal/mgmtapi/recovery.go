@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/harbor/harbor/internal/identity"
+	"github.com/harbor/harbor/internal/region"
 )
 
 // maxRecoveryBody caps recovery request bodies. They carry only small JSON
@@ -442,6 +443,11 @@ func (s *Server) PostRecoveryComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Count every genuine completion attempt as an aggregate, region-only metric.
+	// The region is the request's (middleware-validated, bounded) regional host —
+	// never a per-user dimension (docs/DESIGN.md §6.5).
+	recordRecoveryAttempt(region.Region(recoveryRegion(r)))
+
 	userID, pinnedRegion, err := s.recoveryCeremonies.Lookup(r.Context(), req.RecoveryRequestID)
 	if err != nil {
 		// Unknown/expired ceremony → uniform failure (no existence leak).
@@ -463,6 +469,11 @@ func (s *Server) PostRecoveryComplete(w http.ResponseWriter, r *http.Request) {
 		// the response never leaks account existence or lockout state. The
 		// verifier has already recorded the failed attempt / lockout server-side.
 		if errors.Is(err, identity.ErrInvalidCode) || errors.Is(err, identity.ErrUserLocked) {
+			// Lockout is an aggregate, region-only signal so operators can see the
+			// fail-closed policy engaging without any per-user series.
+			if errors.Is(err, identity.ErrUserLocked) {
+				recordRecoveryLockout(region.Region(pinnedRegion))
+			}
 			s.logRecoveryEvent(r.Context(), userID, pinnedRegion, auditRecoveryFailed)
 			s.writeRecoveryFailed(w)
 			return
@@ -502,8 +513,10 @@ func (s *Server) PostRecoveryComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Recovery is complete: record the success on the account's audit trail so
-	// the owner sees exactly when their account was recovered (best-effort).
+	// the owner sees exactly when their account was recovered (best-effort), and
+	// meter it as an aggregate, region-only success signal.
 	s.logRecoveryEvent(r.Context(), userID, pinnedRegion, auditRecoverySucceeded)
+	recordRecoverySuccess(region.Region(pinnedRegion))
 
 	s.writeJSON(w, http.StatusOK, recoveryCompleteResponse{Status: "recovered"})
 }
