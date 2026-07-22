@@ -19,6 +19,18 @@ var (
 	ErrBFFSessionExpired = errors.New("bff: session expired")
 )
 
+// SessionScope defines the scope of operations allowed for a BFF session.
+// This is used to restrict users in recovery mode to enrollment-only operations.
+type SessionScope string
+
+const (
+	// SessionScopeFull allows all operations (normal authenticated session).
+	SessionScopeFull SessionScope = "full"
+	// SessionScopeEnrollmentOnly restricts the session to passkey enrollment only.
+	// Users with recovery_required=true get this scope until they complete recovery.
+	SessionScopeEnrollmentOnly SessionScope = "enrollment_only"
+)
+
 // BFFSessionRecord holds the state of a BFF session across the OIDC/passkey
 // ceremony flow. It is created at /authorize and consumed after FinishAssertion.
 //
@@ -57,6 +69,15 @@ type BFFSessionRecord struct {
 	// user authenticates.
 	UserID string
 
+	// SessionScope defines what operations are allowed for this session.
+	// Users with recovery_required=true get SessionScopeEnrollmentOnly.
+	// Defaults to SessionScopeFull for normal sessions.
+	SessionScope SessionScope
+
+	// RecoveryRequired indicates whether the user must complete account recovery
+	// setup before normal use. When true, the session scope is enrollment-only.
+	RecoveryRequired bool
+
 	// ExpiresAt is the absolute time after which the session is invalid.
 	// Callers must enforce this; the store may also TTL-evict.
 	ExpiresAt time.Time
@@ -84,6 +105,11 @@ type BFFSessionStore interface {
 	// after FinishAssertion to record the authenticated identity. Returns
 	// ErrBFFSessionNotFound if the session does not exist.
 	SetUser(ctx context.Context, requestID string, userID string) error
+
+	// SetUserWithRecoveryStatus updates the UserID and RecoveryRequired fields.
+	// If recoveryRequired is true, the session scope is set to enrollment-only.
+	// This is called after FinishAssertion when the user's recovery status is known.
+	SetUserWithRecoveryStatus(ctx context.Context, requestID, userID string, recoveryRequired bool) error
 
 	// Delete removes the session record. This is called after the auth code is
 	// issued (one-time use). A no-op if the session does not exist.
@@ -149,6 +175,29 @@ func (s *InMemoryBFFSessionStore) SetUser(_ context.Context, requestID string, u
 		return ErrBFFSessionExpired
 	}
 	record.UserID = userID
+	s.sessions[requestID] = record
+	return nil
+}
+
+// SetUserWithRecoveryStatus implements BFFSessionStore.
+func (s *InMemoryBFFSessionStore) SetUserWithRecoveryStatus(_ context.Context, requestID, userID string, recoveryRequired bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.sessions[requestID]
+	if !ok {
+		return ErrBFFSessionNotFound
+	}
+	if s.now().After(record.ExpiresAt) {
+		delete(s.sessions, requestID)
+		return ErrBFFSessionExpired
+	}
+	record.UserID = userID
+	record.RecoveryRequired = recoveryRequired
+	if recoveryRequired {
+		record.SessionScope = SessionScopeEnrollmentOnly
+	} else {
+		record.SessionScope = SessionScopeFull
+	}
 	s.sessions[requestID] = record
 	return nil
 }

@@ -15,12 +15,16 @@ import (
 
 // fakeStoreQuerier is an in-memory implementation of dbStoreQuerier for tests.
 type fakeStoreQuerier struct {
-	users       map[pgtype.UUID]db.User
-	credentials []db.Credential
+	users            map[pgtype.UUID]db.User
+	credentials      []db.Credential
+	recoveryComplete map[pgtype.UUID]bool
 }
 
 func newFakeStoreQuerier() *fakeStoreQuerier {
-	return &fakeStoreQuerier{users: make(map[pgtype.UUID]db.User)}
+	return &fakeStoreQuerier{
+		users:            make(map[pgtype.UUID]db.User),
+		recoveryComplete: make(map[pgtype.UUID]bool),
+	}
 }
 
 func (f *fakeStoreQuerier) GetUser(_ context.Context, id pgtype.UUID) (db.User, error) {
@@ -73,6 +77,14 @@ func (f *fakeStoreQuerier) UpdateCredentialSignCount(_ context.Context, arg db.U
 		}
 	}
 	return errors.New("not found")
+}
+
+func (f *fakeStoreQuerier) SetRecoveryComplete(_ context.Context, id pgtype.UUID) error {
+	if _, ok := f.users[id]; !ok {
+		return errors.New("not found")
+	}
+	f.recoveryComplete[id] = true
+	return nil
 }
 
 // pgUUID builds a pgtype.UUID from a google/uuid value.
@@ -213,6 +225,31 @@ func TestDBStore_UpdateCredential_CrossUserBlocked(t *testing.T) {
 	err := s.UpdateCredential(context.Background(), []byte(id2.String()), cred)
 	if !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("cross-user update: err = %v, want ErrUserNotFound", err)
+	}
+}
+
+func TestDBStore_SetRecoveryComplete_OK(t *testing.T) {
+	s, q, uid := newFakeDBStore(t)
+	if err := s.SetRecoveryComplete(context.Background(), uidBytes(uid)); err != nil {
+		t.Fatalf("SetRecoveryComplete: %v", err)
+	}
+	if !q.recoveryComplete[uid] {
+		t.Fatal("expected recovery_required to be cleared for the user")
+	}
+}
+
+func TestDBStore_SetRecoveryComplete_UnknownUser(t *testing.T) {
+	s := NewDBStore(newFakeStoreQuerier())
+	err := s.SetRecoveryComplete(context.Background(), []byte(uuid.New().String()))
+	if !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("err = %v, want ErrUserNotFound", err)
+	}
+}
+
+func TestDBStore_SetRecoveryComplete_InvalidHandle(t *testing.T) {
+	s := NewDBStore(newFakeStoreQuerier())
+	if err := s.SetRecoveryComplete(context.Background(), []byte("not-a-uuid")); !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("err = %v, want ErrUserNotFound", err)
 	}
 }
 

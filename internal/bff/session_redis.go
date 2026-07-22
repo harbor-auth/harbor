@@ -107,6 +107,35 @@ end
 return 1
 `)
 
+// setUserWithRecoveryScript is a Lua script for atomic get-modify-set of
+// UserID, RecoveryRequired, and SessionScope fields.
+// It returns:
+//   - 0 if the session was not found
+//   - 1 if the fields were set successfully
+//
+// KEYS[1] = session key
+// ARGV[1] = userID to set
+// ARGV[2] = recoveryRequired ("true" or "false")
+// ARGV[3] = sessionScope ("full" or "enrollment_only")
+var setUserWithRecoveryScript = redis.NewScript(`
+local data = redis.call('GET', KEYS[1])
+if not data then
+    return 0
+end
+
+local record = cjson.decode(data)
+record.UserID = ARGV[1]
+record.RecoveryRequired = (ARGV[2] == "true")
+record.SessionScope = ARGV[3]
+local ttl = redis.call('TTL', KEYS[1])
+if ttl > 0 then
+    redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
+else
+    redis.call('SET', KEYS[1], cjson.encode(record))
+end
+return 1
+`)
+
 // SetUser implements BFFSessionStore. It atomically updates the UserID field of
 // an existing session using a Lua script to preserve the remaining TTL.
 func (s *RedisBFFSessionStore) SetUser(ctx context.Context, requestID string, userID string) error {
@@ -116,6 +145,32 @@ func (s *RedisBFFSessionStore) SetUser(ctx context.Context, requestID string, us
 	).Int()
 	if err != nil {
 		return fmt.Errorf("redis setuser script: %w", err)
+	}
+
+	if result == 0 {
+		return ErrBFFSessionNotFound
+	}
+	return nil
+}
+
+// SetUserWithRecoveryStatus implements BFFSessionStore. It atomically updates
+// the UserID, RecoveryRequired, and SessionScope fields using a Lua script.
+func (s *RedisBFFSessionStore) SetUserWithRecoveryStatus(ctx context.Context, requestID, userID string, recoveryRequired bool) error {
+	recoveryStr := "false"
+	scope := string(SessionScopeFull)
+	if recoveryRequired {
+		recoveryStr = "true"
+		scope = string(SessionScopeEnrollmentOnly)
+	}
+
+	result, err := setUserWithRecoveryScript.Run(ctx, s.client,
+		[]string{sessionKey(requestID)},
+		userID,
+		recoveryStr,
+		scope,
+	).Int()
+	if err != nil {
+		return fmt.Errorf("redis setuser-recovery script: %w", err)
 	}
 
 	if result == 0 {

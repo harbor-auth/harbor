@@ -62,6 +62,21 @@ type MfaFactor struct {
 	CreatedAt pgtype.Timestamptz `json:"created_at"`
 }
 
+type RecoveryAttempt struct {
+	UserID      pgtype.UUID        `json:"user_id"`
+	FailedCount int32              `json:"failed_count"`
+	LockedUntil pgtype.Timestamptz `json:"locked_until"`
+}
+
+type RecoveryCode struct {
+	ID        pgtype.UUID        `json:"id"`
+	UserID    pgtype.UUID        `json:"user_id"`
+	CodeHash  []byte             `json:"code_hash"`
+	Salt      []byte             `json:"salt"`
+	UsedAt    pgtype.Timestamptz `json:"used_at"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
 type RelyingParty struct {
 	ClientID                    string             `json:"client_id"`
 	Name                        string             `json:"name"`

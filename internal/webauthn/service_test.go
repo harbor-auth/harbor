@@ -185,3 +185,44 @@ func TestService_FinishRegistration_InvalidBody(t *testing.T) {
 		t.Fatal("expected error for invalid body, got nil")
 	}
 }
+
+func TestService_FinishRecoveryRegistration_UnknownUser(t *testing.T) {
+	svc, _ := newTestService(t)
+	_, err := svc.FinishRecoveryRegistration(context.Background(), []byte("nobody"), "some-key", strings.NewReader("{}"))
+	if !errors.Is(err, ErrUserNotFound) {
+		t.Fatalf("err = %v, want ErrUserNotFound", err)
+	}
+}
+
+func TestService_FinishRecoveryRegistration_NoSession(t *testing.T) {
+	svc, _ := newTestService(t)
+	_, err := svc.FinishRecoveryRegistration(context.Background(), []byte("demo-user"), "missing-key", strings.NewReader("{}"))
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("err = %v, want ErrSessionNotFound", err)
+	}
+}
+
+// TestService_FinishRecoveryRegistration_InvalidBody proves that when the
+// attestation cannot be verified the recovery_required flag is NOT cleared —
+// the account stays fenced until a fresh passkey is genuinely enrolled.
+func TestService_FinishRecoveryRegistration_InvalidBodyKeepsRecoveryRequired(t *testing.T) {
+	store := NewInMemoryStore()
+	store.PutUser(NewUser([]byte("demo-user"), "demo@harbor.local", "Demo", nil))
+	sessions := NewInMemorySessionStore()
+	svc, err := NewService(testConfig(), store, sessions)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	_, sessionKey, err := svc.BeginRegistration(context.Background(), []byte("demo-user"))
+	if err != nil {
+		t.Fatalf("BeginRegistration: %v", err)
+	}
+
+	if _, err := svc.FinishRecoveryRegistration(context.Background(), []byte("demo-user"), sessionKey, strings.NewReader("not-json")); err == nil {
+		t.Fatal("expected error for invalid body, got nil")
+	}
+	if store.RecoveryCleared([]byte("demo-user")) {
+		t.Fatal("recovery_required must NOT be cleared when enrollment fails")
+	}
+}
