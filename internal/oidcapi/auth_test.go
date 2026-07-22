@@ -175,7 +175,7 @@ func (m *mockClientRegistry) Lookup(_ context.Context, clientID string) (oidc.Cl
 func TestValidateClientCredentialsValid(t *testing.T) {
 	registry := &mockClientRegistry{
 		clients: map[string]oidc.Client{
-			"demo-client": {ID: "demo-client", SectorID: "example.com"},
+			"demo-client":  {ID: "demo-client", SectorID: "example.com"},
 			"other-client": {ID: "other-client", SectorID: "other.com"},
 		},
 	}
