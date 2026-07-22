@@ -69,6 +69,52 @@ func (s *Service) BeginRegistration(ctx context.Context, userID []byte) (*protoc
 // FinishRegistration verifies the authenticator's attestation response against
 // the stored challenge and, on success, persists the new passkey.
 func (s *Service) FinishRegistration(ctx context.Context, userID []byte, sessionKey string, body io.Reader) (*gowebauthn.Credential, error) {
+	cred, err := s.verifyRegistration(ctx, userID, sessionKey, body)
+	if err != nil {
+		return nil, err
+	}
+	// First-passkey registration completes enrollment: persist the credential
+	// and flip the user from "pending" to "active" atomically (design decision 3,
+	// §11.1). A DB-backed store does both in one transaction and rolls back on
+	// any failure, so we never leave a half-enrolled account.
+	if err := s.store.AddCredentialAndActivateUser(ctx, userID, *cred); err != nil {
+		return nil, err
+	}
+	return cred, nil
+}
+
+// FinishRecoveryRegistration verifies the attestation for a passkey enrolled
+// during an account-recovery session and, on success, persists the fresh
+// credential and THEN clears the user's recovery_required flag (REQ-005,
+// docs/DESIGN.md §11.1).
+//
+// Ordering is the whole point: the credential is stored first, and
+// recovery_required is cleared only after that write succeeds. If either write
+// fails the flag stays set, so the account remains fenced to enrollment-only
+// and can never be "recovered" without a working fresh passkey. Unlike
+// first-time enrollment this uses AddCredential (not
+// AddCredentialAndActivateUser): a recovering user is already active.
+func (s *Service) FinishRecoveryRegistration(ctx context.Context, userID []byte, sessionKey string, body io.Reader) (*gowebauthn.Credential, error) {
+	cred, err := s.verifyRegistration(ctx, userID, sessionKey, body)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.store.AddCredential(ctx, userID, *cred); err != nil {
+		return nil, err
+	}
+	// Only now — after a fresh passkey is durably enrolled — clear the recovery
+	// requirement so normal-scope sessions become available again.
+	if err := s.store.SetRecoveryComplete(ctx, userID); err != nil {
+		return nil, err
+	}
+	return cred, nil
+}
+
+// verifyRegistration takes the stored ceremony session and validates the
+// authenticator's attestation, returning the new credential. It is shared by
+// the first-time and recovery registration paths so their verification cannot
+// diverge; only the persistence step after it differs.
+func (s *Service) verifyRegistration(ctx context.Context, userID []byte, sessionKey string, body io.Reader) (*gowebauthn.Credential, error) {
 	user, err := s.store.GetUser(ctx, userID)
 	if err != nil {
 		return nil, err
@@ -81,18 +127,7 @@ func (s *Service) FinishRegistration(ctx context.Context, userID []byte, session
 	if err != nil {
 		return nil, err
 	}
-	cred, err := s.wa.CreateCredential(user, session, parsed)
-	if err != nil {
-		return nil, err
-	}
-	// First-passkey registration completes enrollment: persist the credential
-	// and flip the user from "pending" to "active" atomically (design decision 3,
-	// §11.1). A DB-backed store does both in one transaction and rolls back on
-	// any failure, so we never leave a half-enrolled account.
-	if err := s.store.AddCredentialAndActivateUser(ctx, userID, *cred); err != nil {
-		return nil, err
-	}
-	return cred, nil
+	return s.wa.CreateCredential(user, session, parsed)
 }
 
 // BeginLogin starts an assertion for a known user. It returns the assertion

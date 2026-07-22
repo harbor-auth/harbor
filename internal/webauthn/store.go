@@ -44,6 +44,11 @@ type Store interface {
 	// advanced signature counter after a successful assertion (WebAuthn clone
 	// detection, docs/DESIGN.md §3.1).
 	UpdateCredential(ctx context.Context, userID []byte, cred gowebauthn.Credential) error
+	// SetRecoveryComplete clears the user's recovery_required flag. It is called
+	// ONLY after a fresh passkey has been enrolled during an account-recovery
+	// session, so the account stays fenced to enrollment-only until recovery is
+	// genuinely completed (REQ-005, docs/DESIGN.md §11.1).
+	SetRecoveryComplete(ctx context.Context, userID []byte) error
 }
 
 // SessionStore holds the WebAuthn SessionData (challenge + parameters) between
@@ -60,11 +65,18 @@ type SessionStore interface {
 type InMemoryStore struct {
 	mu    sync.RWMutex
 	users map[string]User
+	// recoveryCleared records which users have had recovery_required cleared.
+	// The in-memory User has no status columns, so this stands in for the DB
+	// flag and lets tests assert the recovery-completion flow.
+	recoveryCleared map[string]bool
 }
 
 // NewInMemoryStore returns an empty in-memory Store.
 func NewInMemoryStore() *InMemoryStore {
-	return &InMemoryStore{users: make(map[string]User)}
+	return &InMemoryStore{
+		users:           make(map[string]User),
+		recoveryCleared: make(map[string]bool),
+	}
 }
 
 // PutUser seeds or replaces a user (used to provision accounts before passkey
@@ -132,6 +144,28 @@ func (s *InMemoryStore) UpdateCredential(_ context.Context, userID []byte, cred 
 		}
 	}
 	return ErrUserNotFound
+}
+
+// SetRecoveryComplete implements Store. The in-memory User has no
+// recovery_required column, so this records that recovery was cleared for the
+// user — enough for tests to assert the flow; the DB store performs the real
+// UPDATE.
+func (s *InMemoryStore) SetRecoveryComplete(_ context.Context, userID []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.users[string(userID)]; !ok {
+		return ErrUserNotFound
+	}
+	s.recoveryCleared[string(userID)] = true
+	return nil
+}
+
+// RecoveryCleared reports whether SetRecoveryComplete has been called for
+// userID. It is a test helper for asserting the recovery-completion flow.
+func (s *InMemoryStore) RecoveryCleared(userID []byte) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.recoveryCleared[string(userID)]
 }
 
 // sessionEntry is a stored ceremony session plus its expiry.

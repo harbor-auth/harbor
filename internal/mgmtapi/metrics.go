@@ -47,6 +47,35 @@ var (
 	)
 )
 
+// Recovery-attempt meters. These are aggregate-only, region-partitioned volume
+// signals for the account-recovery ceremony (user-account-recovery). They are
+// deliberately partitioned ONLY by region — NEVER by user, code, or ceremony id
+// — so operators get recovery volume/success/lockout trends per region without
+// any per-user time series (docs/DESIGN.md §6.5, observability-metrics
+// REQ-002/REQ-003). The region is the request's middleware-validated regional
+// host, which is bounded and non-PII.
+var (
+	// mgmtRecoveryAttemptsTotal counts every /recovery/complete attempt by region.
+	mgmtRecoveryAttemptsTotal = telemetry.NewCounter(
+		"harbor_mgmt_recovery_attempts_total",
+		"Account-recovery completion attempts by region.",
+		telemetry.DimRegion,
+	)
+	// mgmtRecoverySuccessTotal counts successful recoveries by region.
+	mgmtRecoverySuccessTotal = telemetry.NewCounter(
+		"harbor_mgmt_recovery_success_total",
+		"Successful account recoveries by region.",
+		telemetry.DimRegion,
+	)
+	// mgmtRecoveryLockoutTotal counts recovery attempts rejected by the
+	// fail-closed lockout policy, by region.
+	mgmtRecoveryLockoutTotal = telemetry.NewCounter(
+		"harbor_mgmt_recovery_lockout_total",
+		"Account-recovery attempts rejected by lockout, by region.",
+		telemetry.DimRegion,
+	)
+)
+
 // Wave-5 meter hooks. These are label-bounded, aggregate-only counters the later
 // Wave-5 features emit through — never a raw metrics backend — so the zero-PII
 // contract holds for every feature that meters (docs/plans/observability-metrics.md).
@@ -95,6 +124,24 @@ func recordError(endpoint telemetry.EndpointName, code string) {
 // so abuse is visible without a per-IP time series (docs/plans/observability-metrics.md).
 func recordRateLimited(endpoint telemetry.EndpointName, reg region.Region) {
 	mgmtRateLimitedTotal.Inc(telemetry.Endpoint(endpoint), telemetry.Region(reg))
+}
+
+// recordRecoveryAttempt meters a single account-recovery completion attempt by
+// region. Aggregate-only: the region is the sole dimension — no user, code, or
+// ceremony id is ever attached (docs/DESIGN.md §6.5).
+func recordRecoveryAttempt(reg region.Region) {
+	mgmtRecoveryAttemptsTotal.Inc(telemetry.Region(reg))
+}
+
+// recordRecoverySuccess meters a successful account recovery by region.
+func recordRecoverySuccess(reg region.Region) {
+	mgmtRecoverySuccessTotal.Inc(telemetry.Region(reg))
+}
+
+// recordRecoveryLockout meters a recovery attempt rejected by the fail-closed
+// lockout policy, by region.
+func recordRecoveryLockout(reg region.Region) {
+	mgmtRecoveryLockoutTotal.Inc(telemetry.Region(reg))
 }
 
 // mapMgmtErrorCode maps a management-API error-code string onto the bounded

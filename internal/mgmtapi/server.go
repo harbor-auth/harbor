@@ -68,7 +68,36 @@ type Server struct {
 	mtaDomain string
 	// relayDomain is the regional relay domain for BYO-domain setup instructions.
 	relayDomain string
-	logger      *slog.Logger
+
+	// recoveryCodes generates recovery codes for POST /recovery/codes. Nil puts
+	// that endpoint into a 503 state.
+	recoveryCodes RecoveryCodeGenerator
+	// recoveryStore persists recovery code hashes for POST /recovery/codes. Nil
+	// puts that endpoint into a 503 state.
+	recoveryStore RecoveryCodeStore
+	// recoveryVerifier consumes recovery codes (with lockout) for POST
+	// /recovery/complete. Nil puts that endpoint into a 503 state.
+	recoveryVerifier RecoveryVerifier
+	// recoveryCeremonies bridges POST /recovery/begin and POST /recovery/complete.
+	// Nil puts both endpoints into a 503 state.
+	recoveryCeremonies RecoveryCeremonyStore
+	// scopedSessions establishes the enrollment-only session on a successful
+	// POST /recovery/complete. Nil skips the cookie (dev-scaffold mode).
+	scopedSessions ScopedSessionIssuer
+	// recoveryFactors lists a user's registered recovery factors (passkeys /
+	// hardware keys) for GET /recovery/factors. Nil puts that endpoint into a
+	// 503 state.
+	recoveryFactors RecoveryFactorLister
+	// recoveryAudit, when non-nil, appends recovery-lifecycle events
+	// (auth.recovery_begin / _succeeded / _failed) to the user-visible audit
+	// trail. Emission is best-effort — a nil logger simply skips the trail and a
+	// write failure never fails the ceremony.
+	recoveryAudit RecoveryAuditLogger
+	// recoveryLimiter, when non-nil, gates the recovery endpoints. Nil disables
+	// rate limiting.
+	recoveryLimiter RecoveryRateLimiter
+
+	logger *slog.Logger
 }
 
 // New returns a Server. A nil enroller is valid and puts the enrollment route
@@ -157,6 +186,51 @@ func (s *Server) WithBYODomainStore(store BYODomainStore, verifier *relay.Domain
 	return s
 }
 
+// WithRecovery wires the recovery ceremony endpoints (POST /recovery/codes,
+// /recovery/begin, /recovery/complete). codes+store back code generation,
+// verifier backs code consumption with lockout, and ceremonies bridges
+// begin→complete. Any nil dependency puts the affected endpoints into a 503
+// state. Returns s for chaining.
+func (s *Server) WithRecovery(codes RecoveryCodeGenerator, store RecoveryCodeStore, verifier RecoveryVerifier, ceremonies RecoveryCeremonyStore) *Server {
+	s.recoveryCodes = codes
+	s.recoveryStore = store
+	s.recoveryVerifier = verifier
+	s.recoveryCeremonies = ceremonies
+	return s
+}
+
+// WithScopedSessionIssuer attaches the issuer that establishes the scoped
+// enrollment-only session on a successful POST /recovery/complete. A nil issuer
+// skips the cookie. Returns s for chaining.
+func (s *Server) WithScopedSessionIssuer(issuer ScopedSessionIssuer) *Server {
+	s.scopedSessions = issuer
+	return s
+}
+
+// WithRecoveryFactors attaches the lister that backs GET /recovery/factors,
+// surfacing the user's registered passkeys / hardware keys as recovery factors.
+// A nil lister puts that endpoint into a 503 state. Returns s for chaining.
+func (s *Server) WithRecoveryFactors(lister RecoveryFactorLister) *Server {
+	s.recoveryFactors = lister
+	return s
+}
+
+// WithRecoveryAuditLog attaches the logger that appends recovery-lifecycle
+// events to the user-visible audit trail (auth.recovery_begin / _succeeded /
+// _failed). A nil logger skips the trail; emission is always best-effort and
+// never fails the ceremony. Returns s for chaining.
+func (s *Server) WithRecoveryAuditLog(logger RecoveryAuditLogger) *Server {
+	s.recoveryAudit = logger
+	return s
+}
+
+// WithRecoveryRateLimiter attaches a rate limiter for the recovery endpoints.
+// A nil limiter disables rate limiting. Returns s for chaining.
+func (s *Server) WithRecoveryRateLimiter(limiter RecoveryRateLimiter) *Server {
+	s.recoveryLimiter = limiter
+	return s
+}
+
 // Routes registers harbor-mgmt's cold-path routes on mux. It is additive: the
 // caller owns the mux (typically httpserver.NewHealthMux) and its /healthz route.
 func (s *Server) Routes(mux *http.ServeMux) {
@@ -174,6 +248,10 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /byo-domains/{domain}/verify", s.PostBYODomainVerify)
 	mux.HandleFunc("GET /byo-domains/{domain}/dns-status", s.GetBYODomainDNSStatus)
 	mux.HandleFunc("DELETE /byo-domains/{domain}", s.DeleteBYODomain)
+	mux.HandleFunc("POST /recovery/codes", s.PostRecoveryCodes)
+	mux.HandleFunc("POST /recovery/begin", s.PostRecoveryBegin)
+	mux.HandleFunc("POST /recovery/complete", s.PostRecoveryComplete)
+	mux.HandleFunc("GET /recovery/factors", s.ListCredentialsByUser)
 }
 
 // errorResponse is the JSON error envelope for the cold-path API. Messages are

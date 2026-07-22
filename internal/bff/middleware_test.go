@@ -167,3 +167,119 @@ func TestMiddleware_ExpiredSession(t *testing.T) {
 		t.Errorf("userID = %q, want empty (session expired)", gotUserID)
 	}
 }
+
+func TestMiddleware_SessionWithRecoveryRequired(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+
+	// Create a session and set user with recovery required
+	record := BFFSessionRecord{
+		RequestID: "req-recovery",
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	if err := store.Create(ctx, record); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+	if err := store.SetUserWithRecoveryStatus(ctx, "req-recovery", "user-recovery", true); err != nil {
+		t.Fatalf("SetUserWithRecoveryStatus failed: %v", err)
+	}
+
+	middleware := Middleware(store)
+
+	var gotUserID string
+	var gotScope SessionScope
+	var gotRecoveryRequired bool
+	handler := middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUserID = UserIDFromContext(r.Context())
+		gotScope = SessionScopeFromContext(r.Context())
+		gotRecoveryRequired = RecoveryRequiredFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: CookieName, Value: "req-recovery"})
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if gotUserID != "user-recovery" {
+		t.Errorf("userID = %q, want %q", gotUserID, "user-recovery")
+	}
+	if gotScope != SessionScopeEnrollmentOnly {
+		t.Errorf("scope = %q, want %q", gotScope, SessionScopeEnrollmentOnly)
+	}
+	if !gotRecoveryRequired {
+		t.Error("recoveryRequired = false, want true")
+	}
+}
+
+func TestRequireFullScope_AllowsFullScope(t *testing.T) {
+	handler := RequireFullScope(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	// Add full scope to context
+	ctx := ContextWithSessionScope(req.Context(), SessionScopeFull)
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+}
+
+func TestRequireFullScope_DeniesEnrollmentOnlyScope(t *testing.T) {
+	handler := RequireFullScope(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	// Add enrollment-only scope to context
+	ctx := ContextWithSessionScope(req.Context(), SessionScopeEnrollmentOnly)
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+}
+
+func TestRequireFullScope_DefaultsToFullScope(t *testing.T) {
+	handler := RequireFullScope(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	// No scope in context - should default to full and allow
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want %d (default scope should be full)", rec.Code, http.StatusOK)
+	}
+}
+
+func TestSessionScopeFromContext_Default(t *testing.T) {
+	ctx := context.Background()
+	got := SessionScopeFromContext(ctx)
+	if got != SessionScopeFull {
+		t.Errorf("SessionScopeFromContext(empty) = %q, want %q", got, SessionScopeFull)
+	}
+}
+
+func TestRecoveryRequiredFromContext_Default(t *testing.T) {
+	ctx := context.Background()
+	got := RecoveryRequiredFromContext(ctx)
+	if got {
+		t.Error("RecoveryRequiredFromContext(empty) = true, want false")
+	}
+}
