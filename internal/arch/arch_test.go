@@ -324,6 +324,8 @@ func piiLabelDenylist() map[string]bool {
 // phantom-typed Label already makes a PII label unexpressible in the facade;
 // this test guards against a future regression where someone adds a PII-named
 // dimension to the allow-list, or lets the dimension set grow unbounded.
+//
+//harbor:invariant INV-METRICS-NO-PII-LABELS
 func TestMetricLabelsNoPII(t *testing.T) {
 	files := parseTelemetryFiles(t)
 
@@ -354,6 +356,8 @@ func TestMetricLabelsNoPII(t *testing.T) {
 // suppressor that buckets rare quasi-identifier combinations). This structural
 // check fails if that machinery is ever removed, so the aggregate-only
 // guarantee cannot silently regress into per-user rows.
+//
+//harbor:invariant INV-METRICS-AGGREGATE-ONLY
 func TestMetricSmallNSuppressionEnforced(t *testing.T) {
 	files := parseTelemetryFiles(t)
 
