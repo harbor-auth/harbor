@@ -15,6 +15,9 @@ package telemetry
 //     bucketed into a `suppressedValue` series until they cross a small-count
 //     floor, so a label combination can never resolve to a single user at
 //     count 1.
+//   - Abuse metering is aggregate-only: rate-limit (429) rejections are counted
+//     by endpoint/region through this same facade — IP is PII and is never a
+//     dimension, so there is no per-IP time series.
 //
 // The backend is prometheus/client_golang, hidden behind this facade so the
 // privacy contract holds regardless of the exposition format.

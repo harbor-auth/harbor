@@ -37,6 +37,14 @@ var (
 		"Management API errors by endpoint and error_code.",
 		telemetry.DimEndpoint, telemetry.DimErrorCode,
 	)
+	// mgmtRateLimitedTotal counts 429 rate-limit rejections by endpoint and
+	// region. It is aggregate-only — NO per-IP series is ever emitted, so abuse
+	// is visible without PII (docs/plans/observability-metrics.md, §6.5).
+	mgmtRateLimitedTotal = telemetry.NewCounter(
+		"harbor_mgmt_rate_limited_total",
+		"Management API 429 rate-limit rejections by endpoint and region.",
+		telemetry.DimEndpoint, telemetry.DimRegion,
+	)
 )
 
 // Wave-5 meter hooks. These are label-bounded, aggregate-only counters the later
@@ -80,6 +88,13 @@ func recordRequest(endpoint telemetry.EndpointName, outcome telemetry.OutcomeKin
 // allow-list, so an arbitrary code can never inflate metric cardinality (REQ-004).
 func recordError(endpoint telemetry.EndpointName, code string) {
 	mgmtErrorsTotal.Inc(telemetry.Endpoint(endpoint), telemetry.ErrorCode(mapMgmtErrorCode(code)))
+}
+
+// recordRateLimited emits an aggregate 429 rate-limit counter by endpoint and
+// region. IP is PII and is NEVER a dimension — only aggregate counts are kept,
+// so abuse is visible without a per-IP time series (docs/plans/observability-metrics.md).
+func recordRateLimited(endpoint telemetry.EndpointName, reg region.Region) {
+	mgmtRateLimitedTotal.Inc(telemetry.Endpoint(endpoint), telemetry.Region(reg))
 }
 
 // mapMgmtErrorCode maps a management-API error-code string onto the bounded

@@ -9,6 +9,7 @@ package oidcapi
 import (
 	"time"
 
+	"github.com/harbor/harbor/internal/region"
 	"github.com/harbor/harbor/internal/telemetry"
 )
 
@@ -37,6 +38,14 @@ var (
 		"Token endpoint results by grant_type and outcome.",
 		telemetry.DimGrantType, telemetry.DimOutcome,
 	)
+	// oidcRateLimitedTotal counts 429 rate-limit rejections by endpoint and
+	// region. It is aggregate-only — NO per-IP series is ever emitted, so abuse
+	// is visible without PII (docs/plans/observability-metrics.md, §6.5).
+	oidcRateLimitedTotal = telemetry.NewCounter(
+		"harbor_oidc_rate_limited_total",
+		"OIDC hot-path 429 rate-limit rejections by endpoint and region.",
+		telemetry.DimEndpoint, telemetry.DimRegion,
+	)
 )
 
 // recordRequest emits the per-endpoint request count and duration for a hot-path
@@ -53,6 +62,13 @@ func recordRequest(endpoint telemetry.EndpointName, outcome telemetry.OutcomeKin
 // cardinality (REQ-004).
 func recordError(endpoint telemetry.EndpointName, code string) {
 	oidcErrorsTotal.Inc(telemetry.Endpoint(endpoint), telemetry.ErrorCode(mapErrorCode(code)))
+}
+
+// recordRateLimited emits an aggregate 429 rate-limit counter by endpoint and
+// region. IP is PII and is NEVER a dimension — only aggregate counts are kept,
+// so abuse is visible without a per-IP time series (docs/plans/observability-metrics.md).
+func recordRateLimited(endpoint telemetry.EndpointName, reg region.Region) {
+	oidcRateLimitedTotal.Inc(telemetry.Endpoint(endpoint), telemetry.Region(reg))
 }
 
 // mapErrorCode maps an OAuth/OIDC error code string onto the bounded telemetry
