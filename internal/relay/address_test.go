@@ -293,6 +293,211 @@ func TestAddress_CanReceiveMail(t *testing.T) {
 	}
 }
 
+func TestAddress_IsDeactivated(t *testing.T) {
+	tests := []struct {
+		state State
+		want  bool
+	}{
+		{StateActive, false},
+		{StateDeactivated, true},
+		{StateBYODomain, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.state), func(t *testing.T) {
+			addr := &Address{State: tt.state}
+			if got := addr.IsDeactivated(); got != tt.want {
+				t.Errorf("IsDeactivated() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAddress_IsBYODomain(t *testing.T) {
+	tests := []struct {
+		state State
+		want  bool
+	}{
+		{StateActive, false},
+		{StateDeactivated, false},
+		{StateBYODomain, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.state), func(t *testing.T) {
+			addr := &Address{State: tt.state}
+			if got := addr.IsBYODomain(); got != tt.want {
+				t.Errorf("IsBYODomain() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestAddressLifecycleTransitions tests the state machine transitions for relay addresses.
+// This verifies the kill switch behavior described in §7.5.4.
+func TestAddressLifecycleTransitions(t *testing.T) {
+	gen := NewTokenGenerator()
+	userID := uuid.New()
+
+	t.Run("new address starts active", func(t *testing.T) {
+		addr, _, err := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+		if err != nil {
+			t.Fatalf("NewAddress() error = %v", err)
+		}
+		if addr.State != StateActive {
+			t.Errorf("new address State = %v, want %v", addr.State, StateActive)
+		}
+		if !addr.IsActive() {
+			t.Error("new address IsActive() = false, want true")
+		}
+		if !addr.CanReceiveMail() {
+			t.Error("new address CanReceiveMail() = false, want true")
+		}
+		if addr.DeactivatedAt != nil {
+			t.Error("new address DeactivatedAt should be nil")
+		}
+	})
+
+	t.Run("deactivate sets state and timestamp", func(t *testing.T) {
+		addr, _, _ := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+
+		addr.Deactivate()
+
+		if addr.State != StateDeactivated {
+			t.Errorf("after Deactivate() State = %v, want %v", addr.State, StateDeactivated)
+		}
+		if addr.IsActive() {
+			t.Error("after Deactivate() IsActive() = true, want false")
+		}
+		if !addr.IsDeactivated() {
+			t.Error("after Deactivate() IsDeactivated() = false, want true")
+		}
+		if addr.CanReceiveMail() {
+			t.Error("after Deactivate() CanReceiveMail() = true, want false (hard-bounce)")
+		}
+		if addr.DeactivatedAt == nil {
+			t.Error("after Deactivate() DeactivatedAt should be set")
+		}
+	})
+
+	t.Run("reactivate restores active state", func(t *testing.T) {
+		addr, _, _ := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+		addr.Deactivate()
+
+		addr.Reactivate()
+
+		if addr.State != StateActive {
+			t.Errorf("after Reactivate() State = %v, want %v", addr.State, StateActive)
+		}
+		if !addr.IsActive() {
+			t.Error("after Reactivate() IsActive() = false, want true")
+		}
+		if !addr.CanReceiveMail() {
+			t.Error("after Reactivate() CanReceiveMail() = false, want true")
+		}
+		if addr.DeactivatedAt != nil {
+			t.Error("after Reactivate() DeactivatedAt should be nil")
+		}
+	})
+
+	t.Run("set BYO domain transitions to byo_domain state", func(t *testing.T) {
+		addr, _, _ := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+
+		addr.SetBYODomain()
+
+		if addr.State != StateBYODomain {
+			t.Errorf("after SetBYODomain() State = %v, want %v", addr.State, StateBYODomain)
+		}
+		if !addr.IsBYODomain() {
+			t.Error("after SetBYODomain() IsBYODomain() = false, want true")
+		}
+		if !addr.CanReceiveMail() {
+			t.Error("after SetBYODomain() CanReceiveMail() = false, want true")
+		}
+	})
+
+	t.Run("deactivate then reactivate cycle", func(t *testing.T) {
+		addr, _, _ := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+
+		// Cycle through states
+		addr.Deactivate()
+		if !addr.IsDeactivated() {
+			t.Error("first Deactivate() failed")
+		}
+
+		addr.Reactivate()
+		if !addr.IsActive() {
+			t.Error("first Reactivate() failed")
+		}
+
+		addr.Deactivate()
+		if !addr.IsDeactivated() {
+			t.Error("second Deactivate() failed")
+		}
+
+		addr.Reactivate()
+		if !addr.IsActive() {
+			t.Error("second Reactivate() failed")
+		}
+	})
+}
+
+// TestKillSwitchIndependence verifies that the relay kill switch is independent
+// of login grant revocation (§7.5.4). This is a critical privacy property:
+// - Deactivating email does NOT revoke the user's login grant
+// - Revoking a login grant does NOT deactivate the relay address
+// These are separate concerns that the user controls independently.
+func TestKillSwitchIndependence(t *testing.T) {
+	gen := NewTokenGenerator()
+	userID := uuid.New()
+
+	t.Run("deactivation only affects mail not login state", func(t *testing.T) {
+		addr, _, _ := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+
+		// Simulate: user deactivates relay (kill switch)
+		addr.Deactivate()
+
+		// The relay address is deactivated (no mail)
+		if addr.CanReceiveMail() {
+			t.Error("deactivated address should NOT receive mail")
+		}
+
+		// But the address object itself still exists and has valid user/client info
+		// (the login grant is managed separately, not by the relay package)
+		if addr.UserID != userID {
+			t.Error("deactivation should not affect user association")
+		}
+		if addr.ClientID != "rp.example.com" {
+			t.Error("deactivation should not affect client association")
+		}
+		// The token is still valid for lookup (to show deactivated status)
+		if addr.Token == "" {
+			t.Error("deactivation should not clear the token")
+		}
+	})
+
+	t.Run("hard bounce check uses CanReceiveMail not login state", func(t *testing.T) {
+		addr, _, _ := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+
+		// Active: mail is accepted
+		if !addr.CanReceiveMail() {
+			t.Error("active address should accept mail")
+		}
+
+		// Deactivate: mail is rejected (hard bounce)
+		addr.Deactivate()
+		if addr.CanReceiveMail() {
+			t.Error("deactivated address should reject mail (hard bounce)")
+		}
+
+		// Reactivate: mail is accepted again
+		addr.Reactivate()
+		if !addr.CanReceiveMail() {
+			t.Error("reactivated address should accept mail")
+		}
+	})
+}
+
 // failingReader is an io.Reader that always returns an error.
 type failingReader struct{}
 

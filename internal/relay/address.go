@@ -209,8 +209,42 @@ func (a *Address) IsActive() bool {
 	return a.State == StateActive
 }
 
+// IsDeactivated returns true if the address has been deactivated (kill switch).
+func (a *Address) IsDeactivated() bool {
+	return a.State == StateDeactivated
+}
+
+// IsBYODomain returns true if the address is using a user-verified custom domain.
+func (a *Address) IsBYODomain() bool {
+	return a.State == StateBYODomain
+}
+
 // CanReceiveMail returns true if mail to this address should be accepted.
-// Currently only Active addresses accept mail; Deactivated addresses hard-bounce.
+// Active and BYO-domain addresses accept mail; Deactivated addresses hard-bounce.
+// This is the kill switch check for the inbound MTA (§7.5.4).
 func (a *Address) CanReceiveMail() bool {
 	return a.State == StateActive || a.State == StateBYODomain
+}
+
+// Deactivate transitions the address to the Deactivated state (hard-bounce kill switch).
+// This sets the state and records the deactivation timestamp.
+// Deactivation is independent of login grant revocation (§7.5.4): killing email
+// does not revoke login, and revoking login does not deactivate the relay.
+func (a *Address) Deactivate() {
+	a.State = StateDeactivated
+	now := time.Now().UTC()
+	a.DeactivatedAt = &now
+}
+
+// Reactivate transitions the address from Deactivated back to Active state.
+// This clears the deactivation timestamp and restores mail forwarding.
+func (a *Address) Reactivate() {
+	a.State = StateActive
+	a.DeactivatedAt = nil
+}
+
+// SetBYODomain transitions the address to the BYO-domain state.
+// This is called after the user has verified ownership of their custom domain.
+func (a *Address) SetBYODomain() {
+	a.State = StateBYODomain
 }
