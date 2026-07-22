@@ -25,6 +25,8 @@ on:
       - 'internal/**'
       - 'deploy/Dockerfile.hot'
       - 'deploy/Dockerfile.mgmt'
+      - 'deploy/Dockerfile.migrate'
+      - 'db/migrations/**'
       - 'go.mod'
       - 'go.sum'
 
@@ -84,6 +86,23 @@ jobs:
           cache-from: type=gha,scope=harbor-mgmt
           cache-to: type=gha,scope=harbor-mgmt,mode=max
 
+      # DB-migration runner image: golang-migrate + the embedded db/migrations
+      # SQL. Consumed by the pre-install/pre-upgrade hook Job in the Helm chart,
+      # tagged with the same immutable SHA so schema and binaries deploy in
+      # lockstep.
+      - name: Build & push harbor-migrate
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.migrate
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/harbor-migrate:${{ steps.sha.outputs.short }}
+            ${{ env.REGISTRY }}/harbor-migrate:latest
+          cache-from: type=gha,scope=harbor-migrate
+          cache-to: type=gha,scope=harbor-migrate,mode=max
+
       # Pin the just-built immutable SHA into the ArgoCD prod values file. yq
       # (mikefarah) is preinstalled on ubuntu-latest; env(SHA) reads the env var
       # so the value isn't shell-interpolated into the expression.
@@ -122,7 +141,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          for pkg in harbor-hot harbor-mgmt; do
+          for pkg in harbor-hot harbor-mgmt harbor-migrate; do
             echo "Setting ghcr.io/harbor-auth/harbor/${pkg} to public..."
             gh api \
               --method PATCH \

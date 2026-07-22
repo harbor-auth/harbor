@@ -133,6 +133,37 @@ mgmt:
     kekSecret: ""
 
 # ---------------------------------------------------------------------------
+# migrate: an ephemeral Job that applies pending DB schema migrations before
+# each install/upgrade. Runs as a Helm pre-install/pre-upgrade hook (and an
+# ArgoCD PreSync hook), so the schema is always current before harbor-hot /
+# harbor-mgmt start. Idempotent — golang-migrate tracks the applied version and
+# no-ops when the database is already up-to-date, so it is safe to re-run.
+# ---------------------------------------------------------------------------
+migrate:
+  # Set false to manage migrations out-of-band (the Job is then not rendered).
+  enabled: true
+  image:
+    repository: harbor-migrate
+    # digest: ""   # optional: "@sha256:..." to pin the image immutably
+  # DATABASE_URL source. Empty ⇒ reuse harbor-hot's Secret (both binaries share
+  # one database). Set to reference a different Secret exposing a DATABASE_URL
+  # key (must be a superuser/owner DSN able to run DDL).
+  secrets:
+    existingSecret: ""
+  # Retry a failed migration (e.g. DB not yet reachable) up to this many times.
+  backoffLimit: 3
+  # Hard ceiling on total Job runtime; fail (and surface) rather than hang a
+  # deploy forever if migrations wedge.
+  activeDeadlineSeconds: 300
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
+# ---------------------------------------------------------------------------
 # Ingress for harbor-hot ONLY. harbor-mgmt is deliberately cluster-internal and
 # has no Ingress.
 # ---------------------------------------------------------------------------

@@ -124,3 +124,33 @@ over the shared tag.
 {{- printf "%s/%s:%s" $registry $repo .Values.global.image.tag -}}
 {{- end -}}
 {{- end -}}
+
+{{- define "harbor.migrate.image" -}}
+{{- $registry := .Values.global.image.registry -}}
+{{- $repo := .Values.migrate.image.repository -}}
+{{- if .Values.migrate.image.digest -}}
+{{- printf "%s/%s@%s" $registry $repo (trimPrefix "@" .Values.migrate.image.digest) -}}
+{{- else -}}
+{{- printf "%s/%s:%s" $registry $repo .Values.global.image.tag -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Secret the migrate Job reads DATABASE_URL from. Defaults to harbor-hot's Secret
+(both binaries share one database); override via migrate.secrets.existingSecret.
+*/}}
+{{- define "harbor.migrate.secretName" -}}
+{{- if .Values.migrate.secrets.existingSecret -}}
+{{- .Values.migrate.secrets.existingSecret -}}
+{{- else -}}
+{{- include "harbor.hot.secretName" . -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Full label set for the migrate Job. */}}
+{{- define "harbor.migrate.labels" -}}
+{{ include "harbor.labels" . }}
+app.kubernetes.io/name: harbor-migrate
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/component: migrate
+{{- end -}}

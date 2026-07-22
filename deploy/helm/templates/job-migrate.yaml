@@ -1,0 +1,91 @@
+{{- if .Values.migrate.enabled }}
+# Job: harbor-migrate — applies pending DB schema migrations before the app
+# pods start, so harbor-hot / harbor-mgmt never boot against a stale schema.
+#
+# Lifecycle: this is BOTH a Helm hook and an ArgoCD hook, so it runs whether the
+# chart is applied with `helm upgrade` or synced by ArgoCD:
+#   * helm.sh/hook pre-install,pre-upgrade — Helm runs it (and waits for it to
+#     succeed) before rendering the Deployments.
+#   * argocd.argoproj.io/hook PreSync      — ArgoCD runs it before the main sync
+#     wave.
+# Both hook-delete-policies clean the finished Job up so the next deploy starts
+# clean and stale Jobs don't accumulate.
+#
+# Idempotent: golang-migrate records the applied version in a schema_migrations
+# table and no-ops when already current, so re-running on every deploy is safe.
+#
+# NOTE: it deliberately uses the namespace 'default' ServiceAccount (with token
+# automounting off) — the chart's own ServiceAccounts are ordinary resources
+# that don't exist yet when this pre-install hook fires on a fresh install, and
+# the migrator never talks to the Kubernetes API anyway.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "harbor.fullname" . }}-migrate
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.migrate.labels" . | nindent 4 }}
+  annotations:
+    # Helm: run before install/upgrade, early in the hook order, and clean up.
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+    # ArgoCD: run as a PreSync hook and delete on success.
+    "argocd.argoproj.io/hook": PreSync
+    "argocd.argoproj.io/hook-delete-policy": HookSucceeded
+spec:
+  # Retry transient failures (e.g. Postgres not yet reachable) a few times...
+  backoffLimit: {{ .Values.migrate.backoffLimit }}
+  # ...but never hang a deploy forever.
+  activeDeadlineSeconds: {{ .Values.migrate.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "harbor.migrate.labels" . | nindent 8 }}
+    spec:
+      # Fresh pod per retry so each attempt's logs are self-contained.
+      restartPolicy: Never
+      # The migrator does not call the K8s API; the 'default' SA is used only
+      # because the chart's SAs may not exist yet during a pre-install hook.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: {{ include "harbor.migrate.image" . }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          # ENTRYPOINT is /migrate; $(DATABASE_URL) is substituted by kubelet
+          # from the env var below.
+          args:
+            - "-path"
+            - "/migrations"
+            - "-database"
+            - "$(DATABASE_URL)"
+            - "up"
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "harbor.migrate.secretName" . }}
+                  key: DATABASE_URL
+          resources:
+            {{- toYaml .Values.migrate.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # readOnlyRootFilesystem blocks image-fs writes; give migrate a
+          # writable scratch dir for any temp files.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+{{- end }}

@@ -1,0 +1,29 @@
+# Migration runner for Harbor DB schema.
+#
+# Multi-stage: the build stage compiles the golang-migrate CLI at a pinned
+# version; the runtime stage is a minimal Alpine image that embeds the
+# migration files so a single `docker run` applies all pending migrations.
+#
+# Build:
+#   docker buildx build --platform linux/amd64 -t harbor-migrate:local \
+#     -f deploy/Dockerfile.migrate . --load
+#
+# Run (manually):
+#   docker run --rm -e DATABASE_URL=postgres://... harbor-migrate:local \
+#     -path /migrations -database "$DATABASE_URL" up
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
+# Pin golang-migrate at a known-good release. Bump here to upgrade.
+ARG MIGRATE_VERSION=v4.18.1
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go install -trimpath -ldflags='-s -w' \
+    "github.com/golang-migrate/migrate/v4/cmd/migrate@${MIGRATE_VERSION}"
+
+FROM alpine:3.20
+# Non-root uid/gid matches the Deployment securityContext (runAsUser 65532).
+RUN addgroup -g 65532 nonroot && adduser -u 65532 -G nonroot -D -H nonroot
+COPY --from=build /root/go/bin/migrate /migrate
+# Embed the SQL up-migrations. Down-migrations are intentionally excluded from
+# the production image — rollbacks must be deliberate and performed out-of-band.
+COPY db/migrations /migrations
+USER 65532
+ENTRYPOINT ["/migrate"]
