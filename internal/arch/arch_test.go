@@ -8,11 +8,17 @@ package arch
 // module dependencies, so it is unsuitable here.
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/harbor/harbor/internal/telemetry"
 )
 
 const modulePath = "github.com/harbor/harbor"
@@ -174,5 +180,194 @@ func TestGeneratedPackagesAreImportableLeaves(t *testing.T) {
 		if deps := transitiveImports(t, pkg); len(deps) == 0 {
 			t.Errorf("generated package %s did not list — codegen output may be broken", pkg)
 		}
+	}
+}
+
+// maxMetricLabelDimensions is the ceiling on how many distinct label KEYS the
+// metrics facade may partition by. It keeps the label allow-list bounded: an
+// unbounded, ever-growing set of dimensions is itself a cardinality risk
+// (REQ-004). The current allow-list has six dimensions; the ceiling leaves
+// headroom without permitting an explosion.
+const maxMetricLabelDimensions = 12
+
+// parseTelemetryFiles parses every non-test Go source file in internal/telemetry
+// into ASTs. It parses files individually (rather than the deprecated
+// parser.ParseDir) so the fitness test stays lint-clean.
+func parseTelemetryFiles(t *testing.T) []*ast.File {
+	t.Helper()
+	dir := filepath.Join(repoRoot(t), "internal", "telemetry")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read internal/telemetry: %v", err)
+	}
+	fset := token.NewFileSet()
+	var files []*ast.File
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		files = append(files, f)
+	}
+	if len(files) == 0 {
+		t.Fatal("internal/telemetry has no non-test Go source to inspect")
+	}
+	return files
+}
+
+// typedStringConsts returns every string-valued const declared with the given
+// named type (e.g. LabelKey), mapped from const name to its literal value.
+func typedStringConsts(files []*ast.File, typeName string) map[string]string {
+	out := map[string]string{}
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				ident, ok := vs.Type.(*ast.Ident)
+				if !ok || ident.Name != typeName {
+					continue
+				}
+				for i, nm := range vs.Names {
+					if i >= len(vs.Values) {
+						continue
+					}
+					bl, ok := vs.Values[i].(*ast.BasicLit)
+					if !ok || bl.Kind != token.STRING {
+						continue
+					}
+					val, err := strconv.Unquote(bl.Value)
+					if err != nil {
+						continue
+					}
+					out[nm.Name] = val
+				}
+			}
+		}
+	}
+	return out
+}
+
+// hasConstDecl reports whether any const with the given name is declared.
+func hasConstDecl(files []*ast.File, name string) bool {
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, nm := range vs.Names {
+					if nm.Name == name {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// hasTypeDecl reports whether any type with the given name is declared.
+func hasTypeDecl(files []*ast.File, name string) bool {
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			gd, ok := decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				if ts, ok := spec.(*ast.TypeSpec); ok && ts.Name.Name == name {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// piiLabelDenylist is the canonical set of PII / quasi-identifier field names
+// that must NEVER appear as a metric label KEY. It reuses telemetry.DeniedFields
+// (the single source of truth for known-PII keys, §6.5.7) and adds the field
+// names §5 / REQ-004 call out explicitly for metrics.
+func piiLabelDenylist() map[string]bool {
+	deny := map[string]bool{}
+	for _, f := range telemetry.DeniedFields {
+		deny[f] = true
+	}
+	for _, f := range []string{"user_id", "userid", "email", "ppid", "ip", "sub", "subject"} {
+		deny[f] = true
+	}
+	return deny
+}
+
+// TestMetricLabelsNoPII enforces REQ-004: the metric label allow-list
+// (internal/telemetry LabelKey constants) must never source a label from a PII
+// field (user_id, email, PPID, IP, subject, …), and the allow-list must stay
+// bounded in cardinality.
+//
+// This is the CI half of the design's defence-in-depth (Decision 4): the
+// phantom-typed Label already makes a PII label unexpressible in the facade;
+// this test guards against a future regression where someone adds a PII-named
+// dimension to the allow-list, or lets the dimension set grow unbounded.
+//
+//harbor:invariant INV-METRICS-NO-PII-LABELS
+func TestMetricLabelsNoPII(t *testing.T) {
+	files := parseTelemetryFiles(t)
+
+	keys := typedStringConsts(files, "LabelKey")
+	if len(keys) == 0 {
+		t.Fatal("no LabelKey constants found in internal/telemetry — the metric label " +
+			"allow-list must exist and be inspectable (REQ-001/REQ-004)")
+	}
+
+	deny := piiLabelDenylist()
+	for name, value := range keys {
+		if deny[value] {
+			t.Errorf("metric label key %s = %q is a PII/quasi-identifier field — no metric "+
+				"label may be sourced from a PII field (REQ-004)", name, value)
+		}
+	}
+
+	if len(keys) > maxMetricLabelDimensions {
+		t.Errorf("metric label allow-list has %d dimensions, exceeding the cardinality "+
+			"ceiling of %d — the label set must stay bounded (REQ-004)",
+			len(keys), maxMetricLabelDimensions)
+	}
+}
+
+// TestMetricSmallNSuppressionEnforced enforces the REQ-004/REQ-005 half of
+// Decision 4/5: even an allow-listed label can be a quasi-identifier, so the
+// facade MUST carry a small-n suppression mechanism (a small-count floor and the
+// suppressor that buckets rare quasi-identifier combinations). This structural
+// check fails if that machinery is ever removed, so the aggregate-only
+// guarantee cannot silently regress into per-user rows.
+//
+//harbor:invariant INV-METRICS-AGGREGATE-ONLY
+func TestMetricSmallNSuppressionEnforced(t *testing.T) {
+	files := parseTelemetryFiles(t)
+
+	if !hasConstDecl(files, "smallCountFloor") {
+		t.Error("internal/telemetry must define smallCountFloor — quasi-identifier labels " +
+			"require a small-count floor so no series is emitted at a deanonymising count " +
+			"of 1 (REQ-004/REQ-005)")
+	}
+	if !hasTypeDecl(files, "suppressor") {
+		t.Error("internal/telemetry must define the suppressor that buckets rare " +
+			"quasi-identifier label combinations, bounding their cardinality (REQ-004/REQ-005)")
 	}
 }

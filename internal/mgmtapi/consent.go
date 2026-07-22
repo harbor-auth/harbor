@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/harbor/harbor/internal/oidc"
+	"github.com/harbor/harbor/internal/telemetry"
 )
 
 // ConsentStore is the narrow interface the consent handlers need from
@@ -52,13 +53,19 @@ type ConsentGrantsListResponse struct {
 // grants for the authenticated user. The user ID comes from the X-Harbor-User-ID
 // header set by upstream authentication.
 func (s *Server) GetConsentGrants(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	outcome := telemetry.OutcomeError
+	defer func() { recordRequest(telemetry.EndpointConsent, outcome, start) }()
+
 	userID := r.Header.Get(UserIDHeader)
 	if userID == "" {
+		recordError(telemetry.EndpointConsent, "unauthorized")
 		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
 		return
 	}
 
 	if s.consents == nil {
+		recordError(telemetry.EndpointConsent, "service_unavailable")
 		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "consent service not configured")
 		return
 	}
@@ -67,6 +74,7 @@ func (s *Server) GetConsentGrants(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "mgmtapi: consent list failed",
 			"error", err)
+		recordError(telemetry.EndpointConsent, "server_error")
 		s.writeError(w, http.StatusInternalServerError, "server_error", "failed to retrieve consent grants")
 		return
 	}
@@ -83,6 +91,7 @@ func (s *Server) GetConsentGrants(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	outcome = telemetry.OutcomeSuccess
 	s.writeJSON(w, http.StatusOK, resp)
 }
 
@@ -93,19 +102,26 @@ func (s *Server) GetConsentGrants(w http.ResponseWriter, r *http.Request) {
 // are safe. Users can only revoke their own grants — the lookup is scoped by
 // the X-Harbor-User-ID header set by upstream authentication.
 func (s *Server) DeleteConsentGrant(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	outcome := telemetry.OutcomeError
+	defer func() { recordRequest(telemetry.EndpointConsent, outcome, start) }()
+
 	userID := r.Header.Get(UserIDHeader)
 	if userID == "" {
+		recordError(telemetry.EndpointConsent, "unauthorized")
 		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
 		return
 	}
 
 	clientID := r.PathValue("client_id")
 	if clientID == "" {
+		recordError(telemetry.EndpointConsent, "invalid_request")
 		s.writeError(w, http.StatusBadRequest, "invalid_request", "client_id is required")
 		return
 	}
 
 	if s.consents == nil {
+		recordError(telemetry.EndpointConsent, "service_unavailable")
 		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "consent service not configured")
 		return
 	}
@@ -117,6 +133,7 @@ func (s *Server) DeleteConsentGrant(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "mgmtapi: consent lookup failed",
 			"error", err)
+		recordError(telemetry.EndpointConsent, "server_error")
 		s.writeError(w, http.StatusInternalServerError, "server_error", "failed to revoke consent grant")
 		return
 	}
@@ -125,6 +142,7 @@ func (s *Server) DeleteConsentGrant(w http.ResponseWriter, r *http.Request) {
 		if err := s.consents.Revoke(r.Context(), grant.ID); err != nil {
 			s.logger.ErrorContext(r.Context(), "mgmtapi: consent revoke failed",
 				"error", err)
+			recordError(telemetry.EndpointConsent, "server_error")
 			s.writeError(w, http.StatusInternalServerError, "server_error", "failed to revoke consent grant")
 			return
 		}
@@ -138,10 +156,12 @@ func (s *Server) DeleteConsentGrant(w http.ResponseWriter, r *http.Request) {
 		if err := s.sessionRevoker.RevokeSessionsByUserClient(r.Context(), userID, clientID); err != nil {
 			s.logger.ErrorContext(r.Context(), "mgmtapi: session cascade revoke failed",
 				"error", err)
+			recordError(telemetry.EndpointConsent, "server_error")
 			s.writeError(w, http.StatusInternalServerError, "server_error", "failed to revoke consent grant")
 			return
 		}
 	}
 
+	outcome = telemetry.OutcomeSuccess
 	w.WriteHeader(http.StatusNoContent)
 }
