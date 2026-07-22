@@ -34,6 +34,7 @@ import (
 	"github.com/harbor/harbor/internal/httpserver"
 	"github.com/harbor/harbor/internal/oidc"
 	"github.com/harbor/harbor/internal/oidcapi"
+	"github.com/harbor/harbor/internal/telemetry"
 )
 
 // redisRevocationPublisher adapts *redis.Client to oidcapi.RevocationPublisher:
@@ -315,6 +316,14 @@ func main() {
 		RevocationPublisher: revocationPublisher,
 	})
 	handler := openapi.HandlerFromMux(srv, http.NewServeMux())
+
+	// Region-pinning middleware is the OUTERMOST layer so EVERY request has a
+	// resolved, pinned region on its context before any user-data handler runs
+	// (docs/DESIGN.md §5; OpenSpec regional-data-residency-routing REQ-001,
+	// REQ-002). Resolution is total and fail-closed: a request whose Host does
+	// not map to a known region is rejected here with a defined 400 (and metered
+	// PII-free) before it can reach a handler — never defaulted to a region.
+	handler = oidcapi.RegionMiddleware(telemetry.New(logger))(handler)
 
 	// Rehydrate the bloom filter from the DB BEFORE serving traffic so emergency
 	// revocations survive a replica restart (docs/DESIGN.md §3.5). On error we
