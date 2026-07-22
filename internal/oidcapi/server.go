@@ -140,6 +140,13 @@ var _ openapi.ServerInterface = (*Server)(nil)
 // no PII (docs/DESIGN.md §6.5).
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
+	// RFC 6749 §5.1/§5.2: OAuth/token-endpoint error responses MUST carry
+	// Cache-Control: no-store and Pragma: no-cache so no intermediary caches an
+	// error body. writeError is the generic error writer used by the region
+	// middleware and other pre-handler rejections, so setting these here keeps
+	// even fail-closed 400s (e.g. region_unknown on /token) spec-compliant.
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(openapi.Error{Code: code, Message: message})
 }

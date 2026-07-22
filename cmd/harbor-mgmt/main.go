@@ -28,6 +28,7 @@ import (
 	"github.com/harbor/harbor/internal/identity"
 	"github.com/harbor/harbor/internal/mgmtapi"
 	"github.com/harbor/harbor/internal/region"
+	"github.com/harbor/harbor/internal/telemetry"
 	"github.com/harbor/harbor/internal/webauthn"
 )
 
@@ -224,6 +225,44 @@ func main() {
 	// The middleware is non-rejecting: it only populates context when a valid
 	// authenticated session cookie is present.
 	handler := bff.Middleware(bffStore)(mux)
+
+	// Bind this instance's public RP origin host to its REGION (same rationale as
+	// harbor-hot): the region middleware fail-closed rejects any Host it cannot
+	// resolve, so a single-region/dev deployment MUST declare REGION for its own
+	// origin host to resolve. Binding is add-only and conflict-rejecting, and the
+	// boot invariant refuses to serve a surface that rejects its own origin.
+	if raw := os.Getenv("REGION"); raw != "" {
+		// A set REGION with no origin to anchor it to would be silently dropped —
+		// exactly the silent-misconfig footgun the rest of this fail-closed design
+		// fights. Refuse to boot loudly instead.
+		if len(rpOrigins) == 0 {
+			logger.Error("REGION set but no WEBAUTHN_RP_ORIGINS to anchor it to — refusing to boot", "region", raw)
+			os.Exit(1)
+		}
+		reg, err := region.Parse(raw)
+		if err != nil {
+			logger.Error("invalid REGION — refusing to boot", "region", raw, "error", err)
+			os.Exit(1)
+		}
+		if err := region.BindIssuerHost(rpOrigins[0], reg); err != nil {
+			logger.Error("failed to bind RP origin host to REGION — refusing to boot", "origin", rpOrigins[0], "region", reg, "error", err)
+			os.Exit(1)
+		}
+	}
+	if len(rpOrigins) > 0 {
+		if _, err := region.Resolve(rpOrigins[0]); err != nil {
+			logger.Error("RP origin host does not resolve to a region — refusing to boot; set REGION for single-region/dev deployments", "origin", rpOrigins[0], "error", err)
+			os.Exit(1)
+		}
+	}
+
+	// Region-pinning middleware is the OUTERMOST layer so EVERY request has a
+	// resolved, pinned region on its context before any user-data handler runs
+	// (docs/DESIGN.md §5; OpenSpec regional-data-residency-routing REQ-001,
+	// REQ-002). Resolution is total and fail-closed: a request whose Host does
+	// not map to a known region is rejected here with a defined 400 (and metered
+	// PII-free) before it can reach a handler — never defaulted to a region.
+	handler = mgmtapi.RegionMiddleware(telemetry.New(logger))(handler)
 
 	logger.Info("starting harbor-mgmt", "port", port, "rp_id", rpID)
 	if err := httpserver.Run(ctx, ":"+port, handler, logger); err != nil {

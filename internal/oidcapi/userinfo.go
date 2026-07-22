@@ -144,6 +144,14 @@ func (s *Server) verifyAccessToken(token string) (userinfoTokenClaims, error) {
 	if claims.Subject == "" {
 		return userinfoTokenClaims{}, errInvalidToken
 	}
+	// Region issuer/host coherence: a token whose iss claim names a DIFFERENT
+	// region must be rejected even if the signature verifies (shared/rotated
+	// keys do not imply cross-region acceptance). This prevents a token minted
+	// on eu.harbor.id from being accepted on the us.harbor.id /userinfo surface
+	// (OpenSpec regional-data-residency-routing REQ-001, REQ-002).
+	if claims.Issuer != s.issuer {
+		return userinfoTokenClaims{}, errInvalidToken
+	}
 	return claims, nil
 }
 
