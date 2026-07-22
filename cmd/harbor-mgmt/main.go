@@ -109,9 +109,17 @@ func main() {
 	rpDisplayName := getenv("WEBAUTHN_RP_DISPLAY_NAME", "Harbor")
 	rpOrigins := splitAndTrim(getenv("WEBAUTHN_RP_ORIGINS", "http://localhost:"+port))
 
-	// Dev ceremony stores (in-memory). Replace with sqlc-backed implementations
-	// once DATABASE_URL is wired (see docs/plans/user-enrollment.md).
-	store := webauthn.NewInMemoryStore()
+	// Credential store: DB-backed when DATABASE_URL is configured, in-memory for
+	// dev (see docs/plans/user-enrollment.md). WithPool enables atomic
+	// first-passkey enrollment (credential insert + pending→active flip in one tx).
+	var store webauthn.Store
+	if pool != nil {
+		store = webauthn.NewDBStore(db.New(pool)).WithPool(pool)
+		logger.Info("webauthn store: using DB-backed store")
+	} else {
+		logger.Warn("DATABASE_URL not set — using in-memory WebAuthn store (dev only; credentials lost on restart)")
+		store = webauthn.NewInMemoryStore()
+	}
 	// WebAuthn session store: Redis for multi-replica safety when REDIS_URL is set,
 	// otherwise an in-memory dev scaffold (docs/plans/webauthn-session-store.md).
 	var sessions webauthn.SessionStore
