@@ -37,6 +37,15 @@ plans that still depend on them.
 | [`bff-session-middleware`](../features/bff-session-middleware.md) | §9 · §11.1 · §11.2 | (leaf — real login identity; closes `?user_id`) |
 | [`userinfo-endpoint`](../features/userinfo-endpoint.md) | §3.3 · §11.4 · §3.1 | `oidf-conformance` ✅ |
 | [`oidf-conformance`](../features/oidf-conformance.md) | §1.8 · §11.7 · §3.1 | (leaf — the green-suite integration gate) |
+| [`auth-code-persistence`](../features/auth-code-persistence.md) | §4.1 · §10 | (leaf — Redis-backed multi-replica auth codes) |
+| [`token-introspection`](../features/token-introspection.md) | §3.3 · §3.5 | `rate-limiting` ✅ |
+| [`kms-provider-integration`](../features/kms-provider-integration.md) | §4.4 · §7.3 · §A.4 | (leaf — real regional KEK via KMS) |
+| [`consent-ledger`](../features/consent-ledger.md) | §2.1 · §10 · §11.3 | `consent-management-ui` |
+| [`dynamic-client-registration`](../features/dynamic-client-registration.md) | §3.1 · §8 · §10 | (leaf — RFC 7591 dynamic RP registration) |
+| [`token-revocation-endpoint`](../features/token-revocation-endpoint.md) | §3.5 · §3.5.2 · §7.4 | (leaf — RFC 7009 revoke endpoint) |
+| [`bff-flow-wiring`](../features/bff-flow-wiring.md) | §9 · §11.2 | (leaf — BFF session seam in harbor-hot /authorize) |
+| [`redis-enrollment-session`](../features/redis-enrollment-session.md) | §9 · §4.1 | (leaf — Redis-backed enrollment ceremony sessions) |
+| [`rate-limiting`](../features/rate-limiting.md) | §4.1 · §6.1 · §11.7 | (leaf — per-client hot-path rate limiting) |
 
 > **Why they're gone from the DAG:** all three named critical paths — A ("First
 > Honest Token"), B ("Safe Revocation"), and C ("Real Login") — have **fully
@@ -47,22 +56,23 @@ plans that still depend on them.
 
 ---
 
-## Wave 2 — active build (launched 2026-07-20)
+## Wave 2 — ✅ completed (2026-07-20/21)
 
 Three parallel weft jobs launched simultaneously — all independent roots (the
-only ordering is the **merge** protocol for `cmd/harbor-hot/main.go`, below):
+only ordering was the **merge** protocol for `cmd/harbor-hot/main.go`, below).
+All three have shipped and been promoted to Features.
 
 | Job | Plan | Status | Goal |
 |---|---|---|---|
-| **W1** | [`auth-code-persistence`](auth-code-persistence.md) | `approved` → building | Redis-backed `AuthCodeStore` (SET NX EX + Lua atomic `Consume`, 2×-TTL consumed marker); delete the SCAFFOLD warning. **Sole owner of `main.go` — merges first.** |
-| **W2** | [`token-introspection`](token-introspection.md) | `approved` → building | RFC 7662 `POST /introspect` on `harbor-hot`; Basic-auth clients, JWT verify, **reuse the shipped bloom-filter revocation seam**, cross-client `aud` isolation. Rebases onto post-W1 `main`. |
-| **W3** | [`envelope-encryption-kms`](envelope-encryption-kms.md) | `in-progress` → finishing | Finish `kmsKeyProvider` (regional KEK, HSM boundary), crypto-shred tests, frozen vectors. Self-contained in `internal/crypto/`; never touches `main.go`. |
+| **W1** | [`auth-code-persistence`](auth-code-persistence.md) | shipped ✅ | Redis-backed `AuthCodeStore` (SET NX EX + Lua atomic `Consume`, 2×-TTL consumed marker); SCAFFOLD warning deleted. **Sole owner of `main.go` — merged first.** |
+| **W2** | [`token-introspection`](token-introspection.md) | shipped ✅ | RFC 7662 `POST /introspect` on `harbor-hot`; Basic-auth clients, JWT verify, **reuses the shipped bloom-filter revocation seam**, cross-client `aud` isolation. Rebased onto post-W1 `main`. |
+| **W3** | [`envelope-encryption-kms`](../features/envelope-encryption-kms.md) | shipped ✅ | `kmsKeyProvider` (regional KEK, HSM boundary), crypto-shred tests, frozen vectors. Self-contained in `internal/crypto/`; never touched `main.go`. |
 
-## Wave 3 — deferred
+## Wave 3 — ✅ completed
 
 | Job | Plan | Status | Gate |
 |---|---|---|---|
-| **W0** | [`rate-limiting`](rate-limiting.md) | `draft` (authored this wave) | **Hard-gated on `token-introspection` (W2)** — must protect `/introspect` (which doesn't exist until W2 lands) and shares the hot-path router/middleware surface. Build after W2 is promoted. |
+| **W0** | [`rate-limiting`](rate-limiting.md) | shipped ✅ | Was hard-gated on `token-introspection` (W2); now that `/introspect` exists and the hot-path middleware surface is settled, per-client rate limiting has landed. |
 
 ---
 
@@ -77,14 +87,22 @@ since shipped — `consent-ledger` ✅ (PR #46) and `dynamic-client-registration
 consent-and-relay work below. Each plan's `## Dependency order` blockquote is
 canonical; the gate table, graph, and edge list here are derived from them.
 
-| Gate | Plan | Status | Depends on |
-|---|---|---|---|
-| **1** | [`regional-data-residency-routing`](regional-data-residency-routing.md) | `draft` | *(root — platform guardrail)* |
-| **1** | [`observability-metrics`](observability-metrics.md) | `draft` | *(root — platform guardrail)* |
-| **2** | [`user-account-recovery`](user-account-recovery.md) | `draft` | Gate 1; ✅ `user-enrollment`, ✅ `webauthn-session-store`, ✅ `envelope-encryption-kms` |
-| **3** | [`consent-management-ui`](consent-management-ui.md) | `draft` | Gate 1–2; ✅ `consent-ledger`, `user-audit-trail`, ✅ `bff-session-middleware`; **soft:** `email-relay-service` |
-| **3** | [`compliance-export`](compliance-export.md) | `draft` | Gate 1; `user-audit-trail`, ✅ `envelope-encryption-kms` (crypto-shred) |
-| **4** | [`email-relay-service`](email-relay-service.md) | `draft` | Gate 1; ✅ `consent-ledger`, ✅ `client-grant-persistence` |
+| Gate | Plan | Weft ID | Weft Status | Depends on |
+|---|---|---|---|---|
+| **1** | [`regional-data-residency-routing`](regional-data-residency-routing.md) | `feat_8ec115c6` (new) / `feat_733f3eba` (prior ✅) | proposed (quota) / ✅ prior completed | *(root — platform guardrail)* |
+| **1** | [`observability-metrics`](observability-metrics.md) | `feat_6bfb679c` | 🔄 in_progress | *(root — platform guardrail)* |
+| **2** | [`user-account-recovery`](user-account-recovery.md) | — | ⛔ blocked | Gate 1; ✅ `user-enrollment`, ✅ `webauthn-session-store`, ✅ `envelope-encryption-kms` |
+| **2** | [`user-audit-trail`](user-audit-trail.md) | `feat_c2d5e191` | ⏳ proposed | Gate 1 |
+| **2** | [`discoverable-login`](discoverable-login.md) | `feat_12ee5a09` | 🔄 in_progress | Gate 1; ✅ `bff-session-middleware`, ✅ `user-enrollment` |
+| **3** | [`consent-management-ui`](consent-management-ui.md) | `feat_28ba9372` | ⏳ proposed | Gate 1–2; ✅ `consent-ledger`, `user-audit-trail`, ✅ `bff-session-middleware`; **soft:** `email-relay-service` |
+| **3** | [`compliance-export`](compliance-export.md) | `feat_04c21ab3` | ⏳ proposed | Gate 1; `user-audit-trail`, ✅ `envelope-encryption-kms` (crypto-shred) |
+| **4** | [`email-relay-service`](email-relay-service.md) | — | 🔄 in_progress | Gate 1; ✅ `consent-ledger`, ✅ `client-grant-persistence` |
+
+> **⚠️ Failed launch:** [`webauthn-db-wiring`](webauthn-db-wiring.md) (`feat_ac6b4036`)
+> **❌ FAILED** on Weft. It's a ~5-line wiring fix in `cmd/harbor-mgmt/main.go`
+> (`store_db.go` is complete and tested) but the launch failed — **needs
+> immediate re-launch**. Until it lands, enrolled passkeys are lost on every
+> process restart. Tracked as `webauthn-db-rewire` (P0) in **Wave 6** below.
 
 ### Wave 5 dependency graph (ASCII)
 
@@ -266,23 +284,64 @@ session; `harbor-hot` reads it from the server-side session, not a client param.
 
 ## What to build next
 
-**Wave 2 is active** — three parallel jobs are building now (see *Wave 2 —
-active build* above):
+**Waves 2–4 have shipped.** Wave 5 is building on Weft (see the gate table
+above). The critical path now is **Wave 6 — Phase-0 Critical Fixes** (below):
+these are the production-launch blockers surfaced by the
+[production-readiness audit](production-readiness.md), and they take priority
+over finishing the Wave 5 compliance features.
 
-1. **W1 · `auth-code-persistence`** — Redis-backed multi-replica-safe
-   authorization codes; sole owner of `main.go`, **merges first**.
-2. **W2 · `token-introspection`** — RFC 7662 `POST /introspect`; reuses the
-   shipped bloom-filter revocation seam; rebases onto post-W1 `main`.
-3. **W3 · `envelope-encryption-kms`** *(in-progress)* — finish the real regional
-   KEK provider; self-contained in `internal/crypto/`.
+> **Tip for agents:** the four **P0** Wave-6 fixes are independent roots — launch
+> them in parallel. `webauthn-db-rewire` is the cheapest (~5 lines) and closes
+> the passkey-loss-on-restart hole; do it first.
 
-**Wave 3 (deferred):**
+---
 
-4. **W0 · `rate-limiting`** — per-client hot-path rate limiting. **Do not build
-   until `token-introspection` (W2) is promoted** — it must protect
-   `/introspect` and shares the hot-path middleware surface.
+## Wave 6 — Phase-0 Critical Fixes (2026-07 production-readiness audit)
 
-> **Tip for agents:** the only ordering that exists in Wave 2 is the `main.go`
-> **merge** protocol (W1 before W2 — see above), not a launch order. All three
-> Wave-2 jobs launch simultaneously. `rate-limiting` is the sole gated
-> downstream and waits for Wave 3.
+Identified by the Fable production-readiness audit. These are **blocking
+production launch** — not features, but wiring fixes and missing security
+primitives. See [`production-readiness.md`](production-readiness.md) for the
+full audit with file/symbol references and evidence.
+
+| Priority | Fix | What's broken | Est. effort |
+|---|---|---|---|
+| **P0** | `webauthn-db-rewire` | `webauthn.NewInMemoryStore()` hardwired even when `DATABASE_URL` set; `store_db.go` is complete — just ~5 lines of wiring in `cmd/harbor-mgmt/main.go`. Passkeys evaporate on every restart. | 1–2 h |
+| **P0** | `fix-auth-bypass` | `FixedAuthSource` hardcoded `demoUserID` in `cmd/harbor-hot/main.go` — every `/authorize` issues tokens for the same demo user. BFF session seam exists (`bff-flow-wiring` ✅) but was never wired into the hot path. | 2–4 h |
+| **P0** | `admin-endpoint-auth` | `POST /admin/revoke-jwt` and `/admin/keys/*` have zero `Authorization` checks on the internet-facing `harbor-hot` binary. | 2–4 h |
+| **P0** | `client-secret-auth` | `/token` does not verify `client_secret` for confidential clients; `client_secret_hash` column exists in DB but is never read at token time. | 4–8 h |
+| **P1** | `hsm-signing-key` | `NewLocalSigner()` generates ephemeral in-process signing keys — tokens don't survive restarts; `signer_hsm.go` stub returns `ErrHSMNotImplemented` on every method. Separate from KEK KMS. | 1–2 w |
+| **P1** | `totp-mfa` | `mfa_factors` table and DB queries exist but no service/API/UI; TOTP is a §7.1 requirement as a secondary factor. | 1 w |
+| **P1** | `end-session-logout` | No OIDC RP-Initiated Logout (OpenID Connect Session Management / Front-Channel Logout); `sessions` table ready. | 1 w |
+| **P2** | `acr-amr-dynamic` | ACR/AMR claims hardcoded as `urn:harbor:ac:webauthn` / `["hwk","user"]` regardless of actual auth method; will emit lies once TOTP or recovery-code auth exists. | 2–4 h |
+
+### Wave 6 dependency order
+
+- **The four P0 fixes are independent roots — launch all four in parallel.**
+- `hsm-signing-key` unblocks nothing until integrated, but is long-lead — **start
+  it early** so it lands alongside the P0 fixes.
+- `totp-mfa` **gates** `acr-amr-dynamic` (you can't emit an honest `amr` array
+  until a second factor actually exists).
+- `end-session-logout` is a **leaf** — no dependents, build any time.
+
+### Wave 6 dependency graph (ASCII)
+
+```
+┌──────────────── P0 — launch in parallel (production blockers) ──────────────┐
+│  ┌──────────────────┐ ┌────────────────┐ ┌──────────────────┐ ┌───────────┐ │
+│  │ webauthn-db-     │ │ fix-auth-      │ │ admin-endpoint-  │ │ client-   │ │
+│  │ rewire (~5 LOC)  │ │ bypass         │ │ auth             │ │ secret-   │ │
+│  │                  │ │                │ │                  │ │ auth      │ │
+│  └──────────────────┘ └────────────────┘ └──────────────────┘ └───────────┘ │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────── P1 — long-lead / feature primitives ────────────────────────┐
+│  ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────────────┐  │
+│  │ hsm-signing-key  │   │ totp-mfa         │   │ end-session-logout       │  │
+│  │ (start early)    │   │      │           │   │ (leaf)                   │  │
+│  └──────────────────┘   └──────┼───────────┘   └──────────────────────────┘  │
+│                                ▼                                             │
+│                     ┌──────────────────┐  P2                                 │
+│                     │ acr-amr-dynamic  │  (gated on totp-mfa)                │
+│                     └──────────────────┘                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
+```

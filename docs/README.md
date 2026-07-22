@@ -42,6 +42,15 @@ docs/plans/         → future WHAT — intent not yet built
 | [bff-session-middleware](features/bff-session-middleware.md) | implemented | §9, §11.1, §11.2 | `internal/bff/`, `internal/oidcapi/`, `internal/oidc/`, `cmd/harbor-mgmt/` | 2026-07-20 |
 | [userinfo-endpoint](features/userinfo-endpoint.md) | implemented | §3.3, §11.4, §3.1 | `internal/oidcapi/`, `api/openapi/harbor.yaml` | 2026-07-20 |
 | [oidf-conformance](features/oidf-conformance.md) | implemented | §1.8, §11.7, §3.1 | `internal/oidc/`, `internal/oidcapi/`, `conformance/` | 2026-07-20 |
+| [auth-code-persistence](features/auth-code-persistence.md) | implemented | §4.1, §10 | `internal/oidc/`, `internal/clients/`, `cmd/harbor-hot/` | 2026-07-21 |
+| [token-introspection](features/token-introspection.md) | implemented | §3.3, §3.5 | `internal/oidcapi/`, `api/openapi/harbor.yaml` | 2026-07-21 |
+| [kms-provider-integration](features/kms-provider-integration.md) | implemented | §4.4, §7.3, §A.4 | `internal/crypto/` | 2026-07-21 |
+| [consent-ledger](features/consent-ledger.md) | implemented | §2.1, §10, §11.3 | `internal/oidc/`, `internal/mgmtapi/`, `db/migrations/` | 2026-07-21 |
+| [dynamic-client-registration](features/dynamic-client-registration.md) | implemented | §3.1, §8, §10 | `internal/mgmtapi/`, `internal/clients/`, `db/migrations/` | 2026-07-21 |
+| [token-revocation-endpoint](features/token-revocation-endpoint.md) | implemented | §3.5, §3.5.2, §7.4 | `internal/oidcapi/`, `api/openapi/harbor.yaml` | 2026-07-21 |
+| [rate-limiting](features/rate-limiting.md) | implemented | §4.1, §6.1, §11.7 | `internal/oidcapi/`, `cmd/harbor-hot/` | 2026-07-21 |
+| [bff-flow-wiring](features/bff-flow-wiring.md) | implemented | §9, §11.2 | `internal/bff/`, `internal/oidc/`, `cmd/harbor-hot/` | 2026-07-22 |
+| [redis-enrollment-session](features/redis-enrollment-session.md) | implemented | §9, §4.1 | `internal/clients/`, `internal/webauthn/`, `cmd/harbor-mgmt/` | 2026-07-22 |
 
 ## Plans (future / in progress)
 
@@ -49,20 +58,18 @@ docs/plans/         → future WHAT — intent not yet built
 
 | Plan | Status | DESIGN § | Promotes to |
 |---|---|---|---|
-| [envelope-encryption-kms](plans/envelope-encryption-kms.md) | in-progress | §4.4, §7.3, §10 | `internal/crypto/` |
-| [token-introspection](plans/token-introspection.md) | draft | §3.3, §3.5, §3.5.2 | `internal/oidcapi/`, `api/openapi/harbor.yaml` |
-| [auth-code-persistence](plans/auth-code-persistence.md) | draft | §4.1, §4.4, §10 | `internal/oidc/`, `internal/clients/`, `cmd/harbor-hot/` |
-| [kms-provider-integration](plans/kms-provider-integration.md) | draft | §4.4, §7.3, §A.4 | `internal/crypto/` |
-| [token-revocation-endpoint](plans/token-revocation-endpoint.md) | draft | §3.5, §3.5.2, §7.4 | `internal/oidcapi/`, `api/openapi/harbor.yaml` |
-| [consent-ledger](plans/consent-ledger.md) | draft | §2.1, §10, §11.3 | `internal/oidc/`, `internal/mgmtapi/`, `db/migrations/` |
-| [dynamic-client-registration](plans/dynamic-client-registration.md) | draft | §3.1, §8, §10 | `internal/mgmtapi/`, `internal/clients/`, `db/migrations/` |
-| [user-audit-trail](plans/user-audit-trail.md) | draft | §2.1, §4.4, §10, §11.6 | `internal/identity/`, `internal/mgmtapi/`, `db/migrations/` |
-| [regional-data-residency-routing](plans/regional-data-residency-routing.md) | draft | §5, §4, §11.2 | `internal/region/`, `internal/oidcapi/`, `internal/mgmtapi/`, `cmd/harbor-hot/` |
-| [observability-metrics](plans/observability-metrics.md) | draft | §6.5, §5, §11.2 | `internal/telemetry/`, `internal/oidcapi/`, `internal/mgmtapi/` |
-| [user-account-recovery](plans/user-account-recovery.md) | draft | §11.7, §11.6, §4 | `db/migrations/`, `internal/identity/`, `internal/webauthn/`, `internal/mgmtapi/` |
-| [consent-management-ui](plans/consent-management-ui.md) | draft | §2.1, §11.4, §9 | `internal/bff/`, `internal/mgmtapi/`, `web/` |
-| [compliance-export](plans/compliance-export.md) | draft | §11.5, §11.6, §11.2 | `internal/mgmtapi/`, `internal/identity/`, `internal/crypto/` |
-| [email-relay-service](plans/email-relay-service.md) | draft | §7.5, §5, §11.2 | `db/migrations/`, `internal/relay/`, `internal/mgmtapi/`, `cmd/harbor-hot/` |
+| [regional-data-residency-routing](plans/regional-data-residency-routing.md) | building on Weft (`feat_8ec115c6`) | §5, §4, §11.2 | `internal/region/`, `internal/oidcapi/`, `internal/mgmtapi/`, `cmd/harbor-hot/` |
+| [observability-metrics](plans/observability-metrics.md) | building on Weft (`feat_6bfb679c`) | §6.5, §5, §11.2 | `internal/telemetry/`, `internal/oidcapi/`, `internal/mgmtapi/` |
+| [user-audit-trail](plans/user-audit-trail.md) | building on Weft (`feat_c2d5e191`, proposed) | §2.1, §4.4, §10, §11.6 | `internal/identity/`, `internal/mgmtapi/`, `db/migrations/` |
+| [discoverable-login](plans/discoverable-login.md) | building on Weft (`feat_12ee5a09`, in_progress) | §9, §11.1, §11.2 | `internal/bff/`, `internal/webauthn/`, `cmd/harbor-mgmt/` |
+| [user-account-recovery](plans/user-account-recovery.md) | building on Weft (blocked) | §11.7, §11.6, §4 | `db/migrations/`, `internal/identity/`, `internal/webauthn/`, `internal/mgmtapi/` |
+| [consent-management-ui](plans/consent-management-ui.md) | building on Weft (`feat_28ba9372`, proposed) | §2.1, §11.4, §9 | `internal/bff/`, `internal/mgmtapi/`, `web/` |
+| [compliance-export](plans/compliance-export.md) | building on Weft (`feat_04c21ab3`, proposed) | §11.5, §11.6, §11.2 | `internal/mgmtapi/`, `internal/identity/`, `internal/crypto/` |
+| [email-relay-service](plans/email-relay-service.md) | building on Weft (in_progress) | §7.5, §5, §11.2 | `db/migrations/`, `internal/relay/`, `internal/mgmtapi/`, `cmd/harbor-hot/` |
+| [webauthn-db-wiring](plans/webauthn-db-wiring.md) | ❌ failed on Weft (`feat_ac6b4036`) — needs re-launch | §4.1, §4.4, §9 | `cmd/harbor-mgmt/` |
+| [production-readiness](plans/production-readiness.md) | audit doc | — | see [`plans/production-readiness.md`](plans/production-readiness.md) |
+
+> **Wave 6 — Phase-0 Critical Fixes** (from the [production-readiness audit](plans/production-readiness.md)): `webauthn-db-rewire`, `fix-auth-bypass`, `admin-endpoint-auth`, `client-secret-auth` (all **P0**), plus `hsm-signing-key`, `totp-mfa`, `end-session-logout` (**P1**) and `acr-amr-dynamic` (**P2**). These block production launch and take priority over finishing Wave 5. See [`plans/README.md`](plans/README.md#wave-6--phase-0-critical-fixes-2026-07-production-readiness-audit) for the gate order.
 
 > A plan appears here until it's implemented, then **`@plan promote`** moves its row into the **Features** table above. Author the next one with **`@plan new <slug>`**.
 
