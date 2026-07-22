@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-07-22
+goal: Ship a user-authenticated, region-pinned DSAR flow — EXPORT assembles the caller's OWN decrypted data (profile, consent grants, user-audit-trail events, relay mappings) into a portable, region-pinned, short-lived bundle with no operator plaintext path and no cross-user read; ERASE crypto-shreds by destroying the user's wrapped DEK (users.dek_wrapped) so all their envelope-encrypted PII becomes permanently, provably unrecoverable and a prior export cannot re-hydrate it — both metered aggregate-only and audited, realising §11.5 (DSAR) via §11.6 (crypto-shred), adding no new table

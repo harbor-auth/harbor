@@ -66,6 +66,91 @@ only ordering is the **merge** protocol for `cmd/harbor-hot/main.go`, below):
 
 ---
 
+## Wave 5 — authored (2026-07-22)
+
+Wave 5 is a batch of **six** privacy / compliance / data-residency hardening
+plans, launched in **dependency-ordered gates** rather than all at once: the
+**Gate-1 platform guardrails land first** (region-pinning + aggregate-only
+metrics), and every later gate inherits those invariants. Two Wave-4 items have
+since shipped — `consent-ledger` ✅ (PR #46) and `dynamic-client-registration` ✅
+(PR #47) — and `consent-ledger` is a hard prerequisite for the Gate-3/Gate-4
+consent-and-relay work below. Each plan's `## Dependency order` blockquote is
+canonical; the gate table, graph, and edge list here are derived from them.
+
+| Gate | Plan | Status | Depends on |
+|---|---|---|---|
+| **1** | [`regional-data-residency-routing`](regional-data-residency-routing.md) | `draft` | *(root — platform guardrail)* |
+| **1** | [`observability-metrics`](observability-metrics.md) | `draft` | *(root — platform guardrail)* |
+| **2** | [`user-account-recovery`](user-account-recovery.md) | `draft` | Gate 1; ✅ `user-enrollment`, ✅ `webauthn-session-store`, ✅ `envelope-encryption-kms` |
+| **3** | [`consent-management-ui`](consent-management-ui.md) | `draft` | Gate 1–2; ✅ `consent-ledger`, `user-audit-trail`, ✅ `bff-session-middleware`; **soft:** `email-relay-service` |
+| **3** | [`compliance-export`](compliance-export.md) | `draft` | Gate 1; `user-audit-trail`, ✅ `envelope-encryption-kms` (crypto-shred) |
+| **4** | [`email-relay-service`](email-relay-service.md) | `draft` | Gate 1; ✅ `consent-ledger`, ✅ `client-grant-persistence` |
+
+### Wave 5 dependency graph (ASCII)
+
+The two Gate-1 guardrails are independent roots; every later gate inherits the
+region-pinning + aggregate-only-metrics invariants (drawn as ordering edges).
+`✅` marks a shipped prerequisite; a dotted `soft` edge is feature-detected and
+non-blocking.
+
+```
+┌──────────────── GATE 1 — platform guardrails (roots, land first) ───────────┐
+│                                                                             │
+│  ┌─────────────────────────────┐        ┌─────────────────────────────┐    │
+│  │ regional-data-residency-    │        │ observability-metrics       │    │
+│  │ routing   §5·§4·§11.2       │        │ §6.5·§5·§11.2               │    │
+│  └──────────────┬──────────────┘        └──────────────┬──────────────┘    │
+│                 │      (region-pin + aggregate-only)    │                   │
+└─────────────────┼───────────────────────────────────────┼───────────────────┘
+                  ▼                                       ▼
+┌──────────────── GATE 2 — user safeguards ───────────────────────────────────┐
+│              ┌─────────────────────────────┐                                 │
+│              │ user-account-recovery       │  + ✅ user-enrollment,          │
+│              │ §11.7·§11.6·§4             │    ✅ webauthn-session-store,    │
+│              └──────────────┬──────────────┘    ✅ envelope-encryption-kms   │
+└─────────────────────────────┼───────────────────────────────────────────────┘
+                              ▼
+┌──────────────── GATE 3 — user-facing surfaces ──────────────────────────────┐
+│  ┌─────────────────────────────┐   ┌─────────────────────────────┐          │
+│  │ consent-management-ui       │   │ compliance-export           │          │
+│  │ §2.1·§11.4·§9              │   │ §11.5·§11.6·§11.2           │          │
+│  │ + ✅ consent-ledger,        │   │ + user-audit-trail,         │          │
+│  │   user-audit-trail,         │   │   ✅ envelope-encryption-kms │          │
+│  │   ✅ bff-session-middleware  │   │   (crypto-shred)            │          │
+│  └──────────────┬──────────────┘   └─────────────────────────────┘          │
+│                 ┊ soft (per-RP relay toggle, feature-detected)              │
+└─────────────────┼───────────────────────────────────────────────────────────┘
+                  ▼
+┌──────────────── GATE 4 — email relay (last) ────────────────────────────────┐
+│              ┌─────────────────────────────┐                                 │
+│              │ email-relay-service         │  + ✅ consent-ledger,           │
+│              │ §7.5·§5·§11.2 (Phase 1+2)  │    ✅ client-grant-persistence   │
+│              └─────────────────────────────┘                                 │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Wave 5 edge list (machine-readable)
+
+Each row is `(plan, requires)`. `✅` marks an already-shipped prerequisite;
+plain names are Wave-5-internal gate/ordering edges. `soft` edges are
+feature-detected and non-blocking.
+
+| Plan | Requires | Type |
+|---|---|---|
+| `regional-data-residency-routing` | *(none)* | — |
+| `observability-metrics` | *(none)* | — |
+| `user-account-recovery` | `regional-data-residency-routing`, `observability-metrics` | ordering |
+| `user-account-recovery` | ✅ `user-enrollment`, ✅ `webauthn-session-store`, ✅ `envelope-encryption-kms` | hard |
+| `compliance-export` | `regional-data-residency-routing`, `observability-metrics` | ordering |
+| `compliance-export` | `user-audit-trail`, ✅ `envelope-encryption-kms` | hard |
+| `consent-management-ui` | `regional-data-residency-routing`, `observability-metrics` | ordering |
+| `consent-management-ui` | ✅ `consent-ledger`, `user-audit-trail`, ✅ `bff-session-middleware` | hard |
+| `consent-management-ui` | `email-relay-service` | soft |
+| `email-relay-service` | `regional-data-residency-routing`, `observability-metrics` | ordering |
+| `email-relay-service` | ✅ `consent-ledger`, ✅ `client-grant-persistence` | hard |
+
+---
+
 ## Dependency graph (ASCII) — remaining work
 
 The three Wave-2 roots are independent. `rate-limiting` is the one downstream
