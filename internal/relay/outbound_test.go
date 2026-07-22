@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -242,8 +243,8 @@ func TestSession_ReplyThrough_RejectsUnauthorizedSender(t *testing.T) {
 	if err == nil {
 		t.Fatal("Rcpt() accepted an unauthorized sender, want rejection")
 	}
-	smtpErr, ok := err.(*smtp.SMTPError)
-	if !ok || smtpErr.Code != 550 {
+	var smtpErr *smtp.SMTPError
+	if !errors.As(err, &smtpErr) || smtpErr.Code != 550 {
 		t.Errorf("error = %v, want 550 SMTPError", err)
 	}
 	if len(sess.replies) != 0 {

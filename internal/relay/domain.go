@@ -239,7 +239,7 @@ func (v *DomainVerifier) VerifyTXTChallenge(ctx context.Context, domain *BYODoma
 		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
 			return ErrTXTRecordNotFound
 		}
-		return fmt.Errorf("%w: %v", ErrDNSLookupFailed, err)
+		return fmt.Errorf("%w: %w", ErrDNSLookupFailed, err)
 	}
 
 	// Look for the expected value: harbor-verify=<token>
