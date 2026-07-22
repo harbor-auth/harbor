@@ -80,7 +80,7 @@ func RateLimitMiddleware(cfg RateLimitConfig) func(http.Handler) http.Handler {
 
 			// Region is only a metric dimension here; resolve best-effort and pass
 			// empty when the host is unknown (metrics accept an empty region).
-			reg, _ := region.Resolve(r.Host)
+			reg, _ := region.Resolve(r.Host) //nolint:errcheck // best-effort metric dimension; empty region is accepted
 
 			if err != nil {
 				// Fail open: allow the request. Log with PII-free aggregate fields

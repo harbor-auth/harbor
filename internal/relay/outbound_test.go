@@ -172,7 +172,7 @@ type replyStubForwarder struct {
 func (f *replyStubForwarder) Forward(_ context.Context, from, to string, msg io.Reader) error {
 	f.from = from
 	f.to = to
-	f.msg, _ = io.ReadAll(msg)
+	f.msg, _ = io.ReadAll(msg) //nolint:errcheck // test stub: reading an in-memory buffer never fails
 	return nil
 }
 

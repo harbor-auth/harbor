@@ -460,7 +460,7 @@ func (m *mockForwarder) Forward(_ context.Context, from, to string, msg io.Reade
 	}
 	m.from = from
 	m.to = to
-	m.msg, _ = io.ReadAll(msg)
+	m.msg, _ = io.ReadAll(msg) //nolint:errcheck // mock: reading an in-memory buffer never fails
 	return nil
 }
 
@@ -479,7 +479,10 @@ func TestNewSMTPForwarder(t *testing.T) {
 
 // TestNewARCSealer tests constructor.
 func TestNewARCSealer(t *testing.T) {
-	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey: %v", err)
+	}
 	sealer := NewARCSealer("example.com", "arc", key)
 
 	if sealer.domain != "example.com" {
@@ -571,7 +574,10 @@ func TestForwardAll_Integration(t *testing.T) {
 		ReturnPath:      "bounces@relay.example.com",
 	})
 
-	session, _ := backend.NewSession(nil)
+	session, err := backend.NewSession(nil)
+	if err != nil {
+		t.Fatalf("NewSession() error: %v", err)
+	}
 	s := session.(*Session)
 
 	// Simulate a validated recipient
@@ -636,7 +642,10 @@ func TestForwardAll_ForwarderError(t *testing.T) {
 		MappingResolver: resolver,
 	})
 
-	session, _ := backend.NewSession(nil)
+	session, err := backend.NewSession(nil)
+	if err != nil {
+		t.Fatalf("NewSession() error: %v", err)
+	}
 	s := session.(*Session)
 
 	s.recipients = append(s.recipients, &recipientInfo{
@@ -646,7 +655,7 @@ func TestForwardAll_ForwarderError(t *testing.T) {
 	})
 
 	msg := []byte("From: sender@example.com\r\n\r\nBody\r\n")
-	err := s.forwardAll(context.Background(), msg, nil)
+	err = s.forwardAll(context.Background(), msg, nil)
 
 	if err == nil {
 		t.Error("forwardAll() should return error when forwarder fails")
@@ -665,7 +674,10 @@ func TestForwardAll_NoForwarder(t *testing.T) {
 		Forwarder: nil, // No forwarder configured
 	})
 
-	session, _ := backend.NewSession(nil)
+	session, err := backend.NewSession(nil)
+	if err != nil {
+		t.Fatalf("NewSession() error: %v", err)
+	}
 	s := session.(*Session)
 
 	s.recipients = append(s.recipients, &recipientInfo{
@@ -674,7 +686,7 @@ func TestForwardAll_NoForwarder(t *testing.T) {
 	})
 
 	msg := []byte("From: sender@example.com\r\n\r\nBody\r\n")
-	err := s.forwardAll(context.Background(), msg, nil)
+	err = s.forwardAll(context.Background(), msg, nil)
 
 	if err != nil {
 		t.Errorf("forwardAll() error = %v, want nil (no forwarder)", err)
@@ -694,7 +706,10 @@ func TestForwardAll_WithoutARC(t *testing.T) {
 		MappingResolver: resolver,
 	})
 
-	session, _ := backend.NewSession(nil)
+	session, err := backend.NewSession(nil)
+	if err != nil {
+		t.Fatalf("NewSession() error: %v", err)
+	}
 	s := session.(*Session)
 
 	s.recipients = append(s.recipients, &recipientInfo{
@@ -704,7 +719,7 @@ func TestForwardAll_WithoutARC(t *testing.T) {
 	})
 
 	msg := []byte("From: sender@example.com\r\n\r\nBody\r\n")
-	err := s.forwardAll(context.Background(), msg, nil)
+	err = s.forwardAll(context.Background(), msg, nil)
 
 	if err != nil {
 		t.Fatalf("forwardAll() error: %v", err)

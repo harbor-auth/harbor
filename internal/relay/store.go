@@ -67,7 +67,7 @@ func (s *Store) encryptMapping(realEmail string, reg region.Region, dek crypto.D
 	aad := []byte("relay-mapping-v1:" + string(reg))
 	encrypted, err := s.cipher.Encrypt(dek, []byte(realEmail), aad)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrEncryptionFailed, err)
+		return nil, fmt.Errorf("%w: %w", ErrEncryptionFailed, err)
 	}
 	return encrypted, nil
 }
@@ -78,7 +78,7 @@ func (s *Store) decryptMapping(encMapping []byte, reg region.Region, dek crypto.
 	aad := []byte("relay-mapping-v1:" + string(reg))
 	plaintext, err := s.cipher.Decrypt(dek, encMapping, aad)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrDecryptionFailed, err)
+		return "", fmt.Errorf("%w: %w", ErrDecryptionFailed, err)
 	}
 	return string(plaintext), nil
 }

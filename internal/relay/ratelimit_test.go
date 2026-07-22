@@ -37,8 +37,11 @@ func TestRateLimiter_RefillsOverTime(t *testing.T) {
 	rl, now := newTestLimiter(2, 2) // 2 tokens/sec, burst 2
 
 	// Drain the bucket.
-	if !rl.Allow("tok") || !rl.Allow("tok") {
-		t.Fatal("expected first two requests to be allowed")
+	if !rl.Allow("tok") {
+		t.Fatal("expected first request to be allowed")
+	}
+	if !rl.Allow("tok") {
+		t.Fatal("expected second request to be allowed")
 	}
 	if rl.Allow("tok") {
 		t.Fatal("expected third request to be denied (bucket empty)")
@@ -59,8 +62,11 @@ func TestRateLimiter_RefillCapsAtBurst(t *testing.T) {
 
 	// Idle for a long time — tokens must not accumulate beyond burst.
 	*now = now.Add(1 * time.Hour)
-	if !rl.Allow("tok") || !rl.Allow("tok") {
-		t.Fatal("expected burst (2) requests to be allowed after long idle")
+	if !rl.Allow("tok") {
+		t.Fatal("expected first burst request to be allowed after long idle")
+	}
+	if !rl.Allow("tok") {
+		t.Fatal("expected second burst request to be allowed after long idle")
 	}
 	if rl.Allow("tok") {
 		t.Error("tokens accumulated beyond burst ceiling")

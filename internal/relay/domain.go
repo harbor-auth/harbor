@@ -299,7 +299,7 @@ func (v *DomainVerifier) validateMX(ctx context.Context, domain string) (bool, [
 		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
 			return false, nil, ErrMXRecordNotFound
 		}
-		return false, nil, fmt.Errorf("%w: %v", ErrDNSLookupFailed, err)
+		return false, nil, fmt.Errorf("%w: %w", ErrDNSLookupFailed, err)
 	}
 
 	if len(mxRecords) == 0 {
@@ -332,7 +332,7 @@ func (v *DomainVerifier) validateSPF(ctx context.Context, domain string) (bool, 
 		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
 			return false, "", ErrSPFRecordNotFound
 		}
-		return false, "", fmt.Errorf("%w: %v", ErrDNSLookupFailed, err)
+		return false, "", fmt.Errorf("%w: %w", ErrDNSLookupFailed, err)
 	}
 
 	// Find the SPF record (starts with "v=spf1")
@@ -381,7 +381,7 @@ func (v *DomainVerifier) validateDKIM(ctx context.Context, domain string) (bool,
 		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
 			return false, "", ErrDKIMRecordNotFound
 		}
-		return false, "", fmt.Errorf("%w: %v", ErrDNSLookupFailed, err)
+		return false, "", fmt.Errorf("%w: %w", ErrDNSLookupFailed, err)
 	}
 
 	// Check for a valid DKIM key record (v=DKIM1; k=rsa; p=...)

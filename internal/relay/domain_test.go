@@ -188,15 +188,18 @@ func TestDomainVerifier_VerifyTXTChallenge(t *testing.T) {
 	verifier := NewDomainVerifier(resolver, "mta-eu.harbor.id", "relay.eu.harbor.id")
 
 	t.Run("verifies correct TXT record", func(t *testing.T) {
-		domain, _ := GenerateChallenge(userID, "mail.example.com", region.EU)
+		domain, err := GenerateChallenge(userID, "mail.example.com", region.EU)
+		if err != nil {
+			t.Fatalf("GenerateChallenge() error = %v", err)
+		}
 
 		// Set up the mock to return the correct TXT record
 		txtHost := "_harbor-verify.mail.example.com"
 		resolver.txtRecords[txtHost] = []string{"harbor-verify=" + domain.ChallengeToken}
 
-		err := verifier.VerifyTXTChallenge(context.Background(), domain)
-		if err != nil {
-			t.Fatalf("VerifyTXTChallenge() error = %v", err)
+		verifyErr := verifier.VerifyTXTChallenge(context.Background(), domain)
+		if verifyErr != nil {
+			t.Fatalf("VerifyTXTChallenge() error = %v", verifyErr)
 		}
 		if domain.State != BYODomainStateVerified {
 			t.Errorf("domain.State = %v, want %v", domain.State, BYODomainStateVerified)
@@ -207,12 +210,15 @@ func TestDomainVerifier_VerifyTXTChallenge(t *testing.T) {
 	})
 
 	t.Run("handles TXT record with whitespace", func(t *testing.T) {
-		domain, _ := GenerateChallenge(userID, "whitespace.example.com", region.EU)
+		domain, err := GenerateChallenge(userID, "whitespace.example.com", region.EU)
+		if err != nil {
+			t.Fatalf("GenerateChallenge() error = %v", err)
+		}
 
 		txtHost := "_harbor-verify.whitespace.example.com"
 		resolver.txtRecords[txtHost] = []string{"  harbor-verify=" + domain.ChallengeToken + "  "}
 
-		err := verifier.VerifyTXTChallenge(context.Background(), domain)
+		err = verifier.VerifyTXTChallenge(context.Background(), domain)
 		if err != nil {
 			t.Fatalf("VerifyTXTChallenge() error = %v", err)
 		}
@@ -222,49 +228,64 @@ func TestDomainVerifier_VerifyTXTChallenge(t *testing.T) {
 	})
 
 	t.Run("returns error for missing TXT record", func(t *testing.T) {
-		domain, _ := GenerateChallenge(userID, "notxt.example.com", region.EU)
+		domain, err := GenerateChallenge(userID, "notxt.example.com", region.EU)
+		if err != nil {
+			t.Fatalf("GenerateChallenge() error = %v", err)
+		}
 		// Don't set up any TXT records for this domain
 
-		err := verifier.VerifyTXTChallenge(context.Background(), domain)
+		err = verifier.VerifyTXTChallenge(context.Background(), domain)
 		if !errors.Is(err, ErrTXTRecordNotFound) {
 			t.Errorf("VerifyTXTChallenge() error = %v, want ErrTXTRecordNotFound", err)
 		}
 	})
 
 	t.Run("returns error for wrong TXT record value", func(t *testing.T) {
-		domain, _ := GenerateChallenge(userID, "wrong.example.com", region.EU)
+		domain, err := GenerateChallenge(userID, "wrong.example.com", region.EU)
+		if err != nil {
+			t.Fatalf("GenerateChallenge() error = %v", err)
+		}
 
 		txtHost := "_harbor-verify.wrong.example.com"
 		resolver.txtRecords[txtHost] = []string{"harbor-verify=wrong-token"}
 
-		err := verifier.VerifyTXTChallenge(context.Background(), domain)
+		err = verifier.VerifyTXTChallenge(context.Background(), domain)
 		if !errors.Is(err, ErrTXTRecordMismatch) {
 			t.Errorf("VerifyTXTChallenge() error = %v, want ErrTXTRecordMismatch", err)
 		}
 	})
 
 	t.Run("returns error for expired challenge", func(t *testing.T) {
-		domain, _ := GenerateChallenge(userID, "expired.example.com", region.EU)
+		domain, err := GenerateChallenge(userID, "expired.example.com", region.EU)
+		if err != nil {
+			t.Fatalf("GenerateChallenge() error = %v", err)
+		}
 		domain.ExpiresAt = time.Now().Add(-1 * time.Hour) // Expired
 
-		err := verifier.VerifyTXTChallenge(context.Background(), domain)
+		err = verifier.VerifyTXTChallenge(context.Background(), domain)
 		if !errors.Is(err, ErrChallengeExpired) {
 			t.Errorf("VerifyTXTChallenge() error = %v, want ErrChallengeExpired", err)
 		}
 	})
 
 	t.Run("returns error for non-pending domain", func(t *testing.T) {
-		domain, _ := GenerateChallenge(userID, "verified.example.com", region.EU)
+		domain, err := GenerateChallenge(userID, "verified.example.com", region.EU)
+		if err != nil {
+			t.Fatalf("GenerateChallenge() error = %v", err)
+		}
 		domain.State = BYODomainStateVerified
 
-		err := verifier.VerifyTXTChallenge(context.Background(), domain)
+		err = verifier.VerifyTXTChallenge(context.Background(), domain)
 		if !errors.Is(err, ErrChallengeNotFound) {
 			t.Errorf("VerifyTXTChallenge() error = %v, want ErrChallengeNotFound", err)
 		}
 	})
 
 	t.Run("finds correct record among multiple TXT records", func(t *testing.T) {
-		domain, _ := GenerateChallenge(userID, "multi.example.com", region.EU)
+		domain, err := GenerateChallenge(userID, "multi.example.com", region.EU)
+		if err != nil {
+			t.Fatalf("GenerateChallenge() error = %v", err)
+		}
 
 		txtHost := "_harbor-verify.multi.example.com"
 		resolver.txtRecords[txtHost] = []string{
@@ -273,9 +294,9 @@ func TestDomainVerifier_VerifyTXTChallenge(t *testing.T) {
 			"another-record",
 		}
 
-		err := verifier.VerifyTXTChallenge(context.Background(), domain)
-		if err != nil {
-			t.Fatalf("VerifyTXTChallenge() error = %v", err)
+		verifyErr := verifier.VerifyTXTChallenge(context.Background(), domain)
+		if verifyErr != nil {
+			t.Fatalf("VerifyTXTChallenge() error = %v", verifyErr)
 		}
 		if domain.State != BYODomainStateVerified {
 			t.Errorf("domain.State = %v, want %v", domain.State, BYODomainStateVerified)
@@ -459,7 +480,10 @@ func TestBYODomain_StateTransitions(t *testing.T) {
 	userID := uuid.New()
 
 	t.Run("new domain starts pending", func(t *testing.T) {
-		domain, _ := GenerateChallenge(userID, "test.example.com", region.EU)
+		domain, err := GenerateChallenge(userID, "test.example.com", region.EU)
+		if err != nil {
+			t.Fatalf("GenerateChallenge() error = %v", err)
+		}
 		if !domain.IsPending() {
 			t.Error("new domain IsPending() = false, want true")
 		}
@@ -472,10 +496,13 @@ func TestBYODomain_StateTransitions(t *testing.T) {
 	})
 
 	t.Run("activate requires verified state", func(t *testing.T) {
-		domain, _ := GenerateChallenge(userID, "test.example.com", region.EU)
+		domain, err := GenerateChallenge(userID, "test.example.com", region.EU)
+		if err != nil {
+			t.Fatalf("GenerateChallenge() error = %v", err)
+		}
 
 		// Try to activate from pending state
-		err := domain.ActivateDomain()
+		err = domain.ActivateDomain()
 		if err == nil {
 			t.Error("ActivateDomain() from pending should return error")
 		}
@@ -494,7 +521,10 @@ func TestBYODomain_StateTransitions(t *testing.T) {
 	})
 
 	t.Run("mark failed transitions to failed state", func(t *testing.T) {
-		domain, _ := GenerateChallenge(userID, "test.example.com", region.EU)
+		domain, err := GenerateChallenge(userID, "test.example.com", region.EU)
+		if err != nil {
+			t.Fatalf("GenerateChallenge() error = %v", err)
+		}
 		domain.MarkFailed()
 		if domain.State != BYODomainStateFailed {
 			t.Errorf("after MarkFailed() State = %v, want %v", domain.State, BYODomainStateFailed)
@@ -506,7 +536,10 @@ func TestBYODomain_GetInstructions(t *testing.T) {
 	userID := uuid.New()
 
 	t.Run("TXT record instructions", func(t *testing.T) {
-		domain, _ := GenerateChallenge(userID, "test.example.com", region.EU)
+		domain, err := GenerateChallenge(userID, "test.example.com", region.EU)
+		if err != nil {
+			t.Fatalf("GenerateChallenge() error = %v", err)
+		}
 		instructions := domain.GetTXTRecordInstructions()
 
 		expected := "_harbor-verify.test.example.com IN TXT \"harbor-verify=" + domain.ChallengeToken + "\""
@@ -613,12 +646,15 @@ func TestDNSLookupErrors(t *testing.T) {
 
 	t.Run("handles DNS lookup failure for TXT", func(t *testing.T) {
 		userID := uuid.New()
-		domain, _ := GenerateChallenge(userID, "dnsfail.example.com", region.EU)
+		domain, err := GenerateChallenge(userID, "dnsfail.example.com", region.EU)
+		if err != nil {
+			t.Fatalf("GenerateChallenge() error = %v", err)
+		}
 
 		resolver.txtErr = errors.New("network error")
 		defer func() { resolver.txtErr = nil }()
 
-		err := verifier.VerifyTXTChallenge(context.Background(), domain)
+		err = verifier.VerifyTXTChallenge(context.Background(), domain)
 		if !errors.Is(err, ErrDNSLookupFailed) {
 			t.Errorf("VerifyTXTChallenge() error = %v, want ErrDNSLookupFailed", err)
 		}

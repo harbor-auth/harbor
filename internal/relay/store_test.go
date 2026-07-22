@@ -389,7 +389,10 @@ func TestStore_DecryptMapping(t *testing.T) {
 		}
 
 		// Try to decrypt with different DEK (should fail)
-		wrongDEK, _ := crypto.GenerateDEK()
+		wrongDEK, err := crypto.GenerateDEK()
+		if err != nil {
+			t.Fatalf("GenerateDEK() error = %v", err)
+		}
 		_, err = store.DecryptMapping(encrypted, reg, wrongDEK)
 		if err == nil {
 			t.Error("DecryptMapping() with wrong DEK should fail")

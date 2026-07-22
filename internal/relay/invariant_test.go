@@ -199,7 +199,7 @@ func (l *invBodyLookup) GetByToken(_ context.Context, _ string) (*Address, []byt
 type invDiscardForwarder struct{}
 
 func (invDiscardForwarder) Forward(_ context.Context, _, _ string, r io.Reader) error {
-	_, _ = io.Copy(io.Discard, r)
+	_, _ = io.Copy(io.Discard, r) //nolint:errcheck // intentionally draining to /dev/null
 	return nil
 }
 

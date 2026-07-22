@@ -49,6 +49,18 @@ func (m *mockAddressLookup) addAddress(token string, state State) {
 	}
 }
 
+// mustSession creates a new MTA session and fails the test if session creation
+// errors. NewSession never fails in practice (it allocates an in-memory
+// session), but errcheck (check-blank) requires the error to be handled.
+func mustSession(t *testing.T, b *Backend) *Session {
+	t.Helper()
+	session, err := b.NewSession(nil)
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
+	return session.(*Session)
+}
+
 func TestBackend_NewSession(t *testing.T) {
 	lookup := newMockLookup()
 	backend := NewBackend(MTAConfig{
@@ -72,10 +84,13 @@ func TestSession_Mail(t *testing.T) {
 		Domain: "relay.eu.harbor.id",
 	})
 
-	session, _ := backend.NewSession(nil)
+	session, err := backend.NewSession(nil)
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
 	s := session.(*Session)
 
-	err := s.Mail("sender@example.com", nil)
+	err = s.Mail("sender@example.com", nil)
 	if err != nil {
 		t.Fatalf("Mail() error = %v", err)
 	}
@@ -93,10 +108,13 @@ func TestSession_Rcpt_ActiveAddress(t *testing.T) {
 		Domain: "relay.eu.harbor.id",
 	})
 
-	session, _ := backend.NewSession(nil)
+	session, err := backend.NewSession(nil)
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
 	s := session.(*Session)
 
-	err := s.Rcpt("valid-token@relay.eu.harbor.id", nil)
+	err = s.Rcpt("valid-token@relay.eu.harbor.id", nil)
 	if err != nil {
 		t.Fatalf("Rcpt() error = %v", err)
 	}
@@ -117,10 +135,13 @@ func TestSession_Rcpt_BYODomainAddress(t *testing.T) {
 		Domain: "relay.eu.harbor.id",
 	})
 
-	session, _ := backend.NewSession(nil)
+	session, err := backend.NewSession(nil)
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
 	s := session.(*Session)
 
-	err := s.Rcpt("byo-token@relay.eu.harbor.id", nil)
+	err = s.Rcpt("byo-token@relay.eu.harbor.id", nil)
 	if err != nil {
 		t.Fatalf("Rcpt() error = %v", err)
 	}
@@ -138,10 +159,13 @@ func TestSession_Rcpt_DeactivatedAddress(t *testing.T) {
 		Domain: "relay.eu.harbor.id",
 	})
 
-	session, _ := backend.NewSession(nil)
+	session, err := backend.NewSession(nil)
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
 	s := session.(*Session)
 
-	err := s.Rcpt("deactivated-token@relay.eu.harbor.id", nil)
+	err = s.Rcpt("deactivated-token@relay.eu.harbor.id", nil)
 	if err == nil {
 		t.Fatal("Rcpt() expected error for deactivated address")
 	}
@@ -167,10 +191,13 @@ func TestSession_Rcpt_UnknownAddress(t *testing.T) {
 		Domain: "relay.eu.harbor.id",
 	})
 
-	session, _ := backend.NewSession(nil)
+	session, err := backend.NewSession(nil)
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
 	s := session.(*Session)
 
-	err := s.Rcpt("unknown-token@relay.eu.harbor.id", nil)
+	err = s.Rcpt("unknown-token@relay.eu.harbor.id", nil)
 	if err == nil {
 		t.Fatal("Rcpt() expected error for unknown address")
 	}
@@ -193,11 +220,14 @@ func TestSession_Rcpt_InvalidDomain(t *testing.T) {
 		Domain: "relay.eu.harbor.id",
 	})
 
-	session, _ := backend.NewSession(nil)
+	session, err := backend.NewSession(nil)
+	if err != nil {
+		t.Fatalf("NewSession() error = %v", err)
+	}
 	s := session.(*Session)
 
 	// Wrong domain should be rejected
-	err := s.Rcpt("valid-token@wrong-domain.com", nil)
+	err = s.Rcpt("valid-token@wrong-domain.com", nil)
 	if err == nil {
 		t.Fatal("Rcpt() expected error for wrong domain")
 	}
@@ -222,8 +252,7 @@ func TestSession_Rcpt_TooManyRecipients(t *testing.T) {
 		MaxRecipients: 1,
 	})
 
-	session, _ := backend.NewSession(nil)
-	s := session.(*Session)
+	s := mustSession(t, backend)
 
 	// First recipient should succeed
 	err := s.Rcpt("token1@relay.eu.harbor.id", nil)
@@ -255,8 +284,7 @@ func TestSession_Rcpt_LookupError(t *testing.T) {
 		Domain: "relay.eu.harbor.id",
 	})
 
-	session, _ := backend.NewSession(nil)
-	s := session.(*Session)
+	s := mustSession(t, backend)
 
 	err := s.Rcpt("any-token@relay.eu.harbor.id", nil)
 	if err == nil {
@@ -282,8 +310,7 @@ func TestSession_Data_Success(t *testing.T) {
 		Domain: "relay.eu.harbor.id",
 	})
 
-	session, _ := backend.NewSession(nil)
-	s := session.(*Session)
+	s := mustSession(t, backend)
 
 	// Add a valid recipient first
 	err := s.Rcpt("valid-token@relay.eu.harbor.id", nil)
@@ -307,8 +334,7 @@ func TestSession_Data_NoRecipients(t *testing.T) {
 		Domain: "relay.eu.harbor.id",
 	})
 
-	session, _ := backend.NewSession(nil)
-	s := session.(*Session)
+	s := mustSession(t, backend)
 
 	// Try to send data without recipients
 	err := s.Data(strings.NewReader("test message"))
@@ -334,12 +360,15 @@ func TestSession_Reset(t *testing.T) {
 		Domain: "relay.eu.harbor.id",
 	})
 
-	session, _ := backend.NewSession(nil)
-	s := session.(*Session)
+	s := mustSession(t, backend)
 
 	// Set up some state
-	s.Mail("sender@example.com", nil)
-	s.Rcpt("valid-token@relay.eu.harbor.id", nil)
+	if err := s.Mail("sender@example.com", nil); err != nil {
+		t.Fatalf("Mail() setup error: %v", err)
+	}
+	if err := s.Rcpt("valid-token@relay.eu.harbor.id", nil); err != nil {
+		t.Fatalf("Rcpt() setup error: %v", err)
+	}
 
 	if s.from == "" || len(s.recipients) == 0 {
 		t.Fatal("Session state not set up correctly")
@@ -367,8 +396,7 @@ func TestSession_ParseRecipient(t *testing.T) {
 		Domain: "relay.eu.harbor.id",
 	})
 
-	session, _ := backend.NewSession(nil)
-	s := session.(*Session)
+	s := mustSession(t, backend)
 
 	tests := []struct {
 		name    string
@@ -489,8 +517,7 @@ func TestSession_Rcpt_CaseInsensitiveToken(t *testing.T) {
 		Domain: "relay.eu.harbor.id",
 	})
 
-	session, _ := backend.NewSession(nil)
-	s := session.(*Session)
+	s := mustSession(t, backend)
 
 	// The parseRecipient lowercases the entire address, so MYTOKEN becomes mytoken
 	err := s.Rcpt("MYTOKEN@RELAY.EU.HARBOR.ID", nil)
@@ -519,8 +546,7 @@ func TestSession_Data_ReadError(t *testing.T) {
 		Domain: "relay.eu.harbor.id",
 	})
 
-	session, _ := backend.NewSession(nil)
-	s := session.(*Session)
+	s := mustSession(t, backend)
 
 	// Add a valid recipient first
 	err := s.Rcpt("valid-token@relay.eu.harbor.id", nil)
@@ -564,14 +590,15 @@ func TestSession_Data_WithAuthenticator(t *testing.T) {
 		EnforceAuth:   false, // monitoring mode
 	})
 
-	session, _ := backend.NewSession(nil)
-	s := session.(*Session)
+	s := mustSession(t, backend)
 
 	// Set connection info directly (no real connection in unit tests)
 	s.remoteIP = net.ParseIP("192.0.2.1")
 	s.helo = "mail.example.com"
 
-	s.Mail("sender@example.com", nil)
+	if err := s.Mail("sender@example.com", nil); err != nil {
+		t.Fatalf("Mail() setup error: %v", err)
+	}
 	err := s.Rcpt("valid-token@relay.eu.harbor.id", nil)
 	if err != nil {
 		t.Fatalf("Rcpt() error = %v", err)
@@ -603,13 +630,14 @@ func TestSession_Data_AuthReject(t *testing.T) {
 		EnforceAuth:   true, // enforcement mode
 	})
 
-	session, _ := backend.NewSession(nil)
-	s := session.(*Session)
+	s := mustSession(t, backend)
 
 	s.remoteIP = net.ParseIP("192.0.2.1")
 	s.helo = "mail.example.com"
 
-	s.Mail("sender@example.com", nil)
+	if err := s.Mail("sender@example.com", nil); err != nil {
+		t.Fatalf("Mail() setup error: %v", err)
+	}
 	err := s.Rcpt("valid-token@relay.eu.harbor.id", nil)
 	if err != nil {
 		t.Fatalf("Rcpt() error = %v", err)
@@ -652,13 +680,14 @@ func TestSession_Data_AuthMonitoringMode(t *testing.T) {
 		EnforceAuth:   false, // monitoring mode — should accept anyway
 	})
 
-	session, _ := backend.NewSession(nil)
-	s := session.(*Session)
+	s := mustSession(t, backend)
 
 	s.remoteIP = net.ParseIP("192.0.2.1")
 	s.helo = "mail.example.com"
 
-	s.Mail("sender@example.com", nil)
+	if err := s.Mail("sender@example.com", nil); err != nil {
+		t.Fatalf("Mail() setup error: %v", err)
+	}
 	err := s.Rcpt("valid-token@relay.eu.harbor.id", nil)
 	if err != nil {
 		t.Fatalf("Rcpt() error = %v", err)

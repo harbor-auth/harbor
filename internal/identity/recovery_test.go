@@ -468,8 +468,12 @@ func TestConsumeCode_CrossUserRejected(t *testing.T) {
 	}
 
 	store := newFakeRecoveryStore()
-	_ = store.StoreRecoveryCodes(context.Background(), "user-A", aCodes)
-	_ = store.StoreRecoveryCodes(context.Background(), "user-B", bCodes)
+	if err := store.StoreRecoveryCodes(context.Background(), "user-A", aCodes); err != nil {
+		t.Fatalf("StoreRecoveryCodes(A): %v", err)
+	}
+	if err := store.StoreRecoveryCodes(context.Background(), "user-B", bCodes); err != nil {
+		t.Fatalf("StoreRecoveryCodes(B): %v", err)
+	}
 	svc := NewRecoveryService(store)
 
 	// user-B submits user-A's code → rejected.
@@ -512,7 +516,9 @@ func TestConsumeCode_ExpiredLockoutAllowsRetry(t *testing.T) {
 		t.Fatalf("GenerateCodes: %v", err)
 	}
 	store := newFakeRecoveryStore()
-	_ = store.StoreRecoveryCodes(context.Background(), "user-A", codes)
+	if err := store.StoreRecoveryCodes(context.Background(), "user-A", codes); err != nil {
+		t.Fatalf("StoreRecoveryCodes: %v", err)
+	}
 	// Lockout already expired.
 	store.lockouts["user-A"] = LockoutState{
 		FailedCount: MaxFailedAttempts,
@@ -537,7 +543,9 @@ func TestConsumeCode_FailClosedLocksAfterMaxAttempts(t *testing.T) {
 		t.Fatalf("GenerateCodes: %v", err)
 	}
 	store := newFakeRecoveryStore()
-	_ = store.StoreRecoveryCodes(context.Background(), "user-A", codes)
+	if err := store.StoreRecoveryCodes(context.Background(), "user-A", codes); err != nil {
+		t.Fatalf("StoreRecoveryCodes: %v", err)
+	}
 	svc := NewRecoveryService(store)
 
 	for i := 0; i < MaxFailedAttempts; i++ {

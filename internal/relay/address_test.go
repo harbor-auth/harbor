@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"testing"
 
@@ -47,7 +48,7 @@ func TestTokenGenerator_Generate(t *testing.T) {
 		badGen := newTokenGeneratorWithReader(zeroReader)
 
 		_, err := badGen.Generate()
-		if err != ErrRandFailure {
+		if !errors.Is(err, ErrRandFailure) {
 			t.Errorf("Generate() with all-zero reader: error = %v, want ErrRandFailure", err)
 		}
 	})
@@ -56,7 +57,7 @@ func TestTokenGenerator_Generate(t *testing.T) {
 		badGen := newTokenGeneratorWithReader(&failingReader{})
 
 		_, err := badGen.Generate()
-		if err != ErrRandFailure {
+		if !errors.Is(err, ErrRandFailure) {
 			t.Errorf("Generate() with failing reader: error = %v, want ErrRandFailure", err)
 		}
 	})
@@ -185,28 +186,28 @@ func TestNewAddress(t *testing.T) {
 
 	t.Run("rejects empty user_id", func(t *testing.T) {
 		_, _, err := NewAddress(gen, uuid.Nil, "rp.example.com", "user@real.com", region.EU)
-		if err != ErrEmptyUserID {
+		if !errors.Is(err, ErrEmptyUserID) {
 			t.Errorf("NewAddress() with nil userID: error = %v, want ErrEmptyUserID", err)
 		}
 	})
 
 	t.Run("rejects empty client_id", func(t *testing.T) {
 		_, _, err := NewAddress(gen, userID, "", "user@real.com", region.EU)
-		if err != ErrEmptyClientID {
+		if !errors.Is(err, ErrEmptyClientID) {
 			t.Errorf("NewAddress() with empty clientID: error = %v, want ErrEmptyClientID", err)
 		}
 	})
 
 	t.Run("rejects empty email", func(t *testing.T) {
 		_, _, err := NewAddress(gen, userID, "rp.example.com", "", region.EU)
-		if err != ErrEmptyEmail {
+		if !errors.Is(err, ErrEmptyEmail) {
 			t.Errorf("NewAddress() with empty email: error = %v, want ErrEmptyEmail", err)
 		}
 	})
 
 	t.Run("rejects empty region", func(t *testing.T) {
 		_, _, err := NewAddress(gen, userID, "rp.example.com", "user@real.com", "")
-		if err != ErrInvalidRegion {
+		if !errors.Is(err, ErrInvalidRegion) {
 			t.Errorf("NewAddress() with empty region: error = %v, want ErrInvalidRegion", err)
 		}
 	})
@@ -359,7 +360,10 @@ func TestAddressLifecycleTransitions(t *testing.T) {
 	})
 
 	t.Run("deactivate sets state and timestamp", func(t *testing.T) {
-		addr, _, _ := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+		addr, _, err := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+		if err != nil {
+			t.Fatalf("NewAddress: %v", err)
+		}
 
 		addr.Deactivate()
 
@@ -381,7 +385,10 @@ func TestAddressLifecycleTransitions(t *testing.T) {
 	})
 
 	t.Run("reactivate restores active state", func(t *testing.T) {
-		addr, _, _ := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+		addr, _, err := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+		if err != nil {
+			t.Fatalf("NewAddress: %v", err)
+		}
 		addr.Deactivate()
 
 		addr.Reactivate()
@@ -401,7 +408,10 @@ func TestAddressLifecycleTransitions(t *testing.T) {
 	})
 
 	t.Run("set BYO domain transitions to byo_domain state", func(t *testing.T) {
-		addr, _, _ := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+		addr, _, err := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+		if err != nil {
+			t.Fatalf("NewAddress: %v", err)
+		}
 
 		addr.SetBYODomain()
 
@@ -417,7 +427,10 @@ func TestAddressLifecycleTransitions(t *testing.T) {
 	})
 
 	t.Run("deactivate then reactivate cycle", func(t *testing.T) {
-		addr, _, _ := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+		addr, _, err := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+		if err != nil {
+			t.Fatalf("NewAddress: %v", err)
+		}
 
 		// Cycle through states
 		addr.Deactivate()
@@ -452,7 +465,10 @@ func TestKillSwitchIndependence(t *testing.T) {
 	userID := uuid.New()
 
 	t.Run("deactivation only affects mail not login state", func(t *testing.T) {
-		addr, _, _ := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+		addr, _, err := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+		if err != nil {
+			t.Fatalf("NewAddress: %v", err)
+		}
 
 		// Simulate: user deactivates relay (kill switch)
 		addr.Deactivate()
@@ -477,7 +493,10 @@ func TestKillSwitchIndependence(t *testing.T) {
 	})
 
 	t.Run("hard bounce check uses CanReceiveMail not login state", func(t *testing.T) {
-		addr, _, _ := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+		addr, _, err := NewAddress(gen, userID, "rp.example.com", "user@real.com", region.EU)
+		if err != nil {
+			t.Fatalf("NewAddress: %v", err)
+		}
 
 		// Active: mail is accepted
 		if !addr.CanReceiveMail() {

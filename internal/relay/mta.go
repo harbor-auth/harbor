@@ -569,7 +569,7 @@ func (s *Session) stageReply(ctx context.Context, relayToken, extRecipient strin
 func (s *Session) handleReply(ctx context.Context, r io.Reader) error {
 	if s.backend.outboundFwd == nil || s.backend.replyRewriter == nil {
 		// Drain the body so the client isn't left hanging, then fail.
-		_, _ = io.Copy(io.Discard, io.LimitReader(r, s.backend.maxMsgBytes))
+		_, _ = io.Copy(io.Discard, io.LimitReader(r, s.backend.maxMsgBytes)) //nolint:errcheck // draining body before error return; drain failure is inconsequential //nolint:errcheck // intentional drain so the client is not left hanging
 		s.backend.logger.Error("relay: reply path misconfigured (no rewriter/forwarder)")
 		return &smtp.SMTPError{
 			Code:         451,
