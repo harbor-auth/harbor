@@ -20,7 +20,9 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -56,6 +58,24 @@ func main() {
 // run builds the server and serves until ctx is cancelled. It is split out from
 // main so the exit path has a single error sink and stays testable.
 func run(ctx context.Context, logger *slog.Logger) error {
+	// Load and validate the BFF session dependencies up front so a
+	// misconfiguration (malformed LOGIN_URL, non-positive TTL) fails fast at
+	// startup rather than surfacing later when /authorize needs them. Wiring the
+	// resolved config into the DB-backed PPIDSessionResolver lands in a later
+	// task; for now this only captures and validates the inputs — the foundation
+	// for replacing the insecure stub resolver (audit blocker 1.1, auth bypass).
+	bffCfg, err := loadBFFConfig()
+	if err != nil {
+		return err
+	}
+	// Log presence only — never the raw DATABASE_URL (it carries credentials) or
+	// LOGIN_URL, keeping startup logs PII/secret-free (docs/DESIGN.md §6.5).
+	logger.Info("BFF config loaded",
+		"login_url_set", bffCfg.LoginURL != "",
+		"database_url_set", bffCfg.DatabaseURL != "",
+		"bff_session_ttl", bffCfg.SessionTTL.String(),
+	)
+
 	// Redis powers cross-replica rate limiting. ConnectRedis returns (nil, nil)
 	// when REDIS_URL is unset — we then fall back to the in-memory limiter.
 	redisClient, err := clients.ConnectRedis(ctx, logger)
@@ -187,6 +207,68 @@ func newLimiter(redisClient *redis.Client, spec endpointLimitSpec, limit int, wi
 	logger.Warn("REDIS_URL unset: using in-memory rate limiter (single-replica dev only)",
 		"component", "harbor-hot", "endpoint", string(spec.endpoint))
 	return clients.NewMemoryRateLimiter(cfg)
+}
+
+// defaultBFFSessionTTL mirrors the harbor-mgmt BFF session writer default
+// (docs/plans/bff-session-middleware.md — 5 min, matching the PKCE state
+// lifetime). Kept in sync so the hot-path reader and cold-path writer agree on
+// how long a BFF session is valid.
+const defaultBFFSessionTTL = 5 * time.Minute
+
+// bffConfig holds the environment-derived configuration for the BFF session
+// dependencies that the hot-path /authorize flow will consume once the
+// auth-bypass fix lands (docs/DESIGN.md §9). It is parsed and validated at
+// startup so a misconfiguration fails loudly instead of silently degrading to
+// the insecure demo-user stub resolver.
+type bffConfig struct {
+	// LoginURL is the absolute URL of the harbor-mgmt BFF /login endpoint that
+	// /authorize redirects unauthenticated users to. Empty in dev (no redirect).
+	LoginURL string
+	// DatabaseURL is the Postgres DSN backing the PPID session resolver. Empty
+	// falls back to the in-memory dev scaffold (mirrors clients.ConnectDB).
+	DatabaseURL string
+	// SessionTTL is the lifetime of a BFF session record. It must match the
+	// harbor-mgmt writer (docs/plans/bff-session-middleware.md — 5 min).
+	SessionTTL time.Duration
+}
+
+// loadBFFConfig reads the BFF dependency configuration from the environment and
+// validates it. It performs no I/O — connecting the session store and resolver
+// happens in later tasks; this only captures and checks the inputs so startup
+// can fail fast on a bad config.
+func loadBFFConfig() (bffConfig, error) {
+	cfg := bffConfig{
+		LoginURL:    os.Getenv("LOGIN_URL"),
+		DatabaseURL: os.Getenv("DATABASE_URL"),
+		SessionTTL:  envDuration("BFF_SESSION_TTL", defaultBFFSessionTTL),
+	}
+	if err := cfg.validate(); err != nil {
+		return bffConfig{}, err
+	}
+	return cfg, nil
+}
+
+// validate rejects a BFF config that would misbehave at runtime. LOGIN_URL,
+// when set, must be an absolute http(s) URL with a host — a relative or
+// scheme-less value would produce a broken redirect. SessionTTL must be
+// positive so sessions actually persist.
+func (c bffConfig) validate() error {
+	if c.LoginURL != "" {
+		u, err := url.Parse(c.LoginURL)
+		if err != nil {
+			return fmt.Errorf("invalid LOGIN_URL %q: %w", c.LoginURL, err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("invalid LOGIN_URL %q: must be an absolute http(s) URL", c.LoginURL)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("invalid LOGIN_URL %q: missing host", c.LoginURL)
+		}
+	}
+	if c.SessionTTL <= 0 {
+		return fmt.Errorf("invalid BFF_SESSION_TTL: must be positive, got %s", c.SessionTTL)
+	}
+	return nil
 }
 
 // --- tiny env helpers (no external config dependency) ---
