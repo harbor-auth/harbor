@@ -21,6 +21,7 @@ type dbStoreQuerier interface {
 	CreateCredential(ctx context.Context, arg db.CreateCredentialParams) (db.Credential, error)
 	GetCredentialByWebAuthnCredID(ctx context.Context, webauthnCredID []byte) (db.Credential, error)
 	UpdateCredentialSignCount(ctx context.Context, arg db.UpdateCredentialSignCountParams) error
+	SetRecoveryComplete(ctx context.Context, id pgtype.UUID) error
 }
 
 // txBeginner is satisfied by *pgxpool.Pool. It enables the atomic
@@ -191,6 +192,21 @@ func (s *DBStore) UpdateCredential(ctx context.Context, userID []byte, cred gowe
 		ID:        row.ID,
 		SignCount: int64(newCount),
 	})
+}
+
+// SetRecoveryComplete implements Store: clears the user's recovery_required
+// flag once a fresh passkey has been enrolled during recovery (REQ-005). It is
+// a single UPDATE — the caller (Service.FinishRecoveryRegistration) guarantees
+// it runs only after the new credential is persisted.
+func (s *DBStore) SetRecoveryComplete(ctx context.Context, userID []byte) error {
+	uid, err := parseWebAuthnUserID(userID)
+	if err != nil {
+		return ErrUserNotFound
+	}
+	if _, err := s.q.GetUser(ctx, uid); err != nil {
+		return ErrUserNotFound
+	}
+	return s.q.SetRecoveryComplete(ctx, uid)
 }
 
 // rowToGoCredential maps a sqlc Credential row to a go-webauthn Credential.
