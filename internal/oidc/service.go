@@ -416,10 +416,6 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (*Authori
 		CodeChallengeMethod: validated.CodeChallengeMethod,
 		ExpiresAt:           authTime.Add(s.codeTTL),
 		AuthTime:            authTime,
-		// TODO(webauthn): populate ACR/AMR from the actual authentication ceremony.
-		// For now, hardcode WebAuthn values for OIDF conformance testing.
-		ACR: "urn:harbor:ac:webauthn",
-		AMR: []string{"hwk", "user"},
 	}
 	if err := s.codes.Save(ctx, code); err != nil {
 		return nil, redirectErr(ErrCodeServerError, "could not persist authorization code")
