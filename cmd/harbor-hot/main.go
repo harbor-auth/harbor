@@ -20,6 +20,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -29,9 +31,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/harbor-auth/harbor/internal/clients"
+	"github.com/harbor-auth/harbor/internal/crypto"
+	gendb "github.com/harbor-auth/harbor/internal/gen/db"
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
 	"github.com/harbor-auth/harbor/internal/httpserver"
 	"github.com/harbor-auth/harbor/internal/oidc"
@@ -75,6 +80,36 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		}
 	}
 
+	// DB-backed signing keys plug in when DATABASE_URL is configured; otherwise
+	// we fall back to the unsigned placeholder issuer for local dev (tokens are
+	// obviously fake and JWKS is empty).
+	pool, err := clients.ConnectDB(ctx, logger)
+	if err != nil {
+		if ctx.Err() != nil {
+			// SIGINT/SIGTERM during startup — clean shutdown, not a crash.
+			logger.Info("startup cancelled by signal — exiting cleanly", "error", err)
+			return nil
+		}
+		return err
+	}
+	if pool != nil {
+		defer pool.Close()
+	}
+
+	// Signing stack: real ES256 JWT issuer + JWKS + rotator when a DB is wired;
+	// unsigned placeholder otherwise.
+	tokenIssuer := oidc.TokenIssuer(oidc.NewPlaceholderIssuer())
+	var signers []crypto.Signer
+	var rotator *crypto.KeyRotator
+	if pool != nil {
+		tokenIssuer, signers, rotator, err = buildSigningStack(ctx, pool, logger)
+		if err != nil {
+			return err
+		}
+	} else {
+		logger.Warn("DATABASE_URL not set — using unsigned placeholder token issuer (dev only; NEVER for production)")
+	}
+
 	// Wire the OIDC service with scaffold implementations for dev/test.
 	// In production, these are replaced with DB-backed implementations.
 	clientRegistry := oidc.NewInMemoryClientRegistry()
@@ -95,7 +130,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		Issuer:   issuer,
 		Clients:  clientRegistry,
 		Codes:    oidc.NewInMemoryAuthCodeStore(),
-		Tokens:   oidc.NewPlaceholderIssuer(),
+		Tokens:   tokenIssuer,
 		Sessions: oidc.NewStubSessionResolver("demo-user-ppid"),
 		Logger:   logger,
 	})
@@ -111,6 +146,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	srv := oidcapi.New(oidcapi.Config{
 		Issuer:         issuer,
 		Service:        oidcSvc,
+		Signers:        signers,
+		Rotator:        rotator,
 		LogoutVerifier: logoutVerifier,
 		Grants:         grantStore,
 		Clients:        clientRegistry,
@@ -150,6 +187,47 @@ type noopSessionRevoker struct{}
 
 func (noopSessionRevoker) RevokeSessionsByUserClient(_ context.Context, _, _ string) error {
 	return nil
+}
+
+// buildSigningStack wires the real ES256 signing path for harbor-hot: it loads
+// (or, on a cold start, seeds) the live signing keys from the DB, unwraps their
+// private keys under the regional KEK, and returns the JWT issuer, the JWKS
+// signer set, and the key rotator that drives POST /admin/keys/rotate
+// (docs/DESIGN.md §7.3, §3.5).
+//
+// It fails closed: when a real DB is wired, KEK_SECRET MUST be set (mirrors the
+// harbor-mgmt HARBOR_KMS_SECRET guard) — otherwise signing keys would be sealed
+// under a derivable dev key.
+func buildSigningStack(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) (oidc.TokenIssuer, []crypto.Signer, *crypto.KeyRotator, error) {
+	reg := envString("REGION", "EU")
+
+	kekSecret := envString("KEK_SECRET", "")
+	if kekSecret == "" {
+		return nil, nil, nil, errors.New("KEK_SECRET must be set when DATABASE_URL is configured — refusing to seal signing keys under a derivable dev key")
+	}
+	kp, err := crypto.NewLocalKeyProvider(kekSecret)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("harbor-hot: build key provider: %w", err)
+	}
+
+	keyStore := clients.NewDBSigningKeyStore(gendb.New(pool))
+	loader := clients.NewSigningKeyLoader(keyStore, kp, reg)
+
+	provider, err := loader.SeedAndLoad(ctx)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("harbor-hot: load signing keys: %w", err)
+	}
+	signers := provider.AllSigners()
+	logger.Info("signing keys loaded", "count", len(signers), "active_kid", provider.ActiveSigner().KeyID())
+
+	issuer := oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: provider.ActiveSigner()})
+
+	rotStore := clients.NewDBRotationStore(keyStore, reg)
+	mgr := crypto.NewRotationManager(crypto.DefaultRotationConfig())
+	rotator := crypto.NewKeyRotator(mgr, provider, rotStore).
+		WithPrivateKeyWrapper(clients.NewPrivateKeyWrapper(kp, reg))
+
+	return issuer, signers, rotator, nil
 }
 
 // endpointLimitSpec describes the tunable rate limit for one hot-path endpoint:

@@ -21,3 +21,13 @@ func (k *kmsKeyProvider) WrapDEK(_ context.Context, _ string, _ DEK) ([]byte, er
 func (k *kmsKeyProvider) UnwrapDEK(_ context.Context, _ string, _ []byte) (DEK, error) {
 	return DEK{}, ErrKMSNotImplemented
 }
+
+// WrapKey is not yet implemented — returns [ErrKMSNotImplemented].
+func (k *kmsKeyProvider) WrapKey(_ context.Context, _, _ string, _ []byte) ([]byte, error) {
+	return nil, ErrKMSNotImplemented
+}
+
+// UnwrapKey is not yet implemented — returns [ErrKMSNotImplemented].
+func (k *kmsKeyProvider) UnwrapKey(_ context.Context, _, _ string, _ []byte) ([]byte, error) {
+	return nil, ErrKMSNotImplemented
+}
