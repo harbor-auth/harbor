@@ -24,7 +24,7 @@ Auth + server come from `~/.weft/config.yaml` (`$WEFT config show`) — server `
 
 | Fact | Value |
 |---|---|
-| **Project id** | `<YOUR_WEFT_PROJECT_ID>` |
+| **Project id** | `proj_2fb1e550-568b-4102-9285-ecbc17bb7997` |
 | Repo | `harbor-auth/harbor` (bound to the project) |
 | Base branch | `main` |
 | Feature branch (auto) | `weft/<slug>-<shortid>` — never create per-task branches |
