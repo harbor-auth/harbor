@@ -121,8 +121,8 @@ func TestRedirectURIExactMatch(t *testing.T) {
 
 func TestLogoutURIExactMatch(t *testing.T) {
 	row := db.RelyingParty{
-		ClientID:     "rp-3",
-		LogoutUris:   []string{"https://rp.example.com/logged-out"},
+		ClientID:   "rp-3",
+		LogoutUris: []string{"https://rp.example.com/logged-out"},
 	}
 	c := rowToClient(row)
 	if !c.HasLogoutURI("https://rp.example.com/logged-out") {
