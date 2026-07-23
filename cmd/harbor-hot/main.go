@@ -21,6 +21,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -85,6 +86,11 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
 	})
 
+	// Grant store for consent records. The end_session handler reverse-looks-up
+	// the internal userID from an id_token_hint's PPID via this store. In
+	// production this is a DB-backed clients.DBGrantStore.
+	grantStore := oidc.NewInMemoryGrantStore()
+
 	oidcSvc := oidc.NewService(oidc.ServiceConfig{
 		Issuer:   issuer,
 		Clients:  clientRegistry,
@@ -94,13 +100,38 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		Logger:   logger,
 	})
 
-	srv := oidcapi.New(oidcapi.Config{Issuer: issuer, Service: oidcSvc})
+	// RP-Initiated Logout (/end_session) dependencies. In dev/test scaffolding
+	// there is no configured signer, so the LogoutVerifier is left nil and the
+	// end_session handler degrades gracefully — it redirects to /logged-out
+	// without revoking. Production wiring supplies a JWTVerifier (built from the
+	// active signer + region issuer) and a DB-backed SessionRevoker here.
+	var logoutVerifier oidcapi.LogoutVerifier
+	sessionRevoker := noopSessionRevoker{}
+
+	srv := oidcapi.New(oidcapi.Config{
+		Issuer:         issuer,
+		Service:        oidcSvc,
+		LogoutVerifier: logoutVerifier,
+		Grants:         grantStore,
+		Clients:        clientRegistry,
+		SessionRevoker: sessionRevoker,
+	})
 
 	// Wrap the spec-generated router with per-endpoint rate limiting. Only the
 	// hot-path endpoints listed here are guarded; /healthz, /jwks.json and
 	// discovery pass through untouched.
 	base := openapi.Handler(srv)
-	handler := oidcapi.WithRateLimits(base, buildRateLimits(redisClient, logger))
+
+	// The /logged-out page is the default post-logout destination for
+	// RP-Initiated Logout. It is NOT part of the OpenAPI contract (it is a
+	// browser-facing static page, not an API), so it is registered manually here
+	// rather than by the generated router. Requests that don't match /logged-out
+	// fall through to the generated OIDC surface.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /logged-out", srv.GetLoggedOut)
+	mux.Handle("/", base)
+
+	handler := oidcapi.WithRateLimits(mux, buildRateLimits(redisClient, logger))
 
 	// Support both ADDR (full address) and PORT (port-only, for docker-compose).
 	addr := envString("ADDR", "")
@@ -109,6 +140,16 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		addr = ":" + port
 	}
 	return httpserver.Run(ctx, addr, handler, logger)
+}
+
+// noopSessionRevoker is a dev/test scaffold implementation of
+// oidcapi.SessionRevoker. It records nothing — dev runs use the stub session
+// resolver and do not persist refresh sessions, so there is nothing to revoke.
+// Production wiring replaces this with a DB-backed clients.DBSessionStore.
+type noopSessionRevoker struct{}
+
+func (noopSessionRevoker) RevokeSessionsByUserClient(_ context.Context, _, _ string) error {
+	return nil
 }
 
 // endpointLimitSpec describes the tunable rate limit for one hot-path endpoint:
