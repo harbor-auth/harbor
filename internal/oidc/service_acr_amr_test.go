@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"testing"
-	"time"
 
 	"github.com/harbor-auth/harbor/internal/crypto"
 )
@@ -244,9 +243,6 @@ func TestAuthorizeWithUser_WebAuthn_IDTokenClaims_E2E(t *testing.T) {
 func TestAuthorizeWithUser_UnknownMethod_NoACRInToken_E2E(t *testing.T) {
 	svc, _ := acrAMRFlowServer(t)
 	ctx := context.Background()
-
-	now := time.Now()
-	_ = now
 
 	result, aerr := svc.AuthorizeWithUser(ctx, AuthorizeWithUserRequest{
 		ClientID:            "acr-test-client",
