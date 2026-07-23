@@ -1,11 +1,13 @@
 package crypto
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"math/big"
 	"testing"
 )
@@ -534,6 +536,95 @@ func TestKMSSigningKeyRoundTripAcrossReplicas(t *testing.T) {
 	}
 	if !verifySignature(pubB, signingInput, sigB) {
 		t.Error("replica B signature not verifiable by its own public key")
+	}
+}
+
+// --- Rejection / no-oracle / panic-safety tests ---
+
+// TestKMSBackedSignerWrongRegionNoOracle verifies that loading a wrapped signing
+// key under the wrong region fails with the SAME generic error as loading a
+// tampered wrapped key, so there is no oracle distinguishing the two failure
+// modes.
+func TestKMSBackedSignerWrongRegionNoOracle(t *testing.T) {
+	ctx := context.Background()
+	regionA := "us-east-1"
+	regionB := "eu-west-1"
+
+	kp, err := NewLocalKeyProvider("test-secret-for-no-oracle-sign!")
+	if err != nil {
+		t.Fatalf("NewLocalKeyProvider: %v", err)
+	}
+
+	_, wrapped, err := NewKMSBackedSigner(ctx, kp, regionA)
+	if err != nil {
+		t.Fatalf("NewKMSBackedSigner: %v", err)
+	}
+
+	// Wrong region (intact wrapped key).
+	_, wrongRegionErr := LoadKMSBackedSigner(ctx, kp, regionB, wrapped)
+	if wrongRegionErr == nil {
+		t.Fatal("wrong-region load must fail")
+	}
+
+	// Tampered ciphertext (correct region).
+	tampered := append([]byte(nil), wrapped...)
+	tampered[len(tampered)-1] ^= 0xff
+	_, tamperErr := LoadKMSBackedSigner(ctx, kp, regionA, tampered)
+	if tamperErr == nil {
+		t.Fatal("tampered load must fail")
+	}
+
+	// Both must wrap the same sentinel and produce identical error strings, so a
+	// caller cannot distinguish a wrong region from corrupt data.
+	if !errors.Is(wrongRegionErr, ErrDecryptFailed) {
+		t.Errorf("wrong-region err = %v, want wraps ErrDecryptFailed", wrongRegionErr)
+	}
+	if !errors.Is(tamperErr, ErrDecryptFailed) {
+		t.Errorf("tamper err = %v, want wraps ErrDecryptFailed", tamperErr)
+	}
+	if wrongRegionErr.Error() != tamperErr.Error() {
+		t.Errorf("distinguishable errors (oracle signal): wrong-region=%q tamper=%q",
+			wrongRegionErr.Error(), tamperErr.Error())
+	}
+}
+
+// TestLoadKMSBackedSignerNoPanicOnMalformedInput verifies that loading a signer
+// from malformed / short wrapped bytes never panics — it always returns an error.
+func TestLoadKMSBackedSignerNoPanicOnMalformedInput(t *testing.T) {
+	ctx := context.Background()
+	region := "us-east-1"
+
+	kp, err := NewLocalKeyProvider("test-secret-for-panic-safety!!!")
+	if err != nil {
+		t.Fatalf("NewLocalKeyProvider: %v", err)
+	}
+
+	inputs := [][]byte{
+		nil,
+		{},
+		{1},
+		{1, 0},
+		{1, 0, 0},
+		{1, 255, 0},              // dekLen huge, no payload
+		{1, 0, 1},                // dekLen=1 but no dek/ciphertext
+		{wrappedKeyVersion, 0, 0},
+		{99, 0, 0, 'x'},          // wrong version
+		bytes.Repeat([]byte{0xff}, 8),
+		bytes.Repeat([]byte{0x00}, 128),
+	}
+
+	for i, in := range inputs {
+		in := in
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Errorf("LoadKMSBackedSigner[%d] panicked: %v", i, r)
+				}
+			}()
+			if _, err := LoadKMSBackedSigner(ctx, kp, region, in); err == nil {
+				t.Errorf("LoadKMSBackedSigner[%d]: expected error for malformed input", i)
+			}
+		}()
 	}
 }
 
