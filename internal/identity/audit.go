@@ -33,6 +33,17 @@ const (
 	EventConsentScopeEscalated EventType = "consent.scope_escalated"
 	// EventConsentRevoked records a user revoking consent from an RP.
 	EventConsentRevoked EventType = "consent.revoked"
+
+	// EventComplianceExportRequested records a DSAR export request by the
+	// authenticated user.
+	EventComplianceExportRequested EventType = "compliance.export_requested"
+	// EventComplianceEraseRequested records the initiation of a right-to-be-
+	// forgotten erasure request by the authenticated user.
+	EventComplianceEraseRequested EventType = "compliance.erase_requested"
+	// EventComplianceEraseCompleted records the successful crypto-shred
+	// erasure of the user's DEK, making all envelope-encrypted PII
+	// permanently unrecoverable.
+	EventComplianceEraseCompleted EventType = "compliance.erase_completed"
 )
 
 // AuditEventInserter is the narrow write interface AuditRecorder needs from
