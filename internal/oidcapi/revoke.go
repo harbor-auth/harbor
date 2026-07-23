@@ -98,7 +98,8 @@ func (s *Server) revokeRefreshToken(r *http.Request, token, clientID string) {
 	// Service.RevokeRefreshToken handles all error cases internally and
 	// always returns nil for anti-enumeration. Any errors are logged by
 	// the service layer.
-	_ = s.svc.RevokeRefreshToken(r.Context(), token, clientID)
+	//nolint:errcheck // Anti-enumeration: errors logged internally, never propagated
+	s.svc.RevokeRefreshToken(r.Context(), token, clientID)
 }
 
 // revokeAccessToken attempts to revoke an access token (JWT) by extracting
