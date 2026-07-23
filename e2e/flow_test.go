@@ -460,7 +460,10 @@ func TestJWKSSignatureVerification(t *testing.T) {
 	tokenResp := postToken(t, code, verifier, demoRedirectURI)
 	defer tokenResp.Body.Close()
 	if tokenResp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(tokenResp.Body)
+		body, readErr := io.ReadAll(tokenResp.Body)
+		if readErr != nil {
+			t.Fatalf("POST %s = %d, want 200 (body read error: %v)", tokenPath, tokenResp.StatusCode, readErr)
+		}
 		t.Fatalf("POST %s = %d, want 200\n%s", tokenPath, tokenResp.StatusCode, body)
 	}
 	body, err := io.ReadAll(tokenResp.Body)
