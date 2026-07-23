@@ -582,6 +582,13 @@ components:
           type: string
           format: uri
           description: OIDC UserInfo endpoint URL.
+        end_session_endpoint:
+          type: string
+          format: uri
+          description: >-
+            RP-Initiated Logout endpoint (OIDC RP-Initiated Logout 1.0). Terminates
+            the user's session at this OP. Requires id_token_hint to identify the
+            user/client pair.
         jwks_uri:
           type: string
           format: uri

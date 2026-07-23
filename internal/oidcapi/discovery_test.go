@@ -38,6 +38,7 @@ func TestGetOpenIDConfiguration_EndpointsFromIssuer(t *testing.T) {
 		"authorization_endpoint": "https://eu.harbor.id/authorize",
 		"token_endpoint":         "https://eu.harbor.id/token",
 		"userinfo_endpoint":      "https://eu.harbor.id/userinfo",
+		"end_session_endpoint":   "https://eu.harbor.id/end_session",
 		"jwks_uri":               "https://eu.harbor.id/jwks.json",
 	}
 	for k, v := range want {
