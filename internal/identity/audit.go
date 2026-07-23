@@ -153,7 +153,6 @@ func (r *AuditRecorder) RecordAsync(ctx context.Context, userID string, et Event
 	go func() {
 		if err := r.Record(detached, userID, et, clientID, detail); err != nil {
 			r.logger.WarnContext(detached, "identity: audit: best-effort write failed",
-				"user_id", userID,
 				"event_type", string(et),
 				"error", err,
 			)
