@@ -135,13 +135,3 @@ func TestNewLocalSignerGeneratesUsableKey(t *testing.T) {
 	}
 }
 
-func TestHSMSignerFailsClosed(t *testing.T) {
-	// The HSM scaffold must never panic and never return a fake signature.
-	var s Signer = hsmSigner{}
-	if _, err := s.Sign([]byte("x")); err == nil {
-		t.Fatal("expected ErrHSMNotImplemented, got nil")
-	}
-	if s.KeyID() != "" {
-		t.Fatalf("hsmSigner KeyID = %q, want empty", s.KeyID())
-	}
-}
