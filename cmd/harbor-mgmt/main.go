@@ -32,6 +32,7 @@ import (
 	"github.com/harbor-auth/harbor/internal/relay"
 	"github.com/harbor-auth/harbor/internal/telemetry"
 	"github.com/harbor-auth/harbor/internal/webauthn"
+	"github.com/harbor-auth/harbor/web"
 )
 
 // bffSessionTTL is the lifetime of BFF session records (docs/plans/
@@ -250,9 +251,10 @@ func main() {
 	// Relay store for /relay-addresses endpoints. Only wire when DATABASE_URL is
 	// configured; otherwise the relay endpoints stay in a 503 Service Unavailable
 	// state (fail-closed — the mint path needs the cipher and a real DB).
+	var rawRelayStore *relay.Store
 	if pool != nil {
-		relayStore := relay.NewStore(db.New(pool), crypto.NewCipher())
-		mgmtServer.WithRelayStore(relayStore)
+		rawRelayStore = relay.NewStore(db.New(pool), crypto.NewCipher())
+		mgmtServer.WithRelayStore(rawRelayStore)
 		logger.Info("relay store: using DB-backed store")
 	} else {
 		logger.Warn("DATABASE_URL not set — relay endpoints will return 503 (dev mode)")
@@ -267,11 +269,53 @@ func main() {
 	mgmtServer.WithBYODomainStore(byoDomainStore, domainVerifier, mtaDomain, relayDomain)
 	logger.Info("byo-domain store: using in-memory store (dev scaffold)", "mta_domain", mtaDomain, "relay_domain", relayDomain)
 
+	// Dashboard templates are embedded at compile time; a parse failure is fatal.
+	dashTmpl, err := web.ParseDashboardTemplates()
+	if err != nil {
+		logger.Error("failed to parse dashboard templates", "error", err)
+		stop()
+		if pool != nil {
+			pool.Close()
+		}
+		if redisClient != nil {
+			if err := redisClient.Close(); err != nil {
+				logger.Warn("redis close error on exit", "error", err)
+			}
+		}
+		os.Exit(1)
+	}
+
+	// Dashboard handler: composes shipped stores (consent, sessions, credentials,
+	// relay). All deps are nil-safe -- absent deps render gracefully, not 503.
+	var dashConsentStore bff.DashboardConsentStore
+	var dashSessionStore bff.DashboardSessionStore
+	var dashCredStore clients.DashboardCredentialStore
+	var dashRelayStore bff.DashboardRelayStore
+	if pool != nil {
+		q := db.New(pool)
+		dashConsentStore = clients.NewDBConsentStore(q)
+		dashSessionStore = clients.NewDBSessionStore(q)
+		dashCredStore = clients.NewDBDashboardCredentialStore(q)
+		if rawRelayStore != nil {
+			dashRelayStore = &dashboardRelayAdapter{store: rawRelayStore}
+		}
+	}
+	dashHandler := bff.NewDashboardHandler(
+		dashConsentStore,
+		dashSessionStore,
+		dashCredStore,
+		nil, // AuditTrailDeps -- wired when audit-trail client adapter lands
+		dashRelayStore,
+		dashTmpl,
+		logger,
+	)
+
 	mux := httpserver.NewHealthMux()
 	// Passkey ceremony endpoints. userIDFromRequest returns 501 until the BFF
 	// session middleware lands (docs/DESIGN.md §9) — production-safe default.
 	webauthn.RegisterRoutes(mux, svc)
 	mgmtServer.Routes(mux)
+	dashHandler.Routes(mux)
 	mux.HandleFunc("POST /users/enroll", enrollHandler(enroller, logger))
 
 	// BFF login endpoints (docs/plans/bff-session-middleware.md §11.2 step 2).
@@ -394,6 +438,37 @@ func (p *noopUserPersister) PersistUser(_ context.Context, r identity.UserRecord
 	p.logger.Warn("enrollment scaffold: PersistUser is a no-op (DATABASE_URL not wired)",
 		"region", r.Region)
 	return nil
+}
+
+// dashboardRelayAdapter bridges *relay.Store (which returns raw encrypted
+// addresses with mappings) to bff.DashboardRelayStore (which returns plain
+// DashboardRelayAddress summaries). The dashboard only needs relay metadata
+// (token, clientID, state, region) -- the encrypted email mapping is never
+// exposed to the UI (INVARIANT §2).
+type dashboardRelayAdapter struct {
+	store *relay.Store
+}
+
+func (a *dashboardRelayAdapter) ListByUser(ctx context.Context, userID string) ([]bff.DashboardRelayAddress, error) {
+	addresses, _, err := a.store.ListByUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]bff.DashboardRelayAddress, len(addresses))
+	for i, addr := range addresses {
+		out[i] = bff.DashboardRelayAddress{
+			ID:       addr.ID.String(),
+			Token:    addr.Token,
+			ClientID: addr.ClientID,
+			State:    string(addr.State),
+			Region:   string(addr.Region),
+		}
+	}
+	return out, nil
+}
+
+func (a *dashboardRelayAdapter) Deactivate(ctx context.Context, addressID string) error {
+	return a.store.Deactivate(ctx, addressID)
 }
 
 // --- JSON helpers -----------------------------------------------------------
