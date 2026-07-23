@@ -52,6 +52,15 @@ type Server struct {
 	// introspector handles RFC 7662 token introspection. May be nil if
 	// introspection is not configured (no signers).
 	introspector *oidc.Introspector
+
+	// RP-Initiated Logout (end_session) dependencies (OIDC RP-Initiated Logout
+	// 1.0). All four may be nil (e.g. discovery-only tests), in which case
+	// /end_session simply redirects to the issuer's default logged-out page
+	// without revoking anything.
+	logoutVerifier LogoutVerifier
+	grants         oidc.GrantStore
+	clients        oidc.ClientRegistry
+	sessionRevoker SessionRevoker
 }
 
 // Config holds the settings needed to serve the OIDC surface.
@@ -93,6 +102,20 @@ type Config struct {
 	// RevokedJTIChecker performs DB introspection on bloom filter hits for
 	// token introspection. May be nil (filter hits treated as revoked).
 	RevokedJTIChecker oidc.RevokedJTIChecker
+
+	// LogoutVerifier verifies an id_token_hint's signature (expiry ignored) for
+	// RP-Initiated Logout. May be nil, in which case /end_session redirects to
+	// the default logged-out page without revoking sessions.
+	LogoutVerifier LogoutVerifier
+	// Grants reverse-looks-up the internal userID from an id_token_hint's PPID
+	// (sub) claim during RP-Initiated Logout. May be nil.
+	Grants oidc.GrantStore
+	// Clients validates post_logout_redirect_uri against a client's registered
+	// logout_uris during RP-Initiated Logout. May be nil.
+	Clients oidc.ClientRegistry
+	// SessionRevoker revokes the user's sessions at the initiating RP during
+	// RP-Initiated Logout. May be nil.
+	SessionRevoker SessionRevoker
 }
 
 // New returns a Server that serves the generated OpenAPI contract. The JWKS
@@ -133,19 +156,23 @@ func New(cfg Config) *Server {
 	}
 
 	return &Server{
-		issuer:        cfg.Issuer,
-		svc:           cfg.Service,
-		jwksBytes:     jwksBytes,
-		signers:       cfg.Signers,
-		bffSessions:   cfg.BFFSessions,
-		loginURL:      parsedLoginURL,
-		bffSessionTTL: ttl,
-		rotator:       cfg.Rotator,
-		revoked:       cfg.RevokedJTIStore,
-		filter:        cfg.RevocationFilter,
-		publisher:     cfg.RevocationPublisher,
-		revChannel:    channel,
-		introspector:  introspector,
+		issuer:         cfg.Issuer,
+		svc:            cfg.Service,
+		jwksBytes:      jwksBytes,
+		signers:        cfg.Signers,
+		bffSessions:    cfg.BFFSessions,
+		loginURL:       parsedLoginURL,
+		bffSessionTTL:  ttl,
+		rotator:        cfg.Rotator,
+		revoked:        cfg.RevokedJTIStore,
+		filter:         cfg.RevocationFilter,
+		publisher:      cfg.RevocationPublisher,
+		revChannel:     channel,
+		introspector:   introspector,
+		logoutVerifier: cfg.LogoutVerifier,
+		grants:         cfg.Grants,
+		clients:        cfg.Clients,
+		sessionRevoker: cfg.SessionRevoker,
 	}
 }
 
