@@ -29,6 +29,7 @@ import (
 	"github.com/harbor-auth/harbor/internal/mfa"
 	"github.com/harbor-auth/harbor/internal/mgmtapi"
 	"github.com/harbor-auth/harbor/internal/region"
+	"github.com/harbor-auth/harbor/internal/relay"
 	"github.com/harbor-auth/harbor/internal/telemetry"
 	"github.com/harbor-auth/harbor/internal/webauthn"
 )
@@ -245,6 +246,26 @@ func main() {
 		WithConsentStore(consentStore).
 		WithSessionRevoker(sessionRevoker).
 		WithMFA(mfaService)
+
+	// Relay store for /relay-addresses endpoints. Only wire when DATABASE_URL is
+	// configured; otherwise the relay endpoints stay in a 503 Service Unavailable
+	// state (fail-closed — the mint path needs the cipher and a real DB).
+	if pool != nil {
+		relayStore := relay.NewStore(db.New(pool), crypto.NewCipher())
+		mgmtServer.WithRelayStore(relayStore)
+		logger.Info("relay store: using DB-backed store")
+	} else {
+		logger.Warn("DATABASE_URL not set — relay endpoints will return 503 (dev mode)")
+	}
+	// BYO-domain store and verifier for /byo-domains endpoints. The store is
+	// always in-memory (DB persistence is a follow-up); the verifier uses the
+	// system DNS resolver and regional MTA/relay domain configuration.
+	mtaDomain := getenv("MTA_DOMAIN", "mta.harbor.id")
+	relayDomain := getenv("RELAY_DOMAIN", "relay.harbor.id")
+	byoDomainStore := mgmtapi.NewInMemoryBYODomainStore()
+	domainVerifier := relay.NewDomainVerifier(relay.NewNetResolver(), mtaDomain, relayDomain)
+	mgmtServer.WithBYODomainStore(byoDomainStore, domainVerifier, mtaDomain, relayDomain)
+	logger.Info("byo-domain store: using in-memory store (dev scaffold)", "mta_domain", mtaDomain, "relay_domain", relayDomain)
 
 	mux := httpserver.NewHealthMux()
 	// Passkey ceremony endpoints. userIDFromRequest returns 501 until the BFF
