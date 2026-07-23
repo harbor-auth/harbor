@@ -121,7 +121,7 @@ func (e *Eraser) Erase(ctx context.Context, userID string) error {
 	// failed — the irreversible shred in step 3 has already succeeded.
 	if err := e.recorder.RecordNoPayload(ctx, userID, region, EventComplianceEraseCompleted, nil); err != nil {
 		e.logger.WarnContext(ctx, "identity: erase: record erase_completed failed (best-effort)",
-			"user_id", userID, "error", err)
+			"error", err)
 	}
 
 	return nil

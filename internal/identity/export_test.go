@@ -85,7 +85,10 @@ func newExportTestSetup(t *testing.T) *exportTestSetup {
 	}
 
 	userID := uuid.New().String()
-	userUUID, _ := uuid.Parse(userID)
+	userUUID, err := uuid.Parse(userID)
+	if err != nil {
+		t.Fatalf("uuid.Parse: %v", err)
+	}
 
 	userRow := db.User{
 		ID:         pgtype.UUID{Bytes: userUUID, Valid: true},

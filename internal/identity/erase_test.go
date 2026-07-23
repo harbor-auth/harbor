@@ -18,13 +18,13 @@ import (
 
 // fakeEraseStore records which operations were called and in what order.
 type fakeEraseStore struct {
-	eraseUserDEKCalled           bool
-	deleteRecoveryCodesCalled    bool
-	revokeSessionsCalled         bool
-	callOrder                    []string
-	eraseUserDEKErr              error
-	deleteRecoveryCodesErr       error
-	revokeSessionsErr            error
+	eraseUserDEKCalled        bool
+	deleteRecoveryCodesCalled bool
+	revokeSessionsCalled      bool
+	callOrder                 []string
+	eraseUserDEKErr           error
+	deleteRecoveryCodesErr    error
+	revokeSessionsErr         error
 }
 
 func (f *fakeEraseStore) EraseUserDEK(_ context.Context, _ pgtype.UUID) error {
@@ -90,7 +90,10 @@ func newEraseTestSetup(t *testing.T) *eraseTestSetup {
 	}
 
 	userID := uuid.New().String()
-	userUUID, _ := uuid.Parse(userID)
+	userUUID, err := uuid.Parse(userID)
+	if err != nil {
+		t.Fatalf("uuid.Parse: %v", err)
+	}
 
 	userRow := db.User{
 		ID:         pgtype.UUID{Bytes: userUUID, Valid: true},
@@ -225,7 +228,10 @@ func TestEraseUnrecoverabilityAfterShred(t *testing.T) {
 	// Step 1 — encrypt an audit payload under the user's DEK (simulating
 	// a payload that existed before erasure).
 	detail := map[string]string{"scope": "openid"}
-	plain, _ := jsonMarshalForTest(detail)
+	plain, err := jsonMarshalForTest(detail)
+	if err != nil {
+		t.Fatalf("jsonMarshalForTest: %v", err)
+	}
 	ciphertext, err := s.cipher.Encrypt(s.dek, plain, auditPayloadAAD(s.userID))
 	if err != nil {
 		t.Fatalf("pre-shred encrypt: %v", err)
