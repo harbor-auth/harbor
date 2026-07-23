@@ -42,8 +42,23 @@ func (s *slowAuditUserLoader) LoadUserForAudit(_ context.Context, _ string) (str
 
 // fakeAuditEventInserter implements AuditEventInserter and captures inserted params.
 type fakeAuditEventInserter struct {
-	params []db.CreateAuditEventWithPayloadParams
-	err    error
+	params      []db.CreateAuditEventWithPayloadParams
+	plainParams []db.CreateAuditEventParams
+	err         error
+}
+
+func (f *fakeAuditEventInserter) CreateAuditEvent(_ context.Context, arg db.CreateAuditEventParams) (db.AuditEvent, error) {
+	if f.err != nil {
+		return db.AuditEvent{}, f.err
+	}
+	f.plainParams = append(f.plainParams, arg)
+	return db.AuditEvent{
+		ID:        arg.ID,
+		Region:    arg.Region,
+		UserID:    arg.UserID,
+		EventType: arg.EventType,
+		ClientID:  arg.ClientID,
+	}, nil
 }
 
 func (f *fakeAuditEventInserter) CreateAuditEventWithPayload(_ context.Context, arg db.CreateAuditEventWithPayloadParams) (db.AuditEvent, error) {
