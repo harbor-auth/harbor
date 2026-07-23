@@ -37,10 +37,10 @@ func newBFFFlowServer(t *testing.T) (*httptest.Server, *bff.InMemoryBFFSessionSt
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
 	svc := oidc.NewService(oidc.ServiceConfig{
-		Issuer:   "https://eu.harbor.id",
-		Clients:  clients,
-		Codes:    oidc.NewInMemoryAuthCodeStore(),
-		Tokens:   oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
+		Issuer:  "https://eu.harbor.id",
+		Clients: clients,
+		Codes:   oidc.NewInMemoryAuthCodeStore(),
+		Tokens:  oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		// The stub resolver would issue a code in the legacy path; with the BFF
 		// store wired below, /authorize must never reach it for an unauthenticated
 		// request — it redirects to login instead.
