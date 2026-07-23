@@ -113,9 +113,11 @@ services:
   mongodb:
     image: mongo:6.0.13
     platform: linux/amd64
+    mem_limit: 512m
   server:
     image: ${CONFORMANCE_SUITE_IMAGE}
     platform: linux/amd64
+    mem_limit: 1536m
     environment:
       BASE_URL: https://localhost.emobix.co.uk:8443
       MONGODB_HOST: mongodb
