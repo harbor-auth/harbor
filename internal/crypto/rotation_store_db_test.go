@@ -460,6 +460,136 @@ func TestIsNotFoundError(t *testing.T) {
 	}
 }
 
+// --- KMSBackedSigner + DBRotationStore integration ---
+
+// TestDBRotationStoreKMSSignerRoundTrip exercises the full production flow via
+// the DBRotationStore: generate a KMSBackedSigner, persist the wrapped private
+// key through CreateWithWrappedKey, promote to active, reload from the store,
+// sign, and verify against the persisted public key. Uses FakeKMSClient for a
+// hermetic test.
+func TestDBRotationStoreKMSSignerRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	region := "us-east-1"
+	keyID := "arn:aws:kms:us-east-1:123456789012:key/rot-roundtrip"
+
+	// KMS-backed key provider using the hermetic fake client.
+	kmsClient := NewFakeKMSClient()
+	resolver := NewStaticKEKResolver(map[string]string{region: keyID})
+	kp := NewKMSKeyProvider(kmsClient, resolver)
+
+	// Generate a KMS-backed signer and its wrapped private key.
+	signer, wrapped, err := NewKMSBackedSigner(ctx, kp, region)
+	if err != nil {
+		t.Fatalf("NewKMSBackedSigner: %v", err)
+	}
+
+	// Persist via the rotation store (CreateWithWrappedKey path).
+	store := newFakeSigningKeyStore()
+	rotStore := NewDBRotationStore(store.toConfig()).
+		WithIDGenerator(func() string { return "rot-roundtrip-id" })
+
+	key := NewKeyMaterial{
+		Kid:       signer.KeyID(),
+		PublicJWK: signer.PublicJWK(),
+		Region:    region,
+		CreatedAt: time.Now(),
+	}
+	if err := rotStore.CreateWithWrappedKey(ctx, key, wrapped); err != nil {
+		t.Fatalf("CreateWithWrappedKey: %v", err)
+	}
+
+	// Promote to active, mirroring a real rotation.
+	if err := rotStore.Promote(ctx, signer.KeyID(), time.Now()); err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+	activeKid, err := rotStore.ActiveKid(ctx)
+	if err != nil {
+		t.Fatalf("ActiveKid: %v", err)
+	}
+	if activeKid != signer.KeyID() {
+		t.Errorf("ActiveKid = %q, want %q", activeKid, signer.KeyID())
+	}
+
+	// Reload the wrapped key from the store (simulating restart).
+	persisted, err := store.GetByKid(ctx, signer.KeyID())
+	if err != nil {
+		t.Fatalf("GetByKid: %v", err)
+	}
+	if len(persisted.PrivateKeyWrapped) == 0 {
+		t.Fatal("persisted wrapped private key is empty")
+	}
+	loaded, err := LoadKMSBackedSigner(ctx, kp, region, persisted.PrivateKeyWrapped)
+	if err != nil {
+		t.Fatalf("LoadKMSBackedSigner: %v", err)
+	}
+	if loaded.KeyID() != signer.KeyID() {
+		t.Errorf("loaded KeyID = %q, want %q", loaded.KeyID(), signer.KeyID())
+	}
+
+	// Sign and verify against the persisted public key DER.
+	signingInput := []byte("header.payload.rotation")
+	sig, err := loaded.Sign(signingInput)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	pubAny, err := x509.ParsePKIXPublicKey(persisted.PublicKeyBytes)
+	if err != nil {
+		t.Fatalf("ParsePKIXPublicKey: %v", err)
+	}
+	pub, ok := pubAny.(*ecdsa.PublicKey)
+	if !ok {
+		t.Fatalf("expected *ecdsa.PublicKey, got %T", pubAny)
+	}
+	if !verifySignature(pub, signingInput, sig) {
+		t.Error("reloaded signer signature failed verification against persisted public key")
+	}
+}
+
+// TestDBRotationStoreKMSSignerCrossRegionIsolation verifies a wrapped key
+// persisted for one region cannot be reloaded under a different region, even
+// when routed through the rotation store.
+func TestDBRotationStoreKMSSignerCrossRegionIsolation(t *testing.T) {
+	ctx := context.Background()
+	regionA := "us-east-1"
+	regionB := "eu-west-1"
+
+	kmsClient := NewFakeKMSClient()
+	resolver := NewStaticKEKResolver(map[string]string{
+		regionA: "arn:aws:kms:us-east-1:123456789012:key/a",
+		regionB: "arn:aws:kms:eu-west-1:123456789012:key/b",
+	})
+	kp := NewKMSKeyProvider(kmsClient, resolver)
+
+	signer, wrapped, err := NewKMSBackedSigner(ctx, kp, regionA)
+	if err != nil {
+		t.Fatalf("NewKMSBackedSigner: %v", err)
+	}
+
+	store := newFakeSigningKeyStore()
+	rotStore := NewDBRotationStore(store.toConfig()).
+		WithIDGenerator(func() string { return "iso-id" })
+	key := NewKeyMaterial{
+		Kid:       signer.KeyID(),
+		PublicJWK: signer.PublicJWK(),
+		Region:    regionA,
+		CreatedAt: time.Now(),
+	}
+	if err := rotStore.CreateWithWrappedKey(ctx, key, wrapped); err != nil {
+		t.Fatalf("CreateWithWrappedKey: %v", err)
+	}
+
+	persisted, err := store.GetByKid(ctx, signer.KeyID())
+	if err != nil {
+		t.Fatalf("GetByKid: %v", err)
+	}
+
+	// Loading region A's wrapped key under region B must fail.
+	if _, err := LoadKMSBackedSigner(ctx, kp, regionB, persisted.PrivateKeyWrapped); err == nil {
+		t.Fatal("cross-region LoadKMSBackedSigner should fail")
+	}
+}
+
 // --- Multiple regions test ---
 
 func TestDBRotationStoreMultipleRegions(t *testing.T) {

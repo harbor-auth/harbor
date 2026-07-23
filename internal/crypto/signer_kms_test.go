@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"math/big"
 	"testing"
 )
@@ -379,6 +381,159 @@ func TestKMSBackedSignerWithKMSKeyProvider(t *testing.T) {
 
 	if loaded.KeyID() != signer.KeyID() {
 		t.Errorf("loaded KeyID mismatch")
+	}
+}
+
+// --- Full round-trip integration tests ---
+
+// TestKMSSigningKeyRoundTripViaDBStore exercises the full production flow:
+// generate KMSBackedSigner → persist wrapped private key to the signing key store →
+// reload via LoadKMSBackedSigner → sign a JWT → verify signature matches.
+// Uses FakeKMSClient for a hermetic test.
+func TestKMSSigningKeyRoundTripViaDBStore(t *testing.T) {
+	ctx := context.Background()
+	region := "us-east-1"
+	keyID := "arn:aws:kms:us-east-1:123456789012:key/roundtrip-key"
+
+	// --- 1. Set up KMS-backed key provider with a fake KMS client. ---
+	kmsClient := NewFakeKMSClient()
+	resolver := NewStaticKEKResolver(map[string]string{region: keyID})
+	kp := NewKMSKeyProvider(kmsClient, resolver)
+
+	// --- 2. Generate a new KMS-backed signer + wrapped private key. ---
+	signer, wrapped, err := NewKMSBackedSigner(ctx, kp, region)
+	if err != nil {
+		t.Fatalf("NewKMSBackedSigner: %v", err)
+	}
+
+	// --- 3. Persist the wrapped private key to the signing key store. ---
+	store := newFakeSigningKeyStore()
+	pubDER, err := jwkToPublicKeyDER(signer.PublicJWK())
+	if err != nil {
+		t.Fatalf("jwkToPublicKeyDER: %v", err)
+	}
+	if err := store.CreateKey(ctx, "key-id-1", signer.KeyID(), region, pubDER, wrapped); err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+
+	// --- 4. Retrieve the persisted key and reload the signer. ---
+	persisted, err := store.GetByKid(ctx, signer.KeyID())
+	if err != nil {
+		t.Fatalf("GetByKid: %v", err)
+	}
+	if len(persisted.PrivateKeyWrapped) == 0 {
+		t.Fatal("persisted wrapped private key is empty")
+	}
+
+	loaded, err := LoadKMSBackedSigner(ctx, kp, region, persisted.PrivateKeyWrapped)
+	if err != nil {
+		t.Fatalf("LoadKMSBackedSigner: %v", err)
+	}
+
+	// --- 5. Reloaded signer must have the same key identity. ---
+	if loaded.KeyID() != signer.KeyID() {
+		t.Errorf("loaded KeyID = %q, want %q", loaded.KeyID(), signer.KeyID())
+	}
+
+	// --- 6. Sign a JWT-shaped signing input with the reloaded signer. ---
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"ES256","typ":"JWT","kid":"` + loaded.KeyID() + `"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"user-123","iss":"harbor","aud":"test"}`))
+	signingInput := []byte(header + "." + payload)
+
+	sig, err := loaded.Sign(signingInput)
+	if err != nil {
+		t.Fatalf("loaded Sign: %v", err)
+	}
+
+	// --- 7. Verify the signature against the persisted public key (DER). ---
+	pubAny, err := x509.ParsePKIXPublicKey(persisted.PublicKeyBytes)
+	if err != nil {
+		t.Fatalf("ParsePKIXPublicKey: %v", err)
+	}
+	pub, ok := pubAny.(*ecdsa.PublicKey)
+	if !ok {
+		t.Fatalf("expected *ecdsa.PublicKey, got %T", pubAny)
+	}
+	if !verifySignature(pub, signingInput, sig) {
+		t.Error("signature from reloaded signer failed verification against persisted public key")
+	}
+
+	// --- 8. A signature from the ORIGINAL signer must also verify (same key). ---
+	origSig, err := signer.Sign(signingInput)
+	if err != nil {
+		t.Fatalf("original Sign: %v", err)
+	}
+	if !verifySignature(pub, signingInput, origSig) {
+		t.Error("signature from original signer failed verification")
+	}
+}
+
+// TestKMSSigningKeyRoundTripAcrossReplicas simulates two harbor-hot replicas
+// (separate KMSKeyProvider instances sharing the same KMS backend) loading the
+// same persisted wrapped key and producing mutually verifiable signatures.
+// This is the core guarantee: signing keys are consistent across replicas.
+func TestKMSSigningKeyRoundTripAcrossReplicas(t *testing.T) {
+	ctx := context.Background()
+	region := "eu-west-1"
+	keyID := "arn:aws:kms:eu-west-1:123456789012:key/replica-key"
+
+	// Shared KMS backend (the KEK lives in KMS, shared across replicas).
+	kmsClient := NewFakeKMSClient()
+	resolver := NewStaticKEKResolver(map[string]string{region: keyID})
+
+	// Replica A generates and persists the key.
+	kpA := NewKMSKeyProvider(kmsClient, resolver)
+	signerA, wrapped, err := NewKMSBackedSigner(ctx, kpA, region)
+	if err != nil {
+		t.Fatalf("NewKMSBackedSigner: %v", err)
+	}
+
+	store := newFakeSigningKeyStore()
+	pubDER, err := jwkToPublicKeyDER(signerA.PublicJWK())
+	if err != nil {
+		t.Fatalf("jwkToPublicKeyDER: %v", err)
+	}
+	if err := store.CreateKey(ctx, "replica-key-1", signerA.KeyID(), region, pubDER, wrapped); err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
+
+	// Replica B loads the persisted key with a fresh provider (simulated restart).
+	kpB := NewKMSKeyProvider(kmsClient, resolver)
+	persisted, err := store.GetByKid(ctx, signerA.KeyID())
+	if err != nil {
+		t.Fatalf("GetByKid: %v", err)
+	}
+	signerB, err := LoadKMSBackedSigner(ctx, kpB, region, persisted.PrivateKeyWrapped)
+	if err != nil {
+		t.Fatalf("LoadKMSBackedSigner: %v", err)
+	}
+
+	// Both replicas must share the same key identity.
+	if signerA.KeyID() != signerB.KeyID() {
+		t.Errorf("replica KeyID mismatch: A=%q B=%q", signerA.KeyID(), signerB.KeyID())
+	}
+
+	// A signature from replica A verifies with replica B's public key and vice versa.
+	signingInput := []byte("header.payload.cross-replica")
+
+	sigA, err := signerA.Sign(signingInput)
+	if err != nil {
+		t.Fatalf("signerA Sign: %v", err)
+	}
+	sigB, err := signerB.Sign(signingInput)
+	if err != nil {
+		t.Fatalf("signerB Sign: %v", err)
+	}
+
+	pubB, err := signerB.PublicJWK().ToPublicKey()
+	if err != nil {
+		t.Fatalf("ToPublicKey: %v", err)
+	}
+	if !verifySignature(pubB, signingInput, sigA) {
+		t.Error("replica A signature not verifiable by replica B public key")
+	}
+	if !verifySignature(pubB, signingInput, sigB) {
+		t.Error("replica B signature not verifiable by its own public key")
 	}
 }
 
