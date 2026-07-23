@@ -20,11 +20,14 @@
 package e2e
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -431,6 +434,162 @@ func TestRefreshInvalidTokenIsInvalidGrant(t *testing.T) {
 		} else {
 			t.Logf("bogus refresh error body not JSON (%s); status 400 already asserted", body)
 		}
+	}
+}
+
+// TestJWKSSignatureVerification is a cryptographic end-to-end gate: it runs the
+// full PKCE authorize→token flow against the live server, fetches the public key
+// from /jwks.json, and verifies that both the id_token and access_token carry a
+// valid ES256 signature — ECDSA P-256 sign over SHA-256(header.payload) — using
+// the exact key advertised in JWKS. This catches the class of bug where tokens
+// are structurally correct but unsigned or signed with an unrelated key.
+//
+//harbor:invariant INV-JWKS-KID-MATCH
+func TestJWKSSignatureVerification(t *testing.T) {
+	// Step 1: full PKCE authorize → code → token.
+	verifier, challenge := pkcePair(t)
+	authResp := authorize(t, demoRedirectURI, challenge, "state-jwks-verify")
+	defer authResp.Body.Close()
+	if authResp.StatusCode != http.StatusFound {
+		t.Skipf("authorize returned %d (not 302) — auto-approval not wired; skipping JWKS sig verification", authResp.StatusCode)
+	}
+	code := codeFromLocation(t, authResp)
+	if code == "" {
+		t.Skip("no code from authorize; cannot run JWKS sig verification")
+	}
+	tokenResp := postToken(t, code, verifier, demoRedirectURI)
+	defer tokenResp.Body.Close()
+	if tokenResp.StatusCode != http.StatusOK {
+		body, readErr := io.ReadAll(tokenResp.Body)
+		if readErr != nil {
+			t.Fatalf("POST %s = %d, want 200 (body read error: %v)", tokenPath, tokenResp.StatusCode, readErr)
+		}
+		t.Fatalf("POST %s = %d, want 200\n%s", tokenPath, tokenResp.StatusCode, body)
+	}
+	body, err := io.ReadAll(tokenResp.Body)
+	if err != nil {
+		t.Fatalf("read token response: %v", err)
+	}
+	var tok struct {
+		IDToken     string `json:"id_token"`
+		AccessToken string `json:"access_token"`
+	}
+	if err := json.Unmarshal(body, &tok); err != nil {
+		t.Fatalf("unmarshal token response: %v — body: %s", err, body)
+	}
+	if tok.IDToken == "" || tok.AccessToken == "" {
+		t.Fatalf("token response missing id_token or access_token: %s", body)
+	}
+
+	// Step 2: fetch JWKS.
+	jwksResp, err := http.Get(baseURL() + "/jwks.json")
+	if err != nil {
+		t.Fatalf("GET /jwks.json: %v", err)
+	}
+	defer jwksResp.Body.Close()
+	if jwksResp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /jwks.json = %d, want 200", jwksResp.StatusCode)
+	}
+	var jwks struct {
+		Keys []struct {
+			Kid string `json:"kid"`
+			Kty string `json:"kty"`
+			Crv string `json:"crv"`
+			Alg string `json:"alg"`
+			Use string `json:"use"`
+			X   string `json:"x"`
+			Y   string `json:"y"`
+		} `json:"keys"`
+	}
+	if err := json.NewDecoder(jwksResp.Body).Decode(&jwks); err != nil {
+		t.Fatalf("decode JWKS: %v", err)
+	}
+	if len(jwks.Keys) == 0 {
+		t.Fatal("/jwks.json returned no keys")
+	}
+
+	// Step 3: for each token, locate the signing key by kid and verify the
+	// ES256 signature cryptographically (ecdsa.Verify on SHA-256(header.payload)).
+	for name, rawToken := range map[string]string{"id_token": tok.IDToken, "access_token": tok.AccessToken} {
+		parts := strings.Split(rawToken, ".")
+		if len(parts) != 3 {
+			t.Fatalf("%s: not a 3-part compact JWT (got %d parts)", name, len(parts))
+		}
+
+		// Decode header → alg + kid.
+		hdrBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+		if err != nil {
+			t.Fatalf("%s: decode header: %v", name, err)
+		}
+		var hdr struct {
+			Alg string `json:"alg"`
+			Kid string `json:"kid"`
+		}
+		if err := json.Unmarshal(hdrBytes, &hdr); err != nil {
+			t.Fatalf("%s: unmarshal header: %v", name, err)
+		}
+		if hdr.Alg != "ES256" {
+			t.Fatalf("%s: alg = %q, want ES256", name, hdr.Alg)
+		}
+		if hdr.Kid == "" {
+			t.Fatalf("%s: header has no kid", name)
+		}
+
+		// Find the matching JWKS key.
+		var xStr, yStr string
+		var found bool
+		for _, k := range jwks.Keys {
+			if k.Kid == hdr.Kid {
+				if k.Kty != "EC" || k.Crv != "P-256" {
+					t.Fatalf("%s: JWKS key kid=%q: kty=%q crv=%q, want EC / P-256", name, k.Kid, k.Kty, k.Crv)
+				}
+				if k.Alg != "ES256" {
+					t.Fatalf("%s: JWKS key kid=%q: alg=%q, want ES256", name, k.Kid, k.Alg)
+				}
+				if k.Use != "sig" {
+					t.Fatalf("%s: JWKS key kid=%q: use=%q, want sig", name, k.Kid, k.Use)
+				}
+				xStr, yStr = k.X, k.Y
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("%s: kid %q not found in JWKS (%d key(s) present)", name, hdr.Kid, len(jwks.Keys))
+		}
+
+		// Reconstruct the ECDSA P-256 public key from the base64url-encoded x, y.
+		xBytes, err := base64.RawURLEncoding.DecodeString(xStr)
+		if err != nil {
+			t.Fatalf("%s: decode JWK x: %v", name, err)
+		}
+		yBytes, err := base64.RawURLEncoding.DecodeString(yStr)
+		if err != nil {
+			t.Fatalf("%s: decode JWK y: %v", name, err)
+		}
+		pub := &ecdsa.PublicKey{
+			Curve: elliptic.P256(),
+			X:     new(big.Int).SetBytes(xBytes),
+			Y:     new(big.Int).SetBytes(yBytes),
+		}
+
+		// Decode the 64-byte raw ES256 signature (r || s, each 32 bytes).
+		sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+		if err != nil {
+			t.Fatalf("%s: decode signature: %v", name, err)
+		}
+		if len(sig) != 64 {
+			t.Fatalf("%s: signature length = %d, want 64 (ES256 raw r||s)", name, len(sig))
+		}
+
+		// SHA-256 the signing input (ASCII header.payload) and verify.
+		digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
+		r := new(big.Int).SetBytes(sig[:32])
+		s := new(big.Int).SetBytes(sig[32:])
+		if !ecdsa.Verify(pub, digest[:], r, s) {
+			t.Fatalf("%s: ES256 signature verification FAILED — token does not verify against JWKS key kid=%q", name, hdr.Kid)
+		}
+		t.Logf("%s: ES256 signature OK (kid=%q, sig-len=64)", name, hdr.Kid)
 	}
 }
 
