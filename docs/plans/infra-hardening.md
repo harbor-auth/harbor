@@ -62,38 +62,74 @@ before completing these.
 
 ---
 
-#### T0.1 — Enable UFW and block dangerous ports
+#### T0.1 — Block dangerous ports at the cloud/host firewall
 
-**What:** Enable the host firewall and restrict internet-reachable ports to only
-what is required (HTTP, HTTPS, SSH). All Kubernetes internal ports must be
-blocked from external access.
+**What:** Close Kubernetes-internal ports from the internet. The live INPUT chain
+shows `cali-INPUT` (Calico) runs as **rule #1** before any UFW chain — meaning
+`ufw default deny incoming` may be silently bypassed by Calico's ACCEPT verdicts
+for its own ports. **UFW alone is not a reliable layer here.** Use a combination
+of:
 
-**How:**
-```bash
-ssh ubuntu@51.89.98.90
+**Option A (recommended): OVH/cloud security group or firewall-as-a-service**
+If the hosting provider (OVH for `51.89.98.90`) offers a cloud firewall / security
+group, configure it to allow only:
+- Port 22/tcp (SSH, ideally restricted to your IP)
+- Port 80/tcp (nginx ingress HTTP)
+- Port 443/tcp (nginx ingress HTTPS)
 
-# Allow only the ports that must be internet-facing
-sudo ufw allow 22/tcp    # SSH (do this FIRST or you lock yourself out)
-sudo ufw allow 80/tcp    # HTTP (nginx ingress, for redirect to HTTPS)
-sudo ufw allow 443/tcp   # HTTPS (nginx ingress)
+This blocks 6443, 9345, 10250, 9091 before packets even reach the node.
 
-# Block Kubernetes internals from internet
-# (kube-apiserver, RKE2 join, kubelet, Calico metrics)
-# These stay accessible via loopback/internal — only internet-originating
-# packets are blocked by UFW's default-deny-incoming policy.
-
-# Enable UFW with default deny-incoming
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw enable
-
-# Verify
-sudo ufw status verbose
+**Option B: Calico HostEndpoint policy (k8s-native)**
+Calico's `GlobalNetworkPolicy` can protect host ports directly, operating in the
+same iptables chain that processes host traffic:
+```yaml
+apiVersion: crd.projectcalico.org/v1
+kind: HostEndpoint
+metadata:
+  name: ns31170412-eth0
+  labels:
+    host: ns31170412
+spec:
+  interfaceName: eth0
+  node: ns31170412
+  expectedIPs: ["51.89.98.90"]
+---
+apiVersion: crd.projectcalico.org/v1
+kind: GlobalNetworkPolicy
+metadata:
+  name: deny-external-k8s-ports
+spec:
+  selector: host == 'ns31170412'
+  order: 10
+  ingress:
+    - action: Allow
+      protocol: TCP
+      destination:
+        ports: [22, 80, 443]
+    - action: Deny
+      protocol: TCP
+      destination:
+        ports: [6443, 9345, 10250, 9091, 2379, 2380]
+  egress:
+    - action: Allow
 ```
 
-> ⚠️ **Warning:** Do not add a rule for 6443 unless you need kubectl access from
-> outside. If you do, restrict it to your IP only:
-> `sudo ufw allow from <YOUR_IP> to any port 6443`
+**Option C: UFW (last resort, with caveats)**
+UFW can work but requires `BEFORE` rules that run before Calico:
+```bash
+# Must restart UFW in Calico-aware way — check Calico failsafeInboundHostPorts
+# to ensure k8s health probes still work before enabling
+sudo ufw allow 22/tcp
+sudo ufw allow 80/tcp
+sudo ufw allow 443/tcp
+sudo ufw default deny incoming
+sudo ufw enable
+```
+Test thoroughly: verify kubelet health probes and pod-to-pod routing still work
+after enabling. If pods go unhealthy, UFW is interfering with Calico.
+
+> ⚠️ **Single-node note:** Restrict kubectl/API access (6443) to your IP only if
+> you do need remote access: `sudo ufw allow from <YOUR_IP> to any port 6443`
 
 ---
 
@@ -161,7 +197,16 @@ or 465, not 443 — check your relay config and use the correct port).
 application-level authentication. The ingress should deny these paths before they
 reach the pod.
 
-**How:** Add to the Ingress annotations in `deploy/helm/templates/ingress.yaml`:
+**How:** The `server-snippet` annotation requires `allow-snippet-annotations: true`
+in the ingress-nginx ConfigMap (disabled by default in ingress-nginx ≥ 1.9 after
+CVE-2023-5044). First check/enable it:
+
+```bash
+kubectl patch configmap ingress-nginx-controller -n kube-system \
+  --type merge -p '{"data":{"allow-snippet-annotations":"true"}}'
+```
+
+Then add to the Ingress annotations in `deploy/helm/templates/ingress.yaml`:
 ```yaml
 annotations:
   nginx.ingress.kubernetes.io/server-snippet: |
@@ -171,8 +216,12 @@ annotations:
     }
 ```
 
-Or use a separate Ingress resource with `nginx.ingress.kubernetes.io/deny-admission`
-if your nginx version supports it. Test with:
+**Alternative (preferred, no snippet needed):** Create a separate Ingress resource
+that matches `/admin/` with a `403` default-backend, or use a Calico NetworkPolicy
+that blocks admin-port access from the ingress controller entirely (requires a
+dedicated admin port separate from the public port — a future app-level change).
+
+Test with:
 ```bash
 curl -sk https://auth.harborauth.com/admin/keys/rotate  # must return 403
 ```
@@ -247,22 +296,36 @@ oracle attacks.
 > **Note:** This is **not** about enabling encryption (it's already on). This is
 > about upgrading the cipher. The current status shows: `Active: AES-CBC aescbckey`.
 
-**How:** RKE2 does not yet expose a direct `config.yaml` option to change the
-cipher. The path is:
+**How:** RKE2's supported path uses the `rke2 secrets-encrypt` subcommands —
+**do not hand-edit** `/var/lib/rancher/rke2/server/cred/encryption-config.json`
+directly as RKE2 may overwrite it on restart.
 
-1. Generate a new `secretbox` provider configuration (see Kubernetes
-   [Encrypting Secret Data at Rest](https://kubernetes.io/docs/tasks/administer-cluster/encrypt-data/)).
-2. Patch the existing encryption config at
-   `/var/lib/rancher/rke2/server/cred/encryption-config.json` to add `secretbox`
-   as the first provider and `aescbc` as fallback (for reading existing secrets).
-3. Restart rke2-server.
-4. Force re-encryption: `sudo rke2 secrets-encrypt reencrypt --force`
-5. Verify: `sudo rke2 secrets-encrypt status`
-6. Once all secrets are re-encrypted, remove the `aescbc` fallback provider.
+Check what the current RKE2 version supports:
+```bash
+sudo rke2 secrets-encrypt status
+sudo rke2 secrets-encrypt --help  # look for 'rotate-keys' or provider options
+```
+
+For RKE2 versions that expose provider configuration, the upgrade path is:
+1. Add `secretbox` as the **first** provider and keep `aescbc` as a fallback
+   reader using the supported RKE2 config mechanism (check release notes for
+   your exact version — this varies by RKE2 release).
+2. Restart: `sudo systemctl restart rke2-server`
+3. Force re-encryption of all existing secrets:
+   `sudo rke2 secrets-encrypt reencrypt --force`
+4. Verify: `sudo rke2 secrets-encrypt status` — should show `secretbox` as active.
+5. Once confirmed, remove the `aescbc` fallback.
 
 > **Important:** `systemctl restart rke2-server` alone does NOT re-encrypt existing
-> secrets. You must explicitly run `rke2 secrets-encrypt reencrypt` to migrate all
-> existing Secrets from the old cipher to the new one.
+> secrets. The `reencrypt` step is mandatory to migrate existing Secrets to the new
+> cipher.
+>
+> **AES-CBC accuracy note:** The risk justification for upgrading is primarily
+> **missing integrity protection** (AES-CBC is not AEAD — a tampered ciphertext
+> decrypts to garbage with no error). `secretbox` (XSalsa20+Poly1305) is AEAD and
+> detects tampering. The "padding oracle" framing only applies when there's a
+> decryption oracle (not present in etcd-at-rest); the integrity gap is the
+> more accurate risk.
 
 ---
 
