@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
+	"github.com/harbor-auth/harbor/internal/identity"
 	"github.com/harbor-auth/harbor/internal/oidc"
 	"github.com/harbor-auth/harbor/internal/telemetry"
 )
@@ -69,6 +70,21 @@ func (s *Server) PostToken(w http.ResponseWriter, r *http.Request) {
 		oidcTokensIssuedTotal.Inc(telemetry.GrantType(gk), telemetry.Outcome(telemetry.OutcomeSuccess))
 	}
 	outcome = telemetry.OutcomeSuccess
+
+	// Best-effort audit emission on the success path (token.issued /
+	// token.refreshed). RecordAsync is non-blocking and detaches from the
+	// request context, so it never stalls the /token hot path. tokens.UserID
+	// is "" for stub-resolver flows — skip emission in that case.
+	if s.auditRecorder != nil && tokens.UserID != "" {
+		cid := req.ClientID
+		et := identity.EventTokenIssued
+		if req.GrantType == "refresh_token" {
+			et = identity.EventTokenRefreshed
+		}
+		s.auditRecorder.RecordAsync(r.Context(), tokens.UserID, et, &cid,
+			map[string]any{"grant_type": req.GrantType, "scope": tokens.Scope})
+	}
+
 	writeTokenResponse(w, tokens)
 }
 
