@@ -366,21 +366,33 @@ func TestPasskeyFailureLeavesPendingUserWithNoCredential(t *testing.T) {
 // the caller can skip rather than fail.
 func registerPasskey(t *testing.T, client *http.Client) bool {
 	t.Helper()
+	ok, _, _ := registerPasskeyWithKey(t, client)
+	return ok
+}
+
+// registerPasskeyWithKey is like registerPasskey but returns the ES256 private
+// key and credential ID minted for the registration. The login (assertion)
+// ceremony must sign its challenge with this SAME key, so callers driving a
+// subsequent passkey login (e.g. the BFF flow) need them. On any failure it
+// returns ok=false so the caller can skip rather than fail (matches
+// registerPasskey's CI-safe contract).
+func registerPasskeyWithKey(t *testing.T, client *http.Client) (ok bool, key *ecdsa.PrivateKey, credID []byte) {
+	t.Helper()
 
 	beginResp, err := client.Post(mgmtBaseURL()+registerBeginPath, "application/json", nil)
 	if err != nil {
 		t.Logf("register/begin unreachable: %v", err)
-		return false
+		return false, nil, nil
 	}
 	defer func() { _ = beginResp.Body.Close() }()
 	if beginResp.StatusCode != http.StatusOK {
 		t.Logf("register/begin = %d (ceremony not wired)", beginResp.StatusCode)
-		return false
+		return false, nil, nil
 	}
 	beginBody, err := io.ReadAll(beginResp.Body)
 	if err != nil {
 		t.Logf("read register/begin body: %v", err)
-		return false
+		return false, nil, nil
 	}
 
 	var opts struct {
@@ -393,7 +405,7 @@ func registerPasskey(t *testing.T, client *http.Client) bool {
 	}
 	if err := json.Unmarshal(beginBody, &opts); err != nil {
 		t.Logf("register/begin response not parseable: %v\n%s", err, beginBody)
-		return false
+		return false, nil, nil
 	}
 	rpID := opts.PublicKey.RP.ID
 	if rpID == "" {
@@ -401,41 +413,40 @@ func registerPasskey(t *testing.T, client *http.Client) bool {
 	}
 	if opts.PublicKey.Challenge == "" {
 		t.Logf("register/begin response missing challenge\n%s", beginBody)
-		return false
+		return false, nil, nil
 	}
 
-	attestation, credID, err := makeAttestation(rpID, opts.PublicKey.Challenge)
+	attestation, key, credID, err := makeAttestation(rpID, opts.PublicKey.Challenge)
 	if err != nil {
 		t.Logf("build attestation: %v", err)
-		return false
+		return false, nil, nil
 	}
 
 	finishResp, err := client.Post(mgmtBaseURL()+registerFinishPath, "application/json", strings.NewReader(attestation))
 	if err != nil {
 		t.Logf("register/finish: %v", err)
-		return false
+		return false, nil, nil
 	}
 	defer func() { _ = finishResp.Body.Close() }()
 	finishBody, err := io.ReadAll(finishResp.Body)
 	if err != nil {
 		t.Logf("read register/finish body: %v", err)
-		return false
+		return false, nil, nil
 	}
 	if finishResp.StatusCode < 200 || finishResp.StatusCode >= 300 {
 		t.Logf("register/finish = %d (likely origin/RP mismatch on this stack)\n%s", finishResp.StatusCode, finishBody)
-		return false
+		return false, nil, nil
 	}
-	_ = credID
-	return true
+	return true, key, credID
 }
 
 // makeAttestation produces a WebAuthn "none"-format registration response for a
 // freshly generated ES256 credential, ready to POST to register/finish. It
 // returns the JSON body and the generated credential ID.
-func makeAttestation(rpID, challengeB64 string) (body string, credID []byte, err error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+func makeAttestation(rpID, challengeB64 string) (body string, key *ecdsa.PrivateKey, credID []byte, err error) {
+	key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	// COSE_Key for an ES256 (P-256) public key.
@@ -452,12 +463,12 @@ func makeAttestation(rpID, challengeB64 string) (body string, credID []byte, err
 	}
 	cosePub, err := cbor.Marshal(coseKey)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	credID = make([]byte, 16)
 	if _, err := rand.Read(credID); err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	// authData = rpIdHash(32) | flags(1) | signCount(4) | attestedCredentialData.
@@ -484,7 +495,7 @@ func makeAttestation(rpID, challengeB64 string) (body string, credID []byte, err
 		"authData": authData,
 	})
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	clientData, err := json.Marshal(map[string]string{
@@ -493,7 +504,7 @@ func makeAttestation(rpID, challengeB64 string) (body string, credID []byte, err
 		"origin":    webauthnOrigin(),
 	})
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
 
 	credIDB64 := base64.RawURLEncoding.EncodeToString(credID)
@@ -508,9 +519,9 @@ func makeAttestation(rpID, challengeB64 string) (body string, credID []byte, err
 	}
 	out, err := json.Marshal(resp)
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, err
 	}
-	return string(out), credID, nil
+	return string(out), key, credID, nil
 }
 
 // envOr returns the environment variable v, or def when it is unset/empty.
