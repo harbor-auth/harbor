@@ -99,6 +99,16 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		"grant_store_wired", deps.grantStore != nil,
 	)
 
+	// Fail-closed startup guard: production deployments MUST have the complete
+	// BFF flow wired (LOGIN_URL + DATABASE_URL + REDIS_URL) or we refuse to
+	// start. Without all three, /authorize would either skip the login redirect
+	// entirely or fall back to the insecure demo-user stub resolver — both are
+	// total auth bypasses (audit blocker 1.1). The HARBOR_DEV_MODE escape hatch
+	// allows local dev and e2e tests to run without the full stack.
+	if err := validateProductionReadiness(bffCfg, deps, logger); err != nil {
+		return err
+	}
+
 	// Redis powers cross-replica rate limiting. ConnectRedis returns (nil, nil)
 	// when REDIS_URL is unset — we then fall back to the in-memory limiter.
 	redisClient, err := clients.ConnectRedis(ctx, logger)
@@ -425,6 +435,51 @@ func newSessionResolver(deps bffDeps, logger *slog.Logger) oidc.SessionResolver 
 	}
 	logger.Warn("DATABASE_URL not set — using demo-user stub session resolver (dev only; NEVER use in production)")
 	return oidc.NewStubSessionResolver("demo-user-ppid")
+}
+
+// validateProductionReadiness enforces the fail-closed startup guard: in
+// production (HARBOR_DEV_MODE not set), the complete BFF auth flow must be
+// wired — LOGIN_URL for the redirect, DATABASE_URL for the PPIDSessionResolver
+// deps, and implicitly REDIS_URL for the shared BFF session store. Without all
+// three, /authorize would silently degrade to the insecure demo-user stub or
+// skip the login redirect, both of which are total auth bypasses.
+//
+// Dev and e2e runs set HARBOR_DEV_MODE=1 to bypass this guard; they accept the
+// security trade-off of running without a real identity backend.
+func validateProductionReadiness(cfg bffConfig, deps bffDeps, logger *slog.Logger) error {
+	if envBool("HARBOR_DEV_MODE") {
+		logger.Warn("HARBOR_DEV_MODE enabled — skipping production readiness checks (NEVER use in production)")
+		return nil
+	}
+
+	var missing []string
+	if cfg.LoginURL == "" {
+		missing = append(missing, "LOGIN_URL")
+	}
+	if os.Getenv("REDIS_URL") == "" {
+		missing = append(missing, "REDIS_URL (required for shared BFF session store)")
+	}
+	if cfg.DatabaseURL == "" {
+		missing = append(missing, "DATABASE_URL")
+	}
+	if deps.secretLoader == nil {
+		missing = append(missing, "secret_loader (requires DATABASE_URL + HARBOR_KMS_SECRET)")
+	}
+	if deps.grantStore == nil {
+		missing = append(missing, "grant_store (requires DATABASE_URL)")
+	}
+
+	if len(missing) > 0 {
+		return fmt.Errorf("production startup guard failed: missing required BFF dependencies %v — set HARBOR_DEV_MODE=1 to bypass (dev/e2e only)", missing)
+	}
+
+	logger.Info("production readiness check passed",
+		"login_url_set", true,
+		"redis_url_set", true,
+		"secret_loader_wired", true,
+		"grant_store_wired", true,
+	)
+	return nil
 }
 
 // --- tiny env helpers (no external config dependency) ---
