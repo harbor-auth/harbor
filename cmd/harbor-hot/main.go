@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -34,6 +35,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/harbor-auth/harbor/internal/bff"
 	"github.com/harbor-auth/harbor/internal/clients"
 	"github.com/harbor-auth/harbor/internal/crypto"
 	gendb "github.com/harbor-auth/harbor/internal/gen/db"
@@ -62,27 +64,33 @@ func main() {
 // run builds the server and serves until ctx is cancelled. It is split out from
 // main so the exit path has a single error sink and stays testable.
 func run(ctx context.Context, logger *slog.Logger) error {
-	// Redis powers cross-replica rate limiting. ConnectRedis returns (nil, nil)
-	// when REDIS_URL is unset — we then fall back to the in-memory limiter.
+	// Load and validate the BFF session dependencies up front so a
+	// misconfiguration (malformed LOGIN_URL, non-positive TTL) fails fast at
+	// startup rather than surfacing later when /authorize needs them.
+	bffCfg, err := loadBFFConfig()
+	if err != nil {
+		return err
+	}
+	// Log presence only — never the raw DATABASE_URL (it carries credentials) or
+	// LOGIN_URL, keeping startup logs PII/secret-free (docs/DESIGN.md §6.5).
+	logger.Info("BFF config loaded",
+		"login_url_set", bffCfg.LoginURL != "",
+		"database_url_set", bffCfg.DatabaseURL != "",
+		"bff_session_ttl", bffCfg.SessionTTL.String(),
+	)
+
+	// Redis powers cross-replica rate limiting AND shared BFF session state.
+	// ConnectRedis returns (nil, nil) when REDIS_URL is unset — we then fall
+	// back to in-memory limiters and an in-memory BFF session store.
 	redisClient, err := clients.ConnectRedis(ctx, logger)
 	if err != nil {
 		return err
 	}
 
-	issuer := envString("ISSUER", "https://harbor.local")
-
-	// Bind the issuer host to a region so the region middleware resolves it.
-	// In production, the issuer is region-specific (e.g. https://eu.harbor.id);
-	// in dev, REGION env var overrides to allow localhost testing.
-	if reg := envString("REGION", ""); reg != "" {
-		if err := region.BindIssuerHost(issuer, region.Region(reg)); err != nil {
-			return err
-		}
-	}
-
-	// DB-backed signing keys plug in when DATABASE_URL is configured; otherwise
-	// we fall back to the unsigned placeholder issuer for local dev (tokens are
-	// obviously fake and JWKS is empty).
+	// Open the DB pool once — shared by both the signing stack (signing keys)
+	// and the BFF session resolver deps (DEK unwrapping, grant store). When
+	// DATABASE_URL is unset, pool is nil and both sub-systems degrade to their
+	// dev-only fallbacks.
 	pool, err := clients.ConnectDB(ctx, logger)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -110,6 +118,39 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		logger.Warn("DATABASE_URL not set — using unsigned placeholder token issuer (dev only; NEVER for production)")
 	}
 
+	// BFF session resolver dependencies: secret loader (DEK unwrapping for PPID
+	// derivation) and grant store (consent records). Reuses the already-opened
+	// pool rather than re-connecting; returns zero-value deps when pool is nil.
+	deps, err := buildBFFDepsFromPool(pool, logger)
+	if err != nil {
+		return err
+	}
+	logger.Info("BFF DB-backed dependencies wired",
+		"secret_loader_wired", deps.secretLoader != nil,
+		"grant_store_wired", deps.grantStore != nil,
+	)
+
+	// Fail-closed startup guard: production deployments MUST have the complete
+	// BFF flow wired (LOGIN_URL + DATABASE_URL + REDIS_URL) or we refuse to
+	// start. Without all three, /authorize would either skip the login redirect
+	// entirely or fall back to the insecure demo-user stub resolver — both are
+	// total auth bypasses (audit blocker 1.1). The HARBOR_DEV_MODE escape hatch
+	// allows local dev and e2e tests to run without the full stack.
+	if err := validateProductionReadiness(bffCfg, deps, logger); err != nil {
+		return err
+	}
+
+	issuer := envString("ISSUER", "https://harbor.local")
+
+	// Bind the issuer host to a region so the region middleware resolves it.
+	// In production, the issuer is region-specific (e.g. https://eu.harbor.id);
+	// in dev, REGION env var overrides to allow localhost testing.
+	if reg := envString("REGION", ""); reg != "" {
+		if err := region.BindIssuerHost(issuer, region.Region(reg)); err != nil {
+			return err
+		}
+	}
+
 	// Wire the OIDC service with scaffold implementations for dev/test.
 	// In production, these are replaced with DB-backed implementations.
 	clientRegistry := oidc.NewInMemoryClientRegistry()
@@ -126,12 +167,24 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// production this is a DB-backed clients.DBGrantStore.
 	grantStore := oidc.NewInMemoryGrantStore()
 
+	// Session resolver: the real PPIDSessionResolver when the DB-backed deps are
+	// wired (production), else the demo-user stub in dev mode. The real resolver
+	// reads the authenticated user from the BFF session context (bff.BFFAuthSource
+	// — never a client-supplied value), loads + decrypts that user's pairwise
+	// secret, and derives a per-RP PPID while recording consent. This closes the
+	// auth bypass (audit blocker 1.1): /authorize can no longer mint tokens for a
+	// fixed demo user.
+	sessions, err := newSessionResolver(deps, logger)
+	if err != nil {
+		return err
+	}
+
 	oidcSvc := oidc.NewService(oidc.ServiceConfig{
 		Issuer:   issuer,
 		Clients:  clientRegistry,
 		Codes:    oidc.NewInMemoryAuthCodeStore(),
 		Tokens:   tokenIssuer,
-		Sessions: oidc.NewStubSessionResolver("demo-user-ppid"),
+		Sessions: sessions,
 		Logger:   logger,
 	})
 
@@ -143,7 +196,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	var logoutVerifier oidcapi.LogoutVerifier
 	sessionRevoker := noopSessionRevoker{}
 
-	srv := oidcapi.New(oidcapi.Config{
+	apiCfg := oidcapi.Config{
 		Issuer:         issuer,
 		Service:        oidcSvc,
 		Signers:        signers,
@@ -152,23 +205,42 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		Grants:         grantStore,
 		Clients:        clientRegistry,
 		SessionRevoker: sessionRevoker,
-	})
+	}
+
+	// Wire the BFF login flow when LOGIN_URL is configured: /authorize then
+	// creates a BFF session and redirects to the login UI instead of issuing a
+	// code for the demo user (audit blocker 1.1, auth bypass). The session store
+	// shares the "bff_session:" Redis namespace with harbor-mgmt, so a login
+	// completed on the cold path is visible to /authorize here. When LOGIN_URL is
+	// unset (dev/e2e) the BFF flow stays off and /authorize keeps its current
+	// direct-issuance behavior.
+	if bffCfg.LoginURL != "" {
+		apiCfg.BFFSessions = newBFFSessionStore(redisClient, bffCfg.SessionTTL, logger)
+		apiCfg.LoginURL = bffCfg.LoginURL
+		apiCfg.BFFSessionTTL = bffCfg.SessionTTL
+		logger.Info("BFF login flow enabled",
+			"bff_session_store_redis", redisClient != nil,
+			"bff_session_ttl", bffCfg.SessionTTL.String(),
+		)
+	} else {
+		logger.Warn("LOGIN_URL not set — BFF login flow disabled; /authorize will not redirect to login (dev only)")
+	}
+
+	srv := oidcapi.New(apiCfg)
+
+	// Register custom endpoints not in the OpenAPI spec on the mux before
+	// passing to HandlerFromMux so they are part of the same routing tree:
+	//   /authorize/complete — resumes the OIDC flow after passkey login
+	//   /logged-out         — browser-facing post-logout landing page
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /authorize/complete", srv.GetAuthorizeComplete)
+	mux.HandleFunc("GET /logged-out", srv.GetLoggedOut)
 
 	// Wrap the spec-generated router with per-endpoint rate limiting. Only the
 	// hot-path endpoints listed here are guarded; /healthz, /jwks.json and
 	// discovery pass through untouched.
-	base := openapi.Handler(srv)
-
-	// The /logged-out page is the default post-logout destination for
-	// RP-Initiated Logout. It is NOT part of the OpenAPI contract (it is a
-	// browser-facing static page, not an API), so it is registered manually here
-	// rather than by the generated router. Requests that don't match /logged-out
-	// fall through to the generated OIDC surface.
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /logged-out", srv.GetLoggedOut)
-	mux.Handle("/", base)
-
-	handler := oidcapi.WithRateLimits(mux, buildRateLimits(redisClient, logger))
+	base := openapi.HandlerFromMux(srv, mux)
+	handler := oidcapi.WithRateLimits(base, buildRateLimits(redisClient, logger))
 
 	// Support both ADDR (full address) and PORT (port-only, for docker-compose).
 	addr := envString("ADDR", "")
@@ -228,6 +300,202 @@ func buildSigningStack(ctx context.Context, pool *pgxpool.Pool, logger *slog.Log
 		WithPrivateKeyWrapper(clients.NewPrivateKeyWrapper(kp, reg))
 
 	return issuer, signers, rotator, nil
+}
+
+// bffDeps bundles the DB-backed dependencies the PPIDSessionResolver needs to
+// replace the insecure demo-user stub resolver (docs/DESIGN.md §9, audit
+// blocker 1.1). They are constructed once at startup so a later task can wire
+// the real resolver without re-plumbing DB access. When pool is nil (no
+// DATABASE_URL) every field is nil and the caller falls back to dev mode.
+type bffDeps struct {
+	// secretLoader decrypts a user's pairwise secret for PPID derivation.
+	secretLoader *clients.DBSecretLoader
+	// grantStore reads and writes consent grants (the pairwise_sub an RP sees).
+	grantStore *clients.DBGrantStore
+}
+
+// buildBFFDepsFromPool constructs the BFF session resolver dependencies from an
+// already-opened DB pool. The caller (run) manages the pool lifecycle; this
+// function does not open or close it. When pool is nil (DATABASE_URL unset), it
+// returns zero-value deps — the dev path where HARBOR_DEV_MODE skips the
+// readiness guard and newSessionResolver falls back to StubSessionResolver.
+//
+// A configured pool REQUIRES HARBOR_KMS_SECRET: the secret loader unwraps DEKs
+// that harbor-mgmt's enrollment sealed under that same KMS secret, so the two
+// binaries MUST derive the regional KEK identically or every unwrap fails. A
+// missing secret against a real DB is therefore fatal — falling back to a
+// hardcoded dev key would let anyone with the source re-derive every enrolled
+// user's pairwise secret.
+func buildBFFDepsFromPool(pool *pgxpool.Pool, logger *slog.Logger) (bffDeps, error) {
+	if pool == nil {
+		logger.Warn("DATABASE_URL not set — BFF session resolver deps unavailable (dev only; session resolver will use stub)")
+		return bffDeps{}, nil
+	}
+
+	kmsSecret := os.Getenv("HARBOR_KMS_SECRET")
+	if kmsSecret == "" {
+		return bffDeps{}, fmt.Errorf("HARBOR_KMS_SECRET must be set when DATABASE_URL is configured — refusing to unwrap user secrets with a dev key against a real DB")
+	}
+	keys, err := crypto.NewLocalKeyProvider(kmsSecret)
+	if err != nil {
+		return bffDeps{}, fmt.Errorf("create BFF key provider: %w", err)
+	}
+
+	q := gendb.New(pool)
+	return bffDeps{
+		secretLoader: clients.NewDBSecretLoader(q, keys, crypto.NewCipher()),
+		grantStore:   clients.NewDBGrantStore(q),
+	}, nil
+}
+
+// newBFFSessionStore returns the BFF session store the hot-path /authorize flow
+// reads to find the user a login ceremony authenticated. It shares the
+// "bff_session:" Redis namespace with harbor-mgmt's writer so a login completed
+// on the cold path is visible here (docs/plans/bff-session-middleware.md).
+// Redis-backed for multi-replica safety when REDIS_URL is set, otherwise an
+// in-memory dev scaffold (single-replica only; not shared across replicas).
+func newBFFSessionStore(redisClient *redis.Client, ttl time.Duration, logger *slog.Logger) bff.BFFSessionStore {
+	if redisClient != nil {
+		return bff.NewRedisBFFSessionStore(redisClient, ttl)
+	}
+	logger.Warn("REDIS_URL not set — using in-memory BFF session store (dev only; not shared across replicas)")
+	return bff.NewInMemoryBFFSessionStore()
+}
+
+// newSessionResolver returns the SessionResolver the OIDC /authorize flow uses
+// to resolve the authenticated user into a per-RP pairwise subject (PPID).
+//
+// When the DB-backed deps are wired (DATABASE_URL + HARBOR_KMS_SECRET set), it
+// returns the real oidc.PPIDSessionResolver: it reads the signed-in user from
+// the BFF session context (bff.BFFAuthSource — never a client-supplied value),
+// loads + decrypts that user's pairwise secret, and derives a stable,
+// non-correlating sub while recording consent (docs/DESIGN.md §3.2, §11.2).
+// This is what closes the auth bypass (audit blocker 1.1): /authorize can no
+// longer issue tokens for a fixed demo user.
+//
+// When DATABASE_URL is unset (dev/e2e with HARBOR_DEV_MODE=1), it falls back to
+// the demo-user stub so local runs keep working. The fail-closed startup guard
+// (validateProductionReadiness) ensures the stub is never served in production.
+func newSessionResolver(deps bffDeps, logger *slog.Logger) (oidc.SessionResolver, error) {
+	if deps.secretLoader == nil || deps.grantStore == nil {
+		if envBool("HARBOR_DEV_MODE") {
+			logger.Warn("DATABASE_URL not set — using StubSessionResolver (dev only; auth bypass accepted)")
+			return oidc.NewStubSessionResolver("demo-user-ppid"), nil
+		}
+		return nil, fmt.Errorf("session resolver requires DATABASE_URL + HARBOR_KMS_SECRET — set HARBOR_DEV_MODE=1 to bypass (dev/e2e only)")
+	}
+	logger.Info("session resolver: using PPIDSessionResolver (BFF-authenticated, DB-backed)")
+	return oidc.NewPPIDSessionResolver(oidc.PPIDSessionResolverConfig{
+		Auth:   bff.NewBFFAuthSource(),
+		Loader: deps.secretLoader,
+		Grants: deps.grantStore,
+	}), nil
+}
+
+// validateProductionReadiness enforces the fail-closed startup guard: in
+// production (HARBOR_DEV_MODE not set), the complete BFF auth flow must be
+// wired — LOGIN_URL for the redirect, DATABASE_URL for the PPIDSessionResolver
+// deps, and implicitly REDIS_URL for the shared BFF session store. Without all
+// three, /authorize would silently degrade to the insecure demo-user stub or
+// skip the login redirect, both of which are total auth bypasses.
+//
+// Dev and e2e runs set HARBOR_DEV_MODE=1 to bypass this guard; they accept the
+// security trade-off of running without a real identity backend.
+func validateProductionReadiness(cfg bffConfig, deps bffDeps, logger *slog.Logger) error {
+	if envBool("HARBOR_DEV_MODE") {
+		logger.Warn("HARBOR_DEV_MODE enabled — skipping production readiness checks (NEVER use in production)")
+		return nil
+	}
+
+	var missing []string
+	if cfg.LoginURL == "" {
+		missing = append(missing, "LOGIN_URL")
+	}
+	if os.Getenv("REDIS_URL") == "" {
+		missing = append(missing, "REDIS_URL (required for shared BFF session store)")
+	}
+	if cfg.DatabaseURL == "" {
+		missing = append(missing, "DATABASE_URL")
+	}
+	if deps.secretLoader == nil {
+		missing = append(missing, "secret_loader (requires DATABASE_URL + HARBOR_KMS_SECRET)")
+	}
+	if deps.grantStore == nil {
+		missing = append(missing, "grant_store (requires DATABASE_URL)")
+	}
+
+	if len(missing) > 0 {
+		return fmt.Errorf("production startup guard failed: missing required BFF dependencies %v — set HARBOR_DEV_MODE=1 to bypass (dev/e2e only)", missing)
+	}
+
+	logger.Info("production readiness check passed",
+		"login_url_set", true,
+		"redis_url_set", true,
+		"secret_loader_wired", true,
+		"grant_store_wired", true,
+	)
+	return nil
+}
+
+// defaultBFFSessionTTL mirrors the harbor-mgmt BFF session writer default
+// (docs/plans/bff-session-middleware.md — 5 min, matching the PKCE state
+// lifetime). Kept in sync so the hot-path reader and cold-path writer agree on
+// how long a BFF session is valid.
+const defaultBFFSessionTTL = 5 * time.Minute
+
+// bffConfig holds the environment-derived configuration for the BFF session
+// dependencies that the hot-path /authorize flow consumes (docs/DESIGN.md §9).
+// It is parsed and validated at startup so a misconfiguration fails loudly
+// instead of silently degrading to the insecure demo-user stub resolver.
+type bffConfig struct {
+	// LoginURL is the absolute URL of the harbor-mgmt BFF /login endpoint that
+	// /authorize redirects unauthenticated users to. Empty in dev (no redirect).
+	LoginURL string
+	// DatabaseURL is the Postgres DSN backing the PPID session resolver. Empty
+	// falls back to the in-memory dev scaffold (mirrors clients.ConnectDB).
+	DatabaseURL string
+	// SessionTTL is the lifetime of a BFF session record. It must match the
+	// harbor-mgmt writer (docs/plans/bff-session-middleware.md — 5 min).
+	SessionTTL time.Duration
+}
+
+// loadBFFConfig reads the BFF dependency configuration from the environment and
+// validates it. It performs no I/O — connecting the session store and resolver
+// happens later; this only captures and checks the inputs so startup can fail
+// fast on a bad config.
+func loadBFFConfig() (bffConfig, error) {
+	cfg := bffConfig{
+		LoginURL:    os.Getenv("LOGIN_URL"),
+		DatabaseURL: os.Getenv("DATABASE_URL"),
+		SessionTTL:  envDuration("BFF_SESSION_TTL", defaultBFFSessionTTL),
+	}
+	if err := cfg.validate(); err != nil {
+		return bffConfig{}, err
+	}
+	return cfg, nil
+}
+
+// validate rejects a BFF config that would misbehave at runtime. LOGIN_URL,
+// when set, must be an absolute http(s) URL with a host — a relative or
+// scheme-less value would produce a broken redirect. SessionTTL must be
+// positive so sessions actually persist.
+func (c bffConfig) validate() error {
+	if c.LoginURL != "" {
+		u, err := url.Parse(c.LoginURL)
+		if err != nil {
+			return fmt.Errorf("invalid LOGIN_URL %q: %w", c.LoginURL, err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("invalid LOGIN_URL %q: must be an absolute http(s) URL", c.LoginURL)
+		}
+		if u.Host == "" {
+			return fmt.Errorf("invalid LOGIN_URL %q: missing host", c.LoginURL)
+		}
+	}
+	if c.SessionTTL <= 0 {
+		return fmt.Errorf("invalid BFF_SESSION_TTL: must be positive, got %s", c.SessionTTL)
+	}
+	return nil
 }
 
 // endpointLimitSpec describes the tunable rate limit for one hot-path endpoint:

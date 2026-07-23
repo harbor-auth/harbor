@@ -27,6 +27,11 @@ services:
       # region at boot so the fail-closed region middleware resolves /authorize
       # and /token instead of 400-rejecting them (region.BindIssuerHost).
       REGION: "EU"
+      # Dev mode bypasses the fail-closed startup guard (validateProductionReadiness)
+      # so the flow can run without DATABASE_URL/REDIS_URL/LOGIN_URL. Note: with
+      # the stub resolver removed, DATABASE_URL is still required for the session
+      # resolver — until e2e is upgraded to wire a test DB, this stack is broken.
+      HARBOR_DEV_MODE: "1"
     ports:
       - "8080:8080"
     volumes:
