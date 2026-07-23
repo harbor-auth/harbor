@@ -244,7 +244,10 @@ func (s *Server) GetAuthorizeComplete(w http.ResponseWriter, r *http.Request) {
 	// it, the resolver cannot derive the per-RP PPID (audit blocker 1.1 fix).
 	ctx := bff.ContextWithUserID(r.Context(), session.UserID)
 
-	// Issue the authorization code using the authenticated user_id
+	// Issue the authorization code using the authenticated user_id.
+	// AuthMethod flows from the BFF session (set by FinishLoginWithParsedData or
+	// RecordTOTPStepUp) into MapAuthMethodToACRAMR, which is fail-closed: an
+	// unknown or zero-value method emits no ACR/AMR claims rather than a lie.
 	result, aerr := s.svc.AuthorizeWithUser(ctx, oidc.AuthorizeWithUserRequest{
 		ClientID:            session.ClientID,
 		RedirectURI:         session.RedirectURI,
@@ -254,6 +257,7 @@ func (s *Server) GetAuthorizeComplete(w http.ResponseWriter, r *http.Request) {
 		CodeChallenge:       session.CodeChallenge,
 		CodeChallengeMethod: session.CodeChallengeMethod,
 		UserID:              session.UserID,
+		AuthMethod:          session.AuthMethod,
 	})
 	if aerr != nil {
 		recordError(telemetry.EndpointAuthorize, aerr.Code)

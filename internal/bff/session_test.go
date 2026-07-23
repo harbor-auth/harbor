@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/harbor-auth/harbor/internal/oidc"
 )
 
 func TestInMemoryBFFSessionStore_CreateAndGet(t *testing.T) {
@@ -263,6 +265,64 @@ func TestInMemoryBFFSessionStore_SetUserWithRecoveryStatus_NotFound(t *testing.T
 	err := store.SetUserWithRecoveryStatus(ctx, "nonexistent", "user-456", true)
 	if !errors.Is(err, ErrBFFSessionNotFound) {
 		t.Errorf("SetUserWithRecoveryStatus(nonexistent) = %v, want ErrBFFSessionNotFound", err)
+	}
+}
+
+func TestInMemoryBFFSessionStore_SetAuthMethod(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+
+	record := BFFSessionRecord{
+		RequestID: "req-123",
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+
+	if err := store.Create(ctx, record); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	if err := store.SetAuthMethod(ctx, "req-123", oidc.AuthMethodWebAuthn); err != nil {
+		t.Fatalf("SetAuthMethod failed: %v", err)
+	}
+
+	got, err := store.Get(ctx, "req-123")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if got.AuthMethod != oidc.AuthMethodWebAuthn {
+		t.Errorf("AuthMethod = %q, want %q", got.AuthMethod, oidc.AuthMethodWebAuthn)
+	}
+}
+
+func TestInMemoryBFFSessionStore_SetAuthMethod_NotFound(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+
+	err := store.SetAuthMethod(ctx, "nonexistent", oidc.AuthMethodWebAuthn)
+	if !errors.Is(err, ErrBFFSessionNotFound) {
+		t.Errorf("SetAuthMethod(nonexistent) = %v, want ErrBFFSessionNotFound", err)
+	}
+}
+
+func TestInMemoryBFFSessionStore_SetAuthMethod_Expired(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+
+	pastTime := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	store.now = func() time.Time { return pastTime }
+
+	record := BFFSessionRecord{
+		RequestID: "req-123",
+		ExpiresAt: pastTime.Add(-1 * time.Minute),
+	}
+
+	if err := store.Create(ctx, record); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	err := store.SetAuthMethod(ctx, "req-123", oidc.AuthMethodWebAuthn)
+	if !errors.Is(err, ErrBFFSessionExpired) {
+		t.Errorf("SetAuthMethod(expired) = %v, want ErrBFFSessionExpired", err)
 	}
 }
 

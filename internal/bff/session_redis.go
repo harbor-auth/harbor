@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/harbor-auth/harbor/internal/oidc"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -136,6 +137,31 @@ end
 return 1
 `)
 
+// setAuthMethodScript is a Lua script for atomic get-modify-set of the
+// AuthMethod field, preserving the remaining TTL.
+// It returns:
+//   - 0 if the session was not found
+//   - 1 if the field was set successfully
+//
+// KEYS[1] = session key
+// ARGV[1] = AuthMethod string value
+var setAuthMethodScript = redis.NewScript(`
+local data = redis.call('GET', KEYS[1])
+if not data then
+    return 0
+end
+
+local record = cjson.decode(data)
+record.AuthMethod = ARGV[1]
+local ttl = redis.call('TTL', KEYS[1])
+if ttl > 0 then
+    redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
+else
+    redis.call('SET', KEYS[1], cjson.encode(record))
+end
+return 1
+`)
+
 // setMFAVerifiedScript is a Lua script for atomic get-modify-set of the
 // MFAVerifiedAt field, preserving the remaining TTL.
 // It returns:
@@ -215,6 +241,24 @@ func (s *RedisBFFSessionStore) SetMFAVerified(ctx context.Context, requestID str
 	).Int()
 	if err != nil {
 		return fmt.Errorf("redis setmfaverified script: %w", err)
+	}
+
+	if result == 0 {
+		return ErrBFFSessionNotFound
+	}
+	return nil
+}
+
+// SetAuthMethod implements BFFSessionStore. It atomically records the
+// authentication method used during the login ceremony, preserving the
+// remaining TTL.
+func (s *RedisBFFSessionStore) SetAuthMethod(ctx context.Context, requestID string, method oidc.AuthMethod) error {
+	result, err := setAuthMethodScript.Run(ctx, s.client,
+		[]string{sessionKey(requestID)},
+		string(method),
+	).Int()
+	if err != nil {
+		return fmt.Errorf("redis setauthmethod script: %w", err)
 	}
 
 	if result == 0 {

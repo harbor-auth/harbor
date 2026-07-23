@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/harbor-auth/harbor/internal/oidc"
 )
 
 // fixedNow returns a clock function pinned to t, for deterministic TTL tests.
@@ -268,6 +270,48 @@ func TestInMemoryBFFSessionStore_SetMFAVerified_Expired(t *testing.T) {
 	err := store.SetMFAVerified(ctx, "req-123", pastTime)
 	if !errors.Is(err, ErrBFFSessionExpired) {
 		t.Errorf("SetMFAVerified(expired) = %v, want ErrBFFSessionExpired", err)
+	}
+}
+
+// TestRecordTOTPStepUp verifies that RecordTOTPStepUp stamps both MFAVerifiedAt
+// (so the StepUpGate allows the session through) and AuthMethod=TOTP (so the
+// correct ACR/AMR claims are emitted in the issued token).
+func TestRecordTOTPStepUp(t *testing.T) {
+	now := time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
+	store := NewInMemoryBFFSessionStore()
+	store.now = fixedNow(now)
+	ctx := context.Background()
+
+	const requestID = "req-totp"
+	if err := store.Create(ctx, BFFSessionRecord{
+		RequestID: requestID,
+		UserID:    "user-1",
+		ExpiresAt: now.Add(1 * time.Hour),
+	}); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	if err := RecordTOTPStepUp(ctx, store, requestID, now); err != nil {
+		t.Fatalf("RecordTOTPStepUp failed: %v", err)
+	}
+
+	got, err := store.Get(ctx, requestID)
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if !got.MFAVerifiedAt.Equal(now) {
+		t.Errorf("MFAVerifiedAt = %v, want %v", got.MFAVerifiedAt, now)
+	}
+	if got.AuthMethod != oidc.AuthMethodTOTP {
+		t.Errorf("AuthMethod = %q, want %q", got.AuthMethod, oidc.AuthMethodTOTP)
+	}
+}
+
+func TestRecordTOTPStepUp_SessionNotFound(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	err := RecordTOTPStepUp(context.Background(), store, "nonexistent", time.Now())
+	if !errors.Is(err, ErrBFFSessionNotFound) {
+		t.Errorf("RecordTOTPStepUp(nonexistent) = %v, want ErrBFFSessionNotFound", err)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/harbor-auth/harbor/internal/oidc"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -202,6 +203,74 @@ func TestRedisBFFSessionStore_SetUserPreservesTTL(t *testing.T) {
 	}
 	if got.UserID != "user-456" {
 		t.Errorf("UserID = %q, want %q", got.UserID, "user-456")
+	}
+}
+
+func TestRedisBFFSessionStore_SetAuthMethod(t *testing.T) {
+	store, _ := newTestRedisStore(t)
+	ctx := context.Background()
+
+	record := BFFSessionRecord{
+		RequestID: "req-123",
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+
+	if err := store.Create(ctx, record); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	if err := store.SetAuthMethod(ctx, "req-123", oidc.AuthMethodWebAuthn); err != nil {
+		t.Fatalf("SetAuthMethod failed: %v", err)
+	}
+
+	got, err := store.Get(ctx, "req-123")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if got.AuthMethod != oidc.AuthMethodWebAuthn {
+		t.Errorf("AuthMethod = %q, want %q", got.AuthMethod, oidc.AuthMethodWebAuthn)
+	}
+}
+
+func TestRedisBFFSessionStore_SetAuthMethod_NotFound(t *testing.T) {
+	store, _ := newTestRedisStore(t)
+	ctx := context.Background()
+
+	err := store.SetAuthMethod(ctx, "nonexistent", oidc.AuthMethodWebAuthn)
+	if !errors.Is(err, ErrBFFSessionNotFound) {
+		t.Errorf("SetAuthMethod(nonexistent) = %v, want ErrBFFSessionNotFound", err)
+	}
+}
+
+func TestRedisBFFSessionStore_SetAuthMethod_PreservesTTL(t *testing.T) {
+	store, mr := newTestRedisStore(t)
+	ctx := context.Background()
+
+	record := BFFSessionRecord{
+		RequestID: "req-123",
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+
+	if err := store.Create(ctx, record); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	// Fast-forward 2 minutes, then set auth method.
+	mr.FastForward(2 * time.Minute)
+
+	if err := store.SetAuthMethod(ctx, "req-123", oidc.AuthMethodTOTP); err != nil {
+		t.Fatalf("SetAuthMethod failed: %v", err)
+	}
+
+	// Fast-forward another 2 minutes (total 4 min, still within original 5 min TTL).
+	mr.FastForward(2 * time.Minute)
+
+	got, err := store.Get(ctx, "req-123")
+	if err != nil {
+		t.Fatalf("Get failed after SetAuthMethod: %v", err)
+	}
+	if got.AuthMethod != oidc.AuthMethodTOTP {
+		t.Errorf("AuthMethod = %q, want %q", got.AuthMethod, oidc.AuthMethodTOTP)
 	}
 }
 

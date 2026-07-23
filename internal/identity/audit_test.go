@@ -124,7 +124,10 @@ func TestAuditRecordPayloadEncrypted(t *testing.T) {
 		t.Fatalf("expected 1 inserted row, got %d", len(s.store.params))
 	}
 
-	plainJSON, _ := json.Marshal(d)
+	plainJSON, err := json.Marshal(d)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
 	ciphertext := s.store.params[0].PayloadEncrypted
 
 	// Stored bytes must NOT equal the raw JSON.

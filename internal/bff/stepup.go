@@ -1,8 +1,11 @@
 package bff
 
 import (
+	"context"
 	"net/http"
 	"time"
+
+	"github.com/harbor-auth/harbor/internal/oidc"
 )
 
 // DefaultStepUpTTL is how long a step-up (MFA) verification stays valid before
@@ -68,6 +71,22 @@ func (g *StepUpGate) verified(session BFFSessionRecord) bool {
 		return false
 	}
 	return g.now().Sub(session.MFAVerifiedAt) < g.ttl
+}
+
+// RecordTOTPStepUp records a successful TOTP step-up in the BFF session in two
+// steps: SetMFAVerified (stamps the gate TTL window) then SetAuthMethod (upgrades
+// the ACR/AMR to webauthn+totp). Both writes are required for the step-up to be
+// reflected in the issued tokens; if SetAuthMethod fails the session retains the
+// MFA stamp but reverts to WebAuthn-only ACR/AMR (fail-closed on claims).
+//
+// This is the intended call site for the deferred BFF TOTP step-up HTTP handler.
+// Until that handler is wired, this helper documents the contract and provides a
+// testable unit for the ACR/AMR integration tests.
+func RecordTOTPStepUp(ctx context.Context, store BFFSessionStore, requestID string, verifiedAt time.Time) error {
+	if err := store.SetMFAVerified(ctx, requestID, verifiedAt); err != nil {
+		return err
+	}
+	return store.SetAuthMethod(ctx, requestID, oidc.AuthMethodTOTP)
 }
 
 // deny writes the uniform step-up-required response. The distinct error code

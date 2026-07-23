@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/harbor-auth/harbor/internal/oidc"
 )
 
 // Sentinel errors from the BFF session store. Handlers map these to HTTP status
@@ -78,6 +80,12 @@ type BFFSessionRecord struct {
 	// setup before normal use. When true, the session scope is enrollment-only.
 	RecoveryRequired bool
 
+	// AuthMethod is the authentication method used during the login ceremony.
+	// It is set by FinishLoginWithParsedData (passkey) or the TOTP/recovery-code
+	// step-up handler. The zero value (empty string) means the method is unknown;
+	// MapAuthMethodToACRAMR will fail-closed and omit ACR/AMR claims.
+	AuthMethod oidc.AuthMethod
+
 	// MFAVerifiedAt is the absolute time of the session's most recent successful
 	// step-up (MFA) verification. The zero value means the session has never
 	// passed a step-up challenge. The step-up gate treats a verification as
@@ -124,6 +132,11 @@ type BFFSessionStore interface {
 	// decide whether a fresh challenge is required. Returns ErrBFFSessionNotFound
 	// if the session does not exist.
 	SetMFAVerified(ctx context.Context, requestID string, verifiedAt time.Time) error
+
+	// SetAuthMethod records the authentication method used during the login
+	// ceremony. This is used to emit the correct ACR/AMR claims in the issued
+	// tokens. Returns ErrBFFSessionNotFound if the session does not exist.
+	SetAuthMethod(ctx context.Context, requestID string, method oidc.AuthMethod) error
 
 	// Delete removes the session record. This is called after the auth code is
 	// issued (one-time use). A no-op if the session does not exist.
@@ -229,6 +242,23 @@ func (s *InMemoryBFFSessionStore) SetMFAVerified(_ context.Context, requestID st
 		return ErrBFFSessionExpired
 	}
 	record.MFAVerifiedAt = verifiedAt
+	s.sessions[requestID] = record
+	return nil
+}
+
+// SetAuthMethod implements BFFSessionStore.
+func (s *InMemoryBFFSessionStore) SetAuthMethod(_ context.Context, requestID string, method oidc.AuthMethod) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.sessions[requestID]
+	if !ok {
+		return ErrBFFSessionNotFound
+	}
+	if s.now().After(record.ExpiresAt) {
+		delete(s.sessions, requestID)
+		return ErrBFFSessionExpired
+	}
+	record.AuthMethod = method
 	s.sessions[requestID] = record
 	return nil
 }
