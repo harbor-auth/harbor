@@ -128,12 +128,23 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
 	})
 
+	// Session resolver: the real PPIDSessionResolver when the DB-backed deps are
+	// wired (production), else the dev stub. The real resolver reads the
+	// authenticated user from the BFF session context (bff.BFFAuthSource — never a
+	// client-supplied value), loads + decrypts that user's pairwise secret, and
+	// derives a per-RP PPID while recording consent. This is the seam that closes
+	// the auth bypass (audit blocker 1.1): /authorize can no longer mint tokens
+	// for a fixed demo user. The stub is retained ONLY for dev/e2e (no
+	// DATABASE_URL); a fail-closed startup guard rejecting it in production lands
+	// in a later task.
+	sessions := newSessionResolver(deps, logger)
+
 	oidcSvc := oidc.NewService(oidc.ServiceConfig{
 		Issuer:   issuer,
 		Clients:  clientRegistry,
 		Codes:    oidc.NewInMemoryAuthCodeStore(),
 		Tokens:   oidc.NewPlaceholderIssuer(),
-		Sessions: oidc.NewStubSessionResolver("demo-user-ppid"),
+		Sessions: sessions,
 		Logger:   logger,
 	})
 
@@ -382,6 +393,38 @@ func newBFFSessionStore(redisClient *redis.Client, ttl time.Duration, logger *sl
 	}
 	logger.Warn("REDIS_URL not set — using in-memory BFF session store (dev only; not shared across replicas)")
 	return bff.NewInMemoryBFFSessionStore()
+}
+
+// newSessionResolver returns the SessionResolver the OIDC /authorize flow uses
+// to resolve the authenticated user into a per-RP pairwise subject (PPID).
+//
+// When the DB-backed deps are wired (DATABASE_URL set), it returns the real
+// oidc.PPIDSessionResolver: it reads the signed-in user from the BFF session
+// context (bff.BFFAuthSource — never a client-supplied value), loads + decrypts
+// that user's pairwise secret, and derives a stable, non-correlating sub while
+// recording consent (docs/DESIGN.md §3.2, §11.2). This is what closes the auth
+// bypass (audit blocker 1.1): /authorize can no longer issue tokens for a fixed
+// demo user.
+//
+// When DATABASE_URL is unset (dev/e2e), it falls back to the demo-user stub so
+// local runs keep working. A fail-closed startup guard that refuses to serve
+// with the stub in production lands in a later task.
+//
+// The deps.secretLoader/deps.grantStore nil check gates on the CONCRETE pointer
+// (both are set together only when the pool is opened), avoiding the typed-nil
+// interface pitfall — a nil *DBSecretLoader wrapped in a non-nil
+// oidc.UserSecretLoader would pass an `!= nil` interface check yet panic on use.
+func newSessionResolver(deps bffDeps, logger *slog.Logger) oidc.SessionResolver {
+	if deps.secretLoader != nil && deps.grantStore != nil {
+		logger.Info("session resolver: using PPIDSessionResolver (BFF-authenticated, DB-backed)")
+		return oidc.NewPPIDSessionResolver(oidc.PPIDSessionResolverConfig{
+			Auth:   bff.NewBFFAuthSource(),
+			Loader: deps.secretLoader,
+			Grants: deps.grantStore,
+		})
+	}
+	logger.Warn("DATABASE_URL not set — using demo-user stub session resolver (dev only; NEVER use in production)")
+	return oidc.NewStubSessionResolver("demo-user-ppid")
 }
 
 // --- tiny env helpers (no external config dependency) ---
