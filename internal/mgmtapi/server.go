@@ -299,6 +299,8 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /mfa/verify-recovery", s.PostMFAVerifyRecovery)
 	mux.HandleFunc("GET /mfa/factors", s.GetMFAFactors)
 	mux.HandleFunc("DELETE /mfa/factors/{id}", s.DeleteMFAFactor)
+	mux.HandleFunc("POST /compliance/export", s.PostExport)
+	mux.HandleFunc("POST /compliance/erase", s.PostErase)
 }
 
 // errorResponse is the JSON error envelope for the cold-path API. Messages are
