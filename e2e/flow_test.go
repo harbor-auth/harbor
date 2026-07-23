@@ -593,6 +593,141 @@ func TestJWKSSignatureVerification(t *testing.T) {
 	}
 }
 
+// TestJWKSSignatureTamperDetection is the negative companion to
+// TestJWKSSignatureVerification: it mutates a single byte in the id_token
+// payload and asserts that ecdsa.Verify returns false. This confirms that the
+// verification logic actually catches forged/corrupted tokens and is not a no-op
+// that always returns true.
+//
+//harbor:invariant INV-JWKS-KID-MATCH
+func TestJWKSSignatureTamperDetection(t *testing.T) {
+	// Obtain a real id_token via the full PKCE flow.
+	verifier, challenge := pkcePair(t)
+	authResp := authorize(t, demoRedirectURI, challenge, "state-tamper")
+	defer authResp.Body.Close()
+	if authResp.StatusCode != http.StatusFound {
+		t.Skipf("authorize returned %d (not 302) — auto-approval not wired; skipping tamper test", authResp.StatusCode)
+	}
+	code := codeFromLocation(t, authResp)
+	if code == "" {
+		t.Skip("no code from authorize; cannot run tamper test")
+	}
+	tokenResp := postToken(t, code, verifier, demoRedirectURI)
+	defer tokenResp.Body.Close()
+	if tokenResp.StatusCode != http.StatusOK {
+		body, readErr := io.ReadAll(tokenResp.Body)
+		if readErr != nil {
+			t.Fatalf("POST %s = %d, want 200 (body read error: %v)", tokenPath, tokenResp.StatusCode, readErr)
+		}
+		t.Fatalf("POST %s = %d, want 200\n%s", tokenPath, tokenResp.StatusCode, body)
+	}
+	body, err := io.ReadAll(tokenResp.Body)
+	if err != nil {
+		t.Fatalf("read token response: %v", err)
+	}
+	var tok struct {
+		IDToken string `json:"id_token"`
+	}
+	if err := json.Unmarshal(body, &tok); err != nil {
+		t.Fatalf("unmarshal token response: %v — body: %s", err, body)
+	}
+	if tok.IDToken == "" {
+		t.Fatalf("token response missing id_token: %s", body)
+	}
+
+	// Parse the id_token into header / payload / signature parts.
+	parts := strings.Split(tok.IDToken, ".")
+	if len(parts) != 3 {
+		t.Fatalf("id_token is not a 3-part compact JWT (got %d parts)", len(parts))
+	}
+
+	// Decode the header to find the kid and verify alg.
+	hdrBytes, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		t.Fatalf("decode id_token header: %v", err)
+	}
+	var hdr struct {
+		Alg string `json:"alg"`
+		Kid string `json:"kid"`
+	}
+	if err := json.Unmarshal(hdrBytes, &hdr); err != nil {
+		t.Fatalf("unmarshal id_token header: %v", err)
+	}
+	if hdr.Alg != "ES256" {
+		t.Fatalf("alg = %q, want ES256", hdr.Alg)
+	}
+
+	// Fetch JWKS and reconstruct the public key.
+	jwksResp, err := http.Get(baseURL() + "/jwks.json")
+	if err != nil {
+		t.Fatalf("GET /jwks.json: %v", err)
+	}
+	defer jwksResp.Body.Close()
+	var jwks struct {
+		Keys []struct {
+			Kid string `json:"kid"`
+			X   string `json:"x"`
+			Y   string `json:"y"`
+		} `json:"keys"`
+	}
+	if err := json.NewDecoder(jwksResp.Body).Decode(&jwks); err != nil {
+		t.Fatalf("decode JWKS: %v", err)
+	}
+	var xStr, yStr string
+	for _, k := range jwks.Keys {
+		if k.Kid == hdr.Kid {
+			xStr, yStr = k.X, k.Y
+			break
+		}
+	}
+	if xStr == "" {
+		t.Fatalf("kid %q not found in JWKS", hdr.Kid)
+	}
+	xBytes, err := base64.RawURLEncoding.DecodeString(xStr)
+	if err != nil {
+		t.Fatalf("decode JWK x: %v", err)
+	}
+	yBytes, err := base64.RawURLEncoding.DecodeString(yStr)
+	if err != nil {
+		t.Fatalf("decode JWK y: %v", err)
+	}
+	pub := &ecdsa.PublicKey{
+		Curve: elliptic.P256(),
+		X:     new(big.Int).SetBytes(xBytes),
+		Y:     new(big.Int).SetBytes(yBytes),
+	}
+
+	// Decode the signature (unchanged — we only corrupt the payload).
+	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		t.Fatalf("decode signature: %v", err)
+	}
+	if len(sig) != 64 {
+		t.Fatalf("signature length = %d, want 64", len(sig))
+	}
+	r := new(big.Int).SetBytes(sig[:32])
+	s := new(big.Int).SetBytes(sig[32:])
+
+	// Decode the payload, flip one byte, and re-encode it.
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if len(payloadBytes) == 0 {
+		t.Fatal("decoded payload is empty")
+	}
+	payloadBytes[0] ^= 0xFF // flip all bits in the first byte
+	tamperedPayload := base64.RawURLEncoding.EncodeToString(payloadBytes)
+
+	// Verify that the tampered signing input (header.tamperedPayload) does NOT
+	// validate against the original signature and public key.
+	tamperedDigest := sha256.Sum256([]byte(parts[0] + "." + tamperedPayload))
+	if ecdsa.Verify(pub, tamperedDigest[:], r, s) {
+		t.Fatal("ecdsa.Verify returned true for a tampered payload — signature verification is broken")
+	}
+	t.Log("tamper test PASS: mutated payload correctly rejected by ecdsa.Verify")
+}
+
 // TestAuthorizeUnregisteredRedirectRejected enforces the exact-match redirect
 // invariant (§11.7): an unregistered redirect_uri must NEVER receive a redirect.
 func TestAuthorizeUnregisteredRedirectRejected(t *testing.T) {
