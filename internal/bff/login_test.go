@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/harbor-auth/harbor/internal/oidc"
 )
 
 // mockWebAuthnService implements WebAuthnService for testing.
@@ -449,13 +450,16 @@ func TestLoginHandler_FinishLogin_HappyPath(t *testing.T) {
 		}
 	}
 
-	// Verify user_id was saved to session
+	// Verify user_id and auth method were saved to session
 	updatedSession, err := store.Get(ctx, "valid-session")
 	if err != nil {
 		t.Fatalf("get session: %v", err)
 	}
 	if updatedSession.UserID != "authenticated-user-id" {
 		t.Errorf("session.UserID = %q, want %q", updatedSession.UserID, "authenticated-user-id")
+	}
+	if updatedSession.AuthMethod != oidc.AuthMethodWebAuthn {
+		t.Errorf("session.AuthMethod = %q, want %q", updatedSession.AuthMethod, oidc.AuthMethodWebAuthn)
 	}
 }
 

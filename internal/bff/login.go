@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/harbor-auth/harbor/internal/oidc"
 )
 
 // WebAuthnService abstracts the webauthn.Service methods needed by LoginHandler.
@@ -229,6 +230,12 @@ func (h *LoginHandler) FinishLoginWithParsedData(w http.ResponseWriter, r *http.
 
 	// Write the authenticated user_id to the BFF session
 	if err := h.sessions.SetUser(r.Context(), requestID, userID); err != nil {
+		writeLoginError(w, http.StatusInternalServerError, "server_error", "could not update session")
+		return
+	}
+
+	// Record the authentication method used (WebAuthn passkey).
+	if err := h.sessions.SetAuthMethod(r.Context(), requestID, oidc.AuthMethodWebAuthn); err != nil {
 		writeLoginError(w, http.StatusInternalServerError, "server_error", "could not update session")
 		return
 	}
