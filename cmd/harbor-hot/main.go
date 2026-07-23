@@ -365,23 +365,25 @@ func newBFFSessionStore(redisClient *redis.Client, ttl time.Duration, logger *sl
 // newSessionResolver returns the SessionResolver the OIDC /authorize flow uses
 // to resolve the authenticated user into a per-RP pairwise subject (PPID).
 //
-// When the DB-backed deps are wired (DATABASE_URL + HARBOR_KMS_SECRET set), it
-// returns the real oidc.PPIDSessionResolver: it reads the signed-in user from
-// the BFF session context (bff.BFFAuthSource — never a client-supplied value),
-// loads + decrypts that user's pairwise secret, and derives a stable,
-// non-correlating sub while recording consent (docs/DESIGN.md §3.2, §11.2).
-// This is what closes the auth bypass (audit blocker 1.1): /authorize can no
-// longer issue tokens for a fixed demo user.
+// When the DB-backed deps are wired (DATABASE_URL + HARBOR_KMS_SECRET set) AND
+// HARBOR_DEV_MODE is NOT set, it returns the real oidc.PPIDSessionResolver: it
+// reads the signed-in user from the BFF session context (bff.BFFAuthSource —
+// never a client-supplied value), loads + decrypts that user's pairwise secret,
+// and derives a stable, non-correlating sub while recording consent
+// (docs/DESIGN.md §3.2, §11.2). This closes the auth bypass (audit blocker
+// 1.1): /authorize can no longer issue tokens for a fixed demo user.
 //
-// When DATABASE_URL is unset (dev/e2e with HARBOR_DEV_MODE=1), it falls back to
-// the demo-user stub so local runs keep working. The fail-closed startup guard
+// When HARBOR_DEV_MODE=1 (dev/e2e), the stub resolver is used regardless of
+// whether the DB is wired. This lets developers test the real ES256 signing
+// stack (DATABASE_URL + KEK_SECRET) while still running the /authorize flow
+// without a full BFF login ceremony. The fail-closed startup guard
 // (validateProductionReadiness) ensures the stub is never served in production.
 func newSessionResolver(deps bffDeps, logger *slog.Logger) (oidc.SessionResolver, error) {
+	if envBool("HARBOR_DEV_MODE") {
+		logger.Warn("HARBOR_DEV_MODE: using StubSessionResolver (signing stack still real when DB wired; NEVER for production)")
+		return oidc.NewStubSessionResolver("demo-user-ppid"), nil
+	}
 	if deps.secretLoader == nil || deps.grantStore == nil {
-		if envBool("HARBOR_DEV_MODE") {
-			logger.Warn("DATABASE_URL not set — using StubSessionResolver (dev only; auth bypass accepted)")
-			return oidc.NewStubSessionResolver("demo-user-ppid"), nil
-		}
 		return nil, fmt.Errorf("session resolver requires DATABASE_URL + HARBOR_KMS_SECRET — set HARBOR_DEV_MODE=1 to bypass (dev/e2e only)")
 	}
 	logger.Info("session resolver: using PPIDSessionResolver (BFF-authenticated, DB-backed)")
