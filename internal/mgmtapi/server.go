@@ -109,6 +109,10 @@ type Server struct {
 	// management). Nil puts those routes into a 503 state.
 	mfa MFAService
 
+	// compliance, when non-nil, backs the POST /compliance/export and POST
+	// /compliance/erase endpoints. Nil puts those routes into a 503 state.
+	compliance *ComplianceDeps
+
 	logger *slog.Logger
 }
 
