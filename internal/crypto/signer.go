@@ -6,6 +6,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -24,6 +25,16 @@ type Signer interface {
 	KeyID() string
 	// PublicJWK returns the public key as a JWK for JWKS publication.
 	PublicJWK() JWK
+}
+
+// PrivateKeyExporter is an optional interface a Signer may implement to expose
+// its PKCS#8 DER-encoded private key bytes for software wrapping (KeyProvider.
+// WrapKey). HSM-backed signers must NOT implement this interface — the private
+// key never leaves the HSM boundary (docs/DESIGN.md §7.3). LocalSigner (dev/
+// single-node) implements it so its key can be sealed under the regional KEK
+// and persisted for reconstruction on restart.
+type PrivateKeyExporter interface {
+	PrivateKeyDER() ([]byte, error)
 }
 
 // JWK is a JSON Web Key (RFC 7517) for an EC P-256 signing key.
@@ -167,3 +178,15 @@ func (s *LocalSigner) PublicJWK() JWK { return s.jwk }
 
 // String returns the human-readable DEV-ONLY identifier.
 func (s *LocalSigner) String() string { return "localSigner(DEV-ONLY)" }
+
+// PrivateKeyDER implements PrivateKeyExporter: it returns the PKCS#8 DER
+// encoding of the in-memory private key. Callers seal these bytes under the
+// regional KEK (KeyProvider.WrapKey) before persisting them; they are never
+// written or logged in the clear.
+func (s *LocalSigner) PrivateKeyDER() ([]byte, error) {
+	der, err := x509.MarshalPKCS8PrivateKey(s.priv)
+	if err != nil {
+		return nil, fmt.Errorf("crypto: marshal PKCS#8 private key: %w", err)
+	}
+	return der, nil
+}

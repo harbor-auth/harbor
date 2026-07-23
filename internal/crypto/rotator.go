@@ -19,6 +19,13 @@ type NewKeyMaterial struct {
 	Region string
 	// CreatedAt is when the key entered pending state.
 	CreatedAt time.Time
+	// WrappedPrivateKey holds the envelope-encrypted PKCS#8 DER bytes of the
+	// signing private key, produced by the KeyRotator's private-key wrapper
+	// (WithPrivateKeyWrapper). It is nil for HSM-backed signers, where the
+	// private key never leaves the HSM boundary (docs/DESIGN.md §7.3). DB-backed
+	// RotationStore implementations persist this so the key can be reconstructed
+	// on startup; HSM-backed stores ignore it.
+	WrappedPrivateKey []byte
 }
 
 // RotationStore is the persistence seam the KeyRotator depends on. It operates
@@ -96,7 +103,11 @@ type KeyRotator struct {
 	provider *MultiKeyProvider
 	store    RotationStore
 	generate func() (Signer, error)
-	clock    func() time.Time
+	// wrapPrivKey, when non-nil, seals a freshly generated signer's private key
+	// for persistence; its output is stored in NewKeyMaterial.WrappedPrivateKey.
+	// Leave nil for HSM-backed signers (the private key never leaves the HSM).
+	wrapPrivKey func(Signer) ([]byte, error)
+	clock       func() time.Time
 }
 
 // NewKeyRotator constructs a KeyRotator. By default it generates dev-only
@@ -126,6 +137,17 @@ func (r *KeyRotator) WithClock(clock func() time.Time) *KeyRotator {
 	return &cp
 }
 
+// WithPrivateKeyWrapper returns a copy of the rotator that seals each generated
+// signer's private key via wrap. The wrapped bytes are threaded into
+// NewKeyMaterial.WrappedPrivateKey so the RotationStore can persist them for
+// reconstruction on restart. Leave unset (default nil) for HSM-backed signers
+// where the private key never leaves the HSM boundary (docs/DESIGN.md §7.3).
+func (r *KeyRotator) WithPrivateKeyWrapper(wrap func(Signer) ([]byte, error)) *KeyRotator {
+	cp := *r
+	cp.wrapPrivKey = wrap
+	return &cp
+}
+
 // Rotate initiates a key rotation. It generates a new key, persists it in
 // pending state, and publishes it in JWKS. For a scheduled rotation it returns
 // the computed promotion and retirement times for the caller's scheduler to act
@@ -146,22 +168,33 @@ func (r *KeyRotator) Rotate(ctx context.Context, opts RotateOptions) (RotateResu
 		return RotateResult{}, fmt.Errorf("crypto: rotate: lookup active key: %w", err)
 	}
 
-	// 3. Persist the new key in pending state.
+	// 3. Seal the private key for persistence (software signers only). HSM-backed
+	//    signers leave wrapPrivKey nil — the key never leaves the HSM.
+	var wrappedPriv []byte
+	if r.wrapPrivKey != nil {
+		wrappedPriv, err = r.wrapPrivKey(signer)
+		if err != nil {
+			return RotateResult{}, fmt.Errorf("crypto: rotate: wrap private key for %q: %w", newKid, err)
+		}
+	}
+
+	// 4. Persist the new key in pending state.
 	if err := r.store.Create(ctx, NewKeyMaterial{
-		Kid:       newKid,
-		PublicJWK: signer.PublicJWK(),
-		Region:    opts.Region,
-		CreatedAt: now,
+		Kid:               newKid,
+		PublicJWK:         signer.PublicJWK(),
+		Region:            opts.Region,
+		CreatedAt:         now,
+		WrappedPrivateKey: wrappedPriv,
 	}); err != nil {
 		return RotateResult{}, fmt.Errorf("crypto: rotate: persist pending key %q: %w", newKid, err)
 	}
 
-	// 4. Publish the new key in JWKS immediately (pending: present but not signing).
+	// 5. Publish the new key in JWKS immediately (pending: present but not signing).
 	if err := r.provider.Add(signer); err != nil {
 		return RotateResult{}, fmt.Errorf("crypto: rotate: publish pending key %q: %w", newKid, err)
 	}
 
-	// 5. Compute the schedule. Emergency rotations use zero grace/overlap.
+	// 6. Compute the schedule. Emergency rotations use zero grace/overlap.
 	mgr := r.mgr
 	if opts.Emergency {
 		mgr = NewRotationManager(EmergencyRotationConfig())
@@ -176,7 +209,7 @@ func (r *KeyRotator) Rotate(ctx context.Context, opts RotateOptions) (RotateResu
 		Emergency:   schedule.IsEmergency,
 	}
 
-	// 6. Emergency (zero grace + overlap): apply promotion and retirement inline.
+	// 7. Emergency (zero grace + overlap): apply promotion and retirement inline.
 	if schedule.IsEmergency {
 		if err := r.promote(ctx, newKid, now); err != nil {
 			return RotateResult{}, err

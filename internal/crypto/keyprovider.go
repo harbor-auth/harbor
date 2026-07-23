@@ -17,6 +17,21 @@ import (
 type KeyProvider interface {
 	WrapDEK(ctx context.Context, region string, dek DEK) ([]byte, error)
 	UnwrapDEK(ctx context.Context, region string, wrapped []byte) (DEK, error)
+
+	// WrapKey wraps arbitrary key material (e.g. a PKCS#8 DER-encoded EC
+	// private key) under a purpose-derived regional KEK. Unlike WrapDEK — which
+	// is typed to the fixed-size DEK — WrapKey operates on variable-length byte
+	// slices.
+	//
+	// purpose is a short domain-separator (e.g. "signing-key") that makes the
+	// derived KEK cryptographically independent from every other purpose, even
+	// when derived from the same master secret (RFC 5869 §3.2 info-string domain
+	// separation). Callers MUST use the same region+purpose to UnwrapKey.
+	WrapKey(ctx context.Context, region, purpose string, keyBytes []byte) ([]byte, error)
+
+	// UnwrapKey reverses WrapKey. It returns ErrDecryptFailed if the region,
+	// purpose, secret, or ciphertext do not match the values used to wrap.
+	UnwrapKey(ctx context.Context, region, purpose string, wrapped []byte) ([]byte, error)
 }
 
 // localKeyProvider derives a per-region KEK from an environment secret using
@@ -73,6 +88,50 @@ func (p *localKeyProvider) deriveKEK(region string) (DEK, error) {
 // unreadable.
 func wrapAAD(region string) []byte {
 	return []byte("harbor-dek-wrap-v1:" + region)
+}
+
+// deriveKEKForPurpose derives a 32-byte KEK for the given region and purpose
+// using HKDF-SHA256. The purpose is folded into the info string so keys wrapped
+// under different purposes (e.g. "dek" vs "signing-key") are cryptographically
+// independent even though they share the same master secret (RFC 5869 §3.2).
+func (p *localKeyProvider) deriveKEKForPurpose(region, purpose string) (DEK, error) {
+	info := []byte("harbor-" + purpose + "-wrap-v1:" + region)
+	h := hkdf.New(sha256.New, p.secret, nil, info)
+	var kek DEK
+	if _, err := io.ReadFull(h, kek[:]); err != nil {
+		return DEK{}, fmt.Errorf("crypto: HKDF derivation failed: %w", err)
+	}
+	return kek, nil
+}
+
+// keyWrapAAD returns the GCM additional data for a WrapKey/UnwrapKey operation.
+// It is intentionally identical to deriveKEKForPurpose's info string, giving two
+// independent layers of region+purpose binding (wrong region/purpose ⇒ wrong KEK
+// AND wrong AAD tag). If you ever version this string you MUST update both in
+// lockstep or existing wrapped blobs become permanently unreadable.
+func keyWrapAAD(region, purpose string) []byte {
+	return []byte("harbor-" + purpose + "-wrap-v1:" + region)
+}
+
+// WrapKey implements KeyProvider. It encrypts keyBytes under the purpose-derived
+// regional KEK using AES-256-GCM, binding region+purpose as GCM AAD.
+func (p *localKeyProvider) WrapKey(_ context.Context, region, purpose string, keyBytes []byte) ([]byte, error) {
+	kek, err := p.deriveKEKForPurpose(region, purpose)
+	if err != nil {
+		return nil, fmt.Errorf("crypto: WrapKey key derivation: %w", err)
+	}
+	return p.cipher.Encrypt(kek, keyBytes, keyWrapAAD(region, purpose))
+}
+
+// UnwrapKey implements KeyProvider. It reverses WrapKey; on any mismatch
+// (region, purpose, secret, or tampered ciphertext) GCM authentication fails and
+// ErrDecryptFailed is returned.
+func (p *localKeyProvider) UnwrapKey(_ context.Context, region, purpose string, wrapped []byte) ([]byte, error) {
+	kek, err := p.deriveKEKForPurpose(region, purpose)
+	if err != nil {
+		return nil, ErrDecryptFailed
+	}
+	return p.cipher.Decrypt(kek, wrapped, keyWrapAAD(region, purpose))
 }
 
 // WrapDEK encrypts dek under the regional KEK using AES-256-GCM. The region is

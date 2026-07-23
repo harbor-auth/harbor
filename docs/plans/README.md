@@ -89,20 +89,19 @@ canonical; the gate table, graph, and edge list here are derived from them.
 
 | Gate | Plan | Weft ID | Weft Status | Depends on |
 |---|---|---|---|---|
-| **1** | [`regional-data-residency-routing`](regional-data-residency-routing.md) | `feat_8ec115c6` (new) / `feat_733f3eba` (prior ✅) | proposed (quota) / ✅ prior completed | *(root — platform guardrail)* |
-| **1** | [`observability-metrics`](observability-metrics.md) | `feat_6bfb679c` | 🔄 in_progress | *(root — platform guardrail)* |
-| **2** | [`user-account-recovery`](user-account-recovery.md) | — | ⛔ blocked | Gate 1; ✅ `user-enrollment`, ✅ `webauthn-session-store`, ✅ `envelope-encryption-kms` |
-| **2** | [`user-audit-trail`](user-audit-trail.md) | `feat_c2d5e191` | ⏳ proposed | Gate 1 |
-| **2** | [`discoverable-login`](discoverable-login.md) | `feat_12ee5a09` | 🔄 in_progress | Gate 1; ✅ `bff-session-middleware`, ✅ `user-enrollment` |
+| **1** | [`regional-data-residency-routing`](regional-data-residency-routing.md) | `feat_8ec115c6` (new) / `feat_733f3eba` (prior ✅) | ✅ completed | *(root — platform guardrail)* |
+| **1** | [`observability-metrics`](observability-metrics.md) | `feat_6bfb679c` | ✅ completed | *(root — platform guardrail)* |
+| **2** | [`user-account-recovery`](user-account-recovery.md) | `feat_0f716361` | ✅ completed | Gate 1; ✅ `user-enrollment`, ✅ `webauthn-session-store`, ✅ `envelope-encryption-kms` |
+| **2** | [`user-audit-trail`](user-audit-trail.md) | `feat_c2d5e191` | 🔄 in_progress | Gate 1 |
+| **2** | [`discoverable-login`](discoverable-login.md) | `feat_12ee5a09` | ✅ completed | Gate 1; ✅ `bff-session-middleware`, ✅ `user-enrollment` |
 | **3** | [`consent-management-ui`](consent-management-ui.md) | `feat_28ba9372` | ⏳ proposed | Gate 1–2; ✅ `consent-ledger`, `user-audit-trail`, ✅ `bff-session-middleware`; **soft:** `email-relay-service` |
 | **3** | [`compliance-export`](compliance-export.md) | `feat_04c21ab3` | ⏳ proposed | Gate 1; `user-audit-trail`, ✅ `envelope-encryption-kms` (crypto-shred) |
-| **4** | [`email-relay-service`](email-relay-service.md) | — | 🔄 in_progress | Gate 1; ✅ `consent-ledger`, ✅ `client-grant-persistence` |
+| **4** | [`email-relay-service`](email-relay-service.md) | *(no Weft ID — merged as PR #61)* | ✅ merged to main | Gate 1; ✅ `consent-ledger`, ✅ `client-grant-persistence` |
+| **4+** | [`relay-mgmt-wiring`](relay-mgmt-wiring.md) | `feat_b71f32fe` | ⏳ proposed | ✅ `email-relay-service` (PR #61) |
 
-> **⚠️ Failed launch:** [`webauthn-db-wiring`](webauthn-db-wiring.md) (`feat_ac6b4036`)
-> **❌ FAILED** on Weft. It's a ~5-line wiring fix in `cmd/harbor-mgmt/main.go`
-> (`store_db.go` is complete and tested) but the launch failed — **needs
-> immediate re-launch**. Until it lands, enrolled passkeys are lost on every
-> process restart. Tracked as `webauthn-db-rewire` (P0) in **Wave 6** below.
+> **✅ Fixed:** [`webauthn-db-wiring`](webauthn-db-wiring.md) (`feat_ac6b4036`) completed — the
+> in-memory passkey store has been replaced by the DB-backed store. Enrolled passkeys
+> now survive process restarts.
 
 ### Wave 5 dependency graph (ASCII)
 
@@ -303,16 +302,16 @@ production launch** — not features, but wiring fixes and missing security
 primitives. See [`production-readiness.md`](production-readiness.md) for the
 full audit with file/symbol references and evidence.
 
-| Priority | Fix | What's broken | Est. effort |
-|---|---|---|---|
-| **P0** | `webauthn-db-rewire` | `webauthn.NewInMemoryStore()` hardwired even when `DATABASE_URL` set; `store_db.go` is complete — just ~5 lines of wiring in `cmd/harbor-mgmt/main.go`. Passkeys evaporate on every restart. | 1–2 h |
-| **P0** | `fix-auth-bypass` | `FixedAuthSource` hardcoded `demoUserID` in `cmd/harbor-hot/main.go` — every `/authorize` issues tokens for the same demo user. BFF session seam exists (`bff-flow-wiring` ✅) but was never wired into the hot path. | 2–4 h |
-| **P0** | `admin-endpoint-auth` | `POST /admin/revoke-jwt` and `/admin/keys/*` have zero `Authorization` checks on the internet-facing `harbor-hot` binary. | 2–4 h |
-| **P0** | `client-secret-auth` | `/token` does not verify `client_secret` for confidential clients; `client_secret_hash` column exists in DB but is never read at token time. | 4–8 h |
-| **P1** | `hsm-signing-key` | `NewLocalSigner()` generates ephemeral in-process signing keys — tokens don't survive restarts; `signer_hsm.go` stub returns `ErrHSMNotImplemented` on every method. Separate from KEK KMS. | 1–2 w |
-| **P1** | `totp-mfa` | `mfa_factors` table and DB queries exist but no service/API/UI; TOTP is a §7.1 requirement as a secondary factor. | 1 w |
-| **P1** | `end-session-logout` | No OIDC RP-Initiated Logout (OpenID Connect Session Management / Front-Channel Logout); `sessions` table ready. | 1 w |
-| **P2** | `acr-amr-dynamic` | ACR/AMR claims hardcoded as `urn:harbor:ac:webauthn` / `["hwk","user"]` regardless of actual auth method; will emit lies once TOTP or recovery-code auth exists. | 2–4 h |
+| Priority | Fix | Weft ID | Weft Status | What's broken | Est. effort |
+|---|---|---|---|---|---|
+| **P0** | `webauthn-db-rewire` | `feat_ac6b4036` | ✅ completed | `webauthn.NewInMemoryStore()` hardwired even when `DATABASE_URL` set; now fixed — DB-backed store wired in. | 1–2 h |
+| **P0** | `fix-auth-bypass` | `feat_8cfbf8a7` | 🔄 in_progress | `FixedAuthSource` hardcoded `demoUserID` in `cmd/harbor-hot/main.go` — every `/authorize` issues tokens for the same demo user. BFF session seam exists (`bff-flow-wiring` ✅) but was never wired into the hot path. | 2–4 h |
+| **P0** | `admin-endpoint-auth` | `feat_af184af4` | ✅ completed | `POST /admin/revoke-jwt` and `/admin/keys/*` have zero `Authorization` checks on the internet-facing `harbor-hot` binary. | 2–4 h |
+| **P0** | `client-secret-auth` | `feat_ff8da280` | 🔄 in_progress | `/token` does not verify `client_secret` for confidential clients; `client_secret_hash` column exists in DB but is never read at token time. | 4–8 h |
+| **P1** | `hsm-signing-key` | `feat_56cec0b8` | 🔄 in_progress | `NewLocalSigner()` generates ephemeral in-process signing keys — tokens don't survive restarts; DB-backed signing key store now wired. Separate from KEK KMS. | 1–2 w |
+| **P1** | `totp-mfa` | `feat_83c1eff7` | 🔄 in_progress | `mfa_factors` table and DB queries exist but no service/API/UI; TOTP is a §7.1 requirement as a secondary factor. | 1 w |
+| **P1** | `end-session-logout` | `feat_c4f50a17` | 🔄 in_progress | No OIDC RP-Initiated Logout (OpenID Connect Session Management / Front-Channel Logout); `sessions` table ready. | 1 w |
+| **P2** | `acr-amr-dynamic` | `feat_f12d4059` | ⏳ proposed | ACR/AMR claims hardcoded as `urn:harbor:ac:webauthn` / `["hwk","user"]` regardless of actual auth method; will emit lies once TOTP or recovery-code auth exists. **Gated on `totp-mfa`.** | 2–4 h |
 
 ### Wave 6 dependency order
 

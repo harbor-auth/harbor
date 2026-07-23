@@ -22,6 +22,14 @@ func (e errKeyProvider) UnwrapDEK(_ context.Context, _ string, _ []byte) (crypto
 	return crypto.DEK{}, e.unwrapErr
 }
 
+func (e errKeyProvider) WrapKey(_ context.Context, _, _ string, _ []byte) ([]byte, error) {
+	return nil, e.wrapErr
+}
+
+func (e errKeyProvider) UnwrapKey(_ context.Context, _, _ string, _ []byte) ([]byte, error) {
+	return nil, e.unwrapErr
+}
+
 // errCipher returns a fixed error from Encrypt.
 type errCipher struct {
 	encryptErr error
