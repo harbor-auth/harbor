@@ -15,10 +15,11 @@
 # gateway — run-plan.sh adds that `extra_hosts` mapping to the suite container it
 # starts. harbor-hot itself only publishes :8080 and does not need the mapping.
 #
-# harbor-hot's flow backends are in-memory scaffolds today (demo-client, stub
-# session, unsigned placeholder tokens), so this runs with no DB. The OIDF OP
-# suite will legitimately stay RED until harbor-hot reaches real OIDC compliance
-# (asymmetric-signed tokens, pairwise subjects) — that is the honest gate.
+# harbor-hot runs in HARBOR_DEV_MODE here (no DB/Redis required): the stub
+# session resolver auto-approves /authorize, and the real ES256 signing stack
+# (in-process DB-backed ECDSA key, signingkeys store) issues genuine JWTs.
+# The OIDF OP suite will stay RED on tests that require unimplemented features
+# (pairwise subjects, prompt=none, etc.) — that is the honest gate.
 services:
   harbor-hot:
     image: golang:1.26
@@ -28,6 +29,17 @@ services:
       PORT: "8080"
       # Issuer MUST match how the suite reaches harbor-hot (see NETWORKING note).
       ISSUER: "http://host.docker.internal:8080"
+      # REGION is required: binds the issuer host to a region at boot so the
+      # fail-closed region middleware resolves /authorize and /token instead of
+      # 400-rejecting them (region.BindIssuerHost). host.docker.internal is not in
+      # the default *.harbor.id host map, so an explicit binding is needed.
+      REGION: "EU"
+      # Dev mode bypasses the fail-closed startup guard (validateProductionReadiness)
+      # so the OIDF suite can drive the flow without DATABASE_URL/REDIS_URL/LOGIN_URL.
+      # The stub session resolver auto-approves /authorize — required for the suite
+      # to obtain codes without a real login UI. The signing stack is still real
+      # (in-process ECDSA key) in dev mode.
+      HARBOR_DEV_MODE: "1"
     ports:
       - "8080:8080"
     volumes:

@@ -7,9 +7,10 @@
 # e2e smoke gate in `make conformance`.
 #
 # The runner's exit code is AUTHORITATIVE: a non-zero exit fails the release
-# gate (honest red). Per the greenfield reality, harbor-hot is an in-memory
-# scaffold today, so this WILL be red until it reaches real OIDC compliance.
-# Do NOT waive or config-around a failure — fix the implementation to conform.
+# gate (honest red). harbor-hot now uses real ES256 signing (DB-persisted ECDSA
+# key via signingkeys store) and a PKCE-only authorization code flow; it will
+# stay RED on tests that require features not yet implemented (e.g. pairwise
+# subject identifiers, prompt=none). Do NOT waive — fix the implementation.
 #
 # The OIDF suite (mongodb + server + nginx on :8443) is a heavy external
 # dependency built from a large Java jar; there is no official prebuilt image.
@@ -21,20 +22,30 @@
 #               1). Honest fail-closed beats a flaky half-build.
 #
 # Overridable knobs (env):
-#   CONFORMANCE_SUITE_IMAGE  prebuilt all-in-one suite image serving :8443 (primary path)
+#   CONFORMANCE_SUITE_IMAGE  Spring Boot server image (primary path; see prebuilt compose)
+#   CONFORMANCE_NGINX_IMAGE  nginx TLS-terminator image (default: derived from suite image tag)
 #   CONFORMANCE_SUITE_REF    pinned git ref to clone (secondary path)
 #   CONFORMANCE_SERVER       suite base URL (default https://localhost.emobix.co.uk:8443)
 #   HARBOR_ISSUER            issuer the suite drives (default http://host.docker.internal:8080)
-#   PLAN                     OIDF test plan name (default oidcc-basic-certification-test-plan)
+#   PLAN                     OIDF test plan name + variant string
+#                             (default oidcc-basic-certification-test-plan[server_metadata=discovery][client_registration=static_client])
 set -euo pipefail
 
 # --- Config (pinned defaults; override via env) ------------------------------
 CONFORMANCE_SUITE_IMAGE="${CONFORMANCE_SUITE_IMAGE:-}"
 CONFORMANCE_SUITE_REF="${CONFORMANCE_SUITE_REF:-release-v5.1.45}"
+# Derive the nginx image from the suite image tag (same GitLab registry, /nginx sub-path).
+# Override with CONFORMANCE_NGINX_IMAGE if using a custom registry.
+_suite_tag="${CONFORMANCE_SUITE_IMAGE##*:}"
+_suite_registry="${CONFORMANCE_SUITE_IMAGE%%:*}"
+CONFORMANCE_NGINX_IMAGE="${CONFORMANCE_NGINX_IMAGE:-${_suite_registry}/nginx:${_suite_tag}}"
 CONFORMANCE_SUITE_REPO="${CONFORMANCE_SUITE_REPO:-https://github.com/openid-certification/conformance-suite.git}"
 CONFORMANCE_SERVER="${CONFORMANCE_SERVER:-https://localhost.emobix.co.uk:8443}"
 HARBOR_ISSUER="${HARBOR_ISSUER:-http://host.docker.internal:8080}"
-PLAN="${PLAN:-oidcc-basic-certification-test-plan}"
+# Variants are required by run-test-plan.py to enumerate the correct test modules.
+#   server_metadata=discovery   — harbor-hot serves /.well-known/openid-configuration
+#   client_registration=static_client — harbor-hot has no DCR endpoint yet
+PLAN="${PLAN:-oidcc-basic-certification-test-plan[server_metadata=discovery][client_registration=static_client]}"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 OUT="$HERE/out"
@@ -88,17 +99,42 @@ docker compose -f "$HARBOR_COMPOSE" up -d --wait --wait-timeout 180 \
 ensure_suite_clone
 
 if [ -n "$CONFORMANCE_SUITE_IMAGE" ]; then
-  # PRIMARY: prebuilt all-in-one suite image. Contract: it serves the suite on
-  # :8443 and bundles mongodb. We add host.docker.internal so it can reach
-  # harbor-hot on the host (see docker-compose.yml NETWORKING note). The pinned
-  # .suite/ clone above provides the runner scripts we invoke against it.
-  log "starting OIDF suite from prebuilt image: $CONFORMANCE_SUITE_IMAGE"
+  # PRIMARY: prebuilt suite image (Spring Boot server) + nginx TLS terminator + MongoDB.
+  # Mirrors the upstream docker-compose-prebuilt.yml exactly:
+  #   mongodb  — data store (mongo:6.0.13 as pinned by upstream)
+  #   server   — Spring Boot app (CONFORMANCE_SUITE_IMAGE); talks to mongodb
+  #   nginx    — TLS terminator; publishes :8443 and proxies to server
+  # platform: linux/amd64 forces Rosetta/QEMU on ARM64 hosts (images are amd64-only).
+  # We add host.docker.internal to the nginx container so the suite can reach
+  # harbor-hot on the host via the host-gateway (see docker-compose.yml NETWORKING note).
+  log "starting OIDF suite (server=$CONFORMANCE_SUITE_IMAGE, nginx=$CONFORMANCE_NGINX_IMAGE)"
   cat > "$OUT/suite-compose.yml" <<YAML
 services:
-  suite:
+  mongodb:
+    image: mongo:6.0.13
+    platform: linux/amd64
+  server:
     image: ${CONFORMANCE_SUITE_IMAGE}
+    platform: linux/amd64
+    environment:
+      BASE_URL: https://localhost.emobix.co.uk:8443
+      MONGODB_HOST: mongodb
+      SPRING_PROFILES_ACTIVE: dev
+      OIDC_GOOGLE_CLIENTID: google-client
+      OIDC_GOOGLE_SECRET: google-secret
+      OIDC_GITLAB_CLIENTID: gitlab-client
+      OIDC_GITLAB_SECRET: gitlab-secret
+    depends_on:
+      - mongodb
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  nginx:
+    image: ${CONFORMANCE_NGINX_IMAGE}
+    platform: linux/amd64
     ports:
       - "8443:8443"
+    depends_on:
+      - server
     extra_hosts:
       - "host.docker.internal:host-gateway"
 YAML
@@ -128,15 +164,17 @@ fi
 
 # --- 3. Wait for the suite API to answer on :8443 ----------------------------
 log "waiting for the OIDF suite at $CONFORMANCE_SERVER ..."
+# Poll for up to 300s (60 × 5s). Spring Boot under Rosetta/QEMU emulation on
+# ARM64 hosts takes ~2-3 min to start; native amd64 (CI) is much faster.
 ready=
-for _ in $(seq 1 40); do
+for _ in $(seq 1 60); do
   if curl -fsSk "$CONFORMANCE_SERVER/api/runner/available" >/dev/null 2>&1 \
      || curl -fsSk "$CONFORMANCE_SERVER/" >/dev/null 2>&1; then
     ready=1; break
   fi
-  sleep 3
+  sleep 5
 done
-[ -n "$ready" ] || die "OIDF suite never became reachable at $CONFORMANCE_SERVER"
+[ -n "$ready" ] || die "OIDF suite never became reachable at $CONFORMANCE_SERVER (waited $(( 60 * 5 ))s; Spring Boot may need more time under emulation)"
 
 # --- 4. Render the OP config (inject harbor-hot's discovery URL) --------------
 # run-test-plan.py substitutes its own {BASEURL}-style tokens; the harbor issuer
@@ -151,9 +189,16 @@ log "rendered OP config -> $RENDERED (discovery: $HARBOR_ISSUER/.well-known/open
 # so assert-pass.sh has structured evidence. The runner's exit code is the gate.
 command -v python3 >/dev/null 2>&1 || die "python3 not installed (required by the OIDF run-test-plan.py)"
 [ -f "$SUITE_DIR/scripts/run-test-plan.py" ] || die "run-test-plan.py not found in $SUITE_DIR (pinned clone incomplete?)"
+# Install the runner's Python dependency (pyparsing) if not already present.
+# This is a lightweight package; pip3 is always available when python3 is.
+python3 -c 'import pyparsing' 2>/dev/null || pip3 install pyparsing --quiet
 
 export CONFORMANCE_SERVER
 export EXTERNAL_URL="$CONFORMANCE_SERVER"
+# Set dev mode so the runner uses token=None (no auth). Without this the
+# runner reads CONFORMANCE_TOKEN from the environment which is not set for a
+# local/CI headless run against our own dev-mode suite instance.
+export CONFORMANCE_DEV_MODE=1
 
 log "running OIDF plan '$PLAN' against harbor-hot (headless)"
 runner_rc=0
