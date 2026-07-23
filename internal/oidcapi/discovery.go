@@ -31,11 +31,13 @@ func (s *Server) GetOpenIDConfiguration(w http.ResponseWriter, _ *http.Request) 
 func (s *Server) metadata() openapi.OpenIDProviderMetadata {
 	base := strings.TrimRight(s.issuer, "/")
 	userinfoEndpoint := base + "/userinfo"
+	endSessionEndpoint := base + "/end_session"
 	return openapi.OpenIDProviderMetadata{
 		Issuer:                 base,
 		AuthorizationEndpoint:  base + "/authorize",
 		TokenEndpoint:          base + "/token",
 		UserinfoEndpoint:       &userinfoEndpoint,
+		EndSessionEndpoint:     &endSessionEndpoint,
 		JwksUri:                base + "/jwks.json",
 		ResponseTypesSupported: []string{"code"},
 		SubjectTypesSupported: []openapi.OpenIDProviderMetadataSubjectTypesSupported{

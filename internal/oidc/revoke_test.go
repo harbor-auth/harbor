@@ -154,8 +154,14 @@ func TestService_RevokeRefreshToken_RevokesFamilyNotJustSingleSession(t *testing
 	svc := newTestRevokeService(t, store)
 
 	// Create two sessions for the same (user, client) pair
-	plaintext1, hash1, _ := newOpaqueToken()
-	_, hash2, _ := newOpaqueToken()
+	plaintext1, hash1, err := newOpaqueToken()
+	if err != nil {
+		t.Fatalf("newOpaqueToken: %v", err)
+	}
+	_, hash2, err2 := newOpaqueToken()
+	if err2 != nil {
+		t.Fatalf("newOpaqueToken: %v", err2)
+	}
 
 	session1 := RefreshSession{
 		ID:        "session-1",
@@ -182,8 +188,7 @@ func TestService_RevokeRefreshToken_RevokesFamilyNotJustSingleSession(t *testing
 
 	// Revoke using token 1
 	token1 := encodeRefreshToken(plaintext1)
-	err := svc.RevokeRefreshToken(context.Background(), token1, "demo-client")
-	if err != nil {
+	if err := svc.RevokeRefreshToken(context.Background(), token1, "demo-client"); err != nil {
 		t.Fatalf("RevokeRefreshToken = %v, want nil", err)
 	}
 
@@ -203,8 +208,14 @@ func TestService_RevokeRefreshToken_DoesNotAffectOtherClients(t *testing.T) {
 	svc := newTestRevokeService(t, store)
 
 	// Create sessions for the same user but different clients
-	plaintext1, hash1, _ := newOpaqueToken()
-	_, hash2, _ := newOpaqueToken()
+	plaintext1, hash1, err := newOpaqueToken()
+	if err != nil {
+		t.Fatalf("newOpaqueToken: %v", err)
+	}
+	_, hash2, err2 := newOpaqueToken()
+	if err2 != nil {
+		t.Fatalf("newOpaqueToken: %v", err2)
+	}
 
 	session1 := RefreshSession{
 		ID:        "session-1",
@@ -231,8 +242,7 @@ func TestService_RevokeRefreshToken_DoesNotAffectOtherClients(t *testing.T) {
 
 	// Revoke client-a's token
 	token1 := encodeRefreshToken(plaintext1)
-	err := svc.RevokeRefreshToken(context.Background(), token1, "client-a")
-	if err != nil {
+	if err := svc.RevokeRefreshToken(context.Background(), token1, "client-a"); err != nil {
 		t.Fatalf("RevokeRefreshToken = %v, want nil", err)
 	}
 
@@ -273,12 +283,14 @@ func TestService_RevokeRefreshToken_LogsDBError(t *testing.T) {
 	})
 
 	// Create a valid-looking token
-	plaintext, _, _ := newOpaqueToken()
+	plaintext, _, err := newOpaqueToken()
+	if err != nil {
+		t.Fatalf("newOpaqueToken: %v", err)
+	}
 	token := encodeRefreshToken(plaintext)
 
 	// Revoke should succeed silently (anti-enumeration) but log the error
-	err := svc.RevokeRefreshToken(context.Background(), token, "demo-client")
-	if err != nil {
+	if err := svc.RevokeRefreshToken(context.Background(), token, "demo-client"); err != nil {
 		t.Fatalf("RevokeRefreshToken = %v, want nil (anti-enumeration)", err)
 	}
 
@@ -298,7 +310,10 @@ func TestService_RevokeRefreshToken_EmptyUserID_SkipsRevoke(t *testing.T) {
 
 	// Create a session with empty UserID (latent bug scenario)
 	store := NewInMemorySessionStore()
-	plaintext, hash, _ := newOpaqueToken()
+	plaintext, hash, err := newOpaqueToken()
+	if err != nil {
+		t.Fatalf("newOpaqueToken: %v", err)
+	}
 	session := RefreshSession{
 		ID:        "session-123",
 		Region:    "eu",
@@ -327,8 +342,7 @@ func TestService_RevokeRefreshToken_EmptyUserID_SkipsRevoke(t *testing.T) {
 	})
 
 	token := encodeRefreshToken(plaintext)
-	err := svc.RevokeRefreshToken(context.Background(), token, "demo-client")
-	if err != nil {
+	if err := svc.RevokeRefreshToken(context.Background(), token, "demo-client"); err != nil {
 		t.Fatalf("RevokeRefreshToken = %v, want nil", err)
 	}
 
@@ -345,7 +359,10 @@ func TestService_RevokeRefreshToken_ZeroUUID_SkipsRevoke(t *testing.T) {
 
 	// Create a session with zero UUID UserID (latent bug scenario)
 	store := NewInMemorySessionStore()
-	plaintext, hash, _ := newOpaqueToken()
+	plaintext, hash, err := newOpaqueToken()
+	if err != nil {
+		t.Fatalf("newOpaqueToken: %v", err)
+	}
 	session := RefreshSession{
 		ID:        "session-123",
 		Region:    "eu",
@@ -374,8 +391,7 @@ func TestService_RevokeRefreshToken_ZeroUUID_SkipsRevoke(t *testing.T) {
 	})
 
 	token := encodeRefreshToken(plaintext)
-	err := svc.RevokeRefreshToken(context.Background(), token, "demo-client")
-	if err != nil {
+	if err := svc.RevokeRefreshToken(context.Background(), token, "demo-client"); err != nil {
 		t.Fatalf("RevokeRefreshToken = %v, want nil", err)
 	}
 

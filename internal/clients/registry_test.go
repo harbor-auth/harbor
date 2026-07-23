@@ -38,6 +38,7 @@ func TestRowToClient(t *testing.T) {
 		Name:          "Test RP",
 		SectorID:      "sector.example.com",
 		RedirectUris:  []string{"https://rp.example.com/cb"},
+		LogoutUris:    []string{"https://rp.example.com/logged-out"},
 		TokenFormat:   "jwt",
 		ScopesAllowed: []string{"openid", "profile"},
 	}
@@ -50,6 +51,9 @@ func TestRowToClient(t *testing.T) {
 	}
 	if len(c.RedirectURIs) != 1 || c.RedirectURIs[0] != row.RedirectUris[0] {
 		t.Errorf("RedirectURIs mismatch")
+	}
+	if len(c.LogoutURIs) != 1 || c.LogoutURIs[0] != row.LogoutUris[0] {
+		t.Errorf("LogoutURIs mismatch")
 	}
 	if len(c.ScopesAllowed) != 2 {
 		t.Errorf("ScopesAllowed: got %d, want 2", len(c.ScopesAllowed))
@@ -112,6 +116,26 @@ func TestRedirectURIExactMatch(t *testing.T) {
 	}
 	if c.HasRedirectURI("https://rp.example.com") {
 		t.Error("prefix must not match (exact-match invariant)")
+	}
+}
+
+func TestLogoutURIExactMatch(t *testing.T) {
+	row := db.RelyingParty{
+		ClientID:   "rp-3",
+		LogoutUris: []string{"https://rp.example.com/logged-out"},
+	}
+	c := rowToClient(row)
+	if !c.HasLogoutURI("https://rp.example.com/logged-out") {
+		t.Error("exact logout URI should match")
+	}
+	if c.HasLogoutURI("https://rp.example.com/logged-out/") {
+		t.Error("trailing slash must not match (exact-match invariant)")
+	}
+	if c.HasLogoutURI("https://rp.example.com") {
+		t.Error("prefix must not match (exact-match invariant)")
+	}
+	if c.HasLogoutURI("https://evil.example.com/logged-out") {
+		t.Error("different domain must not match (open-redirect defence)")
 	}
 }
 

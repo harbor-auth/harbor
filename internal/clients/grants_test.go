@@ -86,6 +86,18 @@ func (f *fakeGrantQuerier) ListGrantsByUser(_ context.Context, userID pgtype.UUI
 	return out, nil
 }
 
+func (f *fakeGrantQuerier) FindGrantByPPID(_ context.Context, arg db.FindGrantByPPIDParams) (db.Grant, error) {
+	if f.dbErr != nil {
+		return db.Grant{}, f.dbErr
+	}
+	for _, g := range f.rows {
+		if g.PairwiseSub == arg.PairwiseSub && g.ClientID == arg.ClientID && !g.RevokedAt.Valid {
+			return *g, nil
+		}
+	}
+	return db.Grant{}, pgx.ErrNoRows
+}
+
 const testUserID = "a0000000-0000-0000-0000-000000000001"
 
 func TestRowToGrant(t *testing.T) {
@@ -278,6 +290,111 @@ func TestDBGrantStoreInvalidUUID(t *testing.T) {
 
 func TestDBGrantStoreImplementsInterface(t *testing.T) {
 	var _ oidc.GrantStore = (*DBGrantStore)(nil)
+}
+
+func TestDBGrantStoreFindByPPIDFound(t *testing.T) {
+	q := newFakeGrantQuerier()
+	s := NewDBGrantStore(q)
+	ctx := context.Background()
+
+	// Create a grant with a known PPID.
+	_, err := s.CreateGrant(ctx, oidc.NewGrant{
+		UserID:      testUserID,
+		ClientID:    "rp-1",
+		PairwiseSub: "ppid-findme",
+		Scopes:      []string{"openid"},
+	})
+	if err != nil {
+		t.Fatalf("CreateGrant: %v", err)
+	}
+
+	// FindGrantByPPID should find it.
+	g, found, err := s.FindGrantByPPID(ctx, "ppid-findme", "rp-1")
+	if err != nil {
+		t.Fatalf("FindGrantByPPID: %v", err)
+	}
+	if !found {
+		t.Fatal("expected found=true")
+	}
+	if g.PairwiseSub != "ppid-findme" {
+		t.Errorf("PairwiseSub: got %q", g.PairwiseSub)
+	}
+	if g.UserID != testUserID {
+		t.Errorf("UserID: got %q, want %q", g.UserID, testUserID)
+	}
+}
+
+func TestDBGrantStoreFindByPPIDNotFound(t *testing.T) {
+	s := NewDBGrantStore(newFakeGrantQuerier())
+	_, found, err := s.FindGrantByPPID(context.Background(), "nonexistent-ppid", "rp-1")
+	if err != nil {
+		t.Fatalf("FindGrantByPPID: %v", err)
+	}
+	if found {
+		t.Error("expected found=false for nonexistent PPID")
+	}
+}
+
+func TestDBGrantStoreFindByPPIDWrongClient(t *testing.T) {
+	q := newFakeGrantQuerier()
+	s := NewDBGrantStore(q)
+	ctx := context.Background()
+
+	// Create a grant for rp-1.
+	_, err := s.CreateGrant(ctx, oidc.NewGrant{
+		UserID:      testUserID,
+		ClientID:    "rp-1",
+		PairwiseSub: "ppid-client-test",
+	})
+	if err != nil {
+		t.Fatalf("CreateGrant: %v", err)
+	}
+
+	// Search for the same PPID but different client — should not find.
+	_, found, err := s.FindGrantByPPID(ctx, "ppid-client-test", "rp-2")
+	if err != nil {
+		t.Fatalf("FindGrantByPPID: %v", err)
+	}
+	if found {
+		t.Error("expected found=false when client_id doesn't match")
+	}
+}
+
+func TestDBGrantStoreFindByPPIDExcludesRevoked(t *testing.T) {
+	q := newFakeGrantQuerier()
+	s := NewDBGrantStore(q)
+	ctx := context.Background()
+
+	// Create and revoke a grant.
+	created, err := s.CreateGrant(ctx, oidc.NewGrant{
+		UserID:      testUserID,
+		ClientID:    "rp-1",
+		PairwiseSub: "ppid-revoked",
+	})
+	if err != nil {
+		t.Fatalf("CreateGrant: %v", err)
+	}
+	if err := s.RevokeGrant(ctx, created.ID); err != nil {
+		t.Fatalf("RevokeGrant: %v", err)
+	}
+
+	// FindGrantByPPID must not return the revoked grant.
+	_, found, err := s.FindGrantByPPID(ctx, "ppid-revoked", "rp-1")
+	if err != nil {
+		t.Fatalf("FindGrantByPPID: %v", err)
+	}
+	if found {
+		t.Error("revoked grant must not be returned by FindGrantByPPID")
+	}
+}
+
+func TestDBGrantStoreFindByPPIDDBError(t *testing.T) {
+	q := &fakeGrantQuerier{rows: make(map[string]*db.Grant), dbErr: errors.New("db timeout")}
+	s := NewDBGrantStore(q)
+	_, _, err := s.FindGrantByPPID(context.Background(), "any-ppid", "rp-1")
+	if err == nil {
+		t.Error("expected error propagation from DB error")
+	}
 }
 
 // --- Additional edge case tests ---

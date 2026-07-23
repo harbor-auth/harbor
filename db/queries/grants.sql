@@ -46,3 +46,12 @@ UPDATE grants
 SET revoked_at = now()
 WHERE client_id = $1
   AND revoked_at IS NULL;
+
+-- FindGrantByPPID looks up an active grant by its pairwise_sub (PPID) and
+-- client_id. Used during RP-Initiated Logout to reverse-lookup the userID from
+-- the id_token_hint's sub claim without exposing internal user IDs to RPs.
+-- name: FindGrantByPPID :one
+SELECT * FROM grants
+WHERE pairwise_sub = $1
+  AND client_id = $2
+  AND revoked_at IS NULL;

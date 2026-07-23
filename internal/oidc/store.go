@@ -13,6 +13,7 @@ type Client struct {
 	ID            string
 	SectorID      string // groups redirect URIs for PPID derivation (DESIGN §3.2)
 	RedirectURIs  []string
+	LogoutURIs    []string // registered post_logout_redirect_uri values (OIDC RP-Initiated Logout)
 	ScopesAllowed []string
 }
 
@@ -21,6 +22,18 @@ type Client struct {
 // loose matching is a classic open-redirect hole).
 func (c Client) HasRedirectURI(uri string) bool {
 	for _, u := range c.RedirectURIs {
+		if u == uri {
+			return true
+		}
+	}
+	return false
+}
+
+// HasLogoutURI reports whether uri EXACTLY matches a registered logout URI
+// (post_logout_redirect_uri for RP-Initiated Logout). Like HasRedirectURI, this
+// uses exact string matching to prevent open-redirect vulnerabilities.
+func (c Client) HasLogoutURI(uri string) bool {
+	for _, u := range c.LogoutURIs {
 		if u == uri {
 			return true
 		}

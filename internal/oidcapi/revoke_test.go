@@ -1,6 +1,7 @@
 package oidcapi
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -640,7 +641,7 @@ func createRefreshTokenInStore(t *testing.T, store *oidc.InMemorySessionStore, u
 		TokenHash: hash,
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
-	if err := store.CreateSession(nil, session); err != nil {
+	if err := store.CreateSession(context.Background(), session); err != nil {
 		t.Fatalf("CreateSession: %v", err)
 	}
 	// Encode using base64 URL-safe encoding (same as internal encodeRefreshToken)
