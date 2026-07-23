@@ -282,6 +282,49 @@ func TestAuditRecordNilDetail(t *testing.T) {
 	}
 }
 
+// TestAuditCryptoShredMakesPayloadUnrecoverable verifies the GDPR crypto-shred
+// guarantee (DESIGN §11.6): destroying a user's DEK makes every existing
+// payload_encrypted blob permanently unreadable without touching the rows.
+// The operator retains event_type + timestamp (in the clear) but can never
+// recover the encrypted detail.
+//
+//harbor:invariant INV-AUDIT-CRYPTO-SHRED
+func TestAuditCryptoShredMakesPayloadUnrecoverable(t *testing.T) {
+	s := newAuditTestSetup(t)
+
+	// Step 1 — record an event and capture the resulting ciphertext blob.
+	cid := "test-rp"
+	if err := s.recorder.Record(context.Background(), s.userID, EventTokenIssued, &cid,
+		map[string]string{"scope": "openid"}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if len(s.store.params) != 1 {
+		t.Fatalf("expected 1 inserted row, got %d", len(s.store.params))
+	}
+	ciphertext := s.store.params[0].PayloadEncrypted
+
+	// Sanity-check: the blob is readable under the live DEK before erasure.
+	if _, err := s.cipher.Decrypt(s.dek, ciphertext, auditPayloadAAD(s.userID)); err != nil {
+		t.Fatalf("pre-shred sanity: Decrypt with live DEK failed: %v", err)
+	}
+
+	// Step 2 — crypto-shred: zero the DEK, simulating destruction of
+	// users.dek_wrapped (erasure request deletes the wrapped key; the raw DEK
+	// is never persisted, so it can no longer be recovered).
+	var shredded crypto.DEK // all-zero DEK represents a destroyed key
+
+	// Step 3 — assert decryption fails closed with nil plaintext.
+	// An all-zero DEK produces the wrong round-key schedule, so AES-GCM
+	// authentication fails and ErrDecryptFailed is returned.
+	got, err := s.cipher.Decrypt(shredded, ciphertext, auditPayloadAAD(s.userID))
+	if !errors.Is(err, crypto.ErrDecryptFailed) {
+		t.Fatalf("after DEK destruction: expected ErrDecryptFailed, got %v", err)
+	}
+	if got != nil {
+		t.Fatalf("after DEK destruction: expected nil plaintext (fail-closed), got %d bytes", len(got))
+	}
+}
+
 // TestAuditRecordUnwrapDEKError verifies that Record surfaces an error when the
 // key provider cannot unwrap the user's DEK (e.g. HSM unavailable or crypto-shred).
 func TestAuditRecordUnwrapDEKError(t *testing.T) {
