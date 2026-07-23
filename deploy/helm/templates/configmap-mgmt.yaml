@@ -22,3 +22,9 @@ data:
   WEBAUTHN_RP_ID: {{ .Values.mgmt.webauthn.rpId | quote }}
   WEBAUTHN_RP_DISPLAY_NAME: {{ .Values.mgmt.webauthn.rpName | quote }}
   WEBAUTHN_RP_ORIGINS: {{ .Values.mgmt.webauthn.rpOrigin | quote }}
+  # Relay / BYO-domain configuration. These domains are used to generate DNS
+  # setup instructions for users who bring their own custom email domains.
+  # MTA_DOMAIN is the regional MTA that receives inbound mail (e.g., mta-eu.harbor.id).
+  # RELAY_DOMAIN is the SPF/DKIM domain users include in their DNS records.
+  MTA_DOMAIN: {{ .Values.mgmt.relay.mtaDomain | default "mta.harbor.id" | quote }}
+  RELAY_DOMAIN: {{ .Values.mgmt.relay.relayDomain | default "relay.harbor.id" | quote }}

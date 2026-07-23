@@ -113,6 +113,12 @@ mgmt:
     # Fully-qualified origin permitted to run ceremonies (the dashboard/BFF
     # origin, NOT the issuer).
     rpOrigin: https://dashboard.example.com
+  # Relay / BYO-domain configuration for DNS setup instructions.
+  # mtaDomain is the regional MTA that receives inbound mail (MX record target).
+  # relayDomain is the regional relay domain for SPF/DKIM records.
+  relay:
+    mtaDomain: mta-eu.harbor.id
+    relayDomain: relay.eu.harbor.id
   resources:
     requests:
       cpu: 50m
