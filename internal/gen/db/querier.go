@@ -94,6 +94,12 @@ type Querier interface {
 	// Enqueue a revocation signal for durable delivery. Called by signalRefreshReuse
 	// and signalCodeReuse after (or instead of) the inline best-effort attempt.
 	EnqueueRevocation(ctx context.Context, arg EnqueueRevocationParams) (RevocationOutbox, error)
+	// Crypto-shreds a user account by atomically overwriting dek_wrapped with
+	// an empty byte slice and setting status=erased in a single UPDATE.
+	// This destroys the per-user DEK so all envelope-encrypted PII (audit
+	// payloads, relay mappings, etc.) becomes permanently unrecoverable in one
+	// stroke (DESIGN §compliance-export, invariant 1). NOT a row deletion.
+	EraseUserDEK(ctx context.Context, id pgtype.UUID) error
 	// Fetch pending revocation signals ready for delivery. Uses FOR UPDATE SKIP
 	// LOCKED to allow multiple workers without contention. Limited to batch_size
 	// rows to avoid long transactions. Only fetches rows whose next_attempt_at

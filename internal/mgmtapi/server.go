@@ -109,6 +109,10 @@ type Server struct {
 	// management). Nil puts those routes into a 503 state.
 	mfa MFAService
 
+	// compliance, when non-nil, backs the POST /compliance/export and POST
+	// /compliance/erase endpoints. Nil puts those routes into a 503 state.
+	compliance *ComplianceDeps
+
 	logger *slog.Logger
 }
 
@@ -267,6 +271,14 @@ func (s *Server) WithMFA(service MFAService) *Server {
 	return s
 }
 
+// WithCompliance wires the DSAR compliance endpoints (POST /compliance/export
+// and POST /compliance/erase). A nil deps puts both routes into a 503 state.
+// Returns s for chaining.
+func (s *Server) WithCompliance(deps *ComplianceDeps) *Server {
+	s.compliance = deps
+	return s
+}
+
 // Routes registers harbor-mgmt's cold-path routes on mux. It is additive: the
 // caller owns the mux (typically httpserver.NewHealthMux) and its /healthz route.
 func (s *Server) Routes(mux *http.ServeMux) {
@@ -295,6 +307,8 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /mfa/verify-recovery", s.PostMFAVerifyRecovery)
 	mux.HandleFunc("GET /mfa/factors", s.GetMFAFactors)
 	mux.HandleFunc("DELETE /mfa/factors/{id}", s.DeleteMFAFactor)
+	mux.HandleFunc("POST /compliance/export", s.PostExport)
+	mux.HandleFunc("POST /compliance/erase", s.PostErase)
 }
 
 // errorResponse is the JSON error envelope for the cold-path API. Messages are

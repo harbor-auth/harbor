@@ -54,6 +54,23 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 	return i, err
 }
 
+const eraseUserDEK = `-- name: EraseUserDEK :exec
+UPDATE users
+SET dek_wrapped = '\x'::bytea,
+    status      = 'erased'
+WHERE id = $1
+`
+
+// Crypto-shreds a user account by atomically overwriting dek_wrapped with
+// an empty byte slice and setting status=erased in a single UPDATE.
+// This destroys the per-user DEK so all envelope-encrypted PII (audit
+// payloads, relay mappings, etc.) becomes permanently unrecoverable in one
+// stroke (DESIGN §compliance-export, invariant 1). NOT a row deletion.
+func (q *Queries) EraseUserDEK(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, eraseUserDEK, id)
+	return err
+}
+
 const getUser = `-- name: GetUser :one
 SELECT id, region, status, dek_wrapped, pairwise_secret, created_at, recovery_required FROM users
 WHERE id = $1
