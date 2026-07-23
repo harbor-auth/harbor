@@ -240,8 +240,19 @@ e2e: ## Run F8 Go e2e tests (authorize→token→JWKS + §11.7 negatives) agains
 		HARBOR_E2E_BASE_URL=http://localhost:8080 $(GO) test -tags=e2e ./e2e/...; \
 	fi
 
-conformance: e2e ## Run OIDC OP + WebAuthn conformance suites (release gate, §1.8 Stage 7)
+conformance: ## Run OIDC OP + WebAuthn conformance suites (release gate, §1.8 Stage 7; CI only — use `make e2e` locally)
+	@# CI-only gate: the conformance suite spins up MongoDB + a Spring Boot JVM under
+	@# Rosetta/QEMU emulation and will OOM a developer Mac. Use `make e2e` for the
+	@# fast local smoke test. Set CI=true to override (e.g. on a beefy workstation).
+	@if [ -z "$(CI)" ]; then \
+		echo '==> conformance: SKIPPED (CI-only release gate).'; \
+		echo '    Use `make e2e` for the local smoke test.'; \
+		echo '    To run locally anyway: CI=true make conformance'; \
+		exit 0; \
+	fi
 	@echo '==> conformance: OIDC OP + WebAuthn suites (must pass to release)'
+	@# Run e2e first (the fast smoke gate), then the heavy OIDF certification plan.
+	@$(MAKE) e2e
 	@echo '==> conformance: OIDF OP + WebAuthn suites'
 	@# Present-harness branch is FAIL-CLOSED (mirrors the e2e block): no `|| exit 0`.
 	@# The OIDC OP run (run-plan.sh -> assert-pass.sh) and the WebAuthn gate
