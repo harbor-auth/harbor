@@ -235,8 +235,16 @@ func (s *Server) GetAuthorizeComplete(w http.ResponseWriter, r *http.Request) {
 	if session.UserID == "" {
 		writeAuthorizeErrorPage(w)
 		return
-	} // Issue the authorization code using the authenticated user_id
-	result, aerr := s.svc.AuthorizeWithUser(r.Context(), oidc.AuthorizeWithUserRequest{
+	}
+
+	// Inject the authenticated user_id into the context so the PPIDSessionResolver
+	// (via BFFAuthSource) can read it. This is the critical link that connects the
+	// BFF session's authenticated identity to the OIDC session resolver — without
+	// it, the resolver cannot derive the per-RP PPID (audit blocker 1.1 fix).
+	ctx := bff.ContextWithUserID(r.Context(), session.UserID)
+
+	// Issue the authorization code using the authenticated user_id
+	result, aerr := s.svc.AuthorizeWithUser(ctx, oidc.AuthorizeWithUserRequest{
 		ClientID:            session.ClientID,
 		RedirectURI:         session.RedirectURI,
 		Scope:               session.Scope,
