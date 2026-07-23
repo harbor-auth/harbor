@@ -194,4 +194,3 @@ func writeRevokeError(w http.ResponseWriter, code, description string) {
 		ErrorDescription: description,
 	})
 }
-
