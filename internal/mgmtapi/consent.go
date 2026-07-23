@@ -5,9 +5,19 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/harbor-auth/harbor/internal/identity"
 	"github.com/harbor-auth/harbor/internal/oidc"
 	"github.com/harbor-auth/harbor/internal/telemetry"
 )
+
+// ConsentAuditRecorder records consent-lifecycle audit events on a best-effort
+// basis (consent.granted, consent.revoked). It is satisfied directly by
+// *identity.AuditRecorder. Emission is always non-blocking (RecordAsync
+// detaches from the request context) so a slow/failing audit write never
+// stalls the consent management path (DESIGN §2.1, Decision 3).
+type ConsentAuditRecorder interface {
+	RecordAsync(ctx context.Context, userID string, et identity.EventType, clientID *string, detail any)
+}
 
 // ConsentStore is the narrow interface the consent handlers need from
 // oidc.ConsentStore. Depending on the interface keeps the HTTP layer
@@ -145,6 +155,14 @@ func (s *Server) DeleteConsentGrant(w http.ResponseWriter, r *http.Request) {
 			recordError(telemetry.EndpointConsent, "server_error")
 			s.writeError(w, http.StatusInternalServerError, "server_error", "failed to revoke consent grant")
 			return
+		}
+
+		// Best-effort audit emission: consent.revoked records the user
+		// disconnecting an RP. Emitted only when an active grant was found and
+		// revoked. RecordAsync is non-blocking and never fails the request.
+		if s.consentAudit != nil {
+			cid := clientID
+			s.consentAudit.RecordAsync(r.Context(), userID, identity.EventConsentRevoked, &cid, nil)
 		}
 	}
 

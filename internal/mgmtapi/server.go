@@ -55,6 +55,10 @@ type Server struct {
 	// sessionRevoker cascades consent revocation to active sessions with the RP.
 	// May be nil (dev-scaffold mode); DeleteConsentGrant then skips the cascade.
 	sessionRevoker SessionRevoker
+	// consentAudit, when non-nil, appends consent-lifecycle events
+	// (consent.revoked) to the user-visible audit trail. Emission is
+	// best-effort — a nil recorder simply skips the trail.
+	consentAudit ConsentAuditRecorder
 	// relays provides access to relay addresses for the authenticated user.
 	// May be nil in dev-scaffold mode; relay endpoints then return 503.
 	relays RelayStore
@@ -168,6 +172,14 @@ func (s *Server) WithConsentStore(consents ConsentStore) *Server {
 // A nil revoker skips the cascade. Returns s for chaining.
 func (s *Server) WithSessionRevoker(revoker SessionRevoker) *Server {
 	s.sessionRevoker = revoker
+	return s
+}
+
+// WithConsentAuditLog attaches the recorder that appends consent-lifecycle
+// events (consent.revoked) to the user-visible audit trail. A nil recorder
+// skips the trail; emission is always best-effort. Returns s for chaining.
+func (s *Server) WithConsentAuditLog(recorder ConsentAuditRecorder) *Server {
+	s.consentAudit = recorder
 	return s
 }
 
