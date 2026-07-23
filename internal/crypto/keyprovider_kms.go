@@ -320,6 +320,70 @@ func (p *KMSKeyProvider) RewrapDEK(ctx context.Context, region string, wrapped [
 	return newEnvelope, nil
 }
 
+// wrapKeyVersion is the version byte for the WrapKey envelope format. Independent
+// from envelopeVersion (WrapDEK) because WrapKey uses a DEK-wrapping layout:
+// version(1) | wrappedDEKLen(2, big-endian) | wrappedDEK | ciphertext
+const wrapKeyVersion = 1
+
+// WrapKey implements KeyProvider. It encrypts keyBytes under a freshly generated
+// DEK, binding region+purpose cryptographically via GCM AAD (keyWrapAAD), and
+// then wraps that DEK under the regional KEK via WrapDEK.
+//
+// Layout: version(1) | wrappedDEKLen(2, big-endian) | wrappedDEK | ciphertext
+func (p *KMSKeyProvider) WrapKey(ctx context.Context, region, purpose string, keyBytes []byte) ([]byte, error) {
+	dek, err := GenerateDEK()
+	if err != nil {
+		return nil, fmt.Errorf("crypto: WrapKey: generate DEK: %w", err)
+	}
+
+	ciphertext, err := NewCipher().Encrypt(dek, keyBytes, keyWrapAAD(region, purpose))
+	if err != nil {
+		return nil, fmt.Errorf("crypto: WrapKey: encrypt: %w", err)
+	}
+
+	wrappedDEK, err := p.WrapDEK(ctx, region, dek)
+	if err != nil {
+		return nil, fmt.Errorf("crypto: WrapKey: wrap DEK: %w", err)
+	}
+
+	envelope := make([]byte, 0, 3+len(wrappedDEK)+len(ciphertext))
+	envelope = append(envelope, wrapKeyVersion)
+	envelope = append(envelope, byte(len(wrappedDEK)>>8), byte(len(wrappedDEK)))
+	envelope = append(envelope, wrappedDEK...)
+	envelope = append(envelope, ciphertext...)
+	return envelope, nil
+}
+
+// UnwrapKey implements KeyProvider. It reverses WrapKey. Any failure returns
+// ErrDecryptFailed (decryption-oracle defense).
+func (p *KMSKeyProvider) UnwrapKey(ctx context.Context, region, purpose string, wrapped []byte) ([]byte, error) {
+	if len(wrapped) < 4 {
+		return nil, ErrDecryptFailed
+	}
+	if wrapped[0] != wrapKeyVersion {
+		return nil, ErrDecryptFailed
+	}
+
+	dekLen := int(wrapped[1])<<8 | int(wrapped[2])
+	if 3+dekLen >= len(wrapped) {
+		return nil, ErrDecryptFailed
+	}
+
+	wrappedDEK := wrapped[3 : 3+dekLen]
+	ciphertext := wrapped[3+dekLen:]
+
+	dek, err := p.UnwrapDEK(ctx, region, wrappedDEK)
+	if err != nil {
+		return nil, ErrDecryptFailed
+	}
+
+	plaintext, err := NewCipher().Decrypt(dek, ciphertext, keyWrapAAD(region, purpose))
+	if err != nil {
+		return nil, ErrDecryptFailed
+	}
+	return plaintext, nil
+}
+
 // String returns a human-readable description of the provider.
 func (p *KMSKeyProvider) String() string {
 	return "KMSKeyProvider"
@@ -341,4 +405,13 @@ func (k *kmsKeyProvider) UnwrapDEK(_ context.Context, _ string, _ []byte) (DEK, 
 	return DEK{}, ErrKMSNotImplemented
 }
 
+// WrapKey returns ErrKMSNotImplemented. Use KMSKeyProvider instead.
+func (k *kmsKeyProvider) WrapKey(_ context.Context, _, _ string, _ []byte) ([]byte, error) {
+	return nil, ErrKMSNotImplemented
+}
+
+// UnwrapKey returns ErrKMSNotImplemented. Use KMSKeyProvider instead.
+func (k *kmsKeyProvider) UnwrapKey(_ context.Context, _, _ string, _ []byte) ([]byte, error) {
+	return nil, ErrKMSNotImplemented
+}
 

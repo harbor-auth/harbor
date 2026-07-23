@@ -762,3 +762,144 @@ func TestKMSKeyProviderRewrapDEKPreservesDEK(t *testing.T) {
 
 // Compile-time assertion that KMSKeyProvider satisfies KeyProvider.
 var _ KeyProvider = (*KMSKeyProvider)(nil)
+
+func TestKMSKeyProviderUnwrapKeyMalformedEnvelope(t *testing.T) {
+	ctx := context.Background()
+	region := "us-east-1"
+	purpose := "signing-key"
+	keyID := "kek-1"
+
+	kmsClient := NewFakeKMSClient()
+	resolver := NewStaticKEKResolver(map[string]string{region: keyID})
+	provider := NewKMSKeyProvider(kmsClient, resolver)
+
+	// Build a small syntactically valid envelope for comparison.
+	validWrapped, _ := provider.WrapKey(ctx, region, purpose, []byte("key"))
+	dekLen := int(validWrapped[1])<<8 | int(validWrapped[2])
+
+	testCases := []struct {
+		name    string
+		input   []byte
+	}{
+		{"nil", nil},
+		{"empty", []byte{}},
+		{"too short", []byte{1, 0}},
+		{"wrong version", func() []byte { b := make([]byte, len(validWrapped)); copy(b, validWrapped); b[0] = 99; return b }()},
+		{"dekLen overflows", func() []byte {
+			// Set dekLen so that 3+dekLen == len(wrapped), leaving no ciphertext.
+			b := make([]byte, len(validWrapped))
+			copy(b, validWrapped)
+			newLen := len(validWrapped) - 3
+			b[1] = byte(newLen >> 8)
+			b[2] = byte(newLen)
+			return b
+		}()},
+		{"truncated dek", validWrapped[:3+dekLen/2]},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := provider.UnwrapKey(ctx, region, purpose, tc.input)
+			if !errors.Is(err, ErrDecryptFailed) {
+				t.Errorf("error = %v, want ErrDecryptFailed", err)
+			}
+		})
+	}
+}
+
+func TestKMSKeyProviderWrapKeyRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	region := "us-east-1"
+	purpose := "signing-key"
+	keyID := "kek-1"
+	keyBytes := []byte("test-private-key-material")
+
+	kmsClient := NewFakeKMSClient()
+	resolver := NewStaticKEKResolver(map[string]string{region: keyID})
+	provider := NewKMSKeyProvider(kmsClient, resolver)
+
+	wrapped, err := provider.WrapKey(ctx, region, purpose, keyBytes)
+	if err != nil {
+		t.Fatalf("WrapKey: %v", err)
+	}
+
+	unwrapped, err := provider.UnwrapKey(ctx, region, purpose, wrapped)
+	if err != nil {
+		t.Fatalf("UnwrapKey: %v", err)
+	}
+	if string(unwrapped) != string(keyBytes) {
+		t.Errorf("round-trip mismatch: got %q, want %q", unwrapped, keyBytes)
+	}
+}
+
+func TestKMSKeyProviderUnwrapKeyWrongPurpose(t *testing.T) {
+	ctx := context.Background()
+	region := "us-east-1"
+	keyID := "kek-1"
+
+	kmsClient := NewFakeKMSClient()
+	resolver := NewStaticKEKResolver(map[string]string{region: keyID})
+	provider := NewKMSKeyProvider(kmsClient, resolver)
+
+	wrapped, err := provider.WrapKey(ctx, region, "signing-key", []byte("key-material"))
+	if err != nil {
+		t.Fatalf("WrapKey: %v", err)
+	}
+
+	// Wrong purpose: GCM AAD mismatch must yield ErrDecryptFailed.
+	_, err = provider.UnwrapKey(ctx, region, "other-purpose", wrapped)
+	if !errors.Is(err, ErrDecryptFailed) {
+		t.Errorf("wrong-purpose error = %v, want ErrDecryptFailed", err)
+	}
+}
+
+func TestKMSKeyProviderUnwrapKeyWrongRegion(t *testing.T) {
+	ctx := context.Background()
+	regionA := "us-east-1"
+	regionB := "eu-west-1"
+	purpose := "signing-key"
+	keyA := "kek-us"
+	keyB := "kek-eu"
+
+	kmsClient := NewFakeKMSClient()
+	// Both regions point to the same KMS client but different key IDs.
+	resolverA := NewStaticKEKResolver(map[string]string{regionA: keyA, regionB: keyB})
+	provider := NewKMSKeyProvider(kmsClient, resolverA)
+
+	wrapped, err := provider.WrapKey(ctx, regionA, purpose, []byte("key-material"))
+	if err != nil {
+		t.Fatalf("WrapKey: %v", err)
+	}
+
+	// Unwrap with a different region must fail.
+	_, err = provider.UnwrapKey(ctx, regionB, purpose, wrapped)
+	if !errors.Is(err, ErrDecryptFailed) {
+		t.Errorf("wrong-region error = %v, want ErrDecryptFailed", err)
+	}
+}
+
+func TestKMSKeyProviderUnwrapKeyTamperedCiphertext(t *testing.T) {
+	ctx := context.Background()
+	region := "us-east-1"
+	purpose := "signing-key"
+	keyID := "kek-1"
+
+	kmsClient := NewFakeKMSClient()
+	resolver := NewStaticKEKResolver(map[string]string{region: keyID})
+	provider := NewKMSKeyProvider(kmsClient, resolver)
+
+	wrapped, err := provider.WrapKey(ctx, region, purpose, []byte("key-material"))
+	if err != nil {
+		t.Fatalf("WrapKey: %v", err)
+	}
+
+	// Flip the last byte of the ciphertext (the GCM tag).
+	tampered := make([]byte, len(wrapped))
+	copy(tampered, wrapped)
+	tampered[len(tampered)-1] ^= 0xFF
+
+	_, err = provider.UnwrapKey(ctx, region, purpose, tampered)
+	if !errors.Is(err, ErrDecryptFailed) {
+		t.Errorf("tampered ciphertext error = %v, want ErrDecryptFailed", err)
+	}
+}
