@@ -243,10 +243,30 @@ func main() {
 		logger.Warn("DATABASE_URL not set — MFA endpoints will return 503 (dev mode)")
 	}
 
+	// Compliance (DSAR export + erase) endpoints. Only wired when DATABASE_URL is
+	// configured; without a DB the bundle assembly and crypto-shred are impossible.
+	var complianceDeps *mgmtapi.ComplianceDeps
+	if pool != nil {
+		q := db.New(pool)
+		userLoader := clients.NewDBComplianceUserLoader(q)
+		auditRecorder := identity.NewAuditRecorder(userLoader, q, kp, crypto.NewCipher(), logger)
+		bundler := identity.NewExportBundler(q, q, q, q, kp, crypto.NewCipher())
+		eraser := identity.NewEraser(q, q, auditRecorder, logger)
+		complianceDeps = &mgmtapi.ComplianceDeps{
+			Bundler: bundler,
+			Eraser:  eraser,
+			Users:   userLoader,
+		}
+		logger.Info("compliance service: export and erase endpoints enabled")
+	} else {
+		logger.Warn("DATABASE_URL not set -- compliance endpoints will return 503 (dev mode)")
+	}
+
 	mgmtServer := mgmtapi.New(enroller, logger).
 		WithConsentStore(consentStore).
 		WithSessionRevoker(sessionRevoker).
-		WithMFA(mfaService)
+		WithMFA(mfaService).
+		WithCompliance(complianceDeps)
 
 	// Relay store for /relay-addresses endpoints. Only wire when DATABASE_URL is
 	// configured; otherwise the relay endpoints stay in a 503 Service Unavailable

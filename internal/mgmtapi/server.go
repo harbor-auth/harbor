@@ -271,6 +271,14 @@ func (s *Server) WithMFA(service MFAService) *Server {
 	return s
 }
 
+// WithCompliance wires the DSAR compliance endpoints (POST /compliance/export
+// and POST /compliance/erase). A nil deps puts both routes into a 503 state.
+// Returns s for chaining.
+func (s *Server) WithCompliance(deps *ComplianceDeps) *Server {
+	s.compliance = deps
+	return s
+}
+
 // Routes registers harbor-mgmt's cold-path routes on mux. It is additive: the
 // caller owns the mux (typically httpserver.NewHealthMux) and its /healthz route.
 func (s *Server) Routes(mux *http.ServeMux) {
