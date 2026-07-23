@@ -243,7 +243,10 @@ func TestActivate_ValidCode(t *testing.T) {
 	}
 
 	// The TOTP factor must now be ACTIVE (used=true).
-	factors, _ := store.ListFactors(ctx, testUserID)
+	factors, err := store.ListFactors(ctx, testUserID)
+	if err != nil {
+		t.Fatalf("ListFactors: %v", err)
+	}
 	var activated bool
 	for _, f := range factors {
 		if f.Type == FactorTypeTOTP {
@@ -270,7 +273,10 @@ func TestActivate_InvalidCode(t *testing.T) {
 	}
 
 	// Factor must stay PENDING on a failed activation.
-	factors, _ := store.ListFactors(ctx, testUserID)
+	factors, err := store.ListFactors(ctx, testUserID)
+	if err != nil {
+		t.Fatalf("ListFactors: %v", err)
+	}
 	for _, f := range factors {
 		if f.Type == FactorTypeTOTP && f.Used {
 			t.Error("TOTP factor must remain PENDING after a failed Activate")

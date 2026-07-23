@@ -441,8 +441,12 @@ func TestInMemoryBYODomainStore_ConcurrentReadWrite(t *testing.T) {
 	for i := 0; i < numGoroutines; i++ {
 		go func() {
 			defer wg.Done()
-			_, _ = store.GetDomainByName(ctx, userID.String(), "readwrite.example.com")
-			_, _ = store.ListDomainsByUser(ctx, userID.String())
+			if _, err := store.GetDomainByName(ctx, userID.String(), "readwrite.example.com"); err != nil {
+				t.Errorf("concurrent GetDomainByName() error = %v", err)
+			}
+			if _, err := store.ListDomainsByUser(ctx, userID.String()); err != nil {
+				t.Errorf("concurrent ListDomainsByUser() error = %v", err)
+			}
 		}()
 	}
 
@@ -457,7 +461,9 @@ func TestInMemoryBYODomainStore_ConcurrentReadWrite(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			state := states[n%len(states)]
-			_ = store.UpdateDomainState(ctx, domain.ID.String(), state)
+			if err := store.UpdateDomainState(ctx, domain.ID.String(), state); err != nil {
+				t.Errorf("concurrent UpdateDomainState() error = %v", err)
+			}
 		}(i)
 	}
 
