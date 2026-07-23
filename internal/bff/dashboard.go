@@ -10,6 +10,7 @@ import (
 	"github.com/harbor-auth/harbor/internal/clients"
 	"github.com/harbor-auth/harbor/internal/mgmtapi"
 	"github.com/harbor-auth/harbor/internal/oidc"
+	"github.com/harbor-auth/harbor/internal/telemetry"
 )
 
 // DashboardConsentStore is the narrow consent interface the dashboard needs.
@@ -62,6 +63,11 @@ type DashboardHandler struct {
 	auditTrail  *mgmtapi.AuditTrailDeps
 	relay       DashboardRelayStore // nil when email-relay-service is not deployed
 
+	// aggregate-only Prometheus counters — no PII in labels (INV §5)
+	pageViews      *telemetry.Counter
+	appRevokes     *telemetry.Counter
+	sessionRevokes *telemetry.Counter
+
 	tmpl   *template.Template
 	logger *slog.Logger
 }
@@ -90,6 +96,11 @@ func NewDashboardHandler(
 		relay:       relay,
 		tmpl:        tmpl,
 		logger:      logger,
+		// Aggregate-only counters: partitioned by endpoint (page views) or outcome
+		// (mutations). No user / IP / session dimension — no PII (INVARIANT §5).
+		pageViews:      telemetry.NewCounter("dashboard_page_views_total", "Total dashboard page views by view.", telemetry.DimEndpoint),
+		appRevokes:     telemetry.NewCounter("dashboard_app_revokes_total", "Total app consent revocations from the dashboard.", telemetry.DimOutcome),
+		sessionRevokes: telemetry.NewCounter("dashboard_session_revokes_total", "Total session revocations from the dashboard.", telemetry.DimOutcome),
 	}
 }
 
@@ -152,6 +163,7 @@ func (h *DashboardHandler) GetDashboard(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "authentication required", http.StatusUnauthorized)
 		return
 	}
+	h.pageViews.Inc(telemetry.Endpoint(telemetry.EndpointDashboard))
 	h.renderTemplate(w, r, "dashboard.html", map[string]string{"UserID": userID})
 }
 
@@ -171,6 +183,7 @@ func (h *DashboardHandler) GetConnectedApps(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "failed to load connected apps", http.StatusInternalServerError)
 		return
 	}
+	h.pageViews.Inc(telemetry.Endpoint(telemetry.EndpointConsent))
 	h.renderTemplate(w, r, "dashboard_apps.html", dashboardAppsData{Grants: grants})
 }
 
@@ -231,6 +244,7 @@ func (h *DashboardHandler) PostRevokeApp(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	h.appRevokes.Inc(telemetry.Outcome(telemetry.OutcomeSuccess))
 	http.Redirect(w, r, "/dashboard/apps", http.StatusSeeOther)
 }
 
@@ -295,6 +309,7 @@ func (h *DashboardHandler) GetActivity(w http.ResponseWriter, r *http.Request) {
 		events = append(events, ev)
 	}
 
+	h.pageViews.Inc(telemetry.Endpoint(telemetry.EndpointAudit))
 	h.renderTemplate(w, r, "dashboard_activity.html", dashboardActivityData{Events: events})
 }
 
@@ -321,6 +336,7 @@ func (h *DashboardHandler) GetSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.pageViews.Inc(telemetry.Endpoint(telemetry.EndpointSession))
 	h.renderTemplate(w, r, "dashboard_sessions.html", dashboardSessionsData{
 		Sessions:    sessions,
 		Credentials: credentials,
@@ -368,6 +384,7 @@ func (h *DashboardHandler) PostRevokeSession(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	h.sessionRevokes.Inc(telemetry.Outcome(telemetry.OutcomeSuccess))
 	http.Redirect(w, r, "/dashboard/sessions", http.StatusSeeOther)
 }
 
@@ -419,6 +436,7 @@ func (h *DashboardHandler) GetRelayToggles(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	h.pageViews.Inc(telemetry.Endpoint(telemetry.EndpointRelay))
 	h.renderTemplate(w, r, "dashboard_relay.html", dashboardRelayData{Addresses: addresses})
 }
 
