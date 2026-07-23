@@ -18,7 +18,7 @@ INSERT INTO audit_events (
 ) VALUES (
     $1, $2, $3, $4, $5
 )
-RETURNING id, region, user_id, event_type, client_id, occurred_at
+RETURNING id, region, user_id, event_type, client_id, occurred_at, payload_encrypted
 `
 
 type CreateAuditEventParams struct {
@@ -49,12 +49,56 @@ func (q *Queries) CreateAuditEvent(ctx context.Context, arg CreateAuditEventPara
 		&i.EventType,
 		&i.ClientID,
 		&i.OccurredAt,
+		&i.PayloadEncrypted,
+	)
+	return i, err
+}
+
+const createAuditEventWithPayload = `-- name: CreateAuditEventWithPayload :one
+INSERT INTO audit_events (
+    id, region, user_id, event_type, client_id, payload_encrypted
+) VALUES (
+    $1, $2, $3, $4, $5, $6
+)
+RETURNING id, region, user_id, event_type, client_id, occurred_at, payload_encrypted
+`
+
+type CreateAuditEventWithPayloadParams struct {
+	ID               pgtype.UUID `json:"id"`
+	Region           string      `json:"region"`
+	UserID           pgtype.UUID `json:"user_id"`
+	EventType        string      `json:"event_type"`
+	ClientID         *string     `json:"client_id"`
+	PayloadEncrypted []byte      `json:"payload_encrypted"`
+}
+
+// CreateAuditEventWithPayload inserts an event with an envelope-encrypted
+// payload (DESIGN §4.4, §10). The payload_encrypted column holds ciphertext
+// under the user's DEK; the operator sees only event_type + timestamp.
+func (q *Queries) CreateAuditEventWithPayload(ctx context.Context, arg CreateAuditEventWithPayloadParams) (AuditEvent, error) {
+	row := q.db.QueryRow(ctx, createAuditEventWithPayload,
+		arg.ID,
+		arg.Region,
+		arg.UserID,
+		arg.EventType,
+		arg.ClientID,
+		arg.PayloadEncrypted,
+	)
+	var i AuditEvent
+	err := row.Scan(
+		&i.ID,
+		&i.Region,
+		&i.UserID,
+		&i.EventType,
+		&i.ClientID,
+		&i.OccurredAt,
+		&i.PayloadEncrypted,
 	)
 	return i, err
 }
 
 const listAuditEventsByUser = `-- name: ListAuditEventsByUser :many
-SELECT id, region, user_id, event_type, client_id, occurred_at FROM audit_events
+SELECT id, region, user_id, event_type, client_id, occurred_at, payload_encrypted FROM audit_events
 WHERE user_id = $1
 ORDER BY occurred_at DESC
 LIMIT $2 OFFSET $3
@@ -84,6 +128,51 @@ func (q *Queries) ListAuditEventsByUser(ctx context.Context, arg ListAuditEvents
 			&i.EventType,
 			&i.ClientID,
 			&i.OccurredAt,
+			&i.PayloadEncrypted,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAuditEventsByUserWithPayload = `-- name: ListAuditEventsByUserWithPayload :many
+SELECT id, region, user_id, event_type, client_id, occurred_at, payload_encrypted FROM audit_events
+WHERE user_id = $1
+ORDER BY occurred_at DESC
+LIMIT $2 OFFSET $3
+`
+
+type ListAuditEventsByUserWithPayloadParams struct {
+	UserID pgtype.UUID `json:"user_id"`
+	Limit  int32       `json:"limit"`
+	Offset int32       `json:"offset"`
+}
+
+// ListAuditEventsByUserWithPayload returns events including payload_encrypted
+// so the caller can decrypt under the user's DEK (DESIGN §4.4). Only the
+// owning user's endpoint decrypts; the operator has no plaintext read path.
+func (q *Queries) ListAuditEventsByUserWithPayload(ctx context.Context, arg ListAuditEventsByUserWithPayloadParams) ([]AuditEvent, error) {
+	rows, err := q.db.Query(ctx, listAuditEventsByUserWithPayload, arg.UserID, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AuditEvent
+	for rows.Next() {
+		var i AuditEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.Region,
+			&i.UserID,
+			&i.EventType,
+			&i.ClientID,
+			&i.OccurredAt,
+			&i.PayloadEncrypted,
 		); err != nil {
 			return nil, err
 		}

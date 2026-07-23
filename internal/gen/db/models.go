@@ -15,6 +15,8 @@ type AuditEvent struct {
 	EventType  string             `json:"event_type"`
 	ClientID   *string            `json:"client_id"`
 	OccurredAt pgtype.Timestamptz `json:"occurred_at"`
+	// Envelope-encrypted event detail (ciphertext under the user DEK). NULL for pre-migration rows. Operator sees only event_type + timestamp; crypto-shred via users.dek_wrapped destruction (DESIGN §4.4, §11.6).
+	PayloadEncrypted []byte `json:"payload_encrypted"`
 }
 
 type ConsentGrant struct {
