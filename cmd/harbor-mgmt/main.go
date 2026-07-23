@@ -26,6 +26,7 @@ import (
 	"github.com/harbor-auth/harbor/internal/gen/db"
 	"github.com/harbor-auth/harbor/internal/httpserver"
 	"github.com/harbor-auth/harbor/internal/identity"
+	"github.com/harbor-auth/harbor/internal/mfa"
 	"github.com/harbor-auth/harbor/internal/mgmtapi"
 	"github.com/harbor-auth/harbor/internal/region"
 	"github.com/harbor-auth/harbor/internal/telemetry"
@@ -211,7 +212,39 @@ func main() {
 		consentStore = clients.NewDBConsentStore(q)
 		sessionRevoker = clients.NewDBSessionStore(q)
 	}
-	mgmtServer := mgmtapi.New(enroller, logger).WithConsentStore(consentStore).WithSessionRevoker(sessionRevoker)
+
+	// MFA (TOTP second factor + recovery codes) is wired only when DATABASE_URL
+	// is configured: the envelope-encrypted factors and per-user DEKs require the
+	// DB and the KMS-backed key provider (docs/DESIGN.md §7.3). Without a DB the
+	// /mfa/* routes stay in a 503 state (mgmtapi.Server.WithMFA(nil)).
+	var mfaService mgmtapi.MFAService
+	if pool != nil {
+		q := db.New(pool)
+		svc, err := mfa.NewService(mfa.ServiceConfig{
+			Store:  mfa.NewDBStore(q),
+			Cipher: crypto.NewCipher(),
+			Keys:   clients.NewDBMFAKeyResolver(q, kp),
+		})
+		if err != nil {
+			logger.Error("failed to configure MFA service", "error", err)
+			stop()
+			pool.Close()
+			if redisClient != nil {
+				if err := redisClient.Close(); err != nil {
+					logger.Warn("redis close error on exit", "error", err)
+				}
+			}
+			os.Exit(1)
+		}
+		mfaService = svc
+	} else {
+		logger.Warn("DATABASE_URL not set — MFA endpoints will return 503 (dev mode)")
+	}
+
+	mgmtServer := mgmtapi.New(enroller, logger).
+		WithConsentStore(consentStore).
+		WithSessionRevoker(sessionRevoker).
+		WithMFA(mfaService)
 
 	mux := httpserver.NewHealthMux()
 	// Passkey ceremony endpoints. userIDFromRequest returns 501 until the BFF
