@@ -244,6 +244,10 @@ type AuthorizeWithUserRequest struct {
 	CodeChallengeMethod string
 	// UserID is the authenticated user's internal ID from the BFF session.
 	UserID string
+	// AuthMethod is the authentication method used during the login ceremony.
+	// It is mapped to ACR/AMR claims in the issued tokens via MapAuthMethodToACRAMR.
+	// The zero value (empty string) is fail-closed: no ACR/AMR claims are emitted.
+	AuthMethod AuthMethod
 }
 
 // ValidateAuthorizeRequest validates an /authorize request without running login/consent
@@ -296,6 +300,8 @@ func (s *Service) AuthorizeWithUser(ctx context.Context, req AuthorizeWithUserRe
 		return nil, redirectErr(ErrCodeServerError, "could not issue authorization code")
 	}
 
+	acr, amr := MapAuthMethodToACRAMR(req.AuthMethod)
+	authTime := s.now()
 	code := AuthCode{
 		Code:                codeStr,
 		ClientID:            req.ClientID,
@@ -306,7 +312,10 @@ func (s *Service) AuthorizeWithUser(ctx context.Context, req AuthorizeWithUserRe
 		Nonce:               req.Nonce,
 		CodeChallenge:       req.CodeChallenge,
 		CodeChallengeMethod: req.CodeChallengeMethod,
-		ExpiresAt:           s.now().Add(s.codeTTL),
+		ExpiresAt:           authTime.Add(s.codeTTL),
+		AuthTime:            authTime,
+		ACR:                 acr,
+		AMR:                 amr,
 	}
 	if err := s.codes.Save(ctx, code); err != nil {
 		return nil, redirectErr(ErrCodeServerError, "could not persist authorization code")
