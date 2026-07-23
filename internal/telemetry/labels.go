@@ -81,6 +81,7 @@ const (
 	EndpointSession    EndpointName = "session"
 	EndpointWebAuthn   EndpointName = "webauthn"
 	EndpointRelay      EndpointName = "relay"
+	EndpointAudit      EndpointName = "audit"
 )
 
 // OutcomeKind is the closed set of coarse operation outcomes.
