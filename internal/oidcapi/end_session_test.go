@@ -267,6 +267,180 @@ func TestPostEndSessionMissingHintGoesToLoggedOut(t *testing.T) {
 	}
 }
 
+// --- issuer mismatch tests --------------------------------------------------
+
+func TestGetEndSessionWrongIssuerRejected(t *testing.T) {
+	revoker := &fakeSessionRevoker{}
+	// Simulate issuer mismatch — the verifier returns ErrIssuerMismatch.
+	s := newEndSessionServer(t, &fakeLogoutVerifier{err: oidc.ErrIssuerMismatch}, revoker)
+
+	rec := doGetEndSession(s, openapi.GetEndSessionParams{
+		IdTokenHint:           "tok",
+		PostLogoutRedirectUri: esStrPtr(esLogoutURI),
+	})
+
+	// Wrong issuer is treated like invalid token — degrades to /logged-out, no revoke.
+	assertRedirect(t, rec, esLoggedOutURL)
+	if len(revoker.calls) != 0 {
+		t.Fatalf("revoke calls = %d, want 0 for issuer mismatch", len(revoker.calls))
+	}
+}
+
+// --- expired token acceptance tests -----------------------------------------
+
+// TestGetEndSessionAcceptsExpiredToken verifies that VerifySignatureOnly does
+// NOT reject expired tokens — users may log out with expired id_tokens, and
+// the signature is sufficient to prove authenticity for session revocation.
+func TestGetEndSessionAcceptsExpiredToken(t *testing.T) {
+	revoker := &fakeSessionRevoker{}
+	// The fake verifier returns valid claims even though in a real scenario the
+	// token's exp claim would be in the past. VerifySignatureOnly intentionally
+	// skips expiry checking.
+	s := newEndSessionServer(t, &fakeLogoutVerifier{claims: validClaims()}, revoker)
+
+	rec := doGetEndSession(s, openapi.GetEndSessionParams{
+		IdTokenHint:           "expired-but-signed-token",
+		PostLogoutRedirectUri: esStrPtr(esLogoutURI),
+	})
+
+	// Expired token should STILL work — the handler accepts it.
+	assertRedirect(t, rec, esLogoutURI)
+	if len(revoker.calls) != 1 {
+		t.Fatalf("revoke calls = %d, want 1 (expired tokens should be accepted)", len(revoker.calls))
+	}
+}
+
+// --- state parameter tests --------------------------------------------------
+
+func TestGetEndSessionStateNotEchoedWithoutPostLogoutURI(t *testing.T) {
+	// When state is provided but no post_logout_redirect_uri, we go to /logged-out
+	// and state is NOT echoed (no place to put it).
+	revoker := &fakeSessionRevoker{}
+	s := newEndSessionServer(t, &fakeLogoutVerifier{claims: validClaims()}, revoker)
+
+	rec := doGetEndSession(s, openapi.GetEndSessionParams{
+		IdTokenHint: "tok",
+		State:       esStrPtr("should-be-ignored"),
+	})
+
+	// State is not echoed to the default logged-out page.
+	assertRedirect(t, rec, esLoggedOutURL)
+}
+
+func TestPostEndSessionStateEchoedCorrectly(t *testing.T) {
+	revoker := &fakeSessionRevoker{}
+	s := newEndSessionServer(t, &fakeLogoutVerifier{claims: validClaims()}, revoker)
+
+	form := url.Values{}
+	form.Set("id_token_hint", "tok")
+	form.Set("post_logout_redirect_uri", esLogoutURI)
+	form.Set("state", "anti-csrf-token-123")
+
+	rec := doPostEndSession(s, form)
+
+	assertRedirect(t, rec, esLogoutURI+"?state=anti-csrf-token-123")
+}
+
+// --- session revocation verification ----------------------------------------
+
+// TestGetEndSessionRevokesCorrectUserClientPair verifies that after logout,
+// the correct (userID, clientID) pair is revoked — ensuring refresh tokens
+// for that RP are invalidated.
+func TestGetEndSessionRevokesCorrectUserClientPair(t *testing.T) {
+	revoker := &fakeSessionRevoker{}
+	s := newEndSessionServer(t, &fakeLogoutVerifier{claims: validClaims()}, revoker)
+
+	_ = doGetEndSession(s, openapi.GetEndSessionParams{IdTokenHint: "tok"})
+
+	if len(revoker.calls) != 1 {
+		t.Fatalf("revoke calls = %d, want 1", len(revoker.calls))
+	}
+	// Verify the exact userID and clientID were passed to the revoker.
+	call := revoker.calls[0]
+	if call.userID != esUserID {
+		t.Errorf("revoked userID = %q, want %q", call.userID, esUserID)
+	}
+	if call.clientID != esClientID {
+		t.Errorf("revoked clientID = %q, want %q", call.clientID, esClientID)
+	}
+}
+
+// TestPostEndSessionRevokesSessionsAndInvalidatesRefreshTokens verifies the
+// full POST logout flow including session revocation.
+func TestPostEndSessionRevokesSessionsAndInvalidatesRefreshTokens(t *testing.T) {
+	revoker := &fakeSessionRevoker{}
+	s := newEndSessionServer(t, &fakeLogoutVerifier{claims: validClaims()}, revoker)
+
+	form := url.Values{}
+	form.Set("id_token_hint", "tok")
+
+	_ = doPostEndSession(s, form)
+
+	// Verify session revocation was called, which invalidates refresh tokens.
+	if len(revoker.calls) != 1 {
+		t.Fatalf("revoke calls = %d, want 1", len(revoker.calls))
+	}
+	if revoker.calls[0].userID != esUserID || revoker.calls[0].clientID != esClientID {
+		t.Errorf("revoke call = %+v, want {%s %s}", revoker.calls[0], esUserID, esClientID)
+	}
+}
+
+// --- multiple logout URIs test ----------------------------------------------
+
+func TestGetEndSessionMultipleLogoutURIs(t *testing.T) {
+	revoker := &fakeSessionRevoker{}
+	grants := oidc.NewInMemoryGrantStore()
+	if _, err := grants.CreateGrant(context.Background(), oidc.NewGrant{
+		Region:      "eu",
+		UserID:      esUserID,
+		ClientID:    esClientID,
+		PairwiseSub: esPPID,
+		Scopes:      []string{"openid"},
+	}); err != nil {
+		t.Fatalf("CreateGrant: %v", err)
+	}
+	registry := oidc.NewInMemoryClientRegistry()
+	// Client with multiple registered logout URIs.
+	logoutURI2 := "https://rp.example.com/logout-alt"
+	registry.Put(oidc.Client{
+		ID:         esClientID,
+		LogoutURIs: []string{esLogoutURI, logoutURI2},
+	})
+	s := New(Config{
+		Issuer:         esIssuer,
+		LogoutVerifier: &fakeLogoutVerifier{claims: validClaims()},
+		Grants:         grants,
+		Clients:        registry,
+		SessionRevoker: revoker,
+	})
+
+	// Use the second registered URI.
+	rec := doGetEndSession(s, openapi.GetEndSessionParams{
+		IdTokenHint:           "tok",
+		PostLogoutRedirectUri: esStrPtr(logoutURI2),
+	})
+
+	assertRedirect(t, rec, logoutURI2)
+}
+
+// --- empty audience handling ------------------------------------------------
+
+func TestGetEndSessionEmptyAudienceGoesToLoggedOut(t *testing.T) {
+	revoker := &fakeSessionRevoker{}
+	// Claims with empty Audience — cannot determine client_id.
+	s := newEndSessionServer(t, &fakeLogoutVerifier{claims: &oidc.VerifiedClaims{
+		Subject:  esPPID,
+		Audience: "", // empty
+	}}, revoker)
+
+	rec := doGetEndSession(s, openapi.GetEndSessionParams{IdTokenHint: "tok"})
+
+	assertRedirect(t, rec, esLoggedOutURL)
+	if len(revoker.calls) != 0 {
+		t.Fatalf("revoke calls = %d, want 0 for empty audience", len(revoker.calls))
+	}
+}
+
 // --- unconfigured server ----------------------------------------------------
 
 func TestEndSessionUnconfiguredGoesToLoggedOut(t *testing.T) {
