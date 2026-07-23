@@ -147,7 +147,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// for a fixed demo user. The stub is retained ONLY for dev/e2e (no
 	// DATABASE_URL); a fail-closed startup guard rejecting it in production lands
 	// in a later task.
-	sessions := newSessionResolver(deps, logger)
+	sessions, err := newSessionResolver(deps, logger)
+	if err != nil {
+		return err
+	}
 
 	oidcSvc := oidc.NewService(oidc.ServiceConfig{
 		Issuer:   issuer,
@@ -340,7 +343,7 @@ func (c bffConfig) validate() error {
 // replace the insecure demo-user stub resolver (docs/DESIGN.md §9, audit
 // blocker 1.1). They are constructed once at startup so a later task can wire
 // the real resolver without re-plumbing DB access. When DATABASE_URL is unset
-// every field is nil and the caller keeps the in-memory dev scaffold.
+// every field is nil and the caller errors out (no stub fallback).
 type bffDeps struct {
 	// pool is the pgx connection pool. nil in dev (no DATABASE_URL); the caller
 	// closes it on shutdown when non-nil.
@@ -354,7 +357,7 @@ type bffDeps struct {
 // buildBFFDeps opens the DB pool from DATABASE_URL and constructs the
 // DB-backed secret loader and grant store from a shared db.Queries. It returns
 // zero-value deps (all nil) when DATABASE_URL is unset — the dev path that
-// keeps the stub resolver.
+// errors out rather than degrading to stub.
 //
 // A configured DATABASE_URL REQUIRES HARBOR_KMS_SECRET: the secret loader
 // unwraps DEKs that harbor-mgmt's enrollment sealed under that same KMS secret,
@@ -368,7 +371,7 @@ func buildBFFDeps(ctx context.Context, logger *slog.Logger) (bffDeps, error) {
 		return bffDeps{}, err
 	}
 	if pool == nil {
-		logger.Warn("DATABASE_URL not set — BFF session resolver deps unavailable (dev only; stub resolver retained)")
+		logger.Warn("DATABASE_URL not set — BFF session resolver deps unavailable (dev only; session resolver will fail)")
 		return bffDeps{}, nil
 	}
 
@@ -424,17 +427,16 @@ func newBFFSessionStore(redisClient *redis.Client, ttl time.Duration, logger *sl
 // (both are set together only when the pool is opened), avoiding the typed-nil
 // interface pitfall — a nil *DBSecretLoader wrapped in a non-nil
 // oidc.UserSecretLoader would pass an `!= nil` interface check yet panic on use.
-func newSessionResolver(deps bffDeps, logger *slog.Logger) oidc.SessionResolver {
-	if deps.secretLoader != nil && deps.grantStore != nil {
-		logger.Info("session resolver: using PPIDSessionResolver (BFF-authenticated, DB-backed)")
-		return oidc.NewPPIDSessionResolver(oidc.PPIDSessionResolverConfig{
-			Auth:   bff.NewBFFAuthSource(),
-			Loader: deps.secretLoader,
-			Grants: deps.grantStore,
-		})
+func newSessionResolver(deps bffDeps, logger *slog.Logger) (oidc.SessionResolver, error) {
+	if deps.secretLoader == nil || deps.grantStore == nil {
+		return nil, fmt.Errorf("session resolver requires DATABASE_URL + HARBOR_KMS_SECRET — refusing to start without a real BFF-authenticated resolver")
 	}
-	logger.Warn("DATABASE_URL not set — using demo-user stub session resolver (dev only; NEVER use in production)")
-	return oidc.NewStubSessionResolver("demo-user-ppid")
+	logger.Info("session resolver: using PPIDSessionResolver (BFF-authenticated, DB-backed)")
+	return oidc.NewPPIDSessionResolver(oidc.PPIDSessionResolverConfig{
+		Auth:   bff.NewBFFAuthSource(),
+		Loader: deps.secretLoader,
+		Grants: deps.grantStore,
+	}), nil
 }
 
 // validateProductionReadiness enforces the fail-closed startup guard: in
