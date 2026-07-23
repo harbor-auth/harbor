@@ -26,3 +26,14 @@ WHERE id = $1;
 UPDATE users
 SET recovery_required = false
 WHERE id = $1;
+
+-- name: EraseUserDEK :exec
+-- Crypto-shreds a user account by atomically overwriting dek_wrapped with
+-- an empty byte slice and setting status=erased in a single UPDATE.
+-- This destroys the per-user DEK so all envelope-encrypted PII (audit
+-- payloads, relay mappings, etc.) becomes permanently unrecoverable in one
+-- stroke (DESIGN §compliance-export, invariant 1). NOT a row deletion.
+UPDATE users
+SET dek_wrapped = '\x'::bytea,
+    status      = 'erased'
+WHERE id = $1;
