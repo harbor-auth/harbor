@@ -258,6 +258,26 @@ func (s *DBSessionStore) RevokeSessionsByUserClient(ctx context.Context, userID,
 	})
 }
 
+// ListSessionsByUser returns all active (non-revoked) sessions for the given
+// user, ordered as the underlying sqlc query dictates. This is the read path
+// for the dashboard Sessions & Devices view — strictly caller-scoped; the
+// handler is responsible for ensuring userID matches the authenticated session.
+func (s *DBSessionStore) ListSessionsByUser(ctx context.Context, userID string) ([]oidc.RefreshSession, error) {
+	var uid pgtype.UUID
+	if err := uid.Scan(userID); err != nil {
+		return nil, fmt.Errorf("sessions: parse user ID %q: %w", userID, err)
+	}
+	rows, err := s.q.ListSessionsByUser(ctx, uid)
+	if err != nil {
+		return nil, fmt.Errorf("sessions: list by user: %w", err)
+	}
+	out := make([]oidc.RefreshSession, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, rowToRefreshSession(row))
+	}
+	return out, nil
+}
+
 // RevokeSessionsByGrant implements oidc.SessionStore (per-app revocation;
 // DESIGN §11.3). Revokes all active sessions for a specific grant, enabling
 // users to disconnect a single app without affecting other grants.

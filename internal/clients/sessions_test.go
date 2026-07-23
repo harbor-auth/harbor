@@ -583,6 +583,61 @@ func TestDBSessionStoreRevokeSessionsByGrant(t *testing.T) {
 	}
 }
 
+// TestDBSessionStoreListSessionsByUser verifies that ListSessionsByUser returns
+// only the active (non-revoked) sessions for the requested user and excludes
+// sessions belonging to a different user.
+func TestDBSessionStoreListSessionsByUser(t *testing.T) {
+	q := newFakeSessionQuerier()
+	store := NewDBSessionStore(q)
+	ctx := context.Background()
+
+	const otherUserID = "00000000-0000-0000-0000-000000000002"
+
+	// Two active sessions for the primary user.
+	active1 := buildTestSession(t, "00000000-0000-0000-0000-000000000a01", sessTestUserID, []byte{0xa1}, 14*24*time.Hour)
+	active2 := buildTestSession(t, "00000000-0000-0000-0000-000000000a02", sessTestUserID, []byte{0xa2}, 14*24*time.Hour)
+	// One revoked session for the primary user — must not appear in results.
+	revoked := buildTestSession(t, "00000000-0000-0000-0000-000000000a03", sessTestUserID, []byte{0xa3}, 14*24*time.Hour)
+	// One session for a different user — must not appear in results.
+	other := buildTestSession(t, "00000000-0000-0000-0000-000000000a04", otherUserID, []byte{0xa4}, 14*24*time.Hour)
+
+	for _, rs := range []oidc.RefreshSession{active1, active2, revoked, other} {
+		if err := store.CreateSession(ctx, rs); err != nil {
+			t.Fatalf("CreateSession %s: %v", rs.ID, err)
+		}
+	}
+	if err := store.RevokeSession(ctx, revoked.ID); err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+
+	got, err := store.ListSessionsByUser(ctx, sessTestUserID)
+	if err != nil {
+		t.Fatalf("ListSessionsByUser: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 active sessions, got %d", len(got))
+	}
+	ids := map[string]bool{got[0].ID: true, got[1].ID: true}
+	if !ids[active1.ID] || !ids[active2.ID] {
+		t.Errorf("expected sessions %s and %s; got %v", active1.ID, active2.ID, ids)
+	}
+	for _, s := range got {
+		if s.UserID != sessTestUserID {
+			t.Errorf("session %s belongs to user %q, not the requested user", s.ID, s.UserID)
+		}
+	}
+}
+
+// TestDBSessionStoreListSessionsByUser_InvalidUUID verifies that an unparseable
+// userID is returned as an error and does not panic.
+func TestDBSessionStoreListSessionsByUser_InvalidUUID(t *testing.T) {
+	store := NewDBSessionStore(newFakeSessionQuerier())
+	_, err := store.ListSessionsByUser(context.Background(), "not-a-uuid")
+	if err == nil {
+		t.Fatal("expected error for invalid UUID, got nil")
+	}
+}
+
 // TestDBSessionStoreCreateSession_EmptyGrantID verifies that CreateSession
 // correctly handles an empty GrantID (maps to SQL NULL) and that the round-trip
 // via rowToRefreshSession yields an empty string back (not the zero-UUID sentinel).
