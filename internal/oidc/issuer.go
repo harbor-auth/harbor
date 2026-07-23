@@ -25,6 +25,13 @@ type IssuedTokens struct {
 	// RefreshToken is the opaque, rotating, one-time-use refresh token. It is
 	RefreshToken     string // populated only when offline_access is granted (DESIGN §3.5).
 	RefreshExpiresIn int    // refresh-token lifetime in seconds; 0 when no refresh token.
+
+	// UserID is the internal user UUID for the token's subject. It is NOT a
+	// wire field (never serialized to the client) — it is populated by
+	// Service.Token/Refresh purely so the oidcapi layer can emit a
+	// user-scoped audit event (token.issued/token.refreshed). JWTIssuer.Issue
+	// does not set it; it may be "" when unavailable (e.g. stub resolver).
+	UserID string
 }
 
 // TokenIssuer mints the access + ID tokens for a grant. Isolating it behind an

@@ -25,6 +25,10 @@ type Querier interface {
 	// tamper-evident history. The query IS the contract (DESIGN §1.3): `sqlc
 	// generate` (via @codegen) produces typed Go — never hand-write DB types.
 	CreateAuditEvent(ctx context.Context, arg CreateAuditEventParams) (AuditEvent, error)
+	// CreateAuditEventWithPayload inserts an event with an envelope-encrypted
+	// payload (DESIGN §4.4, §10). The payload_encrypted column holds ciphertext
+	// under the user's DEK; the operator sees only event_type + timestamp.
+	CreateAuditEventWithPayload(ctx context.Context, arg CreateAuditEventWithPayloadParams) (AuditEvent, error)
 	// CreateCredential persists a newly-registered passkey. webauthn_cred_id is the
 	// opaque rawID from the authenticator (DESIGN §3.1); webauthn_pubkey is the COSE
 	// public key; webauthn_aaguid identifies the authenticator model.
@@ -205,6 +209,10 @@ type Querier interface {
 	// ListAuditEventsByUser powers the dashboard audit-log viewer (DESIGN §9).
 	// Newest-first with limit/offset paging, served by idx_audit_events_user_time.
 	ListAuditEventsByUser(ctx context.Context, arg ListAuditEventsByUserParams) ([]AuditEvent, error)
+	// ListAuditEventsByUserWithPayload returns events including payload_encrypted
+	// so the caller can decrypt under the user's DEK (DESIGN §4.4). Only the
+	// owning user's endpoint decrypts; the operator has no plaintext read path.
+	ListAuditEventsByUserWithPayload(ctx context.Context, arg ListAuditEventsByUserWithPayloadParams) ([]AuditEvent, error)
 	// Lists all active consent grants for a user, ordered by most recent first.
 	// Used by harbor-mgmt to show the user their connected apps.
 	ListConsentGrantsByUser(ctx context.Context, userID pgtype.UUID) ([]ConsentGrant, error)

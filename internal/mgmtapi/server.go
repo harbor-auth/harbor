@@ -55,6 +55,13 @@ type Server struct {
 	// sessionRevoker cascades consent revocation to active sessions with the RP.
 	// May be nil (dev-scaffold mode); DeleteConsentGrant then skips the cascade.
 	sessionRevoker SessionRevoker
+	// consentAudit, when non-nil, appends consent-lifecycle events
+	// (consent.revoked) to the user-visible audit trail. Emission is
+	// best-effort — a nil recorder simply skips the trail.
+	consentAudit ConsentAuditRecorder
+	// auditTrail, when non-nil, backs the GET /audit-events endpoint.
+	// Nil puts the endpoint into a 503 state.
+	auditTrail *AuditTrailDeps
 	// relays provides access to relay addresses for the authenticated user.
 	// May be nil in dev-scaffold mode; relay endpoints then return 503.
 	relays RelayStore
@@ -171,6 +178,21 @@ func (s *Server) WithSessionRevoker(revoker SessionRevoker) *Server {
 	return s
 }
 
+// WithConsentAuditLog attaches the recorder that appends consent-lifecycle
+// events (consent.revoked) to the user-visible audit trail. A nil recorder
+// skips the trail; emission is always best-effort. Returns s for chaining.
+func (s *Server) WithConsentAuditLog(recorder ConsentAuditRecorder) *Server {
+	s.consentAudit = recorder
+	return s
+}
+
+// WithAuditTrail wires the read-path dependencies for GET /audit-events.
+// A nil deps leaves the endpoint in a 503 state. Returns s for chaining.
+func (s *Server) WithAuditTrail(deps *AuditTrailDeps) *Server {
+	s.auditTrail = deps
+	return s
+}
+
 // WithRelayStore attaches the relay store for relay address management.
 // When set, GET /relay-addresses returns the user's relay addresses and
 // DELETE /relay-addresses/{relay_token} deactivates a relay (kill switch).
@@ -255,6 +277,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /register/{client_id}", s.DeleteRegister)
 	mux.HandleFunc("GET /consent-grants", s.GetConsentGrants)
 	mux.HandleFunc("DELETE /consent-grants/{client_id}", s.DeleteConsentGrant)
+	mux.HandleFunc("GET /audit-events", s.GetAuditEvents)
 	mux.HandleFunc("GET /relay-addresses", s.GetRelayAddresses)
 	mux.HandleFunc("DELETE /relay-addresses/{relay_token}", s.DeleteRelayAddress)
 	mux.HandleFunc("POST /byo-domains", s.PostBYODomain)

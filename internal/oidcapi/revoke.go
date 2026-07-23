@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
+	"github.com/harbor-auth/harbor/internal/identity"
 	"github.com/harbor-auth/harbor/internal/oidc"
 	"github.com/harbor-auth/harbor/internal/telemetry"
 )
@@ -66,21 +67,40 @@ func (s *Server) PostRevoke(w http.ResponseWriter, r *http.Request) {
 	// Step 4: Revoke the token based on type hint.
 	// RFC 7009 §2.1: the hint is advisory; the server SHOULD try both types.
 	// We try the hinted type first for efficiency, then fall back to the other.
+	// revokedUserID is the internal user UUID resolved from the access-token
+	// path (via PPID reverse-lookup), used solely for audit emission. It stays
+	// "" when the token is a refresh token, is inactive, or no grant maps the
+	// PPID — in which case no audit event is emitted.
+	var revokedUserID string
 	switch tokenTypeHint {
 	case "access_token":
 		// Try access token first, then refresh token.
-		s.revokeAccessToken(r, token)
+		revokedUserID = s.revokeAccessToken(r, token, creds.ClientID)
 		s.revokeRefreshToken(r, token, creds.ClientID)
 	case "refresh_token":
 		// Try refresh token first, then access token.
 		s.revokeRefreshToken(r, token, creds.ClientID)
-		s.revokeAccessToken(r, token)
+		revokedUserID = s.revokeAccessToken(r, token, creds.ClientID)
 	default:
 		// No hint or unknown hint: try refresh token first (more common),
 		// then access token. The order follows RFC 7009's guidance that
 		// servers should attempt to identify the token.
 		s.revokeRefreshToken(r, token, creds.ClientID)
-		s.revokeAccessToken(r, token)
+		revokedUserID = s.revokeAccessToken(r, token, creds.ClientID)
+	}
+
+	// Best-effort audit emission (token.revoked). Emitted only when the
+	// access-token path resolved a userID; the refresh-token revoke path
+	// cannot cheaply resolve a userID at this layer and is left unaudited for
+	// now (DESIGN §2.1, Decision 3 — a dropped event never breaks anything).
+	if s.auditRecorder != nil && revokedUserID != "" {
+		cid := creds.ClientID
+		hint := tokenTypeHint
+		if hint == "" {
+			hint = "unknown"
+		}
+		s.auditRecorder.RecordAsync(r.Context(), revokedUserID, identity.EventTokenRevoked, &cid,
+			map[string]any{"token_type_hint": hint})
 	}
 
 	// Step 5: Return 200 with empty body (RFC 7009 §2.2).
@@ -106,12 +126,18 @@ func (s *Server) revokeRefreshToken(r *http.Request, token, clientID string) {
 // its JTI and adding it to the revocation filter. This mirrors the emergency
 // revocation path in PostAdminRevokeJwt but is triggered by the client.
 //
+// It returns the internal user UUID resolved from the token's PPID (sub) via
+// FindGrantByPPID, or "" when the token is not a valid/active access token or
+// no active grant maps the PPID. The returned userID is used only for
+// best-effort audit emission (token.revoked); it is never surfaced to the
+// caller.
+//
 // Errors are logged but not propagated (anti-enumeration).
-func (s *Server) revokeAccessToken(r *http.Request, token string) {
+func (s *Server) revokeAccessToken(r *http.Request, token, clientID string) string {
 	// Parse the JWT to extract claims (particularly jti and exp).
 	// If parsing fails, it's not a valid JWT — silent no-op.
 	if s.introspector == nil {
-		return
+		return ""
 	}
 
 	// Use introspector to validate and extract token claims.
@@ -128,13 +154,13 @@ func (s *Server) revokeAccessToken(r *http.Request, token string) {
 	// If the token is not active (expired, revoked, malformed), nothing to do.
 	// This is the happy path for already-revoked or invalid tokens.
 	if !resp.Active {
-		return
+		return ""
 	}
 
 	// Token is active — revoke it by adding to the filter and publishing.
 	if resp.Jti == "" {
 		// No JTI claim — can't revoke (shouldn't happen for Harbor-issued tokens).
-		return
+		return ""
 	}
 
 	// Compute expiry for the revocation entry (garbage collection).
@@ -159,6 +185,17 @@ func (s *Server) revokeAccessToken(r *http.Request, token string) {
 			slog.Default().Warn("oidcapi: revoke access token publish failed", "error", err)
 		}
 	}
+
+	// Resolve the internal userID from the token's PPID (sub) for audit
+	// emission. FindGrantByPPID is a reverse-lookup of PPID → userID scoped to
+	// the authenticated client. Best-effort: any miss/error yields "" and the
+	// caller simply skips the audit event.
+	if s.grants != nil && resp.Sub != "" {
+		if grant, found, err := s.grants.FindGrantByPPID(r.Context(), resp.Sub, clientID); found && err == nil {
+			return grant.UserID
+		}
+	}
+	return ""
 }
 
 // writeRevokeSuccess writes an empty 200 response with appropriate headers

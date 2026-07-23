@@ -7,6 +7,7 @@ import (
 
 	"github.com/harbor-auth/harbor/internal/bff"
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
+	"github.com/harbor-auth/harbor/internal/identity"
 	"github.com/harbor-auth/harbor/internal/oidc"
 	"github.com/harbor-auth/harbor/internal/telemetry"
 )
@@ -272,6 +273,15 @@ func (s *Server) GetAuthorizeComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	outcome = telemetry.OutcomeSuccess
+
+	// Best-effort audit emission: auth.login marks a successful passkey
+	// authentication + code issuance (BFF flow). RecordAsync is non-blocking
+	// and detaches from the request context, so it never stalls the redirect.
+	if s.auditRecorder != nil {
+		cid := session.ClientID
+		s.auditRecorder.RecordAsync(r.Context(), session.UserID, identity.EventAuthLogin, &cid, nil)
+	}
+
 	// Delete BFF session (one-time use)
 	_ = s.bffSessions.Delete(r.Context(), requestID) //nolint:errcheck // best-effort: session expires via TTL anyway
 

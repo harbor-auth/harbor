@@ -8,6 +8,7 @@
 package oidcapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 	"github.com/harbor-auth/harbor/internal/bff"
 	"github.com/harbor-auth/harbor/internal/crypto"
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
+	"github.com/harbor-auth/harbor/internal/identity"
 	"github.com/harbor-auth/harbor/internal/oidc"
 	"github.com/harbor-auth/harbor/internal/region"
 	"github.com/harbor-auth/harbor/internal/telemetry"
@@ -25,6 +27,15 @@ import (
 // oidcapi Server (docs/plans/bff-session-middleware.md — 5 min, matching the
 // PKCE state lifetime).
 const DefaultBFFSessionTTL = 5 * time.Minute
+
+// TokenAuditRecorder records token-lifecycle audit events on a best-effort
+// basis (token.issued, token.refreshed, token.revoked). It is satisfied
+// directly by *identity.AuditRecorder. Emission is always non-blocking
+// (RecordAsync detaches from the request context) so a slow/failing audit
+// write never stalls the /token or /revoke hot path (DESIGN §2.1, Decision 3).
+type TokenAuditRecorder interface {
+	RecordAsync(ctx context.Context, userID string, et identity.EventType, clientID *string, detail any)
+}
 
 // Server implements openapi.ServerInterface for the harbor-hot binary.
 type Server struct {
@@ -61,6 +72,10 @@ type Server struct {
 	grants         oidc.GrantStore
 	clients        oidc.ClientRegistry
 	sessionRevoker SessionRevoker
+
+	// auditRecorder emits best-effort token-lifecycle audit events. May be nil
+	// (dev/test scaffold), in which case no audit events are recorded.
+	auditRecorder TokenAuditRecorder
 }
 
 // Config holds the settings needed to serve the OIDC surface.
@@ -116,6 +131,10 @@ type Config struct {
 	// SessionRevoker revokes the user's sessions at the initiating RP during
 	// RP-Initiated Logout. May be nil.
 	SessionRevoker SessionRevoker
+
+	// AuditRecorder records token-lifecycle events (best-effort). May be nil,
+	// in which case no audit events are emitted (dev/test scaffold).
+	AuditRecorder TokenAuditRecorder
 }
 
 // New returns a Server that serves the generated OpenAPI contract. The JWKS
@@ -173,6 +192,7 @@ func New(cfg Config) *Server {
 		grants:         cfg.Grants,
 		clients:        cfg.Clients,
 		sessionRevoker: cfg.SessionRevoker,
+		auditRecorder:  cfg.AuditRecorder,
 	}
 }
 

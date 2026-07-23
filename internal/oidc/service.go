@@ -488,6 +488,10 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not issue tokens", Status: 500}
 	}
 
+	// Carry the internal user UUID out to the HTTP layer for audit emission
+	// (token.issued). Never serialized to the client — see IssuedTokens.UserID.
+	tokens.UserID = result.Code.UserID
+
 	// Issue an opaque, rotating refresh token ONLY when offline_access was
 	// granted AND we captured a real user_id at consent time (docs/DESIGN.md
 	// §3.5). A refresh-token store or generation failure must NOT fail the token
@@ -718,6 +722,10 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 			slog.Any("error", err))
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not issue tokens", Status: 500}
 	}
+
+	// Carry the internal user UUID out to the HTTP layer for audit emission
+	// (token.refreshed). Never serialized to the client — see IssuedTokens.UserID.
+	tokens.UserID = session.UserID
 
 	// offline_access guard: only rotate and re-issue a refresh token when
 	// offline_access is still present in the grant's frozen scopes.
