@@ -97,6 +97,11 @@ type Server struct {
 	// rate limiting.
 	recoveryLimiter RecoveryRateLimiter
 
+	// mfa, when non-nil, backs the /mfa/* endpoints (TOTP enrollment,
+	// activation, step-up verification, recovery-code redemption, and factor
+	// management). Nil puts those routes into a 503 state.
+	mfa MFAService
+
 	logger *slog.Logger
 }
 
@@ -231,6 +236,15 @@ func (s *Server) WithRecoveryRateLimiter(limiter RecoveryRateLimiter) *Server {
 	return s
 }
 
+// WithMFA wires the TOTP second-factor endpoints (POST /mfa/enroll,
+// /mfa/activate, /mfa/verify, /mfa/verify-recovery; GET /mfa/factors; DELETE
+// /mfa/factors/{id}). A nil service puts those routes into a 503 state. Returns
+// s for chaining.
+func (s *Server) WithMFA(service MFAService) *Server {
+	s.mfa = service
+	return s
+}
+
 // Routes registers harbor-mgmt's cold-path routes on mux. It is additive: the
 // caller owns the mux (typically httpserver.NewHealthMux) and its /healthz route.
 func (s *Server) Routes(mux *http.ServeMux) {
@@ -252,6 +266,12 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /recovery/begin", s.PostRecoveryBegin)
 	mux.HandleFunc("POST /recovery/complete", s.PostRecoveryComplete)
 	mux.HandleFunc("GET /recovery/factors", s.ListCredentialsByUser)
+	mux.HandleFunc("POST /mfa/enroll", s.PostMFAEnroll)
+	mux.HandleFunc("POST /mfa/activate", s.PostMFAActivate)
+	mux.HandleFunc("POST /mfa/verify", s.PostMFAVerify)
+	mux.HandleFunc("POST /mfa/verify-recovery", s.PostMFAVerifyRecovery)
+	mux.HandleFunc("GET /mfa/factors", s.GetMFAFactors)
+	mux.HandleFunc("DELETE /mfa/factors/{id}", s.DeleteMFAFactor)
 }
 
 // errorResponse is the JSON error envelope for the cold-path API. Messages are

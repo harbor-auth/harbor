@@ -136,6 +136,31 @@ end
 return 1
 `)
 
+// setMFAVerifiedScript is a Lua script for atomic get-modify-set of the
+// MFAVerifiedAt field, preserving the remaining TTL.
+// It returns:
+//   - 0 if the session was not found
+//   - 1 if the field was set successfully
+//
+// KEYS[1] = session key
+// ARGV[1] = MFAVerifiedAt as an RFC3339Nano timestamp string
+var setMFAVerifiedScript = redis.NewScript(`
+local data = redis.call('GET', KEYS[1])
+if not data then
+    return 0
+end
+
+local record = cjson.decode(data)
+record.MFAVerifiedAt = ARGV[1]
+local ttl = redis.call('TTL', KEYS[1])
+if ttl > 0 then
+    redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
+else
+    redis.call('SET', KEYS[1], cjson.encode(record))
+end
+return 1
+`)
+
 // SetUser implements BFFSessionStore. It atomically updates the UserID field of
 // an existing session using a Lua script to preserve the remaining TTL.
 func (s *RedisBFFSessionStore) SetUser(ctx context.Context, requestID string, userID string) error {
@@ -171,6 +196,25 @@ func (s *RedisBFFSessionStore) SetUserWithRecoveryStatus(ctx context.Context, re
 	).Int()
 	if err != nil {
 		return fmt.Errorf("redis setuser-recovery script: %w", err)
+	}
+
+	if result == 0 {
+		return ErrBFFSessionNotFound
+	}
+	return nil
+}
+
+// SetMFAVerified implements BFFSessionStore. It atomically stamps the session
+// with a step-up verification time using a Lua script to preserve the remaining
+// TTL. The timestamp is stored in RFC3339Nano form so it round-trips through
+// Go's time.Time JSON (un)marshaling.
+func (s *RedisBFFSessionStore) SetMFAVerified(ctx context.Context, requestID string, verifiedAt time.Time) error {
+	result, err := setMFAVerifiedScript.Run(ctx, s.client,
+		[]string{sessionKey(requestID)},
+		verifiedAt.UTC().Format(time.RFC3339Nano),
+	).Int()
+	if err != nil {
+		return fmt.Errorf("redis setmfaverified script: %w", err)
 	}
 
 	if result == 0 {

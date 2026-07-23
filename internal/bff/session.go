@@ -78,6 +78,14 @@ type BFFSessionRecord struct {
 	// setup before normal use. When true, the session scope is enrollment-only.
 	RecoveryRequired bool
 
+	// MFAVerifiedAt is the absolute time of the session's most recent successful
+	// step-up (MFA) verification. The zero value means the session has never
+	// passed a step-up challenge. The step-up gate treats a verification as
+	// valid only while now-MFAVerifiedAt is within the gate's TTL, so a stale
+	// verification re-challenges the user before a sensitive action
+	// (docs/DESIGN.md §3.1, §7.3).
+	MFAVerifiedAt time.Time
+
 	// ExpiresAt is the absolute time after which the session is invalid.
 	// Callers must enforce this; the store may also TTL-evict.
 	ExpiresAt time.Time
@@ -110,6 +118,12 @@ type BFFSessionStore interface {
 	// If recoveryRequired is true, the session scope is set to enrollment-only.
 	// This is called after FinishAssertion when the user's recovery status is known.
 	SetUserWithRecoveryStatus(ctx context.Context, requestID, userID string, recoveryRequired bool) error
+
+	// SetMFAVerified stamps the session with the time of a successful step-up
+	// (MFA) verification. The step-up gate (stepup.go) reads MFAVerifiedAt to
+	// decide whether a fresh challenge is required. Returns ErrBFFSessionNotFound
+	// if the session does not exist.
+	SetMFAVerified(ctx context.Context, requestID string, verifiedAt time.Time) error
 
 	// Delete removes the session record. This is called after the auth code is
 	// issued (one-time use). A no-op if the session does not exist.
@@ -198,6 +212,23 @@ func (s *InMemoryBFFSessionStore) SetUserWithRecoveryStatus(_ context.Context, r
 	} else {
 		record.SessionScope = SessionScopeFull
 	}
+	s.sessions[requestID] = record
+	return nil
+}
+
+// SetMFAVerified implements BFFSessionStore.
+func (s *InMemoryBFFSessionStore) SetMFAVerified(_ context.Context, requestID string, verifiedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.sessions[requestID]
+	if !ok {
+		return ErrBFFSessionNotFound
+	}
+	if s.now().After(record.ExpiresAt) {
+		delete(s.sessions, requestID)
+		return ErrBFFSessionExpired
+	}
+	record.MFAVerifiedAt = verifiedAt
 	s.sessions[requestID] = record
 	return nil
 }
