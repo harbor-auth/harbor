@@ -55,7 +55,11 @@ func newBFFFlowServer(t *testing.T) (*httptest.Server, *bff.InMemoryBFFSessionSt
 		LoginURL:      testLoginURL,
 		BFFSessionTTL: 5 * time.Minute,
 	})
-	h := openapi.HandlerFromMux(srv, http.NewServeMux())
+	// The spec-generated router handles /authorize etc., but /authorize/complete
+	// is a custom endpoint not in the OpenAPI spec — register it manually.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /authorize/complete", srv.GetAuthorizeComplete)
+	h := openapi.HandlerFromMux(srv, mux)
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
 	return ts, store
@@ -130,5 +134,93 @@ func TestAuthorize_BFFFlow_InvalidRequest_ErrorPageNoRedirect(t *testing.T) {
 	}
 	if loc := res.Header.Get("Location"); loc != "" {
 		t.Fatalf("unexpected Location header %q — a rejected request must not redirect anywhere", loc)
+	}
+}
+
+// /authorize/complete without an authenticated session must NOT issue a code.
+// This is a critical security invariant (audit blocker 1.1): the endpoint only
+// mints an authorization code when the BFF session carries a user_id set by the
+// completed passkey ceremony. Attempting to call it before login, with a bad
+// request_id, or with an expired session must all yield an error page — never a
+// code that could be exchanged for tokens.
+func TestAuthorizeComplete_NoSession_ErrorPageNoCode(t *testing.T) {
+	ts, _ := newBFFFlowServer(t)
+
+	// Call /authorize/complete with a made-up request_id that has no session.
+	res, err := noRedirectClient().Get(ts.URL + "/authorize/complete?request_id=nonexistent-session-id")
+	if err != nil {
+		t.Fatalf("GET /authorize/complete: %v", err)
+	}
+	defer func() { _ = res.Body.Close() }()
+
+	// Must be an error page, not a redirect with a code.
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (error page)", res.StatusCode)
+	}
+	if loc := res.Header.Get("Location"); loc != "" {
+		t.Fatalf("unexpected redirect %q — must not redirect when session is missing", loc)
+	}
+}
+
+// /authorize/complete with an existing session but NO authenticated user
+// (UserID still empty because the passkey ceremony hasn't completed) must
+// also return an error page and never issue a code.
+func TestAuthorizeComplete_SessionExistsButNoUser_ErrorPageNoCode(t *testing.T) {
+	ts, store := newBFFFlowServer(t)
+
+	// First, hit /authorize to create a BFF session (no login happens).
+	res := getAuthorize(t, ts, validAuthorizeQuery())
+	defer func() { _ = res.Body.Close() }()
+
+	if res.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want 302", res.StatusCode)
+	}
+	vals := locationQuery(t, res, testLoginURL)
+	requestID := vals.Get("request_id")
+	if requestID == "" {
+		t.Fatalf("expected request_id in redirect")
+	}
+
+	// Verify the session exists but has no UserID.
+	session, err := store.Get(context.Background(), requestID)
+	if err != nil {
+		t.Fatalf("session lookup: %v", err)
+	}
+	if session.UserID != "" {
+		t.Fatalf("session.UserID = %q, want empty", session.UserID)
+	}
+
+	// Now call /authorize/complete with the real request_id but WITHOUT having
+	// completed the passkey ceremony (UserID still empty).
+	completeRes, err := noRedirectClient().Get(ts.URL + "/authorize/complete?request_id=" + requestID)
+	if err != nil {
+		t.Fatalf("GET /authorize/complete: %v", err)
+	}
+	defer func() { _ = completeRes.Body.Close() }()
+
+	// Must be an error page — no code issued for unauthenticated session.
+	if completeRes.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (error page)", completeRes.StatusCode)
+	}
+	if loc := completeRes.Header.Get("Location"); loc != "" {
+		t.Fatalf("unexpected redirect %q — must not issue code for unauthenticated session", loc)
+	}
+}
+
+// /authorize/complete with no request_id query param must return an error page.
+func TestAuthorizeComplete_MissingRequestID_ErrorPage(t *testing.T) {
+	ts, _ := newBFFFlowServer(t)
+
+	res, err := noRedirectClient().Get(ts.URL + "/authorize/complete")
+	if err != nil {
+		t.Fatalf("GET /authorize/complete: %v", err)
+	}
+	defer func() { _ = res.Body.Close() }()
+
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", res.StatusCode)
+	}
+	if loc := res.Header.Get("Location"); loc != "" {
+		t.Fatalf("unexpected redirect %q — must not redirect without request_id", loc)
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -184,10 +185,18 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	srv := oidcapi.New(apiCfg)
 
+	// The spec-generated router handles /authorize, /token, etc., but
+	// /authorize/complete is a custom endpoint not in the OpenAPI spec — it
+	// resumes the OIDC flow after the passkey ceremony. Register it manually
+	// on the mux before passing to HandlerFromMux so it is part of the same
+	// routing tree.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /authorize/complete", srv.GetAuthorizeComplete)
+
 	// Wrap the spec-generated router with per-endpoint rate limiting. Only the
 	// hot-path endpoints listed here are guarded; /healthz, /jwks.json and
 	// discovery pass through untouched.
-	base := openapi.Handler(srv)
+	base := openapi.HandlerFromMux(srv, mux)
 	handler := oidcapi.WithRateLimits(base, buildRateLimits(redisClient, logger))
 
 	// Support both ADDR (full address) and PORT (port-only, for docker-compose).
