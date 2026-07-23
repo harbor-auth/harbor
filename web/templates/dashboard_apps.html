@@ -1,0 +1,58 @@
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Connected Apps — Harbor Dashboard</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;color:#111;min-height:100vh}
+.nav{background:#1a1a2e;color:#fff;padding:1rem 2rem;display:flex;align-items:center;gap:1rem}
+.nav h1{font-size:1.1rem;font-weight:600}
+.nav a{color:#a0c4ff;text-decoration:none;font-size:.875rem}
+.container{max-width:960px;margin:2rem auto;padding:0 1.5rem}
+.page-title{font-size:1.25rem;font-weight:700;margin-bottom:1.25rem}
+.breadcrumb{font-size:.8rem;color:#888;margin-bottom:1rem}
+.breadcrumb a{color:#3b82f6;text-decoration:none}
+.grant-card{background:#fff;border-radius:8px;padding:1.25rem 1.5rem;margin-bottom:.75rem;box-shadow:0 1px 3px rgba(0,0,0,.08);display:flex;align-items:flex-start;gap:1rem}
+.grant-info{flex:1;min-width:0}
+.grant-client{font-weight:600;font-size:.95rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.grant-meta{font-size:.78rem;color:#888;margin-top:.2rem}
+.scopes{display:flex;flex-wrap:wrap;gap:.35rem;margin-top:.6rem}
+.scope-tag{background:#eff6ff;color:#1d4ed8;border-radius:4px;padding:.2rem .5rem;font-size:.72rem;font-family:monospace;border:1px solid #bfdbfe}
+.revoke-btn{flex-shrink:0;background:#fee2e2;color:#b91c1c;border:none;border-radius:6px;padding:.45rem .9rem;font-size:.8rem;font-weight:600;cursor:pointer;transition:background .15s}
+.revoke-btn:hover{background:#fecaca}
+.empty{background:#fff;border-radius:8px;padding:3rem 2rem;text-align:center;color:#888;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+</style>
+</head>
+<body>
+<nav class="nav">
+  <h1>⚓ Harbor</h1>
+  <span style="flex:1"></span>
+  <a href="/dashboard">← Dashboard</a>
+</nav>
+<div class="container">
+  <p class="breadcrumb"><a href="/dashboard">Dashboard</a> › Connected Apps</p>
+  <h2 class="page-title">Connected Apps</h2>
+  {{if .Grants}}
+  {{range .Grants}}
+  <div class="grant-card">
+    <div class="grant-info">
+      <div class="grant-client">{{.ClientID}}</div>
+      <div class="grant-meta">Granted {{.GrantedAt.Format "Jan 2, 2006"}}</div>
+      <div class="scopes">
+        {{range .Scopes}}<span class="scope-tag">{{.}}</span>{{end}}
+      </div>
+    </div>
+    <form method="POST" action="/dashboard/apps/{{.ID}}/revoke" onsubmit="return confirm('Disconnect this app? All active sessions with this app will be revoked.')">
+      <button type="submit" class="revoke-btn">Disconnect</button>
+    </form>
+  </div>
+  {{end}}
+  {{else}}
+  <div class="empty">
+    <p style="font-size:2rem;margin-bottom:.5rem">🔗</p>
+    <p>No connected apps yet.</p>
+  </div>
+  {{end}}
+</div>
+</body>
