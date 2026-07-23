@@ -198,7 +198,10 @@ func runBFFPasskeyFlow(t *testing.T) (bffFlowResult, bool) {
 	}
 	defer func() { _ = finishResp.Body.Close() }()
 	if finishResp.StatusCode != http.StatusFound {
-		body, _ := io.ReadAll(finishResp.Body)
+		body, err := io.ReadAll(finishResp.Body)
+		if err != nil {
+			t.Logf("POST /login/complete read body: %v", err)
+		}
 		t.Logf("POST /login/complete = %d, want 302 (assertion verification may have failed on this stack)\n%s", finishResp.StatusCode, body)
 		return bffFlowResult{}, false
 	}
@@ -219,7 +222,10 @@ func runBFFPasskeyFlow(t *testing.T) (bffFlowResult, bool) {
 	}
 	defer func() { _ = compResp.Body.Close() }()
 	if compResp.StatusCode != http.StatusFound {
-		body, _ := io.ReadAll(compResp.Body)
+		body, err := io.ReadAll(compResp.Body)
+		if err != nil {
+			t.Logf("GET /authorize/complete read body: %v", err)
+		}
 		t.Logf("GET /authorize/complete = %d, want 302 to RP\n%s", compResp.StatusCode, body)
 		return bffFlowResult{}, false
 	}
@@ -237,7 +243,10 @@ func runBFFPasskeyFlow(t *testing.T) (bffFlowResult, bool) {
 	tokenResp := postToken(t, code, verifier, demoRedirectURI)
 	defer func() { _ = tokenResp.Body.Close() }()
 	if tokenResp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(tokenResp.Body)
+		body, err := io.ReadAll(tokenResp.Body)
+		if err != nil {
+			t.Logf("POST /token read body: %v", err)
+		}
 		t.Logf("POST /token = %d, want 200\n%s", tokenResp.StatusCode, body)
 		return bffFlowResult{}, false
 	}
