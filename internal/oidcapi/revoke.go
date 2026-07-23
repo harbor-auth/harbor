@@ -20,9 +20,10 @@ import (
 // §2.2).
 //
 // Token type handling:
+//   - Both token types are always attempted (RFC 7009 §2.1 compliance)
+//   - token_type_hint only affects ordering: hinted type is tried first
 //   - refresh_token: calls Service.RevokeRefreshToken (family revocation)
 //   - access_token (JWT): adds JTI to revocation filter + publishes to replicas
-//   - If token_type_hint is absent, tries refresh token first, then access token
 //
 //harbor:invariant INV-REVOKE-ANTI-ENUMERATION
 func (s *Server) PostRevoke(w http.ResponseWriter, r *http.Request) {
@@ -67,9 +68,13 @@ func (s *Server) PostRevoke(w http.ResponseWriter, r *http.Request) {
 	// We try the hinted type first for efficiency, then fall back to the other.
 	switch tokenTypeHint {
 	case "access_token":
+		// Try access token first, then refresh token.
 		s.revokeAccessToken(r, token)
-	case "refresh_token":
 		s.revokeRefreshToken(r, token, creds.ClientID)
+	case "refresh_token":
+		// Try refresh token first, then access token.
+		s.revokeRefreshToken(r, token, creds.ClientID)
+		s.revokeAccessToken(r, token)
 	default:
 		// No hint or unknown hint: try refresh token first (more common),
 		// then access token. The order follows RFC 7009's guidance that
