@@ -205,6 +205,58 @@ func TestService_FinishRecoveryRegistration_NoSession(t *testing.T) {
 // TestService_FinishRecoveryRegistration_InvalidBody proves that when the
 // attestation cannot be verified the recovery_required flag is NOT cleared —
 // the account stays fenced until a fresh passkey is genuinely enrolled.
+func TestService_BeginDiscoverableLogin(t *testing.T) {
+	svc, _ := newTestService(t)
+	options, key, err := svc.BeginDiscoverableLogin(context.Background())
+	if err != nil {
+		t.Fatalf("BeginDiscoverableLogin: %v", err)
+	}
+	if options == nil || len(options.Response.Challenge) == 0 {
+		t.Fatal("expected non-empty assertion options with a challenge")
+	}
+	// Discoverable login MUST have empty allowCredentials — the authenticator
+	// selects the credential and supplies the userHandle (§9, §11.1).
+	if len(options.Response.AllowedCredentials) != 0 {
+		t.Fatalf("expected empty allowCredentials for discoverable login, got %d entries",
+			len(options.Response.AllowedCredentials))
+	}
+	if key == "" {
+		t.Fatal("expected a non-empty session key")
+	}
+}
+
+func TestService_FinishDiscoverableLogin_NoSession(t *testing.T) {
+	svc, _ := newTestService(t)
+	_, _, err := svc.FinishDiscoverableLogin(context.Background(), "missing-key", strings.NewReader("{}"))
+	if !errors.Is(err, ErrSessionNotFound) {
+		t.Fatalf("err = %v, want ErrSessionNotFound", err)
+	}
+}
+
+// TestService_FinishDiscoverableLogin_UnknownHandle verifies that an unknown or
+// invalid userHandle never surfaces ErrUserNotFound to the caller — user
+// existence must not be enumerable from the login endpoint (docs/DESIGN.md §6.5).
+func TestService_FinishDiscoverableLogin_UnknownHandle(t *testing.T) {
+	svc, _ := newTestService(t)
+
+	// Obtain a valid session so the test reaches user-lookup, not session-not-found.
+	_, sessionKey, err := svc.BeginDiscoverableLogin(context.Background())
+	if err != nil {
+		t.Fatalf("BeginDiscoverableLogin: %v", err)
+	}
+
+	// Any body with an unrecognised userHandle (or an otherwise-invalid
+	// assertion) must return a generic error — not ErrUserNotFound.
+	_, _, err = svc.FinishDiscoverableLogin(context.Background(), sessionKey,
+		strings.NewReader(`{"id":"bad","rawId":"bad","type":"public-key","response":{}}`))
+	if err == nil {
+		t.Fatal("expected error for unknown/invalid handle, got nil")
+	}
+	if errors.Is(err, ErrUserNotFound) {
+		t.Fatal("ErrUserNotFound must not escape FinishDiscoverableLogin — user existence must not be enumerable")
+	}
+}
+
 func TestService_FinishRecoveryRegistration_InvalidBodyKeepsRecoveryRequired(t *testing.T) {
 	store := NewInMemoryStore()
 	store.PutUser(NewUser([]byte("demo-user"), "demo@harbor.local", "Demo", nil))
