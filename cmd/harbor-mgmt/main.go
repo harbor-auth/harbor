@@ -39,6 +39,11 @@ import (
 // bff-session-middleware.md — 5 min, matching the PKCE state lifetime).
 const bffSessionTTL = 5 * time.Minute
 
+// Compile-time proof that clients.DBAuditStore satisfies mgmtapi.AuditStore.
+// Placed at package scope (where both packages are imported) to avoid the
+// import cycle that would arise inside internal/clients itself.
+var _ mgmtapi.AuditStore = (*clients.DBAuditStore)(nil)
+
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
@@ -262,11 +267,29 @@ func main() {
 		logger.Warn("DATABASE_URL not set -- compliance endpoints will return 503 (dev mode)")
 	}
 
+	// Audit trail read-path (GET /audit-events + BFF GET /profile/audit-events).
+	// Only wired when DATABASE_URL is configured; without a DB both endpoints
+	// return 503 Service Unavailable (fail-closed).
+	var auditTrailDeps *mgmtapi.AuditTrailDeps
+	if pool != nil {
+		q := db.New(pool)
+		auditTrailDeps = &mgmtapi.AuditTrailDeps{
+			Store:     clients.NewDBAuditStore(q),
+			Users:     clients.NewDBComplianceUserLoader(q),
+			Keys:      kp,
+			Decryptor: crypto.NewCipher(),
+		}
+		logger.Info("audit trail: read endpoints enabled")
+	} else {
+		logger.Warn("DATABASE_URL not set -- audit trail endpoints will return 503 (dev mode)")
+	}
+
 	mgmtServer := mgmtapi.New(enroller, logger).
 		WithConsentStore(consentStore).
 		WithSessionRevoker(sessionRevoker).
 		WithMFA(mfaService).
-		WithCompliance(complianceDeps)
+		WithCompliance(complianceDeps).
+		WithAuditTrail(auditTrailDeps)
 
 	// Relay store for /relay-addresses endpoints. Only wire when DATABASE_URL is
 	// configured; otherwise the relay endpoints stay in a 503 Service Unavailable
@@ -324,7 +347,7 @@ func main() {
 		dashConsentStore,
 		dashSessionStore,
 		dashCredStore,
-		nil, // AuditTrailDeps -- wired when audit-trail client adapter lands
+		auditTrailDeps,
 		dashRelayStore,
 		dashTmpl,
 		logger,
