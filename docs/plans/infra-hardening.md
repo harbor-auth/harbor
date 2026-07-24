@@ -5,11 +5,11 @@
 > · single-node · Calico CNI · ArgoCD GitOps
 >
 > **Bottom line:** the cluster has solid L3/L4 micro-segmentation and enforces Pod
-> Security Admission at the `restricted` profile, but has **several critical
-> host-level exposures** (etcd on public IP, no host firewall, kubelet and kube-apiserver
-> publicly reachable) alongside medium gaps (AES-CBC encryption cipher, no audit
-> logging, no east-west mTLS, no ArgoCD SSO). Fix the host-level items first — they
-> are reachable from the internet today.
+> Security Admission at the `restricted` profile. The critical host-level exposures
+> (etcd on public IP, no host firewall, kubelet and kube-apiserver publicly reachable)
+> have been **resolved as of 2026-07-24** via iptables rules and etcd localhost-binding.
+> Medium gaps remain: AES-CBC encryption cipher (secretbox upgrade pending), no
+> east-west mTLS, no ArgoCD SSO.
 
 ---
 
@@ -20,7 +20,12 @@
 | Control | Detail |
 |---|---|
 | **etcd encryption at rest** | Already enabled by RKE2 default — `Encryption Status: Enabled`, active key `AES-CBC aescbckey`. Secrets are not stored in plaintext. However, see gap below: AES-CBC is a weaker cipher than the upstream-recommended `secretbox`. |
-| **Egress NetworkPolicies** | harbor-hot and harbor-mgmt both have egress rules applied in the `harbor` namespace, locking egress to DNS (53), Redis (6379), and PostgreSQL (5432) only. Not unrestricted. See gap below: **HTTPS egress (443) is missing** from harbor-hot. |
+| **Egress NetworkPolicies** | harbor-hot and harbor-mgmt both have egress rules applied in the `harbor` namespace, locking egress to DNS (53), Redis (6379), PostgreSQL (5432), HTTPS/443, and SMTP (587/465). Applied 2026-07-24. |
+| **Host firewall (iptables)** | iptables INPUT chain DROP rules applied for ports 6443, 9345, 10250, 10255, 2379, 2380, 9091. Saved via `iptables-persistent`. Applied 2026-07-24. |
+| **etcd localhost-only binding** | etcd confirmed listening on `127.0.0.1:2379` only (was `51.89.98.90:2379`). Applied 2026-07-24. |
+| **API audit logging** | Audit policy and log path configured in RKE2 (`/etc/rancher/rke2/audit-policy.yaml`). rke2-server restarted 2026-07-24. Log at `/var/lib/rancher/rke2/server/logs/audit.log`. |
+| **ArgoCD initial admin secret** | `argocd-initial-admin-secret` deleted 2026-07-24. |
+| **nginx allow-snippet-annotations** | ConfigMap `rke2-ingress-nginx-controller` patched with `allow-snippet-annotations: true` 2026-07-24. |
 | **Calico NetworkPolicies (ingress)** | Every workload has an explicit L3/L4 ingress policy: `harbor-hot` (from kube-system ingress controller only), `harbor-mgmt` (same-namespace pods only), `harbor-postgresql`, `harbor-redis`, and all ArgoCD components. |
 | **Pod Security Admission — `restricted`** | The `harbor` namespace enforces `pod-security.kubernetes.io/enforce: restricted` (latest). Prevents privileged containers, host-network/PID access, requires explicit securityContexts. |
 | **TLS at ingress** | cert-manager + Cloudflare DNS-01 wildcard certificate on `auth.harborauth.com`. Traffic from the internet is TLS-terminated at the nginx ingress. |
@@ -28,28 +33,26 @@
 | **ArgoCD GitOps** | All cluster state is managed declaratively; ad-hoc `kubectl apply` changes are detected and reconciled away. |
 | **etcd snapshots** | RKE2 takes daily snapshots automatically (stored in `/var/lib/rancher/rke2/server/db/snapshots/`). |
 
-### 🔴 Critical Gaps (reachable from internet today)
+### ✅ Critical Gaps — Resolved 2026-07-24
 
-| Gap | Risk |
+| Gap | Resolution |
 |---|---|
-| **etcd listening on public IP** | `51.89.98.90:2379` is open to the internet. etcd has no authentication in its default single-node RKE2 setup. Anyone who can reach this port can read all cluster state including Secrets. |
-| **No host-level firewall (UFW inactive)** | `ufw status: inactive`. All ports reachable from the internet: kube-apiserver `:6443`, RKE2 join port `:9345`, kubelet API `:10250`, Calico metrics `:9091`. An attacker can reach the Kubernetes API server directly from the internet with no rate limiting or IP allowlist. |
-| **kube-apiserver (6443) exposed to internet** | Direct API server access from any IP. A stolen service account token, credential stuffing, or a vulnerability in the API server is directly exploitable. |
-| **kubelet API (10250) exposed to internet** | The kubelet API allows exec/log access to pods if authenticated. A leaked token or kubelet vulnerability is directly exploitable. |
+| **etcd listening on public IP** | Bound to `127.0.0.1:2379` via `etcd-arg` in `/etc/rancher/rke2/config.yaml`. Verified: `ss -tlnp \| grep 2379` shows localhost only. |
+| **No host-level firewall** | iptables INPUT DROP rules applied for ports 6443, 9345, 10250, 10255, 2379, 2380, 9091. Saved via `iptables-persistent` to `/etc/iptables/rules.v4`. |
+| **kube-apiserver (6443) exposed to internet** | Blocked by iptables INPUT DROP rule. |
+| **kubelet API (10250) exposed to internet** | Blocked by iptables INPUT DROP rule. |
 
 ### 🟡 Significant Gaps
 
-| Gap | Risk |
+| Gap | Risk / Status |
 |---|---|
-| **AES-CBC encryption cipher** | etcd secrets are encrypted but with AES-CBC — an older CBC-mode cipher with known vulnerabilities (padding oracle, IV reuse risk). Upstream Kubernetes recommends `secretbox` (XSalsa20+Poly1305) as the primary cipher. |
-| **Missing HTTPS egress on harbor-hot** | The harbor-hot egress NetworkPolicy has no port-443 rule. Any outbound HTTPS call from harbor-hot (e.g. Cloudflare KMS API, JWKS external fetch if configured) will be silently blocked. |
-| **No Kubernetes API audit logging** | Zero tamper-evident record of API server actions — cannot detect credential theft, privilege escalation, or Secret exfiltration after the fact. |
-| **No admin endpoint protection at ingress** | `harbor-hot` exposes `/admin/keys/rotate` and `/admin/revoke-jwt`. These are currently reachable from the internet via the nginx ingress because there is no path-based blocking at the ingress layer. (App-level auth is tracked in `production-readiness.md`; this covers the infra layer.) |
-| **ArgoCD using initial admin password, no SSO** | ArgoCD's initial auto-generated admin password is still active (`argocd-initial-admin-secret`). No SSO is configured. ArgoCD has full cluster deploy access. |
-| **etcd snapshots are local-only** | Daily snapshots exist but are only on the same node. A disk failure or node compromise destroys both the live data and the backup. |
-| **No east-west mTLS** | Pod-to-pod traffic (hot↔postgres, mgmt↔redis) is unencrypted plaintext inside the node. Node-level access can expose DB queries and session data. |
-| **No policy-as-code** | No Kyverno or OPA Gatekeeper. No enforcement of image signing, image digest pinning, resource limits, or label requirements. |
-| **No runtime threat detection** | No Falco or equivalent — no alerting on anomalous syscalls (e.g. shell spawned inside `harbor-hot`). |
+| **AES-CBC encryption cipher** | etcd secrets encrypted but with AES-CBC (not AEAD). Upgrade to secretbox pending — `rke2 secrets-encrypt rotate-keys` rotates within the same cipher type; switching to secretbox requires manual encryption-config edit (see T1.5). |
+| **No admin endpoint protection at nginx layer** | The hardened nginx build (v1.14.5-hardened2) blocks `server-snippet` via admission webhook even with `allow-snippet-annotations: true` in ConfigMap. `/admin` endpoints are protected by application-level Bearer token auth (see `admin-endpoint-auth` in `production-readiness.md`). Future: dedicated admin port or Calico HostEndpoint policy. |
+| **etcd snapshots are local-only** | Daily snapshots exist but only on the same node. A disk failure loses both live data and backup. |
+| **No east-west mTLS** | Pod-to-pod traffic (hot↔postgres, mgmt↔redis) is unencrypted inside the node. See T2.3 Linkerd. |
+| **No policy-as-code** | No Kyverno or OPA Gatekeeper. No enforcement of image signing, resource limits, or label requirements. |
+| **No runtime threat detection** | No Falco or equivalent — no alerting on anomalous syscalls. |
+| **ArgoCD no SSO** | Admin password rotated and initial secret deleted 2026-07-24, but SSO not yet configured. See T2.2. |
 
 ---
 
@@ -595,14 +598,15 @@ kubectl patch felixconfiguration default --type='merge' \
 ## Implementation Order
 
 ```
-Week 1, Day 1:  T0.1 Enable UFW (30 min) — blocks internet access to 6443, 10250, 9345
-                T0.2 Bind etcd to localhost (15 min)
-
-Week 1:         T1.1 Add HTTPS egress to harbor-hot NetworkPolicy (10 min)
-                T1.2 Block /admin/* at nginx ingress (15 min)
-                T1.3 Rotate ArgoCD admin credentials (10 min)
-                T1.4 Enable audit logging (20 min)
-                T1.5 Upgrade encryption cipher to secretbox (30 min)
+✅ 2026-07-24  T0.1 iptables DROP rules for k8s ports (6443, 9345, 10250, 10255, 2379, 2380, 9091)
+✅ 2026-07-24  T0.2 Bind etcd to localhost (127.0.0.1:2379 only)
+✅ 2026-07-24  T1.1 HTTPS/443 egress on harbor-hot + SMTP/587/465 egress on harbor-mgmt NetworkPolicy
+⚠️ 2026-07-24  T1.2 /admin block at nginx layer: blocked by hardened nginx admission webhook;
+               protected at application layer by Bearer token auth (admin-endpoint-auth)
+✅ 2026-07-24  T1.3 ArgoCD initial admin secret deleted; admin password rotated
+✅ 2026-07-24  T1.4 Audit logging: policy + log path configured, rke2-server restarted
+⏳ TODO        T1.5 Upgrade etcd cipher AES-CBC → secretbox (rotate-keys doesn't change type;
+               needs manual encryption-config edit + reencrypt)
 
 Week 2:         T2.1 Offsite etcd backups + PostgreSQL backup
                 T2.2 ArgoCD SSO with Dex + GitHub
