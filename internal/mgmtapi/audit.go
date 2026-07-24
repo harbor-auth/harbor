@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/harbor-auth/harbor/internal/clients"
 	"github.com/harbor-auth/harbor/internal/crypto"
 	"github.com/harbor-auth/harbor/internal/telemetry"
 )
@@ -18,17 +19,11 @@ const (
 	auditMaxLimit = 100
 )
 
-// RawAuditEvent is the pre-decryption DB row returned by AuditStore. The
-// PayloadEncrypted field is the ciphertext under the user's DEK; it is
-// nil/empty for rows written before migration 0013_audit_events.
-type RawAuditEvent struct {
-	ID               string
-	EventType        string
-	ClientID         *string
-	OccurredAt       time.Time
-	Region           string
-	PayloadEncrypted []byte
-}
+// RawAuditEvent is a type alias for clients.RawAuditEvent. The struct is
+// defined in the clients package to avoid an import cycle (mgmtapi/register.go
+// already imports clients, so clients cannot import mgmtapi). Using a true
+// alias keeps all handler and test code unchanged.
+type RawAuditEvent = clients.RawAuditEvent
 
 // AuditStore lists encrypted audit events for a user, newest-first, with
 // limit/offset pagination. Satisfied by an adapter over *db.Queries
