@@ -247,9 +247,13 @@ func TestDBRotationStoreActiveKid(t *testing.T) {
 
 	// Create and activate a key.
 	jwk := makeTestJWK(t)
-	store.CreateKey(ctx, "key-1", jwk.Kid, "us-east-1", nil, nil)
+	if err := store.CreateKey(ctx, "key-1", jwk.Kid, "us-east-1", nil, nil); err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
 	now := time.Now()
-	store.PromoteKey(ctx, jwk.Kid, now)
+	if err := store.PromoteKey(ctx, jwk.Kid, now); err != nil {
+		t.Fatalf("PromoteKey: %v", err)
+	}
 
 	kid, err = rotStore.ActiveKid(ctx)
 	if err != nil {
@@ -267,7 +271,9 @@ func TestDBRotationStorePromote(t *testing.T) {
 
 	// Create a pending key.
 	jwk := makeTestJWK(t)
-	store.CreateKey(ctx, "key-1", jwk.Kid, "us-east-1", nil, nil)
+	if err := store.CreateKey(ctx, "key-1", jwk.Kid, "us-east-1", nil, nil); err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
 
 	// Promote it.
 	promotedAt := time.Now()
@@ -277,7 +283,10 @@ func TestDBRotationStorePromote(t *testing.T) {
 	}
 
 	// Verify state changed.
-	key, _ := store.GetByKid(ctx, jwk.Kid)
+	key, err := store.GetByKid(ctx, jwk.Kid)
+	if err != nil {
+		t.Fatalf("GetByKid: %v", err)
+	}
 	if key.State != "active" {
 		t.Errorf("State = %q, want active", key.State)
 	}
@@ -304,7 +313,9 @@ func TestDBRotationStoreRetire(t *testing.T) {
 
 	// Create a key.
 	jwk := makeTestJWK(t)
-	store.CreateKey(ctx, "key-1", jwk.Kid, "us-east-1", nil, nil)
+	if err := store.CreateKey(ctx, "key-1", jwk.Kid, "us-east-1", nil, nil); err != nil {
+		t.Fatalf("CreateKey: %v", err)
+	}
 
 	// Retire it.
 	err := rotStore.Retire(ctx, jwk.Kid)
@@ -313,7 +324,10 @@ func TestDBRotationStoreRetire(t *testing.T) {
 	}
 
 	// Verify state changed.
-	key, _ := store.GetByKid(ctx, jwk.Kid)
+	key, err := store.GetByKid(ctx, jwk.Kid)
+	if err != nil {
+		t.Fatalf("GetByKid: %v", err)
+	}
 	if key.State != "retired" {
 		t.Errorf("State = %q, want retired", key.State)
 	}
