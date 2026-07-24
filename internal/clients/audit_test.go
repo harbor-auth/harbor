@@ -46,11 +46,11 @@ func TestDBAuditStoreListEvents(t *testing.T) {
 				PayloadEncrypted: []byte("ciphertext"),
 			},
 			{
-				ID:        pgUUID("c0000000-0000-0000-0000-000000000002"),
-				Region:    "eu-1",
-				UserID:    pgUUID(testUserID),
-				EventType: "auth.login",
-				ClientID:  nil,
+				ID:         pgUUID("c0000000-0000-0000-0000-000000000002"),
+				Region:     "eu-1",
+				UserID:     pgUUID(testUserID),
+				EventType:  "auth.login",
+				ClientID:   nil,
 				OccurredAt: pgtype.Timestamptz{Time: occurredAt.Add(-time.Hour), Valid: true},
 				// No payload — pre-migration row.
 			},
@@ -159,7 +159,9 @@ func TestDBAuditStoreImplementsAuditStore(t *testing.T) {
 	// mgmtapi.AuditStore here directly (import cycle), but the structural
 	// check is enforced in cmd/harbor-mgmt/main.go which imports both.
 	// This test verifies the concrete method signature matches expectations.
-	var s interface{ ListAuditEvents(context.Context, string, int, int) ([]RawAuditEvent, error) }
+	var s interface {
+		ListAuditEvents(context.Context, string, int, int) ([]RawAuditEvent, error)
+	}
 	s = &DBAuditStore{q: &fakeAuditQuerier{}}
 	_ = s
 }
