@@ -159,9 +159,7 @@ func TestDBAuditStoreImplementsAuditStore(t *testing.T) {
 	// mgmtapi.AuditStore here directly (import cycle), but the structural
 	// check is enforced in cmd/harbor-mgmt/main.go which imports both.
 	// This test verifies the concrete method signature matches expectations.
-	var s interface {
+	var _ interface {
 		ListAuditEvents(context.Context, string, int, int) ([]RawAuditEvent, error)
-	}
-	s = &DBAuditStore{q: &fakeAuditQuerier{}}
-	_ = s
+	} = &DBAuditStore{q: &fakeAuditQuerier{}}
 }
