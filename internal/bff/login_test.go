@@ -16,15 +16,16 @@ import (
 
 // mockWebAuthnService implements WebAuthnService for testing.
 type mockWebAuthnService struct {
-	beginLoginFunc  func(ctx context.Context, userID []byte) (*protocol.CredentialAssertion, string, error)
-	finishLoginFunc func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, error)
+	beginLoginFunc             func(ctx context.Context, userID []byte) (*protocol.CredentialAssertion, string, error)
+	finishLoginFunc            func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, error)
+	beginDiscoverableLoginFunc func(ctx context.Context) (*protocol.CredentialAssertion, string, error)
+	finishDiscoverableFunc     func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, error)
 }
 
 func (m *mockWebAuthnService) BeginLogin(ctx context.Context, userID []byte) (*protocol.CredentialAssertion, string, error) {
 	if m.beginLoginFunc != nil {
 		return m.beginLoginFunc(ctx, userID)
 	}
-	// Return a minimal valid response
 	return &protocol.CredentialAssertion{
 		Response: protocol.PublicKeyCredentialRequestOptions{
 			Challenge: []byte("test-challenge"),
@@ -37,6 +38,24 @@ func (m *mockWebAuthnService) FinishLogin(ctx context.Context, sessionKey string
 		return m.finishLoginFunc(ctx, sessionKey, response)
 	}
 	return "authenticated-user-id", nil
+}
+
+func (m *mockWebAuthnService) BeginDiscoverableLogin(ctx context.Context) (*protocol.CredentialAssertion, string, error) {
+	if m.beginDiscoverableLoginFunc != nil {
+		return m.beginDiscoverableLoginFunc(ctx)
+	}
+	return &protocol.CredentialAssertion{
+		Response: protocol.PublicKeyCredentialRequestOptions{
+			Challenge: []byte("discoverable-challenge"),
+		},
+	}, "discoverable-session-key", nil
+}
+
+func (m *mockWebAuthnService) FinishDiscoverableLogin(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, error) {
+	if m.finishDiscoverableFunc != nil {
+		return m.finishDiscoverableFunc(ctx, sessionKey, response)
+	}
+	return "discoverable-user-id", nil
 }
 
 // mockUserResolver implements UserResolver for testing.
