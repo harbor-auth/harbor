@@ -446,16 +446,16 @@ func TestKMSKeyProviderNoPanicOnMalformedInput(t *testing.T) {
 	for i, in := range inputs {
 		in := in
 		assertNoPanic(fmt.Sprintf("UnwrapDEK[%d]", i), func() {
-			_, _ = provider.UnwrapDEK(ctx, region, in) //nolint:errcheck
+			_, _ = provider.UnwrapDEK(ctx, region, in) //nolint:errcheck // panic-safety test only
 		})
 		assertNoPanic(fmt.Sprintf("RewrapDEK[%d]", i), func() {
-			_, _ = provider.RewrapDEK(ctx, region, in) //nolint:errcheck
+			_, _ = provider.RewrapDEK(ctx, region, in) //nolint:errcheck // panic-safety test only
 		})
 		assertNoPanic(fmt.Sprintf("ParseEnvelopeInfo[%d]", i), func() {
-			_, _ = ParseEnvelopeInfo(in) //nolint:errcheck
+			_, _ = ParseEnvelopeInfo(in) //nolint:errcheck // panic-safety test only
 		})
 		assertNoPanic(fmt.Sprintf("parseEnvelope[%d]", i), func() {
-			_, _, _, _ = parseEnvelope(in) //nolint:errcheck
+			_, _, _, _ = parseEnvelope(in) //nolint:errcheck // panic-safety test only
 		})
 	}
 }
