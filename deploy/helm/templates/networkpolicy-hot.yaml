@@ -55,4 +55,17 @@ spec:
       ports:
         - port: 5432
           protocol: TCP
+    # External HTTPS — Cloudflare KMS API, remote JWKS fetch, and any other
+    # outbound TLS calls harbor-hot makes. ipBlock 0.0.0.0/0 is intentionally
+    # broad but port-locked to 443 only; internal CIDRs are excluded to avoid
+    # accidentally bypassing same-cluster NetworkPolicies via this rule.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
 {{- end }}

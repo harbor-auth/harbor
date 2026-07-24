@@ -11,10 +11,18 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "harbor.hot.labels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
   annotations:
+    {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
+    # Block privileged admin endpoints at the ingress layer — defence-in-depth
+    # on top of application-level auth. The /admin/* paths must never be
+    # reachable from the internet regardless of auth state.
+    nginx.ingress.kubernetes.io/server-snippet: |
+      location ~* ^/admin {
+        deny all;
+        return 403;
+      }
 spec:
   ingressClassName: {{ .Values.ingress.className }}
   tls:
