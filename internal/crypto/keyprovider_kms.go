@@ -24,7 +24,6 @@ var (
 
 	// ErrEnvelopeVersionMismatch is returned when the envelope version is unsupported.
 	ErrEnvelopeVersionMismatch = errors.New("crypto: unsupported envelope version")
-
 )
 
 // KEKResolver resolves a region to its KEK key ID. In production, this maps
@@ -414,4 +413,3 @@ func (k *kmsKeyProvider) WrapKey(_ context.Context, _, _ string, _ []byte) ([]by
 func (k *kmsKeyProvider) UnwrapKey(_ context.Context, _, _ string, _ []byte) ([]byte, error) {
 	return nil, ErrKMSNotImplemented
 }
-

@@ -778,8 +778,8 @@ func TestKMSKeyProviderUnwrapKeyMalformedEnvelope(t *testing.T) {
 	dekLen := int(validWrapped[1])<<8 | int(validWrapped[2])
 
 	testCases := []struct {
-		name    string
-		input   []byte
+		name  string
+		input []byte
 	}{
 		{"nil", nil},
 		{"empty", []byte{}},

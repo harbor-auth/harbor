@@ -134,4 +134,3 @@ func TestNewLocalSignerGeneratesUsableKey(t *testing.T) {
 		t.Fatal("NewLocalSigner signature does not verify against its own JWK")
 	}
 }
-
