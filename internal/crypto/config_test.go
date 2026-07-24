@@ -174,10 +174,10 @@ func TestEnvKEKResolverValidation(t *testing.T) {
 func TestLoadKMSConfigFromEnv(t *testing.T) {
 	// Save and restore original env var.
 	orig := os.Getenv(KMSKeyMapEnvVar)
-	defer os.Setenv(KMSKeyMapEnvVar, orig)
+	defer os.Setenv(KMSKeyMapEnvVar, orig) //nolint:errcheck
 
 	// Test with valid env var.
-	os.Setenv(KMSKeyMapEnvVar, "us-east-1=arn:aws:kms:us-east-1:123:key/a")
+	os.Setenv(KMSKeyMapEnvVar, "us-east-1=arn:aws:kms:us-east-1:123:key/a") //nolint:errcheck
 	cfg, err := LoadKMSConfigFromEnv()
 	if err != nil {
 		t.Fatalf("LoadKMSConfigFromEnv: %v", err)
@@ -187,7 +187,7 @@ func TestLoadKMSConfigFromEnv(t *testing.T) {
 	}
 
 	// Test with unset env var.
-	os.Unsetenv(KMSKeyMapEnvVar)
+	os.Unsetenv(KMSKeyMapEnvVar) //nolint:errcheck
 	_, err = LoadKMSConfigFromEnv()
 	if err == nil {
 		t.Error("expected error for unset env var")
@@ -197,10 +197,10 @@ func TestLoadKMSConfigFromEnv(t *testing.T) {
 func TestNewKEKResolverFromEnv(t *testing.T) {
 	// Save and restore original env var.
 	orig := os.Getenv(KMSKeyMapEnvVar)
-	defer os.Setenv(KMSKeyMapEnvVar, orig)
+	defer os.Setenv(KMSKeyMapEnvVar, orig) //nolint:errcheck
 
 	// Test with valid env var.
-	os.Setenv(KMSKeyMapEnvVar, "us-east-1=arn:aws:kms:us-east-1:123:key/a,eu-west-1=arn:aws:kms:eu-west-1:123:key/b")
+	os.Setenv(KMSKeyMapEnvVar, "us-east-1=arn:aws:kms:us-east-1:123:key/a,eu-west-1=arn:aws:kms:eu-west-1:123:key/b") //nolint:errcheck
 	resolver, err := NewKEKResolverFromEnv()
 	if err != nil {
 		t.Fatalf("NewKEKResolverFromEnv: %v", err)

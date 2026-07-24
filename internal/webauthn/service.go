@@ -54,12 +54,16 @@ func NewService(cfg Config, store Store, sessions SessionStore) (*Service, error
 // BeginRegistration starts enrolling a new passkey for an existing user. It
 // returns the creation options to relay to the browser and an opaque session
 // key the caller must echo back to FinishRegistration (via an HttpOnly cookie).
+//
+// ResidentKeyRequirementRequired is set so that newly enrolled passkeys are
+// client-side discoverable (stored on the authenticator), enabling the
+// discoverable-login flow (docs/DESIGN.md §3.1).
 func (s *Service) BeginRegistration(ctx context.Context, userID []byte) (*protocol.CredentialCreation, string, error) {
 	user, err := s.store.GetUser(ctx, userID)
 	if err != nil {
 		return nil, "", err
 	}
-	options, session, err := s.wa.BeginRegistration(user)
+	options, session, err := s.wa.BeginRegistration(user, gowebauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired))
 	if err != nil {
 		return nil, "", err
 	}
@@ -149,6 +153,59 @@ func (s *Service) BeginLogin(ctx context.Context, userID []byte) (*protocol.Cred
 		return nil, "", err
 	}
 	return options, key, nil
+}
+
+// BeginDiscoverableLogin starts a discoverable (passkey/usernameless) assertion
+// ceremony. No user identity is required upfront — the authenticator returns
+// the userHandle in its response, so allowCredentials is empty.
+// It returns the assertion options and an opaque session key the caller must
+// echo back to FinishDiscoverableLogin (via an HttpOnly cookie).
+func (s *Service) BeginDiscoverableLogin(ctx context.Context) (*protocol.CredentialAssertion, string, error) {
+	options, session, err := s.wa.BeginDiscoverableLogin()
+	if err != nil {
+		return nil, "", err
+	}
+	key, err := newSessionKey()
+	if err != nil {
+		return nil, "", err
+	}
+	if err := s.sessions.Save(ctx, key, *session); err != nil {
+		return nil, "", err
+	}
+	return options, key, nil
+}
+
+// FinishDiscoverableLogin verifies the authenticator's discoverable assertion
+// response. The authenticator supplies the userHandle so no prior user identity
+// is needed. On success it persists the advanced signature counter and returns
+// the base64url-encoded userHandle as the resolved userID.
+//
+// Unknown/invalid user handles fail closed with a generic error (§6.5).
+// Clone detection (sign-count regression) is preserved: CloneWarning triggers
+// ErrClonedAuthenticator and the counter is NOT updated.
+func (s *Service) FinishDiscoverableLogin(ctx context.Context, sessionKey string, body io.Reader) (userID string, cred *gowebauthn.Credential, err error) {
+	session, err := s.sessions.Take(ctx, sessionKey)
+	if err != nil {
+		return "", nil, err
+	}
+	parsed, err := protocol.ParseCredentialRequestResponseBody(body)
+	if err != nil {
+		return "", nil, err
+	}
+	handler := func(rawID, userHandle []byte) (gowebauthn.User, error) {
+		return s.store.GetUser(ctx, userHandle)
+	}
+	user, credential, err := s.wa.ValidatePasskeyLogin(handler, session, parsed)
+	if err != nil {
+		return "", nil, err
+	}
+	if credential.Authenticator.CloneWarning {
+		return "", nil, ErrClonedAuthenticator
+	}
+	if err := s.store.UpdateCredential(ctx, user.WebAuthnID(), *credential); err != nil {
+		return "", nil, err
+	}
+	return base64.RawURLEncoding.EncodeToString(user.WebAuthnID()), credential, nil
 }
 
 // FinishLogin verifies the authenticator's assertion response. On success it

@@ -73,6 +73,18 @@ func (m *mockWebAuthn) FinishLogin(_ context.Context, _ string, _ *protocol.Pars
 	return m.userID, nil
 }
 
+func (m *mockWebAuthn) BeginDiscoverableLogin(_ context.Context) (*protocol.CredentialAssertion, string, error) {
+	return &protocol.CredentialAssertion{
+		Response: protocol.PublicKeyCredentialRequestOptions{
+			Challenge: []byte("integration-discoverable-challenge"),
+		},
+	}, "discoverable-session-key", nil
+}
+
+func (m *mockWebAuthn) FinishDiscoverableLogin(_ context.Context, _ string, _ *protocol.ParsedCredentialAssertionData) (string, error) {
+	return m.userID, nil
+}
+
 // mockResolver implements bff.UserResolver with a fixed user handle.
 type mockResolver struct{}
 

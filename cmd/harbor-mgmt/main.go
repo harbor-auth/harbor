@@ -342,7 +342,7 @@ func main() {
 	// /login initiates the passkey assertion bound to a BFF session; /login/complete
 	// finishes it, writes the authenticated user_id to the session, and redirects
 	// back to harbor-hot/authorize/complete.
-	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(svc), devUserResolver{})
+	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(svc), bff.DiscoverableUserResolver{})
 	mux.HandleFunc("GET /login", loginHandler.BeginLogin)
 	mux.HandleFunc("POST /login/complete", loginHandler.FinishLogin)
 

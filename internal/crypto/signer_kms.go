@@ -114,8 +114,6 @@ func newKMSBackedSignerFromKey(priv *ecdsa.PrivateKey) *KMSBackedSigner {
 	}
 }
 
-
-
 // Sign implements Signer. It computes SHA-256 of signingInput and returns the
 // raw ES256 signature R‖S (each 32 bytes, left-padded).
 func (s *KMSBackedSigner) Sign(signingInput []byte) ([]byte, error) {

@@ -21,6 +21,14 @@ type WebAuthnService interface {
 	// key returned by BeginLogin (echoed via cookie). Returns the authenticated
 	// user's internal ID on success.
 	FinishLogin(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (userID string, err error)
+	// BeginDiscoverableLogin starts a discoverable (passkey/usernameless) assertion
+	// ceremony. No user identity is required — the authenticator returns the
+	// userHandle in its response. Returns assertion options and a session key.
+	BeginDiscoverableLogin(ctx context.Context) (*protocol.CredentialAssertion, string, error)
+	// FinishDiscoverableLogin completes a discoverable assertion ceremony. The
+	// userHandle from the authenticator response is used to identify the user;
+	// no prior user identity is needed. Returns the resolved userID.
+	FinishDiscoverableLogin(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (userID string, err error)
 }
 
 // UserResolver looks up a user's WebAuthn user handle ([]byte) from the BFF
@@ -40,6 +48,25 @@ type UserResolver interface {
 // ErrUserNotIdentified is returned when the user cannot be identified from the
 // request or session state.
 var ErrUserNotIdentified = errors.New("bff: user not identified")
+
+// ErrDiscoverable is returned by DiscoverableUserResolver.ResolveUser to signal
+// that the login flow should use WebAuthn discoverable credentials (passkey
+// autofill). The caller must detect this sentinel and branch to
+// BeginDiscoverableLogin rather than BeginLogin.
+var ErrDiscoverable = errors.New("bff: discoverable login required")
+
+// DiscoverableUserResolver implements UserResolver for the discoverable
+// (passkey/usernameless) login path. Its ResolveUser always returns
+// ErrDiscoverable, which causes LoginHandler.BeginLogin to call
+// BeginDiscoverableLogin instead of BeginLogin(userID). No user identity is
+// required upfront — the authenticator supplies the userHandle in the assertion.
+type DiscoverableUserResolver struct{}
+
+// ResolveUser implements UserResolver by always returning ErrDiscoverable,
+// signalling that discoverable-credential flow must be used.
+func (DiscoverableUserResolver) ResolveUser(_ context.Context, _ *http.Request, _ BFFSessionRecord) ([]byte, error) {
+	return nil, ErrDiscoverable
+}
 
 // LoginHandler serves the /login endpoint that initiates passkey assertion.
 // It reads the BFF session, resolves the user identity, calls BeginAssertion,
@@ -86,20 +113,32 @@ func (h *LoginHandler) BeginLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Resolve the user identity
-	userID, err := h.userResolver.ResolveUser(r.Context(), r, session)
-	if err != nil {
-		if errors.Is(err, ErrUserNotIdentified) {
+	// Resolve the user identity. DiscoverableUserResolver returns ErrDiscoverable
+	// to signal that we should skip user resolution and use the discoverable
+	// credential flow instead.
+	userID, resolveErr := h.userResolver.ResolveUser(r.Context(), r, session)
+
+	var options *protocol.CredentialAssertion
+	var sessionKey string
+	var beginErr error
+
+	switch {
+	case errors.Is(resolveErr, ErrDiscoverable):
+		// Discoverable path: authenticator identifies the user.
+		options, sessionKey, beginErr = h.webauthn.BeginDiscoverableLogin(r.Context())
+	case resolveErr != nil:
+		if errors.Is(resolveErr, ErrUserNotIdentified) {
 			writeLoginError(w, http.StatusBadRequest, "user_not_identified", "could not identify user")
 			return
 		}
 		writeLoginError(w, http.StatusInternalServerError, "server_error", "could not resolve user")
 		return
+	default:
+		// Known-user path: begin assertion for the resolved user.
+		options, sessionKey, beginErr = h.webauthn.BeginLogin(r.Context(), userID)
 	}
 
-	// Begin the WebAuthn assertion
-	options, sessionKey, err := h.webauthn.BeginLogin(r.Context(), userID)
-	if err != nil {
+	if beginErr != nil {
 		// Don't leak whether the user exists — collapse to generic error
 		writeLoginError(w, http.StatusBadRequest, "invalid_request", "could not begin login")
 		return
@@ -220,8 +259,16 @@ func (h *LoginHandler) FinishLoginWithParsedData(w http.ResponseWriter, r *http.
 	requestID := ReadBFFCookie(r)
 	sessionKey := readWebAuthnSessionCookie(r)
 
-	// Finish the WebAuthn assertion
-	userID, err := h.webauthn.FinishLogin(r.Context(), sessionKey, parsedResponse)
+	// Branch on the resolver type: discoverable path uses FinishDiscoverableLogin
+	// (the authenticator identifies the user via userHandle); known-user path uses
+	// FinishLogin as before.
+	var userID string
+	var err error
+	if _, ok := h.userResolver.(DiscoverableUserResolver); ok {
+		userID, err = h.webauthn.FinishDiscoverableLogin(r.Context(), sessionKey, parsedResponse)
+	} else {
+		userID, err = h.webauthn.FinishLogin(r.Context(), sessionKey, parsedResponse)
+	}
 	if err != nil {
 		// Don't leak details — collapse to generic error
 		writeLoginError(w, http.StatusUnauthorized, "authentication_failed", "passkey verification failed")

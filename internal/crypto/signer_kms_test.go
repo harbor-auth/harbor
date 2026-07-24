@@ -605,10 +605,10 @@ func TestLoadKMSBackedSignerNoPanicOnMalformedInput(t *testing.T) {
 		{1},
 		{1, 0},
 		{1, 0, 0},
-		{1, 255, 0},              // dekLen huge, no payload
-		{1, 0, 1},                // dekLen=1 but no dek/ciphertext
+		{1, 255, 0}, // dekLen huge, no payload
+		{1, 0, 1},   // dekLen=1 but no dek/ciphertext
 		{wrappedKeyVersion, 0, 0},
-		{99, 0, 0, 'x'},          // wrong version
+		{99, 0, 0, 'x'}, // wrong version
 		bytes.Repeat([]byte{0xff}, 8),
 		bytes.Repeat([]byte{0x00}, 128),
 	}

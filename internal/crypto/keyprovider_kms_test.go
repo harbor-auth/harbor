@@ -446,16 +446,16 @@ func TestKMSKeyProviderNoPanicOnMalformedInput(t *testing.T) {
 	for i, in := range inputs {
 		in := in
 		assertNoPanic(fmt.Sprintf("UnwrapDEK[%d]", i), func() {
-			_, _ = provider.UnwrapDEK(ctx, region, in)
+			_, _ = provider.UnwrapDEK(ctx, region, in) //nolint:errcheck
 		})
 		assertNoPanic(fmt.Sprintf("RewrapDEK[%d]", i), func() {
-			_, _ = provider.RewrapDEK(ctx, region, in)
+			_, _ = provider.RewrapDEK(ctx, region, in) //nolint:errcheck
 		})
 		assertNoPanic(fmt.Sprintf("ParseEnvelopeInfo[%d]", i), func() {
-			_, _ = ParseEnvelopeInfo(in)
+			_, _ = ParseEnvelopeInfo(in) //nolint:errcheck
 		})
 		assertNoPanic(fmt.Sprintf("parseEnvelope[%d]", i), func() {
-			_, _, _, _ = parseEnvelope(in)
+			_, _, _, _ = parseEnvelope(in) //nolint:errcheck
 		})
 	}
 }
@@ -600,7 +600,10 @@ func TestKMSKeyProviderRewrapDEK(t *testing.T) {
 	}
 
 	// Verify old envelope has old KEK.
-	oldInfo, _ := ParseEnvelopeInfo(oldWrapped)
+	oldInfo, err := ParseEnvelopeInfo(oldWrapped)
+	if err != nil {
+		t.Fatalf("ParseEnvelopeInfo(old): %v", err)
+	}
 	if oldInfo.KEKKeyID != oldKeyID {
 		t.Fatalf("old envelope KEK = %q, want %q", oldInfo.KEKKeyID, oldKeyID)
 	}
@@ -616,7 +619,10 @@ func TestKMSKeyProviderRewrapDEK(t *testing.T) {
 	}
 
 	// Verify new envelope has new KEK.
-	newInfo, _ := ParseEnvelopeInfo(newWrapped)
+	newInfo, err := ParseEnvelopeInfo(newWrapped)
+	if err != nil {
+		t.Fatalf("ParseEnvelopeInfo(new): %v", err)
+	}
 	if newInfo.KEKKeyID != newKeyID {
 		t.Errorf("new envelope KEK = %q, want %q", newInfo.KEKKeyID, newKeyID)
 	}
@@ -678,14 +684,20 @@ func TestKMSKeyProviderRewrapDEKRegionMismatch(t *testing.T) {
 	resolverA := NewStaticKEKResolver(map[string]string{regionA: keyA})
 	providerA := NewKMSKeyProvider(kmsClient, resolverA)
 
-	dek, _ := GenerateDEK()
-	wrapped, _ := providerA.WrapDEK(ctx, regionA, dek)
+	dek, err := GenerateDEK()
+	if err != nil {
+		t.Fatalf("GenerateDEK: %v", err)
+	}
+	wrapped, err := providerA.WrapDEK(ctx, regionA, dek)
+	if err != nil {
+		t.Fatalf("WrapDEK: %v", err)
+	}
 
 	// Try to rewrap with region B - should fail.
 	resolverB := NewStaticKEKResolver(map[string]string{regionB: keyB})
 	providerB := NewKMSKeyProvider(kmsClient, resolverB)
 
-	_, err := providerB.RewrapDEK(ctx, regionB, wrapped)
+	_, err = providerB.RewrapDEK(ctx, regionB, wrapped)
 	if !errors.Is(err, ErrDecryptFailed) {
 		t.Errorf("cross-region RewrapDEK error = %v, want ErrDecryptFailed", err)
 	}
@@ -738,7 +750,10 @@ func TestKMSKeyProviderRewrapDEKPreservesDEK(t *testing.T) {
 	// Wrap with old KEK.
 	oldResolver := NewStaticKEKResolver(map[string]string{region: oldKeyID})
 	oldProvider := NewKMSKeyProvider(kmsClient, oldResolver)
-	oldWrapped, _ := oldProvider.WrapDEK(ctx, region, dek)
+	oldWrapped, err := oldProvider.WrapDEK(ctx, region, dek)
+	if err != nil {
+		t.Fatalf("WrapDEK: %v", err)
+	}
 
 	// Rewrap with new KEK.
 	newResolver := NewStaticKEKResolver(map[string]string{region: newKeyID})
@@ -774,12 +789,15 @@ func TestKMSKeyProviderUnwrapKeyMalformedEnvelope(t *testing.T) {
 	provider := NewKMSKeyProvider(kmsClient, resolver)
 
 	// Build a small syntactically valid envelope for comparison.
-	validWrapped, _ := provider.WrapKey(ctx, region, purpose, []byte("key"))
+	validWrapped, err := provider.WrapKey(ctx, region, purpose, []byte("key"))
+	if err != nil {
+		t.Fatalf("WrapKey: %v", err)
+	}
 	dekLen := int(validWrapped[1])<<8 | int(validWrapped[2])
 
 	testCases := []struct {
-		name    string
-		input   []byte
+		name  string
+		input []byte
 	}{
 		{"nil", nil},
 		{"empty", []byte{}},
