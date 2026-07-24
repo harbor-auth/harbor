@@ -5,11 +5,11 @@
 > · single-node · Calico CNI · ArgoCD GitOps
 >
 > **Bottom line:** the cluster has solid L3/L4 micro-segmentation and enforces Pod
-> Security Admission at the `restricted` profile. The critical host-level exposures
-> (etcd on public IP, no host firewall, kubelet and kube-apiserver publicly reachable)
-> have been **resolved as of 2026-07-24** via iptables rules and etcd localhost-binding.
-> Medium gaps remain: AES-CBC encryption cipher (secretbox upgrade pending), no
-> east-west mTLS, no ArgoCD SSO.
+> Security Admission at the `restricted` profile. All Tier-0 and Tier-1 critical/quick
+> wins are **complete as of 2026-07-24**: host-level ports blocked, etcd bound to
+> localhost, NetworkPolicies tightened, audit logging active, and etcd secrets
+> upgraded from AES-CBC to secretbox (AEAD). Remaining gaps: no east-west mTLS,
+> no ArgoCD SSO.
 
 ---
 
@@ -19,7 +19,7 @@
 
 | Control | Detail |
 |---|---|
-| **etcd encryption at rest** | Already enabled by RKE2 default — `Encryption Status: Enabled`, active key `AES-CBC aescbckey`. Secrets are not stored in plaintext. However, see gap below: AES-CBC is a weaker cipher than the upstream-recommended `secretbox`. |
+| **etcd encryption at rest** | Enabled with **secretbox** (XSalsa20+Poly1305 AEAD) as of 2026-07-24. Custom encryption config at `/etc/rancher/rke2/encryption-config-custom.json`; kube-apiserver pointed to it via `kube-apiserver-arg`. All 33 cluster secrets re-encrypted. |
 | **Egress NetworkPolicies** | harbor-hot and harbor-mgmt both have egress rules applied in the `harbor` namespace, locking egress to DNS (53), Redis (6379), PostgreSQL (5432), HTTPS/443, and SMTP (587/465). Applied 2026-07-24. |
 | **Host firewall (iptables)** | iptables INPUT chain DROP rules applied for ports 6443, 9345, 10250, 10255, 2379, 2380, 9091. Saved via `iptables-persistent`. Applied 2026-07-24. |
 | **etcd localhost-only binding** | etcd confirmed listening on `127.0.0.1:2379` only (was `51.89.98.90:2379`). Applied 2026-07-24. |
@@ -46,7 +46,7 @@
 
 | Gap | Risk / Status |
 |---|---|
-| **AES-CBC encryption cipher** | etcd secrets encrypted but with AES-CBC (not AEAD). Upgrade to secretbox pending — `rke2 secrets-encrypt rotate-keys` rotates within the same cipher type; switching to secretbox requires manual encryption-config edit (see T1.5). |
+| ~~**AES-CBC encryption cipher**~~ | **Resolved 2026-07-24** — upgraded to secretbox (AEAD). See T1.5. |
 | **No admin endpoint protection at nginx layer** | The hardened nginx build (v1.14.5-hardened2) blocks `server-snippet` via admission webhook even with `allow-snippet-annotations: true` in ConfigMap. `/admin` endpoints are protected by application-level Bearer token auth (see `admin-endpoint-auth` in `production-readiness.md`). Future: dedicated admin port or Calico HostEndpoint policy. |
 | **etcd snapshots are local-only** | Daily snapshots exist but only on the same node. A disk failure loses both live data and backup. |
 | **No east-west mTLS** | Pod-to-pod traffic (hot↔postgres, mgmt↔redis) is unencrypted inside the node. See T2.3 Linkerd. |
@@ -605,8 +605,10 @@ kubectl patch felixconfiguration default --type='merge' \
                protected at application layer by Bearer token auth (admin-endpoint-auth)
 ✅ 2026-07-24  T1.3 ArgoCD initial admin secret deleted; admin password rotated
 ✅ 2026-07-24  T1.4 Audit logging: policy + log path configured, rke2-server restarted
-⏳ TODO        T1.5 Upgrade etcd cipher AES-CBC → secretbox (rotate-keys doesn't change type;
-               needs manual encryption-config edit + reencrypt)
+✅ 2026-07-24  T1.5 Upgrade etcd cipher AES-CBC → secretbox. Used custom
+               /etc/rancher/rke2/encryption-config-custom.json with secretbox as
+               first provider + aescbc fallback reader. Added kube-apiserver-arg
+               override in config.yaml. Re-encrypted all 33 secrets.
 
 Week 2:         T2.1 Offsite etcd backups + PostgreSQL backup
                 T2.2 ArgoCD SSO with Dex + GitHub
