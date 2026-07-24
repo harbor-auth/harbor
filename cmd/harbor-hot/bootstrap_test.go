@@ -317,12 +317,12 @@ func TestBootstrapFromEnv(t *testing.T) {
 	origDBURL := os.Getenv("DATABASE_URL")
 	origRegion := os.Getenv("HARBOR_REGION")
 	defer func() {
-		os.Setenv("DATABASE_URL", origDBURL)
-		os.Setenv("HARBOR_REGION", origRegion)
+		os.Setenv("DATABASE_URL", origDBURL)   //nolint:errcheck
+		os.Setenv("HARBOR_REGION", origRegion) //nolint:errcheck
 	}()
 
-	os.Setenv("DATABASE_URL", "postgres://test")
-	os.Setenv("HARBOR_REGION", "eu-west-1")
+	os.Setenv("DATABASE_URL", "postgres://test") //nolint:errcheck
+	os.Setenv("HARBOR_REGION", "eu-west-1")      //nolint:errcheck
 
 	cfg := BootstrapFromEnv()
 
