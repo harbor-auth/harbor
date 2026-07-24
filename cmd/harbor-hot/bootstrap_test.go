@@ -162,7 +162,10 @@ func TestBootstrapProductionModeMissingConfig(t *testing.T) {
 	}
 
 	// Missing SigningKeyStore.
-	kp, _ := crypto.NewLocalKeyProvider("test-secret-32-bytes-long!!!!!!")
+	kp, err := crypto.NewLocalKeyProvider("test-secret-32-bytes-long!!!!!!")
+	if err != nil {
+		t.Fatalf("NewLocalKeyProvider: %v", err)
+	}
 	cfg = BootstrapConfig{
 		DatabaseURL: "postgres://localhost/test",
 		KeyProvider: kp,
@@ -217,7 +220,10 @@ func TestBootstrapProductionModeGeneratesKey(t *testing.T) {
 	}
 
 	// Verify a key was created in the store.
-	liveKeys, _ := store.ListLive(ctx)
+	liveKeys, err := store.ListLive(ctx)
+	if err != nil {
+		t.Fatalf("ListLive: %v", err)
+	}
 	if len(liveKeys) == 0 {
 		t.Error("expected at least one live key in store")
 	}
@@ -253,8 +259,14 @@ func TestBootstrapProductionModeLoadsExistingKey(t *testing.T) {
 		t.Fatalf("NewKMSBackedSigner: %v", err)
 	}
 
-	pubKey, _ := signer.PublicJWK().ToPublicKey()
-	pubKeyBytes, _ := marshalPublicKeyForTest(pubKey)
+	pubKey, err := signer.PublicJWK().ToPublicKey()
+	if err != nil {
+		t.Fatalf("ToPublicKey: %v", err)
+	}
+	pubKeyBytes, err := marshalPublicKeyForTest(pubKey)
+	if err != nil {
+		t.Fatalf("marshalPublicKeyForTest: %v", err)
+	}
 
 	existingKey := clients.SigningKey{
 		ID:                "existing-key-id",
@@ -419,12 +431,15 @@ func TestRotationStoreAdapter(t *testing.T) {
 
 func TestRotationStoreAdapterNotFound(t *testing.T) {
 	ctx := context.Background()
-	kp, _ := crypto.NewLocalKeyProvider("test-secret-32-bytes-long!!!!!!")
+	kp, err := crypto.NewLocalKeyProvider("test-secret-32-bytes-long!!!!!!")
+	if err != nil {
+		t.Fatalf("NewLocalKeyProvider: %v", err)
+	}
 	store := newFakeSigningKeyStore()
 	adapter := newRotationStoreAdapter(store, kp, "us-east-1")
 
 	// Promote non-existent key should fail.
-	err := adapter.Promote(ctx, "nonexistent", time.Now())
+	err = adapter.Promote(ctx, "nonexistent", time.Now())
 	if err == nil {
 		t.Error("expected error for nonexistent key")
 	}
