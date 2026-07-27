@@ -369,8 +369,9 @@ additively in `deploy/falco/rules/harbor_rules.yaml` via macro overrides.
   condition: (proc.name = "sh" and proc.pname = "harbor-init")
 
 - rule: Harbor Shell Spawned
+  condition: and not harbor_shell_exception_init
   override:
-    condition: and not harbor_shell_exception_init
+    condition: append
 ```
 
 ### Pattern — New allowed binary
