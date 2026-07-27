@@ -82,7 +82,9 @@ certController:
 # ---------------------------------------------------------------------------
 serviceAccount:
   create: true
-  automountServiceAccountToken: false
+  # ESO controller must call the Kubernetes API to create/update Secrets;
+  # the SA token must be mounted (default: true). Do not set false here.
+  automountServiceAccountToken: true
 
 # ---------------------------------------------------------------------------
 # Pod security — align with the harbor namespace's restricted PSA profile.
