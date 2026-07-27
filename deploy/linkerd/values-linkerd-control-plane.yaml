@@ -1,0 +1,147 @@
+# Helm values for the linkerd-control-plane chart.
+#
+# Target: harbor namespace on 51.89.98.90 (RKE2 v1.35.6, single-node,
+# Calico CNI, PSA restricted on harbor namespace).
+#
+# Install order: linkerd-crds → linkerd-cni → linkerd-control-plane
+# Prerequisites: cert-manager + trust-manager installed and healthy;
+#   linkerd-trust-anchor and linkerd-identity-issuer Certificates Ready.
+#
+# Usage:
+#   helm install linkerd-control-plane linkerd/linkerd-control-plane \
+#     --namespace linkerd \
+#     -f deploy/linkerd/values-linkerd-control-plane.yaml
+
+# ---------------------------------------------------------------------------
+# Cluster network configuration
+# ---------------------------------------------------------------------------
+
+# RKE2 default pod CIDR is 10.42.0.0/16 and service CIDR is 10.43.0.0/16.
+# The Linkerd default covers all RFC-1918 ranges (10.0.0.0/8 etc.) which is
+# sufficient and future-safe; no need to narrow further on a single-node cluster.
+clusterNetworks: "10.0.0.0/8,100.64.0.0/10,172.16.0.0/12,192.168.0.0/16"
+
+clusterDomain: cluster.local
+
+# ---------------------------------------------------------------------------
+# Identity: external cert-manager issuer (kubernetes.io/tls scheme)
+# ---------------------------------------------------------------------------
+# identityTrustAnchorsPEM is intentionally left empty here because trust-manager
+# distributes the trust anchor via the linkerd-identity-trust-roots ConfigMap.
+# The control plane reads it from that ConfigMap rather than from Helm values.
+identityTrustAnchorsPEM: ""
+
+identity:
+  # externalCA: tells Linkerd not to generate its own self-signed CA.
+  # cert-manager manages the linkerd-identity-issuer Secret instead.
+  externalCA: true
+
+  issuer:
+    # kubernetes.io/tls: read the issuer cert+key from the
+    # linkerd-identity-issuer Secret (type kubernetes.io/tls), which
+    # cert-manager creates and rotates automatically.
+    # Do NOT use the default "linkerd.io/tls" scheme — that requires manual
+    # PEM values in Helm and has no auto-rotation story.
+    scheme: kubernetes.io/tls
+
+    # How long each workload identity certificate is valid.
+    # 24h matches cert-manager's renewBefore=25h on the 48h issuer cert,
+    # ensuring the issuer is always valid for at least one proxy cert lifetime.
+    issuanceLifetime: 24h0m0s
+
+    # Clock skew tolerance between nodes (single-node: 20s is generous).
+    clockSkewAllowance: 20s
+
+# ---------------------------------------------------------------------------
+# Single-node: HA disabled
+# ---------------------------------------------------------------------------
+# Running 3 replicas on a single node provides zero additional availability
+# (all replicas fail together with the node) and wastes ~450 MB RAM.
+# Scale to 3 when a second node is added (set controllerReplicas: 3 and
+# enablePodAntiAffinity: true in a values override).
+controllerReplicas: 1
+highAvailability: false
+enablePodAntiAffinity: false
+enablePodDisruptionBudget: false
+
+# ---------------------------------------------------------------------------
+# CNI plugin (required for PSA restricted on harbor namespace)
+# ---------------------------------------------------------------------------
+# The default linkerd-init initContainer requires NET_ADMIN/NET_RAW, which
+# PSA restricted forbids. With cniEnabled=true, iptables rewiring is done by
+# the linkerd-cni DaemonSet at the CNI level; injected pods need no extra
+# capabilities and remain restricted-compliant.
+# The linkerd-cni chart must be installed before this chart.
+cniEnabled: true
+
+# ---------------------------------------------------------------------------
+# Resource requests and limits — control-plane components
+# ---------------------------------------------------------------------------
+# Modest single-node sizing. Total control-plane footprint: ~150–200 MB RAM,
+# ~50–100m CPU at idle. Adjust upward if profiling shows pressure.
+
+controllerResources:
+  cpu:
+    request: 50m
+    limit: 250m
+  memory:
+    request: 50Mi
+    limit: 250Mi
+
+destinationResources:
+  cpu:
+    request: 50m
+    limit: 250m
+  memory:
+    request: 50Mi
+    limit: 250Mi
+
+identityResources:
+  cpu:
+    request: 20m
+    limit: 100m
+  memory:
+    request: 10Mi
+    limit: 100Mi
+
+proxyInjectorResources:
+  cpu:
+    request: 20m
+    limit: 100m
+  memory:
+    request: 20Mi
+    limit: 100Mi
+
+heartbeatResources:
+  cpu:
+    request: 10m
+    limit: 100m
+  memory:
+    request: 10Mi
+    limit: 64Mi
+
+# Sidecar proxy resources (per injected pod).
+# Harbor pods are CPU-sensitive; keep proxy overhead minimal.
+proxy:
+  resources:
+    cpu:
+      request: 10m
+      limit: 100m
+    memory:
+      request: 20Mi
+      limit: 100Mi
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+controllerLogLevel: info
+controllerLogFormat: plain
+
+# ---------------------------------------------------------------------------
+# Webhook failure policy
+# ---------------------------------------------------------------------------
+# Fail-open on a single-node cluster: if the proxy-injector webhook is
+# unavailable, pods still schedule (without a proxy). This prevents a
+# Linkerd control-plane restart from blocking all pod admission.
+# Switch to Fail when running multi-replica on multi-node.
+webhookFailurePolicy: Ignore

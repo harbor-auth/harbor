@@ -1,0 +1,45 @@
+# Strategic merge patches — Linkerd opaque port annotations for PostgreSQL and Redis.
+#
+# PostgreSQL (port 5432) and Redis (port 6379) are SERVER-SPEAKS-FIRST protocols:
+# the server sends data before the client. Linkerd's protocol detection waits for
+# client-first bytes, which causes it to stall on these connections, resulting in
+# connection timeouts that appear immediately after the harbor namespace is meshed.
+#
+# The opaque-ports annotation tells Linkerd to proxy these ports as raw mTLS TCP
+# WITHOUT protocol detection — traffic is still encrypted and mutually authenticated,
+# just without HTTP/gRPC-level awareness (which neither protocol needs).
+#
+# CRITICAL: Apply these patches BEFORE enabling namespace injection and restarting
+# harbor pods. Applying them after causes a brief window of connection failures.
+#
+# Apply:
+#   kubectl apply -f deploy/linkerd/postgres-opaque-ports.yaml
+#
+# Verify:
+#   kubectl get svc harbor-postgresql harbor-redis-master -n harbor \
+#     -o jsonpath='{range .items[*]}{.metadata.name}: {.metadata.annotations.config\.linkerd\.io/opaque-ports}{"\n"}{end}'
+#
+# Rollback (remove annotations):
+#   kubectl annotate svc harbor-postgresql -n harbor config.linkerd.io/opaque-ports-
+#   kubectl annotate svc harbor-redis-master -n harbor config.linkerd.io/opaque-ports-
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: harbor-postgresql
+  namespace: harbor
+  annotations:
+    # Mark port 5432 as opaque — proxied as raw mTLS TCP without protocol detection.
+    # Without this annotation, Linkerd stalls waiting for a client-first byte that
+    # PostgreSQL (server-speaks-first) never sends, causing connection timeouts.
+    config.linkerd.io/opaque-ports: "5432"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: harbor-redis-master
+  namespace: harbor
+  annotations:
+    # Mark port 6379 as opaque — same reason as PostgreSQL above.
+    # Redis sends an inline greeting on connection before the client sends a command.
+    config.linkerd.io/opaque-ports: "6379"
