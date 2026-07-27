@@ -1,0 +1,28 @@
+# Strategic merge patch — enable Linkerd proxy injection on the harbor namespace.
+#
+# Applying this annotation causes the Linkerd proxy-injector webhook to
+# automatically inject a linkerd-proxy sidecar into every new pod in the
+# harbor namespace. Existing pods are NOT affected until they are restarted.
+#
+# Apply AFTER:
+#   - linkerd-control-plane is installed and linkerd check is green
+#   - postgres-opaque-ports.yaml is applied (opaque ports FIRST)
+#
+# Then roll all harbor deployments to inject proxies:
+#   kubectl rollout restart deployment -n harbor
+#   kubectl rollout status deployment -n harbor
+#
+# Rollback: remove the annotation and restart to eject proxies:
+#   kubectl annotate namespace harbor linkerd.io/inject-
+#   kubectl rollout restart deployment -n harbor
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: harbor
+  annotations:
+    # Enable automatic proxy injection for all pods in this namespace.
+    # The proxy-injector webhook intercepts pod creation and injects the
+    # linkerd-proxy sidecar + (with CNI) skips the init-container so the
+    # namespace stays PSA restricted-compliant.
+    linkerd.io/inject: enabled
