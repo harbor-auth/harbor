@@ -1,0 +1,123 @@
+# Linkerd two-tier CA chain — managed by cert-manager.
+#
+# Install order (all in this file, apply top to bottom):
+#   1. SelfSigned bootstrap Issuer  (cert-manager namespace)
+#   2. Trust anchor Certificate     (cert-manager namespace, 10y root CA)
+#   3. ClusterIssuer backed by anchor
+#   4. Identity issuer Certificate  (linkerd namespace, 48h intermediate CA)
+#
+# Apply before installing linkerd-control-plane:
+#   kubectl create namespace linkerd --dry-run=client -o yaml | kubectl apply -f -
+#   kubectl apply -f deploy/linkerd/identity-issuer-cert.yaml
+#
+# Wait for both Certificates to be Ready before proceeding:
+#   kubectl wait --for=condition=Ready certificate/linkerd-trust-anchor \
+#     -n cert-manager --timeout=60s
+#   kubectl wait --for=condition=Ready certificate/linkerd-identity-issuer \
+#     -n linkerd --timeout=60s
+---
+# Step 1 — Bootstrap SelfSigned Issuer
+# Used only to issue the trust anchor Certificate; not used for anything else.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: linkerd-selfsigned-issuer
+  namespace: cert-manager
+  labels:
+    app.kubernetes.io/part-of: linkerd
+    app.kubernetes.io/component: identity
+spec:
+  selfSigned: {}
+---
+# Step 2 — Trust anchor (root CA, 10 years)
+# Long-lived root CA. The public cert is distributed by trust-manager
+# (see trust-manager-bundle.yaml) as the linkerd-identity-trust-roots ConfigMap.
+# The private key never leaves the cert-manager namespace.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: linkerd-trust-anchor
+  namespace: cert-manager
+  labels:
+    app.kubernetes.io/part-of: linkerd
+    app.kubernetes.io/component: identity
+spec:
+  # Secret stays in cert-manager namespace — trust-manager reads only ca.crt
+  # from here to populate the bundle; the private key is never distributed.
+  secretName: linkerd-trust-anchor
+  duration: 87600h   # 10 years
+  renewBefore: 720h  # 30 days
+  isCA: true
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  usages:
+    - cert sign
+    - crl sign
+  subject:
+    organizations:
+      - cluster.local
+  commonName: root.linkerd.cluster.local
+  issuerRef:
+    name: linkerd-selfsigned-issuer
+    kind: Issuer
+    group: cert-manager.io
+---
+# Step 3 — ClusterIssuer backed by the trust anchor
+# A ClusterIssuer is required to issue a Certificate in the linkerd namespace
+# using a CA Secret that lives in the cert-manager namespace; a namespaced
+# Issuer cannot reach Secrets across namespaces.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: linkerd-trust-anchor-cluster-issuer
+  labels:
+    app.kubernetes.io/part-of: linkerd
+    app.kubernetes.io/component: identity
+spec:
+  ca:
+    # cert-manager reads ClusterIssuer CA Secrets from --cluster-resource-namespace
+    # (defaults to cert-manager). The trust anchor Secret is in cert-manager namespace.
+    secretName: linkerd-trust-anchor
+---
+# Step 4 — Identity issuer cert (intermediate CA, 48h, auto-rotated)
+#
+# cert-manager issues this cert in the linkerd namespace as a kubernetes.io/tls
+# Secret. The control plane reads from it when identity.issuer.scheme=kubernetes.io/tls.
+#
+# Timing rationale:
+#   duration=48h, renewBefore=25h → cert-manager starts renewal 25h before expiry.
+#   This guarantees the issuer cert is always valid for at least one full proxy
+#   cert lifetime (issuanceLifetime=24h in values-linkerd-control-plane.yaml).
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: linkerd-identity-issuer
+  namespace: linkerd
+  labels:
+    app.kubernetes.io/part-of: linkerd
+    app.kubernetes.io/component: identity
+spec:
+  # Fixed name expected by the Linkerd control plane when scheme=kubernetes.io/tls.
+  secretName: linkerd-identity-issuer
+  secretTemplate:
+    labels:
+      app.kubernetes.io/part-of: linkerd
+      app.kubernetes.io/component: identity
+  duration: 48h
+  renewBefore: 25h
+  isCA: true
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  usages:
+    - cert sign
+    - crl sign
+  subject:
+    organizations:
+      - cluster.local
+  commonName: identity.linkerd.cluster.local
+  issuerRef:
+    name: linkerd-trust-anchor-cluster-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io

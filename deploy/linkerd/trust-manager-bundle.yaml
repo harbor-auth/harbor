@@ -1,0 +1,48 @@
+# trust-manager Bundle — distributes the Linkerd trust anchor to all namespaces.
+#
+# trust-manager watches this Bundle resource and creates/updates a ConfigMap
+# named linkerd-identity-trust-roots in every namespace that matches the
+# target selector. Linkerd proxies read this ConfigMap to validate peer
+# certificate chains.
+#
+# Prerequisites:
+#   - trust-manager installed in cert-manager namespace
+#   - linkerd-trust-anchor Certificate Ready (cert-manager namespace)
+#     (the Secret linkerd-trust-anchor must exist and contain ca.crt)
+#
+# Apply after trust-manager is installed and the trust anchor is Ready:
+#   kubectl apply -f deploy/linkerd/trust-manager-bundle.yaml
+#
+# Verify the ConfigMap was created in the linkerd namespace:
+#   kubectl get configmap linkerd-identity-trust-roots -n linkerd -o yaml
+---
+apiVersion: trust.cert-manager.io/v1alpha1
+kind: Bundle
+metadata:
+  # Bundle resources are cluster-scoped.
+  name: linkerd-identity-trust-roots
+  labels:
+    app.kubernetes.io/part-of: linkerd
+    app.kubernetes.io/component: identity
+spec:
+  sources:
+    # Read the CA certificate from the trust anchor Secret in the
+    # cert-manager namespace. Only ca.crt is distributed — the private
+    # key stays in cert-manager namespace and is never exposed.
+    - secret:
+        name: linkerd-trust-anchor
+        key: ca.crt
+  target:
+    # Name of the ConfigMap to create in each namespace.
+    # This is the fixed name Linkerd expects (set via --identity-trust-anchors-file
+    # or the identityTrustDomain chart value — Linkerd reads from this ConfigMap
+    # when externalCA=true and no identityTrustAnchorsPEM is provided in Helm).
+    configMap:
+      key: ca-bundle.crt
+    namespaceSelector:
+      # Distribute to all namespaces. Linkerd requires the trust roots ConfigMap
+      # in the linkerd namespace (for the control plane) and in every namespace
+      # that has injected proxies (harbor, linkerd-viz, etc.).
+      # matchLabels: {} means all namespaces — trust-manager creates the ConfigMap
+      # everywhere, which is safe: it contains only the public CA cert.
+      matchLabels: {}
