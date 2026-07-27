@@ -143,6 +143,63 @@ mgmt:
     kekSecret: ""
 
 # ---------------------------------------------------------------------------
+# harbor-relay: the inbound email relay MTA (per-RP Hide-My-Email). Receives
+# SMTP, authenticates inbound mail (SPF/DKIM/DMARC), ARC-seals, and forwards
+# masked mail to users' real inboxes. Disabled by default — enable per region
+# once the MX/SPF/DKIM DNS records point at this deployment's node.
+#
+# The container listens on a NON-privileged port (relay.port) so the pod runs
+# as non-root; the Service maps the public SMTP port (relay.servicePort: 25) →
+# relay.port. For a real internet-facing MX the Service must be externally
+# reachable (type LoadBalancer / NodePort, or a hostPort on the node).
+# ---------------------------------------------------------------------------
+relay:
+  enabled: false
+  replicaCount: 1
+  image:
+    repository: harbor-relay
+    # digest: ""   # optional: "@sha256:..." to pin the image immutably
+  # Non-privileged container listen port (PORT env). Must be > 1024.
+  port: 2525
+  # Public SMTP port MX/clients connect to. The Service maps this → port.
+  servicePort: 25
+  service:
+    # LoadBalancer for a cloud MX; NodePort/ClusterIP+hostPort on bare metal.
+    type: LoadBalancer
+  # Relay domain suffix used to validate inbound recipients (matches the MX /
+  # SPF / DKIM DNS records). MUST be per-region.
+  domain: relay.eu.harbor.id
+  # Outbound smarthost (host:port) used to deliver forwarded mail. Empty ⇒ mail
+  # is accepted but not forwarded (test mode).
+  smarthost: ""
+  # Envelope sender for forwarded mail so bounces return to the relay.
+  returnPath: ""
+  # DKIM selector for ARC sealing (matches the *_domainkey DNS record). Empty ⇒
+  # ARC sealing is skipped.
+  dkimSelector: ""
+  # Reject inbound mail that fails SPF/DKIM/DMARC. Start false (monitor-only)
+  # and tighten once pass rates are confirmed.
+  enforceAuth: false
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 128Mi
+  pdb:
+    enabled: true
+    minAvailable: 1
+  secrets:
+    existingSecret: ""
+    # postgres://… DSN — the encrypted relay mapping lives here.
+    databaseUrl: ""
+    # 256-bit hex KEK sealing per-user DEKs. Generate: openssl rand -hex 32
+    kekSecret: ""
+    # PEM-encoded RSA private key for DKIM/ARC sealing (matches dkimSelector).
+    dkimPrivateKey: ""
+
+# ---------------------------------------------------------------------------
 # migrate: an ephemeral Job that applies pending DB schema migrations before
 # each install/upgrade. Runs as a Helm pre-install/pre-upgrade hook (and an
 # ArgoCD PreSync hook), so the schema is always current before harbor-hot /

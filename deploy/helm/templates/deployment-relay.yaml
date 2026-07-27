@@ -1,0 +1,72 @@
+{{- if .Values.relay.enabled }}
+# Deployment: harbor-relay — the inbound email relay MTA (docs/DESIGN.md §7.5).
+# Stateful only in-flight (no local mutable PII state — the encrypted mapping
+# lives in Postgres), but pinned low: a single node's :25 is the MX target.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "harbor.fullname" . }}-relay
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.relay.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.relay.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "harbor.relay.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        {{- include "harbor.relay.labels" . | nindent 8 }}
+    spec:
+      # Dedicated SA with no auto-mounted API token (harbor-relay never calls
+      # the K8s API).
+      serviceAccountName: {{ include "harbor.relay.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: harbor-relay
+          image: {{ include "harbor.relay.image" . }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          ports:
+            - name: smtp
+              containerPort: {{ .Values.relay.port }}
+          # Non-secret config first, then secrets (DATABASE_URL / HARBOR_KMS_SECRET
+          # / RELAY_DKIM_PRIVATE_KEY).
+          envFrom:
+            - configMapRef:
+                name: {{ include "harbor.fullname" . }}-relay-config
+            - secretRef:
+                name: {{ include "harbor.relay.secretName" . }}
+          # SMTP has no HTTP health surface — probe the listening socket.
+          livenessProbe:
+            tcpSocket:
+              port: smtp
+            initialDelaySeconds: 5
+            periodSeconds: 15
+          readinessProbe:
+            tcpSocket:
+              port: smtp
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.relay.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+{{- end }}

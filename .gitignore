@@ -4,6 +4,7 @@
 /testweakening
 /harbor-hot
 /harbor-mgmt
+/harbor-relay
 check-results.json
 
 # Test / coverage

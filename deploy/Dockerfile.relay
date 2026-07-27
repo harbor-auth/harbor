@@ -1,0 +1,27 @@
+# Runtime image for harbor-relay — the inbound email relay MTA (docs/DESIGN.md
+# §7.5). Receives SMTP, authenticates (SPF/DKIM/DMARC), ARC-seals, and forwards
+# masked relay mail to users' real inboxes via a smarthost.
+#
+# Multi-stage: the build stage cross-compiles a static (CGO-off) linux/amd64
+# binary using the pinned Go toolchain; the runtime stage is a minimal Alpine
+# image (a real shell/coreutils are handy for the preStop drain hook).
+#
+# The container listens on the non-privileged port 2525 (PORT env) so it runs
+# as non-root; the Kubernetes Service maps the public SMTP port 25 → 2525.
+#
+# Build:
+#   docker buildx build --platform linux/amd64 -t harbor-relay:local \
+#     -f deploy/Dockerfile.relay . --load
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags='-s -w' -o /out/harbor-relay ./cmd/harbor-relay
+
+FROM alpine:3.20
+# Non-root uid/gid matches the Deployment securityContext (runAsUser 65532).
+RUN addgroup -g 65532 nonroot && adduser -u 65532 -G nonroot -D -H nonroot
+COPY --from=build /out/harbor-relay /harbor-relay
+USER 65532
+EXPOSE 2525
+ENTRYPOINT ["/harbor-relay"]
