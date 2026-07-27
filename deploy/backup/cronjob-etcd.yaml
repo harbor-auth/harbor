@@ -1,0 +1,102 @@
+# CronJob: harbor-etcd-sync
+#
+# Defense-in-depth fallback for etcd snapshot offsite backup.
+# Primary path: RKE2 native etcd-s3 (see rke2-etcd-s3-snippet.yaml).
+# This CronJob syncs any on-disk snapshots (including manually-triggered ones)
+# to the same bucket every 6 hours via rclone.
+#
+# Requires:
+#   - harbor-backup namespace (namespace.yaml)
+#   - backup-credentials Secret (secret-backup.yaml, populated with real values)
+#   - Node must be the RKE2 control-plane node (affinity below)
+#
+# Privilege note: hostPath mount of the snapshot directory requires PSA
+# "privileged" on the harbor-backup namespace. The mount is readOnly: true.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: harbor-etcd-sync
+  namespace: harbor-backup
+  labels:
+    app.kubernetes.io/name: harbor-etcd-sync
+    app.kubernetes.io/component: backup
+    app.kubernetes.io/part-of: harbor
+spec:
+  schedule: "0 */6 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 3600
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: harbor-etcd-sync
+            app.kubernetes.io/component: backup
+            app.kubernetes.io/part-of: harbor
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: harbor-backup
+          # Pin to the RKE2 control-plane node where snapshots are written.
+          affinity:
+            nodeAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                nodeSelectorTerms:
+                  - matchExpressions:
+                      - key: node-role.kubernetes.io/control-plane
+                        operator: Exists
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+          securityContext:
+            runAsNonRoot: false
+            runAsUser: 0
+          containers:
+            - name: rclone
+              image: rclone/rclone:1.68
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/sh
+                - -euc
+                - |
+                  BUCKET="${BACKUP_BUCKET:-harbor-backups}"
+                  echo "[$(date -u +%FT%TZ)] Starting etcd snapshot sync to r2:${BUCKET}/etcd/"
+                  rclone sync \
+                    /snapshots/ \
+                    "r2:${BUCKET}/etcd/" \
+                    --max-age 168h \
+                    --transfers 4 \
+                    --checkers 8 \
+                    --retries 3 \
+                    --log-level INFO \
+                    --stats 60s
+                  echo "[$(date -u +%FT%TZ)] Sync complete."
+              envFrom:
+                - secretRef:
+                    name: backup-credentials
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+              volumeMounts:
+                - name: etcd-snapshots
+                  mountPath: /snapshots
+                  readOnly: true
+                - name: rclone-cache
+                  mountPath: /root/.cache/rclone
+          volumes:
+            - name: etcd-snapshots
+              hostPath:
+                path: /var/lib/rancher/rke2/server/db/snapshots
+                type: Directory
+            - name: rclone-cache
+              emptyDir: {}

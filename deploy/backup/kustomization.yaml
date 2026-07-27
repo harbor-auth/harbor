@@ -1,0 +1,29 @@
+# Kustomization for deploy/backup/
+#
+# Apply the complete harbor backup stack:
+#   kubectl apply -k deploy/backup/
+#
+# Resources applied:
+#   - secret-backup.yaml       — rclone S3/R2 credentials (backup-credentials Secret)
+#   - cronjob-etcd.yaml        — harbor-etcd-sync CronJob (etcd snapshots → R2, every 6h)
+#   - cronjob-pgdump.yaml      — harbor-pgdump CronJob (pg_dump → R2, daily 03:00 UTC)
+#
+# Note: rke2-etcd-s3-snippet.yaml is an informational config reference, not a
+# Kubernetes resource, and is intentionally excluded from this kustomization.
+#
+# Prerequisites (create once, not managed here):
+#   kubectl create namespace harbor-backup
+#   kubectl label namespace harbor-backup \
+#     pod-security.kubernetes.io/enforce=privileged \
+#     pod-security.kubernetes.io/warn=privileged
+#   kubectl create serviceaccount harbor-backup -n harbor-backup
+#
+# After editing secret-backup.yaml with real credentials, apply:
+#   kubectl apply -k deploy/backup/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - secret-backup.yaml
+  - cronjob-etcd.yaml
+  - cronjob-pgdump.yaml
