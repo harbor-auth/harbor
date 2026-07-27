@@ -1,0 +1,3 @@
+# kms-credentials-rotation-cc53b421
+
+Eliminate static `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` env-var credentials shipped by the KMS-backed signing key feature (#79) by deploying the **External Secrets Operator (ESO)** and pulling KMS credentials from **AWS SSM Parameter Store** (rotated there by ops). ESO syncs them into the `harbor-kms-credentials` Secret consumed by `harbor-hot` on a 1-hour refresh interval, giving automatic rotation with **no code changes**. The bootstrap IAM user (credentials loaded via a Sealed Secret) has `SSM:GetParameter` on `/harbor/*` only — it holds no KMS rights; those stay on the existing KMS role.
