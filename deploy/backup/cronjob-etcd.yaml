@@ -1,7 +1,7 @@
 # CronJob: harbor-etcd-sync
 #
 # Defense-in-depth fallback for etcd snapshot offsite backup.
-# Primary path: RKE2 native etcd-s3 (see rke2-etcd-s3-config-snippet.yaml).
+# Primary path: RKE2 native etcd-s3 (see rke2-etcd-s3-snippet.yaml).
 # This CronJob syncs any on-disk snapshots (including manually-triggered ones)
 # to the same bucket every 6 hours via rclone.
 #
