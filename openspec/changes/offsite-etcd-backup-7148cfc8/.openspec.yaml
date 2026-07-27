@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-07-27
+goal: Ship offsite etcd + PostgreSQL backup for the Harbor cluster — a Kubernetes CronJob that syncs RKE2 etcd snapshots to S3/Cloudflare R2 every 6 hours via rclone, RKE2 native etcd-s3 config, and a daily pg_dump CronJob streaming directly to the same bucket, with credentials in a Kubernetes Secret, retention enforced at 7 days, and a restore runbook in deploy/backup/README.md
