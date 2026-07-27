@@ -1,0 +1,59 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-latest-tag
+  annotations:
+    policies.kyverno.io/title: Disallow Latest Tag
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      Containers using :latest or no tag make rollbacks non-reproducible and
+      cause silent drift between what git says and what is actually running.
+      All containers in the harbor and argocd namespaces must use a concrete,
+      pinned image tag. This policy enforces that rule at admission time and
+      via background scanning of already-running workloads.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: require-image-tag
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - harbor
+                - argocd
+      validate:
+        message: >-
+          An image tag is required and must not be ':latest'. Use a pinned tag
+          such as 'harbor-hot:v1.2.3' or an image digest. All container images
+          must use a concrete pinned tag (e.g. nginx:1.25.3, not nginx:latest or nginx).
+        foreach:
+          - list: "request.object.spec.containers"
+            deny:
+              conditions:
+                any:
+                  - key: "{{ element.image }}"
+                    operator: Equals
+                    value: "*:latest"
+                  - key: "{{ element.image }}"
+                    operator: NotContains
+                    value: ":"
+          - list: "request.object.spec.initContainers"
+            preconditions:
+              any:
+                - key: "{{ request.object.spec.initContainers[] | length(@) }}"
+                  operator: GreaterThanOrEquals
+                  value: 1
+            deny:
+              conditions:
+                any:
+                  - key: "{{ element.image }}"
+                    operator: Equals
+                    value: "*:latest"
+                  - key: "{{ element.image }}"
+                    operator: NotContains
+                    value: ":"

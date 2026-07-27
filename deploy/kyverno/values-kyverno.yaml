@@ -1,0 +1,85 @@
+# Kyverno Helm values — single-node RKE2 cluster (ns31170412 / 51.89.98.90)
+#
+# Key decisions:
+#   replicaCount=1    — single-node; HA requires multiple nodes AND multiple replicas.
+#                       Three replicas would triple memory with no availability benefit.
+#   failurePolicy     — MUST be Ignore on a single-node cluster. If Kyverno crashes and
+#                       the webhook has failurePolicy=Fail, the API server blocks ALL pod
+#                       admission (including Kyverno's own restart pod) — permanent
+#                       self-deadlock until the webhook is manually deleted via SSH.
+#                       Revisit Fail + replicaCount=3 when a second node is added.
+#   webhookTimeout    — 5s (task spec) is tighter than the chart default (10s) and safe
+#                       for a lightly-loaded single-node cluster; gives faster feedback
+#                       on policy violations without risking spurious timeouts.
+#
+# Install:
+#   helm repo add kyverno https://kyverno.github.io/kyverno/
+#   helm install kyverno kyverno/kyverno \
+#     -n kyverno --create-namespace \
+#     -f deploy/kyverno/values-kyverno.yaml
+
+admissionController:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+backgroundController:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+cleanupController:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+reportsController:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# Fail-open: see key decisions above. NEVER change to Fail on a single-node cluster.
+webhookConfiguration:
+  failurePolicy: Ignore
+  webhookTimeout: 5
+
+config:
+  # resourceFilters: namespaces and resource types that Kyverno MUST NOT evaluate.
+  # The defaults exclude kube-system; we extend with kube-node-lease and the
+  # kyverno namespace itself so a policy can never block Kyverno's own pods.
+  resourceFilters:
+    - '[Event,*,*]'
+    - '[*,kube-system,*]'
+    - '[*,kube-public,*]'
+    - '[*,kube-node-lease,*]'
+    - '[*,kyverno,*]'
+    - '[APIService,*,*]'
+    - '[TokenReview,*,*]'
+    - '[SubjectAccessReview,*,*]'
+    - '[SelfSubjectAccessReview,*,*]'
+    - '[Binding,*,*]'
+    - '[ReplicaSet,*,*]'
+    - '[AdmissionReport,*,*]'
+    - '[ClusterAdmissionReport,*,*]'
+    - '[BackgroundScanReport,*,*]'
+    - '[ClusterBackgroundScanReport,*,*]'
