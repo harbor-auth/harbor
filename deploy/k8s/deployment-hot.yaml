@@ -73,6 +73,7 @@ spec:
                 name: harbor-hot-secrets
             - secretRef:
                 name: harbor-kms-credentials
+                optional: true
           # Liveness restarts a wedged process; readiness gates traffic. Both
           # hit /healthz (served by the OpenAPI mux). Readiness is tighter so a
           # briefly-unhealthy pod is pulled from the Service before it's killed.
