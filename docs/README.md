@@ -58,6 +58,7 @@ docs/plans/         → future WHAT — intent not yet built
 
 | Plan | Status | DESIGN § | Promotes to |
 |---|---|---|---|
+| [kms-credentials-rotation](plans/kms-credentials-rotation.md) | building on Weft (`feat_cc53b421`) | §7.3, §4.4, §A.4 | `deploy/eso/` |
 | [regional-data-residency-routing](plans/regional-data-residency-routing.md) | building on Weft (`feat_8ec115c6`) | §5, §4, §11.2 | `internal/region/`, `internal/oidcapi/`, `internal/mgmtapi/`, `cmd/harbor-hot/` |
 | [observability-metrics](plans/observability-metrics.md) | building on Weft (`feat_6bfb679c`) | §6.5, §5, §11.2 | `internal/telemetry/`, `internal/oidcapi/`, `internal/mgmtapi/` |
 | [user-audit-trail](plans/user-audit-trail.md) | building on Weft (`feat_c2d5e191`, proposed) | §2.1, §4.4, §10, §11.6 | `internal/identity/`, `internal/mgmtapi/`, `db/migrations/` |
