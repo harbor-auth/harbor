@@ -1,0 +1,44 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-resource-limits
+  annotations:
+    policies.kyverno.io/title: Require Resource Limits
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      On a single-node cluster a runaway pod with no resource limits can starve
+      etcd, the API server, and every Harbor workload simultaneously. All
+      containers in the harbor namespace must declare both CPU and memory limits.
+      This policy enforces that requirement at admission time and via background
+      scanning of already-running workloads.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: require-limits
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - harbor
+      validate:
+        message: >-
+          All containers must declare resources.limits.cpu and
+          resources.limits.memory. Container '{{ request.object.spec.containers[].name }}'
+          is missing one or both limits. Add a resources.limits block to the
+          container spec.
+        foreach:
+          - list: "request.object.spec.containers"
+            deny:
+              conditions:
+                any:
+                  - key: "{{ element.resources.limits.cpu || '' }}"
+                    operator: Equals
+                    value: ""
+                  - key: "{{ element.resources.limits.memory || '' }}"
+                    operator: Equals
+                    value: ""

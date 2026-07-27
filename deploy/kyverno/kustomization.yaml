@@ -1,0 +1,23 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Kyverno ClusterPolicies.
+#
+# ArgoCD sync-wave ordering:
+#   Wave 0: Kyverno Helm chart (installs CRDs + controllers) — managed via the
+#           ArgoCD Application for the kyverno Helm release, NOT this kustomization.
+#   Wave 1: ClusterPolicies (this file) — must wait for Kyverno CRDs to be Ready.
+#
+# The ClusterPolicy resources below are CRs of Kyverno's CRDs. ArgoCD will fail
+# to apply them if the CRDs are not yet established. Use the ArgoCD sync-wave
+# annotation on the Application for the Helm release (wave 0) and on this
+# Application (wave 1) to enforce ordering.
+
+resources:
+  - policies/disallow-latest-tag.yaml
+  - policies/require-resource-limits.yaml
+  - policies/disallow-privilege-escalation.yaml
+  - policies/require-harbor-labels.yaml
+
+commonAnnotations:
+  argocd.argoproj.io/sync-wave: "1"

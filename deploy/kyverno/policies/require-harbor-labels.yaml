@@ -1,0 +1,43 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-harbor-labels
+  annotations:
+    policies.kyverno.io/title: Require Harbor Standard Labels
+    policies.kyverno.io/category: Harbor Conventions
+    policies.kyverno.io/severity: low
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      Audit-only: harbor-namespace Pods must carry app.kubernetes.io/name and
+      app.kubernetes.io/version labels. These labels are used by observability
+      and audit tooling for workload identification. Audit mode (not Enforce)
+      because third-party charts (Bitnami PostgreSQL, Redis) do not carry these
+      labels by default and must not be blocked from upgrading. Violations surface
+      in PolicyReports without blocking admission.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: check-harbor-labels
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - harbor
+      validate:
+        message: >-
+          harbor-namespace Pods should carry the labels
+          app.kubernetes.io/name and app.kubernetes.io/version for observability
+          and audit tooling. This is an Audit-only policy — the pod is admitted.
+          Add the labels to the workload's pod template metadata.
+        deny:
+          conditions:
+            any:
+              - key: "{{ request.object.metadata.labels.\"app.kubernetes.io/name\" || '' }}"
+                operator: Equals
+                value: ""
+              - key: "{{ request.object.metadata.labels.\"app.kubernetes.io/version\" || '' }}"
+                operator: Equals
+                value: ""

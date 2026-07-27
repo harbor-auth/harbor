@@ -1,0 +1,62 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-privilege-escalation
+  annotations:
+    policies.kyverno.io/title: Disallow Privilege Escalation
+    policies.kyverno.io/category: Pod Security Standards (Restricted)
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      Belt-and-suspenders over PSA restricted: all containers cluster-wide must
+      set allowPrivilegeEscalation: false. This extends coverage to namespaces
+      that PSA does not label (e.g. argocd, future linkerd). The falco namespace
+      is explicitly excluded — Falco is a legitimate privileged workload that
+      requires host-level visibility via eBPF. The kube-system, kyverno, and
+      cert-manager namespaces are also excluded.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: deny-privilege-escalation
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                - kube-system
+                - kube-public
+                - kube-node-lease
+                - kyverno
+                - cert-manager
+                - falco
+      validate:
+        message: >-
+          Privilege escalation is not allowed. Set
+          securityContext.allowPrivilegeEscalation: false on every container.
+          If this is a legitimate privileged workload (e.g. Falco), add the
+          namespace to the exclusion list in this policy via a PR-reviewed change.
+        foreach:
+          - list: "request.object.spec.containers"
+            deny:
+              conditions:
+                any:
+                  - key: "{{ element.securityContext.allowPrivilegeEscalation || true }}"
+                    operator: Equals
+                    value: true
+          - list: "request.object.spec.initContainers"
+            preconditions:
+              any:
+                - key: "{{ request.object.spec.initContainers[] | length(@) }}"
+                  operator: GreaterThanOrEquals
+                  value: 1
+            deny:
+              conditions:
+                any:
+                  - key: "{{ element.securityContext.allowPrivilegeEscalation || true }}"
+                    operator: Equals
+                    value: true
