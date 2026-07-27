@@ -1,0 +1,59 @@
+# Strategic-merge patch for the argocd-rbac-cm ConfigMap.
+#
+# Applied via Kustomize (kustomization.yaml) — this file is NOT applied directly.
+# It patches the stock ConfigMap in the argocd namespace, adding RBAC policy
+# without replacing other settings.
+#
+# Policy design:
+#   policy.default: role:readonly
+#     Every authenticated harbor-auth org member gets read-only access by default.
+#     They can view app state and logs — useful for debugging — but cannot sync,
+#     delete, or mutate anything.
+#
+#   harbor-auth:ops → role:ops
+#     Full deploy rights flow from GitHub team membership.  Onboarding/offboarding
+#     is a GitHub team edit — no cluster access or ArgoCD admin action required.
+#
+#   exec denied even for role:ops
+#     argocd app exec (pod shell) is a much bigger hammer; keep it disabled until
+#     there is a concrete, reviewed need for it.
+#
+#   scopes: "[groups]"
+#     Tells ArgoCD to include the Dex "groups" claim (harbor-auth:<slug>) when
+#     evaluating the g, group lines below.  Without this, group mappings are ignored.
+#
+# After applying, restart argocd-server to pick up the change:
+#   kubectl rollout restart deployment argocd-server -n argocd
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-rbac-cm
+  namespace: argocd
+data:
+  # Default role for every authenticated user (all harbor-auth org members).
+  # Read-only: can view applications, resources, and logs; cannot sync or mutate.
+  policy.default: role:readonly
+
+  # Include the Dex "groups" claim so the g, lines below are evaluated.
+  scopes: "[groups]"
+
+  # RBAC policy in Casbin CSV format.
+  #
+  # role:ops permissions:
+  #   applications  — full lifecycle (sync, rollback, create, update, delete)
+  #   clusters      — read-only (view cluster list and connection status)
+  #   repositories  — manage repo connections (needed to trigger sync from UI)
+  #   projects      — read-only (view project constraints)
+  #   exec          — explicitly denied (pod shell; too broad for default ops role)
+  #
+  # g, harbor-auth:ops, role:ops
+  #   Maps the harbor-auth GitHub team "ops" (Dex group claim: harbor-auth:ops)
+  #   to role:ops.  Dex uses teamNameField: slug so the identifier is stable even
+  #   if the team display name is changed.
+  policy.csv: |
+    p, role:ops, applications, *, */*, allow
+    p, role:ops, clusters, get, *, allow
+    p, role:ops, repositories, *, *, allow
+    p, role:ops, projects, get, *, allow
+    p, role:ops, exec, create, */*, deny
+    g, harbor-auth:ops, role:ops

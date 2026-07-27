@@ -1,0 +1,59 @@
+# Strategic-merge patch for the argocd-cm ConfigMap.
+#
+# Applied via Kustomize (kustomization.yaml) — this file is NOT applied directly.
+# It patches the stock ConfigMap in the argocd namespace, adding the Dex GitHub
+# connector and the canonical ArgoCD URL without replacing other settings.
+#
+# Prerequisites (operator steps before applying):
+#   1. Create a GitHub OAuth App under the harbor-auth org:
+#        Homepage:  https://argocd.internal.harborauth.com
+#        Callback:  https://argocd.internal.harborauth.com/api/dex/callback
+#   2. Store the client ID in the clientID field below (public, committable).
+#   3. Inject the client secret out-of-band — see dex-secret-template.yaml.
+#
+# After applying, restart ArgoCD to pick up the change:
+#   kubectl rollout restart deployment argocd-dex-server argocd-server -n argocd
+#
+# IMPORTANT: admin.enabled is intentionally left uncommented (admin stays enabled)
+# until SSO login is verified working. See README.md for the verification matrix
+# and the safe procedure for disabling admin afterwards.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cm
+  namespace: argocd
+data:
+  # Canonical external URL — must match the GitHub OAuth App homepage and the
+  # Dex issuer so JWTs validate correctly.
+  url: https://argocd.internal.harborauth.com
+
+  # Dex GitHub connector.
+  #
+  # $dex.github.clientSecret is resolved by Dex from the argocd-secret Secret
+  # (key: dex.github.clientSecret).  The secret is provisioned via
+  # dex-secret-template.yaml — the raw value is never committed to git.
+  #
+  # orgs: restricts login to members of the harbor-auth GitHub organisation.
+  # Dex emits harbor-auth:<team-slug> group claims, consumed by argocd-rbac-cm.
+  # teamNameField: slug  guarantees stable identifiers even if the team display
+  # name is changed (slugs require a GitHub admin operation to change).
+  # useLoginAsID: false  keeps the preferred_username as the GitHub login handle.
+  dex.config: |
+    connectors:
+    - type: github
+      id: github
+      name: GitHub
+      config:
+        clientID: <github-oauth-app-client-id>
+        clientSecret: $dex.github.clientSecret
+        orgs:
+        - name: harbor-auth
+        teamNameField: slug
+        useLoginAsID: false
+
+  # admin.enabled: "false"
+  # ^^^^^^^^^^^^^^^^^^^^^^
+  # Uncomment ONLY after verifying SSO login with an ops-team member AND a
+  # non-ops member (see README.md §Verification matrix).  Once disabled,
+  # break-glass recovery is: kubectl edit cm argocd-cm -n argocd  (requires
+  # SSH/kubectl access to the node — documented in README.md §Break-glass).
