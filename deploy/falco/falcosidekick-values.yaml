@@ -1,0 +1,91 @@
+# Falcosidekick Helm values — phase 2 alert routing stub.
+#
+# STATUS: Phase 1 (stdout-only shadow mode) is active.
+#         This file is a stub for phase 2. Wire after triage is complete.
+#
+# Rollout procedure:
+#   Phase 1 (week 1+): Falco writes JSON events to stdout only.
+#     - Collect events: kubectl logs -n falco -l app.kubernetes.io/name=falco -f
+#     - Triage false positives and add scoped rule exceptions to
+#       deploy/falco/rules/harbor_rules.yaml (commit + review each exception).
+#     - When false-positive rate is acceptable, proceed to phase 2.
+#
+#   Phase 2: Enable Falcosidekick for structured alert routing.
+#     1. Fill in the outputs below (Slack webhook, Alertmanager host, etc.).
+#     2. Set falcosidekick.enabled: true in deploy/falco/values-falco.yaml.
+#     3. Uncomment and configure the sections below.
+#     4. helm upgrade falco falcosecurity/falco -n falco \
+#          -f deploy/falco/values-falco.yaml \
+#          -f deploy/falco/falcosidekick-values.yaml
+#
+# Install command (phase 2):
+#   helm upgrade falco falcosecurity/falco \
+#     -n falco \
+#     -f deploy/falco/values-falco.yaml \
+#     -f deploy/falco/falcosidekick-values.yaml
+#
+# Reference: docs/plans/falco-runtime-detection.md §2.4
+
+# ---------------------------------------------------------------------------
+# Falcosidekick — phase 2 alert routing
+# Uncomment and configure each output after phase 1 triage is complete.
+# ---------------------------------------------------------------------------
+
+# falcosidekick:
+#   enabled: true
+#
+#   replicaCount: 1
+#
+#   resources:
+#     requests:
+#       cpu: 50m
+#       memory: 64Mi
+#     limits:
+#       cpu: 200m
+#       memory: 128Mi
+#
+#   config:
+#     # -----------------------------------------------------------------------
+#     # Slack — real-time WARNING+ alerts to #security-alerts channel.
+#     # -----------------------------------------------------------------------
+#     slack:
+#       webhookurl: ""          # Set via sealed secret or external-secrets
+#       channel: "#security-alerts"
+#       minimumpriority: warning
+#       messageformat: >
+#         [{{ .Priority }}] {{ .Rule }} — pod={{ .OutputFields.k8s_pod_name }}
+#         ns={{ .OutputFields.k8s_ns_name }}
+#
+#     # -----------------------------------------------------------------------
+#     # Alertmanager — feeds the existing Prometheus alerting pipeline.
+#     # -----------------------------------------------------------------------
+#     alertmanager:
+#       hostport: ""            # e.g. http://alertmanager.monitoring:9093
+#       minimumpriority: warning
+#       # Labels added to every Falco alert in Alertmanager:
+#       extralabels: "source:falco,team:security,env:production"
+#
+#     # -----------------------------------------------------------------------
+#     # Loki — long-term structured event storage alongside app logs.
+#     # -----------------------------------------------------------------------
+#     loki:
+#       hostport: ""            # e.g. http://loki.monitoring:3100
+#       minimumpriority: notice
+#       extralabels: "source:falco,ns:%k8s.ns.name%,pod:%k8s.pod.name%"
+#
+#     # -----------------------------------------------------------------------
+#     # PagerDuty — on-call escalation for CRITICAL rules only.
+#     # -----------------------------------------------------------------------
+#     pagerduty:
+#       routingkey: ""          # PD Events API v2 integration key
+#       minimumpriority: critical
+#
+#     # -----------------------------------------------------------------------
+#     # Webhook — generic sink for custom SIEM / SOAR integrations.
+#     # -----------------------------------------------------------------------
+#     webhook:
+#       address: ""
+#       minimumpriority: warning
+#
+#   webui:
+#     enabled: false            # Enable for a local Falcosidekick UI dashboard.
