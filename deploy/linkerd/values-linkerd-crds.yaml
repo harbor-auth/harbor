@@ -1,0 +1,16 @@
+# Helm values for the linkerd-crds chart.
+#
+# The linkerd-crds chart is intentionally minimal: it only installs
+# Linkerd's CustomResourceDefinitions and (optionally) Gateway API CRDs.
+#
+# Install order: linkerd-crds → linkerd-cni → linkerd-control-plane
+#
+# Usage:
+#   helm install linkerd-crds linkerd/linkerd-crds \
+#     --namespace linkerd --create-namespace \
+#     -f deploy/linkerd/values-linkerd-crds.yaml
+
+# Do not install Gateway API CRDs — this cluster uses Calico NetworkPolicy,
+# not the Gateway API. Installing unused CRDs wastes API server storage and
+# creates version-skew surface area.
+installGatewayAPI: false
