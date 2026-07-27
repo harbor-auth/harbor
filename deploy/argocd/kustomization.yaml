@@ -1,0 +1,27 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# All resources in this overlay target the argocd namespace.
+# The ConfigMap patches merge into the stock ArgoCD ConfigMaps that are
+# already present in the namespace (created by the ArgoCD install manifest).
+namespace: argocd
+
+# resources: objects that are created/owned by this overlay.
+# The SealedSecret is a net-new resource; the controller decrypts and creates
+# the corresponding argocd-secret keys once real ciphertext is populated.
+# See dex-secret-template.yaml for the kubeseal operator steps.
+resources:
+  - dex-secret-template.yaml
+
+# patches: strategic-merge patches applied over existing objects.
+# These add the Dex connector config and RBAC policy to the stock ConfigMaps
+# without replacing them wholesale — other ArgoCD settings are preserved.
+patches:
+  - path: argocd-cm-patch.yaml
+    target:
+      kind: ConfigMap
+      name: argocd-cm
+  - path: argocd-rbac-cm-patch.yaml
+    target:
+      kind: ConfigMap
+      name: argocd-rbac-cm
