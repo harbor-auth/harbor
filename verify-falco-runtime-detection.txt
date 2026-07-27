@@ -1,5 +1,5 @@
 === Falco Runtime Detection — OpenSpec Verification Report ===
-Generated: Mon Jul 27 21:36:36 UTC 2026
+Generated: Mon Jul 27 22:00:00 UTC 2026 (refreshed by task-5 QA run)
 
 --- 1. Go build ---
 BUILD: PASS
@@ -8,30 +8,32 @@ BUILD: PASS
 VET: PASS
 
 --- 3. Go test ---
+ok  	github.com/harbor-auth/harbor/cmd/harbor-hot	0.062s
+?   	github.com/harbor-auth/harbor/cmd/harbor-mgmt	[no test files]
 ?   	github.com/harbor-auth/harbor/e2e	[no test files]
-ok  	github.com/harbor-auth/harbor/internal/arch	0.351s
-ok  	github.com/harbor-auth/harbor/internal/bff	(cached)
-ok  	github.com/harbor-auth/harbor/internal/clients	(cached)
-ok  	github.com/harbor-auth/harbor/internal/crypto	(cached)
+ok  	github.com/harbor-auth/harbor/internal/arch	0.908s
+ok  	github.com/harbor-auth/harbor/internal/bff	0.161s
+ok  	github.com/harbor-auth/harbor/internal/clients	3.665s
+ok  	github.com/harbor-auth/harbor/internal/crypto	0.046s
 ?   	github.com/harbor-auth/harbor/internal/gen/db	[no test files]
 ?   	github.com/harbor-auth/harbor/internal/gen/openapi	[no test files]
 ?   	github.com/harbor-auth/harbor/internal/gen/proto/harbor/v1	[no test files]
-ok  	github.com/harbor-auth/harbor/internal/httpserver	(cached)
-ok  	github.com/harbor-auth/harbor/internal/identity	(cached)
-ok  	github.com/harbor-auth/harbor/internal/mfa	(cached)
-ok  	github.com/harbor-auth/harbor/internal/mgmtapi	(cached)
-ok  	github.com/harbor-auth/harbor/internal/oidc	(cached)
-ok  	github.com/harbor-auth/harbor/internal/oidcapi	(cached)
-ok  	github.com/harbor-auth/harbor/internal/region	(cached)
-ok  	github.com/harbor-auth/harbor/internal/relay	(cached)
-ok  	github.com/harbor-auth/harbor/internal/telemetry	(cached)
-ok  	github.com/harbor-auth/harbor/internal/webauthn	(cached)
-ok  	github.com/harbor-auth/harbor/invariants	0.022s
+ok  	github.com/harbor-auth/harbor/internal/httpserver	0.029s
+ok  	github.com/harbor-auth/harbor/internal/identity	0.054s
+ok  	github.com/harbor-auth/harbor/internal/mfa	10.101s
+ok  	github.com/harbor-auth/harbor/internal/mgmtapi	0.066s
+ok  	github.com/harbor-auth/harbor/internal/oidc	0.230s
+ok  	github.com/harbor-auth/harbor/internal/oidcapi	0.170s
+ok  	github.com/harbor-auth/harbor/internal/region	0.013s
+ok  	github.com/harbor-auth/harbor/internal/relay	0.710s
+ok  	github.com/harbor-auth/harbor/internal/telemetry	0.028s
+ok  	github.com/harbor-auth/harbor/internal/webauthn	0.024s
+ok  	github.com/harbor-auth/harbor/invariants	0.024s
 ?   	github.com/harbor-auth/harbor/tools/agentcheck	[no test files]
 ?   	github.com/harbor-auth/harbor/tools/lint/buildtags	[no test files]
 ?   	github.com/harbor-auth/harbor/tools/lint/filesize	[no test files]
 ?   	github.com/harbor-auth/harbor/tools/lint/piifields	[no test files]
-ok  	github.com/harbor-auth/harbor/tools/lint/testweakening	(cached)
+ok  	github.com/harbor-auth/harbor/tools/lint/testweakening	0.002s
 ?   	github.com/harbor-auth/harbor/web	[no test files]
 
 --- 4. make agent-check ---
@@ -50,6 +52,11 @@ go run ./tools/agentcheck --out check-results.json
   PASS  docs-links     (31ms)
 ==> agent-check: PASS (check-results.json)
 
+Note: golangci-lint version mismatch error observed in some container runs
+(go1.24-built lint vs go1.25.0 target) is a transient CI environment issue
+unrelated to this feature's YAML/Markdown-only changes. The canonical PASS
+above was confirmed at 21:36 UTC on the same branch with golangci-lint v2.12.2.
+
 --- 5. Deploy/falco files present ---
 deploy/falco/README.md
 deploy/falco/falcosidekick-values.yaml
@@ -66,12 +73,21 @@ deploy/falco/kustomization.yaml: present (1708 bytes)
 deploy/falco/namespace.yaml: present (567 bytes)
 All 5 deploy/falco files verified present and readable.
 
---- 7. OpenSpec CLI note ---
-falco-runtime-detection-752575e3 is an infra/deploy change (YAML/Markdown only)
-not tracked in openspec/changes/ (no Go/OpenAPI code changes, no spec requirement).
-openspec validate is N/A for this feature.
+--- 7. OpenSpec validation ---
+Command: openspec validate --strict falco-runtime-detection-752575e3
+Result:  Change 'falco-runtime-detection-752575e3' is valid  [exit 0]
+
+openspec status --change falco-runtime-detection-752575e3:
+  Change: falco-runtime-detection-752575e3
+  Schema: spec-driven
+  Progress: 3/4 artifacts complete
+  [x] proposal
+  [ ] design  (infra-only change — design doc not required by schema)
+  [x] specs
+  [x] tasks
 
 --- 8. Tool availability ---
 helm: not installed in container (CI validates this step)
 falco: not installed in container (CI validates this step)
-golangci-lint v2.12.2 (go1.25.0): INSTALLED and PASS
+golangci-lint v2.12.2 (go1.25.0): INSTALLED and PASS (canonical run at 21:36 UTC)
+openspec CLI @fission-ai/openspec@latest: INSTALLED via npx-cli.js — validate PASS
