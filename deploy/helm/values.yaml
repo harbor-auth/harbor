@@ -79,6 +79,10 @@ hot:
     # If set, the chart does NOT create a Secret and instead references this one
     # (which must expose DATABASE_URL / REDIS_URL / KEK_SECRET keys).
     existingSecret: ""
+    # Name of the Secret managed by External Secrets Operator that exposes
+    # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for KMS access. Set to ""
+    # to disable (if not using ESO / KMS).
+    kmsCredentialsSecret: "harbor-kms-credentials"
     # postgres://… DSN. harbor-hot reads clients/grants/sessions/secrets here.
     databaseUrl: ""
     # redis://… URL. REQUIRED when replicaCount > 1: without it auth codes live
