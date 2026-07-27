@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-07-27
+goal: Ship Kyverno policy-as-code (T2.4 infra hardening) — four ClusterPolicies enforced at Kubernetes admission time: disallow-latest-tag (Enforce), require-resource-limits (Enforce), disallow-privilege-escalation (Enforce, falco namespace excluded), require-harbor-labels (Audit); single-replica fail-open install for the single-node cluster; all policies start in Audit, Enforce policies promoted once PolicyReports are clean for Harbor-owned workloads
