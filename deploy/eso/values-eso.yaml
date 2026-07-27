@@ -1,0 +1,110 @@
+# External Secrets Operator — Helm values for the single-node RKE2 cluster
+# (ns31170412 / 51.89.98.90, harbor namespace).
+#
+# Bootstrap command (run once, before applying ESO manifests):
+#   helm repo add external-secrets https://charts.external-secrets.io
+#   helm install external-secrets external-secrets/external-secrets \
+#     -n external-secrets --create-namespace \
+#     --version 0.10.7 \
+#     -f deploy/eso/values-eso.yaml
+#
+# Upgrade:
+#   helm upgrade external-secrets external-secrets/external-secrets \
+#     -n external-secrets \
+#     --version <new-version> \
+#     -f deploy/eso/values-eso.yaml
+#
+# After ESO is running, apply the ESO CRs:
+#   kubectl apply -k deploy/eso/
+#
+# Pin the chart version. Verify the latest at:
+#   https://artifacthub.io/packages/helm/external-secrets-operator/external-secrets
+# Do not use 'latest' — version pinning is mandatory per project convention.
+# Pinned chart version: 0.10.7 (ESO v0.10.7, 2026-xx-xx).
+# Update here when upgrading.
+
+# ---------------------------------------------------------------------------
+# CRD management
+# ---------------------------------------------------------------------------
+# Install ESO CRDs as part of the Helm release. Required so that
+# ClusterSecretStore and ExternalSecret CRDs exist before the kustomize overlay
+# in deploy/eso/ is applied by ArgoCD.
+installCRDs: true
+
+# ---------------------------------------------------------------------------
+# Main controller — one replica is correct for a single-node cluster.
+# The controller is the only component that reads from AWS SSM and writes
+# the harbor-kms-credentials Secret.
+# ---------------------------------------------------------------------------
+replicaCount: 1
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# ---------------------------------------------------------------------------
+# Webhook — validates ExternalSecret and SecretStore resources at admission
+# time. Single replica is sufficient on a single-node cluster.
+# ---------------------------------------------------------------------------
+webhook:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 96Mi
+
+# ---------------------------------------------------------------------------
+# CertController — rotates the webhook TLS certificate. Runs infrequently;
+# single replica is correct.
+# ---------------------------------------------------------------------------
+certController:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 100m
+      memory: 96Mi
+
+# ---------------------------------------------------------------------------
+# Service account — ESO creates its own SA in the external-secrets namespace.
+# automountServiceAccountToken is true by default (the controller needs to
+# read ServiceAccount tokens for workload identity flows; our setup uses a
+# secretRef so this is not strictly required but is the ESO default).
+# ---------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  # ESO controller must call the Kubernetes API to create/update Secrets;
+  # the SA token must be mounted (default: true). Do not set false here.
+  automountServiceAccountToken: true
+
+# ---------------------------------------------------------------------------
+# Pod security — align with the harbor namespace's restricted PSA profile.
+# ---------------------------------------------------------------------------
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+
+# ---------------------------------------------------------------------------
+# Logging — structured JSON for compatibility with the existing log pipeline.
+# ---------------------------------------------------------------------------
+log:
+  level: info
+  timeEncoding: iso8601

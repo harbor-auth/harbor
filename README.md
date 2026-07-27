@@ -134,6 +134,156 @@ The OIDF OP suite is intentionally **honest red** until harbor-hot reaches real
 OIDC compliance (asymmetric-signed tokens, pairwise subjects) — details in
 [conformance/README.md](conformance/README.md).
 
+## KMS Credentials — Bootstrap, Rotation, and Rollback
+
+Harbor's AWS KMS signing key credentials are managed by the [External Secrets Operator](https://external-secrets.io/) (ESO). The IAM access key used by `harbor-hot` to call AWS KMS is stored in AWS SSM Parameter Store and synced into the cluster automatically, eliminating static long-lived credentials.
+
+See [`docs/plans/kms-credentials-rotation.md`](docs/plans/kms-credentials-rotation.md) for the full architecture and rationale.
+
+### IAM setup (one-time, performed by ops)
+
+Two IAM users are required:
+
+**1. ESO bootstrap user** (`harbor-eso-bootstrap`) — reads SSM only:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["ssm:GetParameter"],
+    "Resource": "arn:aws:ssm:us-east-1:*:parameter/harbor/*"
+  }]
+}
+```
+
+**2. KMS workload user** (`harbor-kms`) — calls KMS only:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:GenerateDataKey",
+      "kms:DescribeKey"
+    ],
+    "Resource": "arn:aws:kms:us-east-1:<ACCOUNT_ID>:key/<HARBOR_KEK_ARN>"
+  }]
+}
+```
+
+### Bootstrap procedure (one-time)
+
+**Step 1:** Create access keys for both IAM users. Store the KMS workload key in SSM:
+
+```bash
+# Store the KMS workload credentials in SSM (rotated here going forward).
+aws ssm put-parameter --name /harbor/kms/aws-access-key-id \
+  --value "<HARBOR_KMS_ACCESS_KEY_ID>" --type SecureString --overwrite
+aws ssm put-parameter --name /harbor/kms/aws-secret-access-key \
+  --value "<HARBOR_KMS_SECRET_ACCESS_KEY>" --type SecureString --overwrite
+```
+
+**Step 2:** Provision the ESO bootstrap credential as a Sealed Secret (never commit plaintext):
+
+```bash
+# Install kubeseal if not already present.
+# Create the bootstrap Secret in the external-secrets namespace.
+kubectl create secret generic eso-ssm-credentials \
+  -n external-secrets \
+  --from-literal=access-key-id="<ESO_BOOTSTRAP_ACCESS_KEY_ID>" \
+  --from-literal=secret-access-key="<ESO_BOOTSTRAP_SECRET_ACCESS_KEY>" \
+  --dry-run=client -o yaml \
+  | kubeseal --controller-namespace kube-system -o yaml \
+  > deploy/eso/sealed-eso-ssm-credentials.yaml
+
+# Apply the Sealed Secret to the cluster.
+kubectl apply -f deploy/eso/sealed-eso-ssm-credentials.yaml
+```
+
+**Step 3:** Install ESO via Helm:
+
+```bash
+helm repo add external-secrets https://charts.external-secrets.io
+helm repo update
+helm install external-secrets external-secrets/external-secrets \
+  -n external-secrets --create-namespace \
+  --version 0.10.7 \
+  -f deploy/eso/values-eso.yaml
+```
+
+**Step 4:** Apply the ESO CRs (ClusterSecretStore + ExternalSecret):
+
+```bash
+kubectl apply -k deploy/eso/
+```
+
+**Step 5:** Verify sync (may take up to 60 seconds):
+
+```bash
+kubectl get clustersecretstore harbor-ssm
+kubectl get externalsecret -n harbor harbor-kms-credentials
+# STATUS column should show: SecretSynced
+kubectl get secret -n harbor harbor-kms-credentials
+# Should exist with keys AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
+```
+
+**Step 6:** Restart harbor-hot to pick up the new credentials:
+
+```bash
+kubectl rollout restart deployment/harbor-hot -n harbor
+kubectl rollout status deployment/harbor-hot -n harbor
+```
+
+### Rotation procedure
+
+When the ops team rotates the KMS IAM user access key:
+
+1. **Create key 2** in AWS IAM for `harbor-kms` (leave key 1 active — two concurrent keys allowed).
+
+2. **Update SSM** with the new credentials:
+   ```bash
+   aws ssm put-parameter --name /harbor/kms/aws-access-key-id \
+     --value "<NEW_ACCESS_KEY_ID>" --type SecureString --overwrite
+   aws ssm put-parameter --name /harbor/kms/aws-secret-access-key \
+     --value "<NEW_SECRET_ACCESS_KEY>" --type SecureString --overwrite
+   ```
+
+3. **Wait ≤ 1 hour** for ESO to re-fetch from SSM (or trigger immediately: `kubectl annotate externalsecret harbor-kms-credentials -n harbor force-sync="$(date +%s)" --overwrite`).
+
+4. **Verify** the Secret was updated: check `kubectl get secret harbor-kms-credentials -n harbor -o jsonpath='{.metadata.annotations.reconcile\.external-secrets\.io/data-hash}'` changed.
+
+5. **Restart harbor-hot** to load the new env vars:
+   ```bash
+   kubectl rollout restart deployment/harbor-hot -n harbor
+   kubectl rollout status deployment/harbor-hot -n harbor
+   ```
+
+6. **Verify KMS calls succeed** via CloudTrail — confirm calls are attributed to key 2.
+
+7. **Deactivate key 1** in AWS IAM. Zero-downtime by construction (key 1 was active until step 6 completed).
+
+> **Tip:** Install [Stakater Reloader](https://github.com/stakater/Reloader) and add `reloader.stakater.com/auto: "true"` to the `harbor-hot` Deployment to automate step 5 — pods restart automatically when the Secret changes.
+
+### Rollback / break-glass
+
+If ESO is unavailable or `harbor-kms-credentials` is missing:
+
+- **`deletionPolicy: Retain`** means the last-synced Secret persists even if the ExternalSecret is deleted or ESO crashes. `harbor-hot` keeps running as long as the Secret exists.
+
+- **Manual break-glass** (create the Secret by hand if needed):
+  ```bash
+  kubectl create secret generic harbor-kms-credentials -n harbor \
+    --from-literal=AWS_ACCESS_KEY_ID="<ACCESS_KEY_ID>" \
+    --from-literal=AWS_SECRET_ACCESS_KEY="<SECRET_ACCESS_KEY>"
+  kubectl rollout restart deployment/harbor-hot -n harbor
+  ```
+
+- **Disable ESO integration** temporarily: set `hot.secrets.kmsCredentialsSecret: ""` in `deploy/argocd/values-prod.yaml` and sync — the `secretRef` block is omitted entirely and harbor-hot falls back to other credential sources (IAM instance profile, etc.).
+
 ## Documentation
 
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — a one-page, high-level map (hot/cold path, regions, KMS) — start here.

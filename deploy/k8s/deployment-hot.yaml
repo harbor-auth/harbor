@@ -64,12 +64,16 @@ spec:
             - name: http
               containerPort: 8080
           # Non-secret config first, then secrets (DATABASE_URL/REDIS_URL/
-          # KEK_SECRET). envFrom keeps the two sources cleanly separated.
+          # KEK_SECRET), then KMS credentials (AWS_ACCESS_KEY_ID/
+          # AWS_SECRET_ACCESS_KEY). envFrom keeps sources cleanly separated.
           envFrom:
             - configMapRef:
                 name: harbor-hot-config
             - secretRef:
                 name: harbor-hot-secrets
+            - secretRef:
+                name: harbor-kms-credentials
+                optional: true
           # Liveness restarts a wedged process; readiness gates traffic. Both
           # hit /healthz (served by the OpenAPI mux). Readiness is tighter so a
           # briefly-unhealthy pod is pulled from the Service before it's killed.

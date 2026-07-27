@@ -1,0 +1,19 @@
+# Kustomize entrypoint for the External Secrets Operator CRs.
+#
+# This overlay manages only the ESO custom resources — the ClusterSecretStore
+# and ExternalSecret. The ESO controller itself is installed via Helm
+# (deploy/eso/values-eso.yaml) before this overlay is applied.
+#
+# Apply order matters:
+#   1. ESO Helm install (CRDs + controller) — run once during bootstrap
+#   2. kubectl apply -k deploy/eso/ — this file (ClusterSecretStore, ExternalSecret)
+#
+# ArgoCD: add this as a second Application (wave 1, after the ESO Helm app at
+# wave 0) so the controller exists before its CRs are reconciled.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # ClusterSecretStore must exist before the ExternalSecret references it.
+  - cluster-secret-store.yaml
+  - external-secret-kms.yaml
