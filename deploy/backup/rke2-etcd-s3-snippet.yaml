@@ -1,0 +1,143 @@
+# RKE2 Native etcd-S3 Configuration Snippet
+#
+# This file is NOT a Kubernetes resource — it is an informational reference.
+#
+# PURPOSE
+# -------
+# RKE2 has built-in support for uploading etcd snapshots directly to S3 (or any
+# S3-compatible store such as Cloudflare R2). Enabling this provides a PRIMARY
+# offsite backup path at the RKE2 level, independent of any Kubernetes CronJob.
+#
+# The harbor-etcd-sync CronJob (cronjob-etcd.yaml) serves as a DEFENSE-IN-DEPTH
+# complement: it rclone-syncs the same on-disk snapshots every 6 hours, ensuring
+# continuity even if the RKE2 native upload fails or the cluster is partially
+# degraded.
+#
+# ARCHITECTURE
+# ------------
+#   RKE2 control-plane
+#     └─ etcd snapshot (every 6h, native)
+#          ├─ /var/lib/rancher/rke2/server/db/snapshots/  (local, on-disk)
+#          │    └─ harbor-etcd-sync CronJob → r2:harbor-backups/etcd/  (rclone)
+#          └─ r2:harbor-backups/etcd/  (RKE2 native etcd-s3 upload, below)
+#
+# HOW TO APPLY
+# ------------
+# Merge the configuration block below into /etc/rancher/rke2/config.yaml on
+# every RKE2 control-plane node (server role), then restart rke2-server:
+#
+#   sudo cp /etc/rancher/rke2/config.yaml /etc/rancher/rke2/config.yaml.bak
+#   sudo tee -a /etc/rancher/rke2/config.yaml << 'EOF'
+#   <paste the CONFIGURATION block below>
+#   EOF
+#   sudo systemctl restart rke2-server
+#
+# Verify the upload:
+#   journalctl -u rke2-server -f | grep -i etcd-snapshot
+#   rclone ls r2:harbor-backups/etcd/
+#
+# HA CLUSTERS
+# -----------
+# Apply this config to ALL control-plane nodes. RKE2 elects one node to upload
+# each snapshot; duplicate uploads are deduplicated by key name.
+#
+# CREDENTIALS
+# -----------
+# The access-key and secret-key below MUST match the values in the
+# backup-credentials Kubernetes Secret (secret-backup.yaml).
+# Retrieve real values from ~/.harbor.env before applying.
+#
+# Long-term: replace with External Secrets Operator + Vault/AWS SSM
+# (tracked in kms-credentials-rotation plan).
+#
+# RETENTION
+# ---------
+# etcd-snapshot-retention controls how many snapshots RKE2 keeps LOCALLY.
+# Offsite retention (7 days / 168 hours) is enforced separately:
+#   - rclone --max-age 168h in the harbor-etcd-sync CronJob
+#   - Cloudflare R2 / AWS S3 lifecycle rule: expire objects after 7 days
+#     (configure in the R2 dashboard or via aws s3api put-bucket-lifecycle-configuration)
+#
+# =============================================================================
+# CONFIGURATION — append to /etc/rancher/rke2/config.yaml on control-plane nodes
+# =============================================================================
+
+# Snapshot schedule: every 6 hours, matching the harbor-etcd-sync CronJob.
+etcd-snapshot-schedule-cron: "0 */6 * * *"
+
+# Number of snapshots to retain on-disk (local). Offsite retention is 7 days.
+etcd-snapshot-retention: 5
+
+# Compress snapshots before upload to reduce storage and transfer costs.
+etcd-snapshot-compress: true
+
+# Local snapshot directory (RKE2 default — shown here for documentation clarity).
+# The harbor-etcd-sync CronJob mounts this same path via hostPath.
+etcd-snapshot-dir: /var/lib/rancher/rke2/server/db/snapshots
+
+# Enable S3 (or S3-compatible) offsite upload.
+etcd-s3: true
+
+# Cloudflare R2 endpoint. Replace <account-id> with your R2 account ID.
+# For AWS S3: set to the regional endpoint, e.g. https://s3.us-east-1.amazonaws.com
+# or omit entirely for us-east-1 (AWS SDK default).
+etcd-s3-endpoint: https://CHANGEME.r2.cloudflarestorage.com
+
+# Set to true ONLY for testing with self-signed certificates. Never in production.
+etcd-s3-skip-ssl-verify: false
+
+# S3 credentials — must match backup-credentials Secret values.
+# ⚠️  DO NOT COMMIT REAL VALUES. Replace CHANGEME before applying.
+etcd-s3-access-key: CHANGEME
+etcd-s3-secret-key: CHANGEME
+
+# Bucket name — must match BACKUP_BUCKET in backup-credentials Secret.
+etcd-s3-bucket: harbor-backups
+
+# Region for Cloudflare R2. Use the appropriate AWS region for AWS S3.
+etcd-s3-region: auto
+
+# Prefix/folder within the bucket. Snapshots are stored as:
+#   s3://harbor-backups/etcd/<snapshot-name>.db
+etcd-s3-folder: etcd
+
+# Timeout for S3 operations. Increase if snapshots are large or upload is slow.
+etcd-s3-timeout: 5m
+
+# =============================================================================
+# MANUAL SNAPSHOT COMMANDS (run on control-plane node as root)
+# =============================================================================
+#
+# Trigger an immediate snapshot and upload:
+#   rke2 etcd-snapshot save --s3 --s3-bucket harbor-backups --s3-folder etcd \
+#     --s3-endpoint https://CHANGEME.r2.cloudflarestorage.com \
+#     --s3-access-key CHANGEME --s3-secret-key CHANGEME \
+#     --name manual-$(date +%Y%m%d-%H%M%S)
+#
+# List snapshots stored in S3:
+#   rke2 etcd-snapshot ls --s3 --s3-bucket harbor-backups --s3-folder etcd \
+#     --s3-endpoint https://CHANGEME.r2.cloudflarestorage.com \
+#     --s3-access-key CHANGEME --s3-secret-key CHANGEME
+#
+# =============================================================================
+# RESTORE RUNBOOK (summary — full runbook in README.md)
+# =============================================================================
+#
+# 1. Identify the snapshot to restore:
+#      rclone ls r2:harbor-backups/etcd/
+#
+# 2. Download the snapshot to the control-plane node:
+#      rclone copy r2:harbor-backups/etcd/<snapshot-name>.db \
+#        /var/lib/rancher/rke2/server/db/snapshots/
+#
+# 3. Stop rke2-server on ALL nodes:
+#      systemctl stop rke2-server   # repeat on every control-plane node
+#
+# 4. Restore on the first (bootstrap) control-plane node:
+#      rke2 server --cluster-reset \
+#        --cluster-reset-restore-path=/var/lib/rancher/rke2/server/db/snapshots/<snapshot-name>.db
+#
+# 5. Start rke2-server on the bootstrap node, then join remaining nodes:
+#      systemctl start rke2-server
+#
+# See deploy/backup/README.md for the full step-by-step restore runbook.
