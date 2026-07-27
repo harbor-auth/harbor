@@ -1,0 +1,142 @@
+# CronJob: harbor-pgdump
+#
+# Daily pg_dump of the harbor PostgreSQL database, compressed and uploaded
+# to S3/Cloudflare R2 under db-backups/ via rclone.
+#
+# Schedule: 03:00 UTC daily (0 3 * * *)
+# Retention: objects older than 168h (7 days) are pruned after each run.
+#
+# Requires:
+#   - harbor-backup namespace
+#   - backup-credentials Secret (secret-backup.yaml) — rclone r2 remote config
+#   - harbor-postgresql Secret — POSTGRES_PASSWORD (created by Harbor Helm chart)
+#   - Network access from harbor-backup namespace to harbor-postgresql Service
+#
+# Output path in bucket:
+#   r2:harbor-backups/db-backups/harbor-YYYY-MM-DD.dump.gz
+#   (pg_dump custom format, gzip-compressed)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: harbor-pgdump
+  namespace: harbor-backup
+  labels:
+    app.kubernetes.io/name: harbor-pgdump
+    app.kubernetes.io/component: backup
+    app.kubernetes.io/part-of: harbor
+spec:
+  schedule: "0 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 7200
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: harbor-pgdump
+            app.kubernetes.io/component: backup
+            app.kubernetes.io/part-of: harbor
+        spec:
+          restartPolicy: OnFailure
+          serviceAccountName: harbor-backup
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            fsGroup: 999
+          initContainers:
+            # rclone is not in the postgres image; copy the binary via initContainer
+            # so the main container can use it without a custom image.
+            - name: copy-rclone
+              image: rclone/rclone:1.68
+              imagePullPolicy: IfNotPresent
+              command:
+                - cp
+                - /usr/local/bin/rclone
+                - /shared/rclone
+              securityContext:
+                runAsNonRoot: false
+                runAsUser: 0
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 100m
+                  memory: 64Mi
+              volumeMounts:
+                - name: shared-bin
+                  mountPath: /shared
+          containers:
+            - name: pgdump
+              image: postgres:16
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/sh
+                - -euc
+                - |
+                  BUCKET="${BACKUP_BUCKET:-harbor-backups}"
+                  DATE="$(date -u +%F)"
+                  DEST="r2:${BUCKET}/db-backups/harbor-${DATE}.dump.gz"
+                  echo "[$(date -u +%FT%TZ)] Starting pg_dump of harbor database"
+                  pg_dump \
+                    --host="${PGHOST}" \
+                    --port="${PGPORT:-5432}" \
+                    --username="${PGUSER:-postgres}" \
+                    --dbname="${PGDATABASE:-registry}" \
+                    --format=custom \
+                    --no-password \
+                    | gzip \
+                    | /shared/rclone copyto - "${DEST}" \
+                        --retries 3 \
+                        --log-level INFO \
+                        --stats 60s
+                  echo "[$(date -u +%FT%TZ)] Upload complete: ${DEST}"
+                  echo "[$(date -u +%FT%TZ)] Pruning backups older than 168h"
+                  /shared/rclone delete \
+                    "r2:${BUCKET}/db-backups/" \
+                    --min-age 168h \
+                    --log-level INFO
+                  echo "[$(date -u +%FT%TZ)] Pruning complete."
+              env:
+                - name: PGHOST
+                  value: harbor-postgresql.harbor.svc.cluster.local
+                - name: PGPORT
+                  value: "5432"
+                - name: PGUSER
+                  value: postgres
+                - name: PGDATABASE
+                  value: registry
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: harbor-postgresql
+                      key: postgres-password
+              envFrom:
+                - secretRef:
+                    name: backup-credentials
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+              volumeMounts:
+                - name: shared-bin
+                  mountPath: /shared
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: shared-bin
+              emptyDir: {}
+            - name: tmp
+              emptyDir: {}
