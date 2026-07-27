@@ -29,8 +29,8 @@ spec:
       validate:
         message: >-
           An image tag is required and must not be ':latest'. Use a pinned tag
-          such as 'harbor-hot:v1.2.3' or an image digest. Found untagged or
-          :latest image in container '{{ request.object.spec.containers[].name }}'.
+          such as 'harbor-hot:v1.2.3' or an image digest. All container images
+          must use a concrete pinned tag (e.g. nginx:1.25.3, not nginx:latest or nginx).
         foreach:
           - list: "request.object.spec.containers"
             deny:

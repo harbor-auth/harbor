@@ -28,9 +28,8 @@ spec:
       validate:
         message: >-
           All containers must declare resources.limits.cpu and
-          resources.limits.memory. Container '{{ request.object.spec.containers[].name }}'
-          is missing one or both limits. Add a resources.limits block to the
-          container spec.
+          resources.limits.memory. Add a resources.limits block with both cpu and
+          memory to each container spec in this workload.
         foreach:
           - list: "request.object.spec.containers"
             deny:
