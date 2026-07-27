@@ -4,7 +4,20 @@ This directory holds the GitOps configuration that drives the running Harbor
 deployment on the RKE2 cluster. Git is the source of truth: a push to `main`
 deploys itself.
 
-## The flow
+## Contents
+
+| File | Purpose |
+|------|---------|
+| `application.yaml` | ArgoCD `Application` — points at `deploy/helm` with `values-prod.yaml`, auto-syncs with prune + self-heal. |
+| `values-prod.yaml` | Production Helm overrides (domain, single-node replicas, existing secrets). `global.image.tag` is **managed by CI** — do not edit it by hand. |
+| `argocd-cm-patch.yaml` | Strategic-merge patch adding Dex GitHub OAuth connector to `argocd-cm`. |
+| `argocd-rbac-cm-patch.yaml` | Strategic-merge patch adding RBAC policy (`policy.default: role:readonly`, `harbor-auth:ops` → deploy rights). |
+| `dex-secret-template.yaml` | SealedSecret template for the GitHub OAuth client secret. **Operator must run kubeseal before applying.** |
+| `kustomization.yaml` | Kustomize overlay wiring the two patches and the SealedSecret together. |
+
+---
+
+## CI/CD flow (Harbor app)
 
 ```
 git push to main (Go / Dockerfile change)
@@ -21,26 +34,277 @@ Images are pinned to the **immutable commit SHA** (not `:latest`) in
 `values-prod.yaml`, so every deploy is reproducible and rollbacks are just a
 revert of the pinning commit.
 
-## Files
+---
 
-| File | Purpose |
-|------|---------|
-| `application.yaml` | ArgoCD `Application` — points at `deploy/helm` with `values-prod.yaml`, auto-syncs with prune + self-heal. |
-| `values-prod.yaml` | Production Helm overrides (domain, single-node replicas, existing secrets). `global.image.tag` is **managed by CI** — do not edit it by hand. |
+## ArgoCD SSO setup (Dex + GitHub OAuth)
 
-## One-time bootstrap
+This section documents the one-time operator steps needed to enable GitHub OAuth
+SSO for the ArgoCD UI. After this is in place, the shared admin password is no
+longer needed.
+
+### Prerequisites
+
+#### 1. DNS — `argocd.internal.harborauth.com`
+
+The ArgoCD ingress must be reachable at `https://argocd.internal.harborauth.com`.
+Verify with:
 
 ```bash
-# 1. Install ArgoCD (from the URL, no repo files needed):
-kubectl create namespace argocd
-kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+curl -sk https://argocd.internal.harborauth.com/healthz
+# Should return: ok
+```
 
-# 2. After this directory is on main, register the Application:
+If the DNS record does not exist, create an `A` record pointing at the cluster
+node IP (`51.89.98.90`) in your DNS provider. cert-manager will provision a TLS
+certificate automatically if the ingress annotation is present.
+
+#### 2. Sealed Secrets controller
+
+The SealedSecret for the OAuth client secret requires the Bitnami Sealed Secrets
+controller:
+
+```bash
+# Check if already installed:
+kubectl get deployment sealed-secrets-controller -n kube-system
+
+# If not installed:
+helm repo add sealed-secrets https://bitnami-labs.github.io/sealed-secrets
+helm repo update
+helm install sealed-secrets sealed-secrets/sealed-secrets \
+  -n kube-system \
+  --set fullnameOverride=sealed-secrets-controller
+```
+
+### Step 1 — Create the GitHub OAuth App
+
+1. Go to `https://github.com/organizations/harbor-auth/settings/applications` (org admin required).
+2. Click **New OAuth App** and fill in:
+   - **Application name:** `Harbor ArgoCD`
+   - **Homepage URL:** `https://argocd.internal.harborauth.com`
+   - **Authorization callback URL:** `https://argocd.internal.harborauth.com/api/dex/callback`
+3. Click **Register application**.
+4. Note the **Client ID** (public — add it to `argocd-cm-patch.yaml` under `clientID`).
+5. Click **Generate a new client secret** and copy the value immediately (shown once).
+
+> **Org restrictions:** If the `harbor-auth` org has third-party OAuth app restrictions
+> enabled, a GitHub org admin must approve the OAuth app at
+> `https://github.com/organizations/harbor-auth/settings/oauth_application_policy`
+> after creation. Dex needs `read:org` scope to resolve team membership.
+
+### Step 2 — Update the client ID in the patch
+
+Edit `argocd-cm-patch.yaml` and replace `<github-oauth-app-client-id>` with the
+real Client ID from step 1. This value is public and safe to commit.
+
+```bash
+# Example:
+sed -i 's/<github-oauth-app-client-id>/Ov23li...<your-id>/' \
+  deploy/argocd/argocd-cm-patch.yaml
+git add deploy/argocd/argocd-cm-patch.yaml
+git commit -m "chore(argocd): set GitHub OAuth client ID"
+git push
+```
+
+### Step 3 — Seal the client secret
+
+```bash
+# Fetch the controller's public key:
+kubeseal --fetch-cert \
+  --controller-namespace kube-system \
+  --controller-name sealed-secrets-controller \
+  > /tmp/pub-sealed-secrets.pem
+
+# Seal the secret (replace <CLIENT_SECRET> with the value from step 1):
+SEALED=$(echo -n '<CLIENT_SECRET>' | kubeseal \
+  --raw \
+  --from-file=/dev/stdin \
+  --namespace argocd \
+  --name argocd-secret \
+  --scope strict \
+  --cert /tmp/pub-sealed-secrets.pem)
+
+# Patch the template:
+sed -i "s|PLACEHOLDER_REPLACE_ME_run_kubeseal_command_above|${SEALED}|" \
+  deploy/argocd/dex-secret-template.yaml
+
+git add deploy/argocd/dex-secret-template.yaml
+git commit -m "chore(argocd): seal GitHub OAuth client secret"
+git push
+```
+
+> **Security:** The sealed ciphertext is safe to commit — only this cluster's
+> controller private key can decrypt it. The raw client secret must never be committed.
+
+#### Alternative — imperative secret injection (no Sealed Secrets)
+
+If Sealed Secrets is not available, inject the secret directly and skip committing
+`dex-secret-template.yaml` (remove it from `kustomization.yaml` resources):
+
+```bash
+kubectl -n argocd patch secret argocd-secret \
+  --type='json' \
+  -p='[{"op":"add","path":"/data/dex.github.clientSecret",
+        "value":"'"$(echo -n '<CLIENT_SECRET>' | base64 -w0)"'"}]'
+```
+
+### Step 4 — Apply the SSO overlay
+
+```bash
+# Dry-run first to catch any YAML errors:
+kubectl apply --dry-run=client -k deploy/argocd/
+
+# Apply:
+kubectl apply -k deploy/argocd/
+
+# Restart ArgoCD to pick up the ConfigMap changes:
+kubectl rollout restart deployment argocd-dex-server argocd-server -n argocd
+kubectl rollout status deployment argocd-dex-server argocd-server -n argocd
+```
+
+ArgoCD will also sync this automatically on the next reconcile cycle if the ArgoCD
+Application watches the `deploy/argocd/` directory.
+
+---
+
+## Verification matrix
+
+After applying, test each persona **before** disabling the admin account:
+
+| Persona | Expected behaviour |
+|---|---|
+| **ops-team member** (`harbor-auth:ops`) | Can log in via GitHub. Can sync, rollback, and manage applications. |
+| **org member (not ops)** (`harbor-auth`, any other team) | Can log in via GitHub. Read-only: can view apps and logs, cannot sync or delete. |
+| **non-org GitHub user** | Login rejected by Dex — GitHub OAuth returns no org membership, Dex denies the token. |
+
+```bash
+# After logging in as an ops-team member via the UI, also verify via CLI:
+argocd login argocd.internal.harborauth.com --sso
+argocd account can-i sync applications '*'    # should return: yes
+argocd account can-i delete applications '*'  # should return: yes
+
+# As a non-ops org member:
+argocd account can-i sync applications '*'    # should return: no
+```
+
+Confirm the ArgoCD audit log records the **GitHub username** (not `admin`) on a
+test sync:
+
+```bash
+kubectl logs -n argocd -l app.kubernetes.io/name=argocd-server --tail=50 | \
+  grep -i audit
+```
+
+---
+
+## Step 5 — Disable the admin account (post-verification)
+
+Only after confirming SSO works for all three personas above:
+
+```bash
+# Edit the patch to uncomment admin.enabled: "false":
+sed -i 's/# admin.enabled: "false"/admin.enabled: "false"/' \
+  deploy/argocd/argocd-cm-patch.yaml
+git add deploy/argocd/argocd-cm-patch.yaml
+git commit -m "chore(argocd): disable admin account now SSO is verified"
+git push
+
+# Apply:
+kubectl apply -k deploy/argocd/
+kubectl rollout restart deployment argocd-server -n argocd
+```
+
+Verify admin login is rejected:
+
+```bash
+argocd login argocd.internal.harborauth.com --username admin --password <old-pw>
+# Should fail: rpc error: code = Unauthenticated ... user "admin" is disabled
+```
+
+---
+
+## Rollback procedure
+
+### Rollback SSO (revert ConfigMap patches)
+
+If SSO is broken and you need to revert quickly:
+
+```bash
+# Option A — kubectl (immediate, does not wait for ArgoCD sync):
+kubectl -n argocd edit cm argocd-cm
+# Remove or comment out the dex.config block and the url field.
+
+kubectl -n argocd edit cm argocd-rbac-cm
+# Remove policy.default, scopes, and policy.csv fields added by the patch.
+
+kubectl rollout restart deployment argocd-dex-server argocd-server -n argocd
+
+# Option B — Git revert (ArgoCD self-heals within ~3 minutes):
+git revert HEAD~<n>  # revert the SSO commits
+git push
+```
+
+### Remove the SealedSecret
+
+```bash
+kubectl delete sealedsecret argocd-secret -n argocd
+# The underlying Secret key is NOT automatically removed. Clean up manually:
+kubectl -n argocd patch secret argocd-secret \
+  --type='json' \
+  -p='[{"op":"remove","path":"/data/dex.github.clientSecret"}]'
+```
+
+---
+
+## Break-glass — locked out of ArgoCD UI
+
+If the admin account is disabled and SSO is broken (e.g. GitHub is down or the
+OAuth app is misconfigured):
+
+```bash
+# SSH to the cluster node:
+ssh ubuntu@51.89.98.90
+
+# Re-enable the admin account directly:
+kubectl -n argocd patch cm argocd-cm \
+  --type='json' \
+  -p='[{"op":"replace","path":"/data/admin.enabled","value":"true"}]'
+
+kubectl rollout restart deployment argocd-server -n argocd
+
+# Retrieve the current admin password hash from argocd-secret:
+kubectl -n argocd get secret argocd-secret \
+  -o jsonpath='{.data.admin\.password}' | base64 -d
+# This is the bcrypt hash. If you have lost the plaintext, set a new one:
+NEW_PASSWORD_HASH=$(htpasswd -bnBC 10 "" "<new-password>" | tr -d ':\n')
+NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+kubectl -n argocd patch secret argocd-secret \
+  --type='json' \
+  -p="[{\"op\":\"replace\",\"path\":\"/data/admin.password\",\"value\":\"$(echo -n "${NEW_PASSWORD_HASH}" | base64 -w0)\"},
+        {\"op\":\"replace\",\"path\":\"/data/admin.passwordMtime\",\"value\":\"$(echo -n "${NOW}" | base64 -w0)\"}]"
+kubectl rollout restart deployment argocd-server -n argocd
+```
+
+After restoring access, fix the SSO configuration and re-disable the admin account
+following the steps above.
+
+---
+
+## One-time bootstrap (initial ArgoCD install)
+
+```bash
+# 1. Install ArgoCD:
+kubectl create namespace argocd
+kubectl apply -n argocd \
+  -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+# 2. Register the Harbor Application (after this file is on main):
 kubectl apply -f deploy/argocd/application.yaml
 ```
 
 After that, everything is automatic — merges to `main` deploy without any manual
 `kubectl`/`helm` step.
+
+---
 
 ## Changing the domain
 
@@ -51,5 +315,5 @@ OIDC discovery / WebAuthn origin checks will fail closed) and commit:
 - `hot.issuer`
 - `mgmt.webauthn.rpId`, `mgmt.webauthn.rpName`, `mgmt.webauthn.rpOrigin`
 
-Then make sure the TLS cert named by `ingress.tlsSecretName` exists for the new
-host (cert-manager provisions it). ArgoCD applies the change on the next sync.
+Also update `argocd-cm-patch.yaml` `url:` to the new ArgoCD hostname, and recreate
+the GitHub OAuth App callback URL.
