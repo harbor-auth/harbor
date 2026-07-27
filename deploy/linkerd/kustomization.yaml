@@ -1,0 +1,41 @@
+# Kustomize manifest for the Linkerd mTLS deployment (T2.3).
+#
+# Apply with:  kubectl apply -k deploy/linkerd/
+#
+# IMPORTANT: This kustomization applies the Kubernetes-native resources only
+# (cert-manager Certificates, trust-manager Bundle, Namespace + Service patches).
+# The Linkerd control-plane and cert-manager/trust-manager themselves are
+# installed via Helm BEFORE running kubectl apply -k — see README.md for the
+# full install order with gate checks.
+#
+# Dependency order (also the apply order here):
+#   1. identity-issuer-cert.yaml  — cert-manager CA chain (Issuer, Cert, ClusterIssuer)
+#   2. trust-manager-bundle.yaml  — distributes trust anchor to all namespaces
+#   3. postgres-opaque-ports.yaml — MUST be applied before namespace injection
+#   4. harbor-namespace-injection.yaml — enables proxy injection on harbor namespace
+#
+# Helm values files (values-linkerd-crds.yaml, values-linkerd-control-plane.yaml)
+# are not listed here — they are consumed by helm install, not kubectl apply.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  # cert-manager Certificate chain: bootstrap Issuer → trust anchor →
+  # ClusterIssuer → 48h identity issuer Certificate in linkerd namespace.
+  # Must be applied first so the trust anchor Secret exists before trust-manager
+  # tries to read it.
+  - identity-issuer-cert.yaml
+
+  # trust-manager Bundle: distributes the trust anchor CA cert as the
+  # linkerd-identity-trust-roots ConfigMap into all namespaces.
+  # Applied after identity-issuer-cert.yaml so the source Secret exists.
+  - trust-manager-bundle.yaml
+
+  # Opaque port annotations on PostgreSQL and Redis Services.
+  # MUST be applied before harbor-namespace-injection.yaml so the annotations
+  # are present when harbor pods are restarted with proxies.
+  - postgres-opaque-ports.yaml
+
+  # Namespace annotation: linkerd.io/inject=enabled on the harbor namespace.
+  # After applying this, run: kubectl rollout restart deployment -n harbor
+  - harbor-namespace-injection.yaml
