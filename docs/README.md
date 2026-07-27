@@ -67,6 +67,7 @@ docs/plans/         → future WHAT — intent not yet built
 | [compliance-export](plans/compliance-export.md) | building on Weft (`feat_04c21ab3`, proposed) | §11.5, §11.6, §11.2 | `internal/mgmtapi/`, `internal/identity/`, `internal/crypto/` |
 | [email-relay-service](plans/email-relay-service.md) | building on Weft (in_progress) | §7.5, §5, §11.2 | `db/migrations/`, `internal/relay/`, `internal/mgmtapi/`, `cmd/harbor-hot/` |
 | [webauthn-db-wiring](plans/webauthn-db-wiring.md) | ❌ failed on Weft (`feat_ac6b4036`) — needs re-launch | §4.1, §4.4, §9 | `cmd/harbor-mgmt/` |
+| [kyverno-policies](plans/kyverno-policies.md) | building on Weft (`feat_41ebcf7f`) | §4.4, §1.5, §A.8 | `deploy/kyverno/` |
 | [production-readiness](plans/production-readiness.md) | audit doc | — | see [`plans/production-readiness.md`](plans/production-readiness.md) |
 
 > **Wave 6 — Phase-0 Critical Fixes** (from the [production-readiness audit](plans/production-readiness.md)): `webauthn-db-rewire`, `fix-auth-bypass`, `admin-endpoint-auth`, `client-secret-auth` (all **P0**), plus `hsm-signing-key`, `totp-mfa`, `end-session-logout` (**P1**) and `acr-amr-dynamic` (**P2**). These block production launch and take priority over finishing Wave 5. See [`plans/README.md`](plans/README.md#wave-6--phase-0-critical-fixes-2026-07-production-readiness-audit) for the gate order.
