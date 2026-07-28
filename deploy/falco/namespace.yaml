@@ -1,0 +1,14 @@
+# Falco namespace — Pod Security Admission (PSA) privileged labels are required
+# so that the Falco DaemonSet pods (which need host PID/net and CAP_SYS_PTRACE)
+# are admitted by the cluster's PSA controller.
+#
+# Kyverno note: the disallow-privilege-escalation ClusterPolicy must exclude
+# this namespace. See deploy/falco/kustomization.yaml for details.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: falco
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/warn: privileged
+    pod-security.kubernetes.io/audit: privileged

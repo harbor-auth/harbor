@@ -1,0 +1,51 @@
+# Kustomization for Falco runtime threat detection — Harbor T3.3.
+#
+# This kustomization manages:
+#   - The falco namespace with Pod Security Admission (PSA) privileged labels
+#     required for the Falco DaemonSet to run with host syscall visibility.
+#   - References to the Helm values files and custom rules.
+#
+# IMPORTANT — Kyverno exclusion:
+#   Before applying this kustomization, ensure the falco namespace is listed
+#   in the disallow-privilege-escalation ClusterPolicy exception. Falco pods
+#   require privileged access (host PID/net + CAP_SYS_PTRACE) that would
+#   otherwise be blocked.
+#
+#   Example Kyverno ClusterPolicy patch:
+#     spec:
+#       rules:
+#         - name: disallow-privilege-escalation
+#           exclude:
+#             resources:
+#               namespaces: [falco]
+#
+# Usage:
+#   kubectl kustomize deploy/falco/ | kubectl apply -f -
+#
+# Or with helm (recommended for Falco itself):
+#   kubectl apply -k deploy/falco/          # creates namespace only
+#   helm install falco falcosecurity/falco \
+#     -n falco \
+#     -f deploy/falco/values-falco.yaml
+#
+# Reference: docs/plans/falco-runtime-detection.md
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: falco
+
+resources:
+  - namespace.yaml
+
+# Helm values and rules are not kustomize resources (they are not k8s manifests),
+# but are referenced here for documentation purposes. Apply them via helm:
+#
+#   helm install falco falcosecurity/falco \
+#     -n falco --create-namespace \
+#     -f deploy/falco/values-falco.yaml
+#
+# Phase 2 (after triage):
+#   helm upgrade falco falcosecurity/falco -n falco \
+#     -f deploy/falco/values-falco.yaml \
+#     -f deploy/falco/falcosidekick-values.yaml

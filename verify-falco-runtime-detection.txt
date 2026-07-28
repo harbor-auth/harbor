@@ -1,0 +1,98 @@
+=== Falco Runtime Detection — OpenSpec Verification Report ===
+Generated: Mon Jul 28 00:16:00 UTC 2026 (task-5 QA run — fresh verification)
+
+--- 1. Go build ---
+BUILD: PASS
+
+--- 2. Go vet ---
+VET: PASS
+
+--- 3. Go test ---
+ok  	github.com/harbor-auth/harbor/cmd/harbor-hot	(cached)
+?   	github.com/harbor-auth/harbor/cmd/harbor-mgmt	[no test files]
+?   	github.com/harbor-auth/harbor/e2e	[no test files]
+ok  	github.com/harbor-auth/harbor/internal/arch	0.380s
+ok  	github.com/harbor-auth/harbor/internal/bff	(cached)
+ok  	github.com/harbor-auth/harbor/internal/clients	(cached)
+ok  	github.com/harbor-auth/harbor/internal/crypto	(cached)
+?   	github.com/harbor-auth/harbor/internal/gen/db	[no test files]
+?   	github.com/harbor-auth/harbor/internal/gen/openapi	[no test files]
+?   	github.com/harbor-auth/harbor/internal/gen/proto/harbor/v1	[no test files]
+ok  	github.com/harbor-auth/harbor/internal/httpserver	(cached)
+ok  	github.com/harbor-auth/harbor/internal/identity	(cached)
+ok  	github.com/harbor-auth/harbor/internal/mfa	(cached)
+ok  	github.com/harbor-auth/harbor/internal/mgmtapi	(cached)
+ok  	github.com/harbor-auth/harbor/internal/oidc	(cached)
+ok  	github.com/harbor-auth/harbor/internal/oidcapi	(cached)
+ok  	github.com/harbor-auth/harbor/internal/region	(cached)
+ok  	github.com/harbor-auth/harbor/internal/relay	(cached)
+ok  	github.com/harbor-auth/harbor/internal/telemetry	(cached)
+ok  	github.com/harbor-auth/harbor/internal/webauthn	(cached)
+ok  	github.com/harbor-auth/harbor/invariants	0.024s
+?   	github.com/harbor-auth/harbor/tools/agentcheck	[no test files]
+?   	github.com/harbor-auth/harbor/tools/lint/buildtags	[no test files]
+?   	github.com/harbor-auth/harbor/tools/lint/filesize	[no test files]
+?   	github.com/harbor-auth/harbor/tools/lint/piifields	[no test files]
+ok  	github.com/harbor-auth/harbor/tools/lint/testweakening	(cached)
+?   	github.com/harbor-auth/harbor/web	[no test files]
+
+--- 4. make agent-check ---
+==> agent-check: single source of truth (F6)
+go run ./tools/agentcheck --out check-results.json
+  PASS  gofmt          (437ms)
+  PASS  build          (31032ms)
+  PASS  vet            (14131ms)
+  PASS  test           (14149ms)
+  PASS  invariants     (65ms)
+  PASS  piifields      (166ms)
+  PASS  buildtags      (137ms)
+  FAIL  golangci-lint  (78ms)
+  PASS  buf-lint       (99ms)
+  PASS  docs-design-refs (23ms)
+  PASS  docs-links     (34ms)
+==> agent-check: FAIL (check-results.json)
+
+Note: golangci-lint failure is a pre-existing container environment issue —
+golangci-lint v2.1.6 was built with go1.24.2 but this module targets go1.25.0.
+Error: "can't load config: the Go language version (go1.24) used to build
+golangci-lint is lower than the targeted Go version (1.25.0)"
+This is unrelated to this feature's YAML/Markdown-only changes. All other
+checks (build, vet, test, invariants, piifields, buildtags, buf-lint,
+docs-design-refs, docs-links) PASS. The golangci-lint version mismatch is a
+CI environment issue to be fixed separately (upgrade golangci-lint to a
+go1.25-built binary).
+
+--- 5. Deploy/falco files present ---
+deploy/falco/README.md
+deploy/falco/falcosidekick-values.yaml
+deploy/falco/kustomization.yaml
+deploy/falco/namespace.yaml
+deploy/falco/rules/harbor_rules.yaml
+deploy/falco/values-falco.yaml
+
+--- 6. Rules validation (node) ---
+deploy/falco/values-falco.yaml: present (13841 bytes)
+deploy/falco/rules/harbor_rules.yaml: rules=5 CRITICAL=3 WARNING=2
+deploy/falco/falcosidekick-values.yaml: present (3884 bytes)
+deploy/falco/kustomization.yaml: present (1708 bytes)
+deploy/falco/namespace.yaml: present (567 bytes)
+All 5 deploy/falco files verified present and readable.
+
+Note: falco --validate and helm lint not installed in this container;
+those steps are validated by CI on the deployed cluster.
+
+--- 7. OpenSpec validation ---
+Command: openspec validate falco-runtime-detection-752575e3 --strict
+Tool: @fission-ai/openspec@1.6.0 (installed via npm --prefix /tmp)
+Result:  Change 'falco-runtime-detection-752575e3' is valid  [exit 0]
+
+openspec validate output:
+  Note: OpenSpec collects anonymous usage stats. Opt out: OPENSPEC_TELEMETRY=0
+  Change 'falco-runtime-detection-752575e3' is valid
+
+--- 8. Tool availability ---
+helm: not installed in container (CI validates this step)
+falco: not installed in container (CI validates this step)
+golangci-lint v2.1.6 (go1.24.2): INSTALLED but fails on go1.25 module — pre-existing env issue
+openspec CLI @fission-ai/openspec@1.6.0: INSTALLED via npm (local prefix) — validate PASS [exit 0]
+go build/vet/test: PASS (all packages green)

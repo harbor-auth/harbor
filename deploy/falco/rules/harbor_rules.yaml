@@ -1,0 +1,265 @@
+# Harbor custom Falco rules — additive over the default ruleset.
+#
+# Conventions:
+#   - All rules are scoped to k8s.ns.name = "harbor" (requires collectors.kubernetes enabled).
+#   - Rules are never forked from upstream; they layer via customRules mechanism.
+#   - Every rule carries tags: [harbor, T3.3] for dashboard filtering.
+#   - Output templates include pod name, command line, and relevant fd/file context.
+#   - Exceptions are added here as macro overrides (committed + reviewed), never
+#     by editing default rules in place.
+#
+# Self-contained macros:
+#   All macros used by these rules are defined in this file using stable Falco
+#   engine primitives (evt.type, fd.typechar, etc.) rather than referencing
+#   upstream macros (container, spawned_process, outbound, open_read). This
+#   makes the file independently validatable with:
+#     falco --validate deploy/falco/rules/harbor_rules.yaml
+#   and avoids forking or shadowing any upstream definitions.
+#
+# Rollout: week 1 stdout-only shadow mode; wire Falcosidekick after triage.
+#
+# Reference: docs/plans/falco-runtime-detection.md §2.3
+
+- required_engine_version: 0.31.0
+
+# ---------------------------------------------------------------------------
+# Lists
+# ---------------------------------------------------------------------------
+
+- list: harbor_shell_binaries
+  items:
+    - bash
+    - sh
+    - zsh
+    - ksh
+    - fish
+    - csh
+    - tcsh
+    - dash
+    - ash
+    - rbash
+
+- list: harbor_allowed_binaries
+  items:
+    - harbor-hot
+    - harbor-mgmt
+
+# Allowed outbound destination ports for Harbor pods:
+#   5432  — PostgreSQL
+#   6379  — Redis
+#   53    — DNS
+#   443   — HTTPS (KMS, JWKS, external OIDC upstreams)
+#   587   — SMTP submission (TLS)
+#   465   — SMTP submission (implicit TLS)
+- list: harbor_allowed_outbound_ports
+  items: [53, 443, 465, 587, 5432, 6379]
+
+- list: harbor_sensitive_files
+  items:
+    - /etc/passwd
+    - /etc/shadow
+    - /etc/sudoers
+    - /etc/hosts
+    - /etc/hostname
+    - /proc/self/environ
+    - /root/.ssh/id_rsa
+    - /root/.ssh/authorized_keys
+
+# ---------------------------------------------------------------------------
+# Macros (self-contained, using engine primitives only)
+# ---------------------------------------------------------------------------
+
+# Scope all rules to the Harbor Kubernetes namespace.
+- macro: harbor_namespace
+  condition: (k8s.ns.name = "harbor")
+
+# A process is running inside a Harbor container (not the host).
+- macro: harbor_container
+  condition: (container.id != host and harbor_namespace)
+
+# The spawning process is one of the legitimate Harbor application binaries.
+- macro: harbor_allowed_proc
+  condition: (proc.name in (harbor_allowed_binaries))
+
+# A new process was spawned (execve/execveat returning to the child).
+- macro: harbor_spawned_process
+  condition: (evt.type in (execve, execveat) and evt.dir = <)
+
+# A file was opened for reading.
+- macro: harbor_open_read
+  condition: >
+    (evt.type in (open, openat, openat2) and
+     evt.is_open_read = true and
+     fd.typechar = 'f' and
+     fd.num >= 0)
+
+# An outbound TCP/UDP connection was established from a container.
+# Simplified from the default 'outbound' macro; excludes loopback only.
+# The full upstream outbound macro (rfc_1918_addresses exclusion) layered
+# over this at deploy time gives the complete picture.
+- macro: harbor_outbound
+  condition: >
+    (((evt.type = connect and evt.dir = <) or
+      (evt.type in (sendto, sendmsg) and evt.dir = < and
+       fd.l4proto != tcp and fd.connected = false and fd.name_changed = true)) and
+     (fd.typechar = 4 or fd.typechar = 6) and
+     fd.ip != "0.0.0.0" and
+     fd.net != "127.0.0.0/8" and
+     (evt.rawres >= 0 or evt.res = EINPROGRESS))
+
+# ---------------------------------------------------------------------------
+# Rule 1 — Harbor Shell Spawned (CRITICAL)
+#
+# Harbor pods are built from distroless-style Go binaries. No shell should
+# ever execute inside them. Any shell invocation is a strong indicator of
+# active exploitation (RCE, supply-chain compromise, or hands-on intrusion).
+#
+# Triage notes:
+#   - Confirm pod/namespace from output fields.
+#   - Check proc.cmdline and proc.pname for call chain.
+#   - If from an init-container running a legitimate shell script, add a
+#     scoped exception macro below (committed + reviewed).
+#   - First response: capture 'kubectl describe pod' + logs, then isolate.
+# ---------------------------------------------------------------------------
+
+- rule: Harbor Shell Spawned
+  desc: >
+    A shell binary was spawned inside a Harbor namespace container. Harbor
+    images run distroless Go binaries; any shell execution is anomalous and
+    likely hostile (RCE, supply-chain, or hands-on intrusion).
+  condition: >
+    harbor_spawned_process and harbor_container and
+    proc.name in (harbor_shell_binaries)
+  output: >
+    Shell spawned in Harbor container
+    (user=%user.name pod=%k8s.pod.name ns=%k8s.ns.name
+     cmd=%proc.cmdline parent=%proc.pname
+     image=%container.image.repository:%container.image.tag)
+  priority: CRITICAL
+  tags: [harbor, T3.3, shell, MITRE_T1059]
+
+# ---------------------------------------------------------------------------
+# Rule 2 — Harbor Privileged Exec (CRITICAL)
+#
+# Detects interactive process execution inside Harbor containers, such as
+# 'kubectl exec -it' or 'kubectl attach' sessions. An interactive TTY
+# attached to a production Harbor pod signals direct operator access or an
+# active intrusion. This complements the Kubernetes API audit log (which
+# records the API call) with the runtime syscall evidence.
+#
+# Triage notes:
+#   - Cross-reference with k8s API audit log for the exec event and actor.
+#   - Legitimate break-glass access should be pre-approved and time-boxed.
+#   - If a CI/CD pipeline runs healthcheck commands via exec, scope an
+#     exception to that specific image + proc.name combination.
+# ---------------------------------------------------------------------------
+
+- rule: Harbor Privileged Exec
+  desc: >
+    An interactive TTY session was opened in a Harbor namespace container,
+    indicating a kubectl exec -it / attach or equivalent direct intrusion.
+  condition: >
+    harbor_spawned_process and harbor_container and
+    proc.tty != 0 and
+    not harbor_allowed_proc
+  output: >
+    Interactive exec into Harbor container
+    (user=%user.name pod=%k8s.pod.name ns=%k8s.ns.name
+     cmd=%proc.cmdline parent=%proc.pname tty=%proc.tty
+     image=%container.image.repository:%container.image.tag)
+  priority: CRITICAL
+  tags: [harbor, T3.3, exec, MITRE_T1609]
+
+# ---------------------------------------------------------------------------
+# Rule 3 — Harbor Unexpected Outbound (WARNING)
+#
+# Mirrors the egress NetworkPolicy allowlist at the syscall layer. Catches
+# connections to destinations not in {Postgres, Redis, DNS, HTTPS(443),
+# SMTP(587/465)}, including 443-tunneled exfiltration to unknown IPs.
+# Phase 2: tighten to an IP/CIDR allowlist covering KMS and JWKS endpoints.
+#
+# Triage notes:
+#   - Identify destination with fd.rip (remote IP) and fd.dport.
+#   - If a legitimate new egress target is needed, add it to the NetworkPolicy
+#     AND to harbor_allowed_outbound_ports (both layers move together).
+#   - Unexpected 443 connections warrant IP-level inspection in phase 2.
+# ---------------------------------------------------------------------------
+
+- rule: Harbor Unexpected Outbound
+  desc: >
+    A Harbor namespace container opened an outbound connection to a port not
+    in the approved allowlist (Postgres/5432, Redis/6379, DNS/53, HTTPS/443,
+    SMTP/587,465). Possible data exfiltration or C2 channel.
+  condition: >
+    harbor_outbound and harbor_container and
+    not fd.rport in (harbor_allowed_outbound_ports)
+  output: >
+    Unexpected outbound connection from Harbor container
+    (user=%user.name pod=%k8s.pod.name ns=%k8s.ns.name
+    cmd=%proc.cmdline connection=%fd.name
+    image=%container.image.repository:%container.image.tag)
+  priority: WARNING
+  tags: [harbor, T3.3, network, MITRE_T1048]
+
+# ---------------------------------------------------------------------------
+# Rule 4 — Harbor Sensitive File Read (WARNING)
+#
+# Classic post-exploit recon: reading /etc/passwd, /etc/shadow, or SSH keys
+# after landing in a container. These files serve no purpose to a Go OIDC
+# binary; any read is suspicious.
+#
+# Triage notes:
+#   - Check proc.cmdline to identify the reading process.
+#   - If a legitimate use case surfaces (e.g. libc resolving UIDs), scope a
+#     narrow exception by proc.name.
+# ---------------------------------------------------------------------------
+
+- rule: Harbor Sensitive File Read
+  desc: >
+    A process inside a Harbor namespace container read a sensitive system
+    file (/etc/passwd, /etc/shadow, SSH keys). Typical post-exploitation
+    recon pattern.
+  condition: >
+    harbor_open_read and harbor_container and
+    fd.name in (harbor_sensitive_files)
+  output: >
+    Sensitive file read in Harbor container
+    (user=%user.name pod=%k8s.pod.name ns=%k8s.ns.name
+     file=%fd.name cmd=%proc.cmdline parent=%proc.pname
+     image=%container.image.repository:%container.image.tag)
+  priority: WARNING
+  tags: [harbor, T3.3, file, MITRE_T1083]
+
+# ---------------------------------------------------------------------------
+# Rule 5 — Harbor Secret Mount Access by Foreign Process (CRITICAL)
+#
+# Only the legitimate Harbor application binaries (harbor-hot, harbor-mgmt)
+# should ever read Kubernetes secret mounts (/var/run/secrets/...) or Harbor
+# secret directories (/etc/harbor-secrets). Any other process doing so — a
+# shell, a recon tool, an injected binary — is an active threat targeting
+# signing material, DB credentials, or service account tokens.
+#
+# Triage notes:
+#   - proc.name and proc.cmdline reveal the foreign process.
+#   - fd.name reveals which secret was targeted.
+#   - Immediate response: cordon the node, capture pod forensic snapshot,
+#     rotate the compromised secret if any was read.
+# ---------------------------------------------------------------------------
+
+- rule: Harbor Secret Mount Access by Foreign Process
+  desc: >
+    A process other than the Harbor application binaries read from a
+    Kubernetes secret mount or Harbor secret directory. This indicates
+    credential harvesting by a foreign / injected process.
+  condition: >
+    harbor_open_read and harbor_container and
+    (fd.name startswith /var/run/secrets or
+     fd.name startswith /etc/harbor-secrets) and
+    not harbor_allowed_proc
+  output: >
+    Foreign process accessed Harbor secret mount
+    (user=%user.name pod=%k8s.pod.name ns=%k8s.ns.name
+     file=%fd.name cmd=%proc.cmdline parent=%proc.pname
+     image=%container.image.repository:%container.image.tag)
+  priority: CRITICAL
+  tags: [harbor, T3.3, secrets, MITRE_T1552]
