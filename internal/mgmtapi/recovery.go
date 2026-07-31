@@ -244,9 +244,9 @@ type recoveryCodesResponse struct {
 // PostRecoveryCodes handles POST /recovery/codes — it generates (or
 // regenerates) the authenticated user's single-use recovery codes, stores their
 // salted hashes, and returns the plaintext codes exactly once. The user id
-// comes from the X-Harbor-User-ID header set by upstream authentication; this
-// endpoint is for an already-authenticated user setting up recovery, so it is
-// distinct from the unauthenticated begin/complete ceremony below.
+// comes from the authenticated BFF session context; this endpoint is for an
+// already-authenticated user setting up recovery, so it is distinct from the
+// unauthenticated begin/complete ceremony below.
 //
 // Responses:
 //   - 201 Created             on success ({codes, count})
@@ -255,7 +255,10 @@ type recoveryCodesResponse struct {
 //   - 503 Service Unavailable recovery not wired
 //   - 500 Internal Server Error generation or persistence failure
 func (s *Server) PostRecoveryCodes(w http.ResponseWriter, r *http.Request) {
-	userID := r.Header.Get(UserIDHeader)
+	var userID string
+	if s.callerSource != nil {
+		userID = s.callerSource.CallerID(r.Context())
+	}
 	if userID == "" {
 		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
 		return
@@ -544,7 +547,7 @@ type recoveryFactorsResponse struct {
 // the existing WebAuthn registration path is an independent recovery factor, so
 // this endpoint simply surfaces those credentials as PII-free metadata; it adds
 // no new WebAuthn behaviour (docs/DESIGN.md §11.1). The user id comes from the
-// X-Harbor-User-ID header set by upstream authentication.
+// authenticated BFF session context.
 //
 // Responses:
 //   - 200 OK                  on success ({factors, count})
@@ -553,7 +556,10 @@ type recoveryFactorsResponse struct {
 //   - 503 Service Unavailable recovery factor listing not wired
 //   - 500 Internal Server Error listing failure
 func (s *Server) ListCredentialsByUser(w http.ResponseWriter, r *http.Request) {
-	userID := r.Header.Get(UserIDHeader)
+	var userID string
+	if s.callerSource != nil {
+		userID = s.callerSource.CallerID(r.Context())
+	}
 	if userID == "" {
 		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
 		return

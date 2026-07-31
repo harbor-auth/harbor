@@ -65,10 +65,15 @@ func newComplianceDeps(bundler BundleAssembler, eraser AccountEraser, users Comp
 }
 
 // newComplianceMux builds a mgmtapi Server with ComplianceDeps wired and
-// returns its ServeMux ready for httptest requests.
-func newComplianceMux(deps *ComplianceDeps) *http.ServeMux {
+// returns its ServeMux ready for httptest requests. A non-empty userID seeds
+// the authenticated caller via a fakeCallerSource; an empty userID leaves the
+// server without a caller source so user-scoped endpoints return 401.
+func newComplianceMux(deps *ComplianceDeps, userID string) *http.ServeMux {
 	srv := New(nil, nil)
 	srv.compliance = deps
+	if userID != "" {
+		srv = srv.WithCallerSource(fakeCallerSource{userID: userID})
+	}
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 	return mux
@@ -94,10 +99,10 @@ func TestPostExport_Unauthorized(t *testing.T) {
 		&fakeBundleAssembler{bundle: testBundle("user-123")},
 		&fakeAccountEraser{},
 		&fakeComplianceUserLoader{region: "EU"},
-	))
+	), "")
 
 	req := httptest.NewRequest("POST", "/compliance/export", nil)
-	// No X-Harbor-User-ID header.
+	// No authenticated caller.
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -115,12 +120,11 @@ func TestPostExport_Unauthorized(t *testing.T) {
 
 func TestPostExport_ServiceUnavailable(t *testing.T) {
 	// nil compliance → 503.
-	srv := New(nil, nil)
+	srv := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	req := httptest.NewRequest("POST", "/compliance/export", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -143,10 +147,9 @@ func TestPostExport_Success(t *testing.T) {
 		bundler,
 		&fakeAccountEraser{},
 		&fakeComplianceUserLoader{region: "EU"},
-	))
+	), "user-123")
 
 	req := httptest.NewRequest("POST", "/compliance/export", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -178,10 +181,9 @@ func TestPostExport_CallerScoped(t *testing.T) {
 		bundler,
 		&fakeAccountEraser{},
 		&fakeComplianceUserLoader{region: "EU"},
-	))
+	), "alice")
 
 	req := httptest.NewRequest("POST", "/compliance/export", nil)
-	req.Header.Set(UserIDHeader, "alice")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -203,11 +205,10 @@ func TestSecurity_PostExport_CrossUserIsolation(t *testing.T) {
 		bundler,
 		&fakeAccountEraser{},
 		&fakeComplianceUserLoader{region: "EU"},
-	))
+	), "user-B")
 
 	// user-B makes the request — must only trigger assembly for user-B.
 	req := httptest.NewRequest("POST", "/compliance/export", nil)
-	req.Header.Set(UserIDHeader, "user-B")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -225,10 +226,9 @@ func TestPostExport_BundlerError(t *testing.T) {
 		&fakeBundleAssembler{err: errors.New("DEK unwrap failed")},
 		&fakeAccountEraser{},
 		&fakeComplianceUserLoader{region: "EU"},
-	))
+	), "user-123")
 
 	req := httptest.NewRequest("POST", "/compliance/export", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -251,10 +251,10 @@ func TestPostErase_Unauthorized(t *testing.T) {
 		&fakeBundleAssembler{bundle: testBundle("user-123")},
 		&fakeAccountEraser{},
 		&fakeComplianceUserLoader{region: "EU"},
-	))
+	), "")
 
 	req := httptest.NewRequest("POST", "/compliance/erase", nil)
-	// No X-Harbor-User-ID header.
+	// No authenticated caller.
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -272,12 +272,11 @@ func TestPostErase_Unauthorized(t *testing.T) {
 
 func TestPostErase_ServiceUnavailable(t *testing.T) {
 	// nil compliance → 503.
-	srv := New(nil, nil)
+	srv := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	req := httptest.NewRequest("POST", "/compliance/erase", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -299,10 +298,9 @@ func TestPostErase_Success(t *testing.T) {
 		&fakeBundleAssembler{bundle: testBundle("user-123")},
 		eraser,
 		&fakeComplianceUserLoader{region: "EU"},
-	))
+	), "user-123")
 
 	req := httptest.NewRequest("POST", "/compliance/erase", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -326,10 +324,9 @@ func TestPostErase_EraseCalledWithAuthenticatedUser(t *testing.T) {
 		&fakeBundleAssembler{bundle: testBundle("alice")},
 		eraser,
 		&fakeComplianceUserLoader{region: "EU"},
-	))
+	), "alice")
 
 	req := httptest.NewRequest("POST", "/compliance/erase", nil)
-	req.Header.Set(UserIDHeader, "alice")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -346,10 +343,9 @@ func TestPostErase_UserLoadError(t *testing.T) {
 		&fakeBundleAssembler{bundle: testBundle("user-123")},
 		&fakeAccountEraser{},
 		&fakeComplianceUserLoader{err: errors.New("DB unavailable")},
-	))
+	), "user-123")
 
 	req := httptest.NewRequest("POST", "/compliance/erase", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -374,10 +370,9 @@ func TestPostErase_UserLoadError_ShredNotCalled(t *testing.T) {
 		&fakeBundleAssembler{bundle: testBundle("user-123")},
 		eraser,
 		&fakeComplianceUserLoader{err: errors.New("DB unavailable")},
-	))
+	), "user-123")
 
 	req := httptest.NewRequest("POST", "/compliance/erase", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -395,10 +390,9 @@ func TestPostErase_EraserError(t *testing.T) {
 		&fakeBundleAssembler{bundle: testBundle("user-123")},
 		&fakeAccountEraser{err: errors.New("crypto-shred failed")},
 		&fakeComplianceUserLoader{region: "EU"},
-	))
+	), "user-123")
 
 	req := httptest.NewRequest("POST", "/compliance/erase", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -423,10 +417,9 @@ func TestPostErase_NoUsersLoader(t *testing.T) {
 		Eraser:  eraser,
 		Users:   nil, // no region loader wired
 	}
-	mux := newComplianceMux(deps)
+	mux := newComplianceMux(deps, "user-123")
 
 	req := httptest.NewRequest("POST", "/compliance/erase", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 

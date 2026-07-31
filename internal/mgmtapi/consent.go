@@ -40,11 +40,6 @@ type SessionRevoker interface {
 	RevokeSessionsByUserClient(ctx context.Context, userID, clientID string) error
 }
 
-// UserIDHeader is the header containing the authenticated user's ID.
-// In production this is set by upstream authentication middleware (e.g. BFF
-// session validation). For testing, it can be set directly.
-const UserIDHeader = "X-Harbor-User-ID"
-
 // ConsentGrantResponse is the JSON representation of a consent grant
 // returned by GET /consent-grants.
 type ConsentGrantResponse struct {
@@ -60,17 +55,15 @@ type ConsentGrantsListResponse struct {
 }
 
 // GetConsentGrants handles GET /consent-grants — returns all active consent
-// grants for the authenticated user. The user ID comes from the X-Harbor-User-ID
-// header set by upstream authentication.
+// grants for the authenticated user. The caller identity is resolved from the
+// BFF session context.
 func (s *Server) GetConsentGrants(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	outcome := telemetry.OutcomeError
 	defer func() { recordRequest(telemetry.EndpointConsent, outcome, start) }()
 
-	userID := r.Header.Get(UserIDHeader)
-	if userID == "" {
-		recordError(telemetry.EndpointConsent, "unauthorized")
-		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
+	userID, ok := s.callerID(w, r, telemetry.EndpointConsent)
+	if !ok {
 		return
 	}
 
@@ -110,16 +103,14 @@ func (s *Server) GetConsentGrants(w http.ResponseWriter, r *http.Request) {
 // revocation to any active sessions with that RP. The operation is idempotent:
 // it returns 204 even when no active grant exists so repeated calls (or races)
 // are safe. Users can only revoke their own grants — the lookup is scoped by
-// the X-Harbor-User-ID header set by upstream authentication.
+// the authenticated BFF session caller.
 func (s *Server) DeleteConsentGrant(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	outcome := telemetry.OutcomeError
 	defer func() { recordRequest(telemetry.EndpointConsent, outcome, start) }()
 
-	userID := r.Header.Get(UserIDHeader)
-	if userID == "" {
-		recordError(telemetry.EndpointConsent, "unauthorized")
-		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
+	userID, ok := s.callerID(w, r, telemetry.EndpointConsent)
+	if !ok {
 		return
 	}
 

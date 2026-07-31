@@ -56,7 +56,7 @@ type ComplianceDeps struct {
 //
 // Responses:
 //   - 200 OK                   on success (JSON bundle)
-//   - 401 Unauthorized         missing X-Harbor-User-ID
+//   - 401 Unauthorized         no authenticated BFF session
 //   - 503 Service Unavailable  compliance service not configured
 //   - 500 Internal Server Error assembly or crypto failure
 func (s *Server) PostExport(w http.ResponseWriter, r *http.Request) {
@@ -64,10 +64,8 @@ func (s *Server) PostExport(w http.ResponseWriter, r *http.Request) {
 	outcome := telemetry.OutcomeError
 	defer func() { recordRequest(telemetry.EndpointCompliance, outcome, start) }()
 
-	userID := r.Header.Get(UserIDHeader)
-	if userID == "" {
-		recordError(telemetry.EndpointCompliance, "unauthorized")
-		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
+	userID, ok := s.callerID(w, r, telemetry.EndpointCompliance)
+	if !ok {
 		return
 	}
 
@@ -101,7 +99,7 @@ func (s *Server) PostExport(w http.ResponseWriter, r *http.Request) {
 //
 // Responses:
 //   - 204 No Content           on success (erasure complete)
-//   - 401 Unauthorized         missing X-Harbor-User-ID
+//   - 401 Unauthorized         no authenticated BFF session
 //   - 503 Service Unavailable  compliance service not configured
 //   - 500 Internal Server Error erasure or audit failure
 func (s *Server) PostErase(w http.ResponseWriter, r *http.Request) {
@@ -109,10 +107,8 @@ func (s *Server) PostErase(w http.ResponseWriter, r *http.Request) {
 	outcome := telemetry.OutcomeError
 	defer func() { recordRequest(telemetry.EndpointCompliance, outcome, start) }()
 
-	userID := r.Header.Get(UserIDHeader)
-	if userID == "" {
-		recordError(telemetry.EndpointCompliance, "unauthorized")
-		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
+	userID, ok := s.callerID(w, r, telemetry.EndpointCompliance)
+	if !ok {
 		return
 	}
 
