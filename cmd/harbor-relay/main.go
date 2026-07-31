@@ -7,23 +7,24 @@
 // forwarding — it is never logged or persisted in the clear (§7.5.6).
 //
 // Configuration (environment):
-//   PORT                     — SMTP listen port (default 2525; the Service maps
-//                              the public port 25 → this non-privileged port so
-//                              the pod runs as non-root).
-//   REGION                   — home region this MTA serves (e.g. "EU").
-//   RELAY_DOMAIN             — relay domain suffix (e.g. "relay.eu.harbor.id").
-//   RELAY_SMARTHOST          — host:port of the outbound smarthost used to
-//                              deliver forwarded mail. When empty, mail is
-//                              accepted but not forwarded (test mode).
-//   RELAY_RETURN_PATH        — envelope sender for forwarded mail (bounces).
-//   RELAY_DKIM_SELECTOR      — DKIM selector for ARC sealing (optional).
-//   RELAY_DKIM_PRIVATE_KEY   — PEM-encoded RSA private key for ARC sealing
-//                              (optional; ARC sealing is skipped when unset).
-//   RELAY_ENFORCE_AUTH       — "true" to reject mail that fails SPF/DKIM/DMARC;
-//                              otherwise results are evaluated but only logged.
-//   DATABASE_URL             — regional Postgres DSN (REQUIRED: the mapping
-//                              lookup lives here).
-//   HARBOR_KMS_SECRET        — regional KEK sealing per-user DEKs (REQUIRED).
+//
+//	PORT                     — SMTP listen port (default 2525; the Service maps
+//	                           the public port 25 → this non-privileged port so
+//	                           the pod runs as non-root).
+//	REGION                   — home region this MTA serves (e.g. "EU").
+//	RELAY_DOMAIN             — relay domain suffix (e.g. "relay.eu.harbor.id").
+//	RELAY_SMARTHOST          — host:port of the outbound smarthost used to
+//	                           deliver forwarded mail. When empty, mail is
+//	                           accepted but not forwarded (test mode).
+//	RELAY_RETURN_PATH        — envelope sender for forwarded mail (bounces).
+//	RELAY_DKIM_SELECTOR      — DKIM selector for ARC sealing (optional).
+//	RELAY_DKIM_PRIVATE_KEY   — PEM-encoded RSA private key for ARC sealing
+//	                           (optional; ARC sealing is skipped when unset).
+//	RELAY_ENFORCE_AUTH       — "true" to reject mail that fails SPF/DKIM/DMARC;
+//	                           otherwise results are evaluated but only logged.
+//	DATABASE_URL             — regional Postgres DSN (REQUIRED: the mapping
+//	                           lookup lives here).
+//	HARBOR_KMS_SECRET        — regional KEK sealing per-user DEKs (REQUIRED).
 package main
 
 import (
@@ -36,7 +37,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -136,7 +137,7 @@ func run(logger *slog.Logger) error {
 	// smarthost is configured. MappingResolver is required only when a
 	// Forwarder is set. ---
 	var (
-		forwarder relay.Forwarder
+		forwarder       relay.Forwarder
 		mappingResolver relay.MappingResolver
 	)
 	if smarthost := os.Getenv("RELAY_SMARTHOST"); smarthost != "" {
@@ -144,7 +145,10 @@ func run(logger *slog.Logger) error {
 		mappingResolver = resolver
 	}
 
-	enforceAuth, _ := strconv.ParseBool(os.Getenv("RELAY_ENFORCE_AUTH"))
+	enforceAuth, err := parseEnforceAuth(os.Getenv("RELAY_ENFORCE_AUTH"))
+	if err != nil {
+		return err
+	}
 
 	cfg := relay.MTAConfig{
 		Lookup:          store,
@@ -234,4 +238,33 @@ func parseDKIMKey(pemStr string) (*rsa.PrivateKey, error) {
 		return nil, errors.New("DKIM key is not an RSA key")
 	}
 	return rsaKey, nil
+}
+
+// parseEnforceAuth interprets RELAY_ENFORCE_AUTH, the switch that decides
+// whether inbound mail failing SPF/DKIM/DMARC is rejected or merely logged.
+//
+// An UNSET value means "evaluate but only log" — the documented default (see
+// the Configuration block at the top of this file). A value that cannot be
+// parsed is FATAL rather than falsely disabling enforcement: silently reading a
+// typo'd RELAY_ENFORCE_AUTH=yes as "off" would leave an operator believing
+// inbound mail is authenticated when it is not. Failing closed on a
+// misconfigured security control beats booting with it quietly disabled
+// (docs/design/principles/error-handling.md §1.11 — an error is handled,
+// returned, or explicitly justified; never swallowed).
+//
+// The accepted spellings deliberately match the rest of Harbor's env handling
+// (cmd/harbor-hot envBool) and are a superset of strconv.ParseBool, so an
+// operator who writes "yes" or "on" gets what they meant instead of the
+// opposite.
+func parseEnforceAuth(raw string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return false, nil
+	case "1", "t", "true", "yes", "on":
+		return true, nil
+	case "0", "f", "false", "no", "off":
+		return false, nil
+	default:
+		return false, fmt.Errorf("invalid RELAY_ENFORCE_AUTH %q: use true/false (also accepted: yes/no, on/off, 1/0)", raw)
+	}
 }
