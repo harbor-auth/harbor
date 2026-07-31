@@ -183,6 +183,11 @@ func (h *DashboardHandler) GetConnectedApps(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	if h.consents == nil {
+		http.Error(w, "consent store not available", http.StatusServiceUnavailable)
+		return
+	}
+
 	grants, err := h.consents.List(r.Context(), userID)
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "bff: dashboard: list consent grants failed",
@@ -202,6 +207,11 @@ func (h *DashboardHandler) PostRevokeApp(w http.ResponseWriter, r *http.Request)
 	userID := UserIDFromContext(r.Context())
 	if userID == "" {
 		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+
+	if h.consents == nil {
+		http.Error(w, "consent store not available", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -329,6 +339,11 @@ func (h *DashboardHandler) GetSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.sessions == nil || h.credentials == nil {
+		http.Error(w, "session store not available", http.StatusServiceUnavailable)
+		return
+	}
+
 	sessions, err := h.sessions.ListSessionsByUser(r.Context(), userID)
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "bff: dashboard: list sessions failed", "error", err)
@@ -356,6 +371,11 @@ func (h *DashboardHandler) PostRevokeSession(w http.ResponseWriter, r *http.Requ
 	userID := UserIDFromContext(r.Context())
 	if userID == "" {
 		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+
+	if h.sessions == nil {
+		http.Error(w, "session store not available", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -402,6 +422,11 @@ func (h *DashboardHandler) PostRevokeCredential(w http.ResponseWriter, r *http.R
 	userID := UserIDFromContext(r.Context())
 	if userID == "" {
 		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+
+	if h.credentials == nil {
+		http.Error(w, "credential store not available", http.StatusServiceUnavailable)
 		return
 	}
 
