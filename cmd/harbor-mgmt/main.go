@@ -285,6 +285,7 @@ func main() {
 	}
 
 	mgmtServer := mgmtapi.New(enroller, logger).
+		WithCallerSource(bffCallerAdapter{}).
 		WithConsentStore(consentStore).
 		WithSessionRevoker(sessionRevoker).
 		WithMFA(mfaService).
