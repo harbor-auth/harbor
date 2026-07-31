@@ -73,4 +73,19 @@ spec:
           protocol: TCP
         - port: 465
           protocol: TCP
+    # Linkerd control-plane — proxy sidecars must reach the linkerd namespace:
+    #   8080 linkerd-identity  (mTLS cert issuance)
+    #   8086 linkerd-destination (gRPC endpoint/service discovery)
+    #   8090 linkerd-policy    (gRPC authorization policy)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: linkerd
+      ports:
+        - port: 8080
+          protocol: TCP
+        - port: 8086
+          protocol: TCP
+        - port: 8090
+          protocol: TCP
 {{- end }}

@@ -15,7 +15,57 @@ created: 2026-07-22
 > `bff-flow-wiring` (BFF session store wired) and `client-secret-auth`
 > (client auth seam for `id_token_hint` validation).
 
+> ### ⚠️ Problem statement below is now STALE — 2026-07-30 audit
+>
+> The original problem ("Harbor has no RP-Initiated Logout endpoint") **no
+> longer holds**. `internal/oidcapi/end_session.go` now exists and its logic is
+> **correct and complete**: it verifies the `id_token_hint` signature, treats
+> `aud` as the authoritative `client_id`, reverse-looks-up the internal userID
+> from the RP-specific PPID via `FindGrantByPPID`, revokes only that RP's
+> sessions, and exact-matches `post_logout_redirect_uri` against registered
+> `logout_uris` (column added in migration 0017).
+>
+> **What is missing is the wiring, not the feature** — audit finding **H2**
+> ([`audit-2026-07-30-wiring-and-auth.md`](./audit-2026-07-30-wiring-and-auth.md)):
+>
+> ```go
+> // cmd/harbor-hot/main.go:196-197
+> var logoutVerifier oidcapi.LogoutVerifier   // nil, never assigned
+> sessionRevoker := noopSessionRevoker{}      // returns nil, records nothing
+> ```
+>
+> `endSession` short-circuits straight to `redirectLoggedOut` whenever these are
+> nil (`end_session.go:85`). So `/end_session` is today a **cosmetic redirect**:
+> no revocation, no hint verification, and `post_logout_redirect_uri` never
+> honoured even when correctly registered. `oidc.NewJWTVerifier` is never
+> constructed anywhere in the tree.
+>
+> **Revised scope — construct the four dependencies in `cmd/harbor-hot`:**
+>
+> | Dependency | Source |
+> |---|---|
+> | `LogoutVerifier` | `oidc.NewJWTVerifier` over the loaded signer set, pinned to the region issuer |
+> | `SessionRevoker` | `clients.NewDBSessionStoreWithPool` — the same store the refresh path uses |
+> | `Grants` | the DB grant store (unified by [`unify-consent-ledger`](./unify-consent-ledger.md)) |
+> | `Clients` | `clients.NewDBClientRegistry`, so `HasLogoutURI` checks real registered URIs |
+>
+> …then delete `noopSessionRevoker`.
+>
+> **Revised dependencies:** this is now a DAG child of
+> [`production-wiring-collapse`](./production-wiring-collapse.md) (which wires
+> the DB session store and client registry) and depends on
+> [`unify-token-verification`](./unify-token-verification.md) — a single-key
+> verifier would fail on any token from a rotation overlap, so taking that
+> dependency is preferable to shipping a verifier that only works for the
+> active key.
+>
+> **Headline regression test:** `/end_session` with a valid `id_token_hint`
+> revokes that RP's sessions **and only that RP's**; with a bad signature or a
+> mismatched `aud` it revokes nothing and never honours the redirect URI.
+
 ## Problem
+
+<!-- STALE as of 2026-07-30 — see the audit note above. Retained for provenance. -->
 
 Harbor has **no RP-Initiated Logout endpoint** and **no session termination
 surface**. The OpenID Connect Session Management / RP-Initiated Logout 1.0

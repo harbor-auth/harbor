@@ -49,7 +49,7 @@
 | ~~**AES-CBC encryption cipher**~~ | **Resolved 2026-07-24** — upgraded to secretbox (AEAD). See T1.5. |
 | **No admin endpoint protection at nginx layer** | The hardened nginx build (v1.14.5-hardened2) blocks `server-snippet` via admission webhook even with `allow-snippet-annotations: true` in ConfigMap. `/admin` endpoints are protected by application-level Bearer token auth (see `admin-endpoint-auth` in `production-readiness.md`). Future: dedicated admin port or Calico HostEndpoint policy. |
 | **etcd snapshots are local-only** | Daily snapshots exist but only on the same node. A disk failure loses both live data and backup. |
-| **No east-west mTLS** | Pod-to-pod traffic (hot↔postgres, mgmt↔redis) is unencrypted inside the node. See T2.3 Linkerd. |
+| ~~**No east-west mTLS**~~ | **Resolved 2026-07-27** — Linkerd (edge-26.7.2) installed; harbor-hot↔harbor-mgmt and ingress↔hot/mgmt traffic is mTLS-encrypted. Redis/Postgres remain direct TCP via `skip-outbound-ports` (server-speaks-first protocols). See T2.3. |
 | **No policy-as-code** | No Kyverno or OPA Gatekeeper. No enforcement of image signing, resource limits, or label requirements. |
 | **No runtime threat detection** | No Falco or equivalent — no alerting on anomalous syscalls. |
 | **ArgoCD no SSO** | Admin password rotated and initial secret deleted 2026-07-24, but SSO not yet configured. See T2.2. |
@@ -613,8 +613,11 @@ kubectl patch felixconfiguration default --type='merge' \
 Week 2:         T2.1 Offsite etcd backups + PostgreSQL backup
                 T2.2 ArgoCD SSO with Dex + GitHub
 
-Week 3:         T2.3 Linkerd mTLS (including PostgreSQL/Redis opaque ports)
-                T2.4 Kyverno + policies
+✅ 2026-07-27  T2.3 Linkerd mTLS installed (edge-26.7.2). All harbor pods running 2/2
+               with Linkerd sidecars. skip-outbound-ports=5432,6379 used for
+               Redis/Postgres (direct TCP; mTLS covers hot↔mgmt and hot↔ingress).
+               Linkerd check all green.
+Week 3:         T2.4 Kyverno + policies
 
 Later:          T3.1 Cert expiry alerting
                 T3.2 Cosign image signing

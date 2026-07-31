@@ -25,6 +25,16 @@ spec:
     metadata:
       labels:
         {{- include "harbor.mgmt.labels" . | nindent 8 }}
+      annotations:
+        # Hold the app container until the Linkerd proxy sidecar is ready, so
+        # early outbound connections (DB) aren't dropped on startup while the
+        # mesh warms up. See linkerd.io/2/features/proxy-injection.
+        config.linkerd.io/proxy-await: enabled
+        # PostgreSQL (5432) is a server-speaks-first protocol that Linkerd
+        # cannot proxy cleanly here; connect to it directly (unmeshed TCP).
+        # mTLS still covers hot↔mgmt and ingress↔mgmt edges. (6379 listed for
+        # parity with harbor-hot; harbor-mgmt does not use Redis.)
+        config.linkerd.io/skip-outbound-ports: "5432,6379"
     spec:
       # Dedicated SA with no auto-mounted API token (harbor-mgmt never calls the
       # K8s API).
@@ -64,7 +74,7 @@ spec:
             httpGet:
               path: /healthz
               port: http
-            initialDelaySeconds: 5
+            initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 2
             failureThreshold: 3
@@ -72,7 +82,7 @@ spec:
             httpGet:
               path: /healthz
               port: http
-            initialDelaySeconds: 2
+            initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 2

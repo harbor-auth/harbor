@@ -1,8 +1,53 @@
-# client-secret-auth — Verify client_secret at the /token endpoint
+# client-secret-auth — Verify client_secret at the /token, /introspect and /revoke endpoints
 
 > **Priority:** P0 (Wave 6, production-readiness audit blocker 1.6)
 > **Effort:** 4–8 h · **Root feature** (reads the existing `client_secret_hash`
 > column from migration `0012_client_registration`)
+
+> ### 🔴 Scope expanded — 2026-07-30 audit
+>
+> The [2026-07-30 wiring audit](./audit-2026-07-30-wiring-and-auth.md) (finding
+> **C4**) re-confirmed this blocker and found the same hole on **two more
+> endpoints** that this plan did not cover. `/token` is the least exploitable of
+> the three, because Harbor is a PKCE public-client provider by design (§3.1);
+> `/introspect` and `/revoke` are worse:
+>
+> 1. **`validateClientCredentials` is a stub.** `internal/oidcapi/auth.go:73-86`
+>    looks the client up and then literally discards the secret:
+>    `// TODO(introspect): compare secret against stored hash` … `_ = secret`.
+> 2. **`PostIntrospect` never even calls it.** `internal/oidcapi/introspect.go:31-51`
+>    takes the HTTP Basic **username verbatim** as the authenticated `clientID`,
+>    with no registry lookup at all. The Introspector's cross-client isolation
+>    (`internal/oidc/introspect.go:225`, `claims.Audience != req.ClientID`) is
+>    therefore trivially defeated — just claim to be whichever `client_id` the
+>    token's `aud` names.
+> 3. **`PostRevoke` has the same shape.** `parseBasicAuth` returning ok (any
+>    non-empty username) is the entire gate, and then `revokeAccessToken` passes
+>    `IsAdmin: true` (`internal/oidcapi/revoke.go:146-151`) to deliberately
+>    bypass the cross-client check.
+>
+> **Added scope:**
+>
+> - Implement the constant-time comparison in `validateClientCredentials` (the
+>   column and the SHA-256 hashes already exist — only the comparison is missing).
+> - Make `PostIntrospect` and `PostRevoke` actually call it, and reject unknown
+>   or unauthenticated clients with `401` **before** touching the token.
+> - Stop passing `IsAdmin: true` from the revoke path; pass the authenticated
+>   `clientID` so cross-client revocation becomes impossible.
+> - **Public clients (`token_endpoint_auth_method: "none"`) must be rejected** at
+>   `/introspect` and `/revoke` rather than admitted with an empty secret — a
+>   public client has no way to authenticate, so it has no business introspecting.
+> - Correct `token_endpoint_auth_methods_supported` in
+>   `internal/oidcapi/discovery.go:71`, which currently advertises `["none"]`
+>   only, contradicting `internal/mgmtapi/register_validate.go:74-78` (which
+>   accepts `client_secret_basic` and `client_secret_post`).
+>
+> **Breaking change:** any RP relying on unauthenticated `/introspect` starts
+> receiving `401`. Intended — call it out in the PR description.
+>
+> **Scope boundary:** *token* verification correctness (`kid` selection, `exp`,
+> `iss`) is [`unify-token-verification`](./unify-token-verification.md). The two
+> land in adjacent files; coordinate and expect a rebase.
 
 ## Problem
 

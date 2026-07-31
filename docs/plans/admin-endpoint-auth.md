@@ -3,6 +3,44 @@
 > **Priority:** P0 (Wave 6, production-readiness audit blocker 1.5)
 > **Effort:** 2–4 h · **Root feature** (no dependencies)
 
+> ### 🔴 Re-confirmed and expanded — 2026-07-30 audit
+>
+> The [2026-07-30 wiring audit](./audit-2026-07-30-wiring-and-auth.md) (finding
+> **C2**) re-verified this blocker against the current tree. **It is still
+> entirely unfixed**, and the audit adds three things this plan did not cover:
+>
+> 1. **The OpenAPI contract is also silent.** `api/openapi/harbor.yaml:222-311`
+>    gives both admin paths a documented `401` response but **no `security:`
+>    block at all** (contrast `/userinfo` at `:207`, which has one). Add
+>    `security: [- bearerAuth: []]` to both operations so the generated client
+>    and docs state the requirement and `make generate-check` keeps them honest.
+>    Note that oapi-codegen's `HandlerFromMux` does **not** enforce security
+>    schemes — the spec change is documentation, the middleware is enforcement.
+> 2. **The admin paths are absent from `hotPathLimits`**
+>    (`cmd/harbor-hot/main.go:520-525`), so even with auth a leaked token allows
+>    unbounded key rotation. Add both paths with tight budgets.
+> 3. **Network containment.** `deploy/k8s/ingress.yaml` routes `path: /`
+>    `Prefix` to harbor-hot, so `/admin/*` is internet-reachable. Add an ingress
+>    rule (or a second, internal-only Ingress) denying `/admin/` on the public
+>    host, and document the operator path in `deploy/README.md`. Middleware
+>    remains the enforcement; this is defence in depth.
+>
+> **Fail closed:** if `ADMIN_API_TOKEN` is unset while `DATABASE_URL` is set,
+> refuse to boot — mirroring the existing `KEK_SECRET` guard in
+> `buildSigningStack`. An admin surface that silently defaults to open is the
+> bug being fixed. Ship the variable in the Helm chart in the same PR or
+> upgrades will break.
+>
+> **Reuse, don't reinvent:** `Server.initialAccessTokenAuthorized`
+> (`internal/mgmtapi/register.go:227-237`) already implements exactly the right
+> pattern — a hashed token compared in constant time via `subtle`. Follow it.
+>
+> **This is a DAG root and a hard prerequisite for
+> [`wire-revocation-pipeline`](./wire-revocation-pipeline.md).** Today
+> `/admin/revoke-jwt` is harmless only because its store is unwired and it 503s.
+> The moment revocation is wired it becomes an unauthenticated, fleet-wide token
+> kill switch. This must be on `origin/main` first.
+
 ## Problem
 
 `POST /admin/keys/rotate` (`internal/oidcapi/admin_keys.go`) and

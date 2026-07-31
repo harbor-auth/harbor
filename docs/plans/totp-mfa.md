@@ -14,7 +14,81 @@ created: 2026-07-22
 > **Priority:** Wave 6 P1. The `mfa_factors` schema is fully in place;
 > this is a pure service + wiring build.
 
+> ### ⚠️ Problem statement below is now STALE — 2026-07-30 audit
+>
+> The original problem ("nothing above the DB layer exists") **no longer
+> holds**. `internal/mfa/` is now complete — `Service` with `Enroll`,
+> `Activate`, `Verify`, `VerifyRecoveryCode`, `ListFactors`, `Disable`,
+> `HasMFA`; envelope-encrypted secrets via `KeyResolver`; bcrypt recovery codes;
+> `internal/mgmtapi/mfa.go` handlers; `bff.StepUpGate`; `bff.RecordTOTPStepUp`.
+> All of it is written, tested, and wired into `cmd/harbor-mgmt`.
+>
+> **What is missing is enforcement** — audit finding **H7**
+> ([`audit-2026-07-30-wiring-and-auth.md`](./audit-2026-07-30-wiring-and-auth.md)):
+>
+> 1. **MFA is inert.** `bff.StepUpGate` and `bff.RecordTOTPStepUp` are **never
+>    called anywhere**. A successful `POST /mfa/verify`
+>    (`internal/mgmtapi/mfa.go:181-200`) returns `{"status":"verified"}` and
+>    **sets no session state whatsoever** — nothing writes `MFAVerifiedAt`, and
+>    no endpoint reads it. `RecordTOTPStepUp`'s own doc comment admits it:
+>    *"This is the intended call site for the deferred BFF TOTP step-up HTTP
+>    handler. Until that handler is wired…"* — it never was. Enrolling TOTP
+>    changes nothing about what an attacker with a session can do.
+> 2. **TOTP is brute-forceable.** `mfa.Service.Verify` does a bare
+>    `totp.Validate` with `totpSkew = 1` (a ~90 s acceptance window) and **no
+>    attempt counter**. There is no rate limiter, because **harbor-mgmt has no
+>    rate limiting on any endpoint** — the `RateLimitMiddleware` built for the
+>    hot path is never applied to the cold path, and `WithRecoveryRateLimiter`
+>    is never called either, so `/recovery/complete` is equally unlimited. Six
+>    digits, ~90 s window, unlimited attempts.
+>
+>    `internal/identity/recovery.go` already implements exactly the right
+>    pattern for recovery codes (`MaxFailedAttempts = 5`,
+>    `LockoutDuration = 15m`, the `recovery_attempts` table). TOTP simply never
+>    got it — reuse that shape rather than inventing a second one.
+>
+> **Revised scope:**
+>
+> - Add the missing BFF step-up handler that verifies **and records** — calling
+>   `RecordTOTPStepUp` so both `MFAVerifiedAt` and `AuthMethod` (→ ACR/AMR) are
+>   stamped.
+> - Wire `bff.NewStepUpGate` in `cmd/harbor-mgmt` and apply `Require` to the
+>   sensitive routes. **Proposed** initial set — confirm before building, since
+>   over-gating makes the dashboard hostile: `POST /compliance/erase`
+>   (irreversible), `POST /compliance/export` (full PII egress),
+>   `DELETE /mfa/factors/{id}` (disabling the second factor),
+>   `POST /recovery/codes`, `POST /dashboard/credentials/{id}/revoke`.
+> - **Resolve the duplicate-verify ambiguity.** Two endpoints that both "verify
+>   TOTP" but only one of which counts is precisely what produced this bug.
+>   Either `PostMFAVerify` becomes the recorder, or it is deleted in favour of
+>   the BFF handler. Pick one.
+> - Per-account TOTP attempt counting + lockout (IP rate limiting alone is
+>   insufficient — a distributed attacker rotates IPs; the *account* is the
+>   thing under attack).
+> - Apply `RateLimitMiddleware` to the cold path (`/mfa/verify`,
+>   `/mfa/verify-recovery`, `/recovery/begin`, `/recovery/complete`, `/login`,
+>   `/login/complete`, `/enroll`) and wire `WithRecoveryRateLimiter`.
+>   `mgmtapi.Server.WriteRateLimited` already exists and meters correctly — it
+>   has no caller.
+>
+> **Revised dependencies:** DAG child of
+> [`production-wiring-collapse`](./production-wiring-collapse.md), and depends
+> on [`fix-bff-session-binding`](./fix-bff-session-binding.md) — gating on a
+> fixatable session would be theatre.
+>
+> **Note:** lockout is a DoS vector against the user (an attacker who knows a
+> userID can lock them out for 15 minutes). `identity/recovery.go` already
+> accepts that trade-off; be consistent, or prefer exponential backoff if the
+> product view differs.
+>
+> **No migration** — reuse the existing `recovery_attempts` table. `0018` and
+> `0019` are already claimed by `unify-consent-ledger` and
+> `refresh-session-claims`.
+
 ## Problem
+
+<!-- STALE as of 2026-07-30 — see the audit note above. Retained for provenance. -->
+
 
 Harbor's DESIGN.md §7.1 names TOTP as the secondary/step-up factor for
 users — and the DB schema is ready (`mfa_factors` table with full sqlc queries:
