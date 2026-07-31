@@ -231,6 +231,8 @@ paths:
         uses zero grace period and zero overlap — the old key disappears from
         JWKS immediately, invalidating all in-flight tokens signed with it.
         This is the "nuclear option" for compromised keys.
+      security:
+        - bearerAuth: []
       tags:
         - admin
       requestBody:
@@ -276,6 +278,8 @@ paths:
         to all harbor-hot replicas via Redis pub/sub. Use sparingly: routine
         revocation should use refresh-token deletion (short-lived JWTs expire
         naturally within 15 minutes).
+      security:
+        - bearerAuth: []
       tags:
         - admin
       requestBody:

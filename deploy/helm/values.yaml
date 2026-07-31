@@ -77,7 +77,7 @@ hot:
   # Secret you manage out-of-band (recommended for production).
   secrets:
     # If set, the chart does NOT create a Secret and instead references this one
-    # (which must expose DATABASE_URL / REDIS_URL / KEK_SECRET keys).
+    # (which must expose DATABASE_URL / REDIS_URL / KEK_SECRET / ADMIN_API_TOKEN keys).
     existingSecret: ""
     # Name of the Secret managed by External Secrets Operator that exposes
     # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for KMS access. Set to ""
@@ -91,6 +91,10 @@ hot:
     # 256-bit hex key-encryption-key wrapping per-user pairwise-secret DEKs.
     # Generate: openssl rand -hex 32
     kekSecret: ""
+    # Bearer token guarding /admin/ endpoints (POST /admin/keys/rotate and
+    # POST /admin/revoke-jwt). FATAL if unset when DATABASE_URL is set.
+    # Generate: openssl rand -hex 32
+    adminApiToken: ""
 
 # ---------------------------------------------------------------------------
 # harbor-mgmt: the cold-path management binary (passkey ceremonies, user

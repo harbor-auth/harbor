@@ -228,6 +228,19 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	srv := oidcapi.New(apiCfg)
 
+	// Admin auth boot guard and middleware wiring. The guard is fail-closed:
+	// when a real DB is connected (admin endpoints are live) ADMIN_API_TOKEN
+	// must be set and at least 32 bytes — refusing to boot otherwise mirrors
+	// the KEK_SECRET guard above and closes the unauthenticated admin surface
+	// (audit finding C2). When pool is nil (dev, no DB) the guard is skipped
+	// and the middleware is still constructed; with an empty token it is
+	// fail-closed and rejects every admin request with 401.
+	adminToken, err := loadAdminToken(pool != nil, logger)
+	if err != nil {
+		return err
+	}
+	adminMW := oidcapi.AdminAuthMiddleware(oidcapi.AdminAuthConfig{Token: adminToken, Logger: logger})
+
 	// Register custom endpoints not in the OpenAPI spec on the mux before
 	// passing to HandlerFromMux so they are part of the same routing tree:
 	//   /authorize/complete — resumes the OIDC flow after passkey login
@@ -236,11 +249,14 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	mux.HandleFunc("GET /authorize/complete", srv.GetAuthorizeComplete)
 	mux.HandleFunc("GET /logged-out", srv.GetLoggedOut)
 
-	// Wrap the spec-generated router with per-endpoint rate limiting. Only the
-	// hot-path endpoints listed here are guarded; /healthz, /jwks.json and
-	// discovery pass through untouched.
+	// Build the handler chain (outermost first):
+	//   rate limiting → admin auth → spec-generated router
+	// Rate limiting is outermost so an unauthenticated flood of admin requests
+	// is throttled before the token check runs — a wrong/leaked token cannot
+	// drive unbounded key-rotation or JWT-revocation attempts.
 	base := openapi.HandlerFromMux(srv, mux)
-	handler := oidcapi.WithRateLimits(base, buildRateLimits(redisClient, logger))
+	authed := oidcapi.WithAdminAuth(base, adminMW)
+	handler := oidcapi.WithRateLimits(authed, buildRateLimits(redisClient, logger))
 
 	// Support both ADDR (full address) and PORT (port-only, for docker-compose).
 	addr := envString("ADDR", "")
@@ -516,12 +532,16 @@ type endpointLimitSpec struct {
 
 // hotPathLimits is the fixed set of abuse-sensitive endpoints we rate-limit.
 // Introspect is the most enumeration-prone (token probing) so it gets the
-// highest ceiling; /token and /authorize are tighter per-client budgets.
+// highest ceiling; /token and /authorize are tighter per-client budgets. Admin
+// endpoints get the tightest budget (10 req/min) — a leaked admin token must
+// not enable unbounded key-rotation or JWT-revocation.
 var hotPathLimits = []endpointLimitSpec{
 	{path: "/token", endpoint: telemetry.EndpointToken, envKey: "TOKEN", defaultLimit: 60, defaultWindow: time.Minute},
 	{path: "/authorize", endpoint: telemetry.EndpointAuthorize, envKey: "AUTHORIZE", defaultLimit: 120, defaultWindow: time.Minute},
 	{path: "/introspect", endpoint: telemetry.EndpointIntrospect, envKey: "INTROSPECT", defaultLimit: 600, defaultWindow: time.Minute},
 	{path: "/revoke", endpoint: telemetry.EndpointRevoke, envKey: "REVOKE", defaultLimit: 120, defaultWindow: time.Minute},
+	{path: "/admin/keys/rotate", endpoint: telemetry.EndpointAdminRotate, envKey: "ADMIN_ROTATE", defaultLimit: 10, defaultWindow: time.Minute},
+	{path: "/admin/revoke-jwt", endpoint: telemetry.EndpointAdminRevoke, envKey: "ADMIN_REVOKE", defaultLimit: 10, defaultWindow: time.Minute},
 }
 
 // buildRateLimits constructs one rate-limit middleware per hot-path endpoint.
@@ -577,6 +597,42 @@ func newLimiter(redisClient *redis.Client, spec endpointLimitSpec, limit int, wi
 	logger.Warn("REDIS_URL unset: using in-memory rate limiter (single-replica dev only)",
 		"component", "harbor-hot", "endpoint", string(spec.endpoint))
 	return clients.NewMemoryRateLimiter(cfg)
+}
+
+// minAdminTokenBytes is the minimum acceptable length for ADMIN_API_TOKEN.
+// A token shorter than 32 bytes provides insufficient entropy against
+// offline brute-force attacks on the SHA-256 comparison.
+const minAdminTokenBytes = 32
+
+// loadAdminToken enforces the fail-closed admin-auth boot guard. When a real
+// DB is wired (databaseURLSet == true) ADMIN_API_TOKEN must be set and at
+// least minAdminTokenBytes long — otherwise key-rotation and JWT-revocation
+// are reachable without any credential (audit finding C2, mirrors KEK_SECRET
+// guard). HARBOR_DEV_MODE bypasses the length check with a warning so that
+// e2e/dev runs work without setting the token; the returned token still builds
+// a fail-closed middleware (empty token → 401 on every admin request).
+// The token value is never logged (docs/DESIGN.md §6.5).
+func loadAdminToken(databaseURLSet bool, logger *slog.Logger) (string, error) {
+	token := os.Getenv("ADMIN_API_TOKEN")
+	if !databaseURLSet {
+		// Admin endpoints are inert without a real DB; middleware remains
+		// fail-closed regardless of token value.
+		return token, nil
+	}
+	if envBool("HARBOR_DEV_MODE") {
+		if len(token) < minAdminTokenBytes {
+			logger.Warn("HARBOR_DEV_MODE: ADMIN_API_TOKEN missing or < 32 bytes — admin endpoints will reject all requests (NEVER for production)")
+		}
+		return token, nil
+	}
+	if len(token) < minAdminTokenBytes {
+		return "", fmt.Errorf(
+			"ADMIN_API_TOKEN must be set and at least %d bytes when DATABASE_URL is configured — "+
+				"refusing to expose unauthenticated admin key-rotation/JWT-revocation endpoints",
+			minAdminTokenBytes,
+		)
+	}
+	return token, nil
 }
 
 // --- tiny env helpers (no external config dependency) ---

@@ -31,7 +31,9 @@ type RevocationPublisher interface {
 }
 
 // PostAdminRevokeJwt handles POST /admin/revoke-jwt — emergency JWT revocation
-// (docs/DESIGN.md §3.5, §7.4). The pipeline is:
+// (docs/DESIGN.md §3.5, §7.4). Admin authentication is enforced by
+// WithAdminAuth (server.go), which wraps the spec-generated router and rejects
+// any unauthenticated /admin/ request before this handler runs. The pipeline is:
 //
 //  1. Validate the JSON body (jti, reason enum, expires_at).
 //  2. Upsert the JTI into the revoked_jtis table (source of truth).

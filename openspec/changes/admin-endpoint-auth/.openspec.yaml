@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-07-30
+goal: Authenticate the /admin/* surface on harbor-hot with Bearer token middleware (constant-time), boot guard (fail-closed), admin rate limits, and network containment at ingress — fixing audit finding C2
