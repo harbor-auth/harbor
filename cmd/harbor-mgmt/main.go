@@ -366,7 +366,32 @@ func main() {
 	// /login initiates the passkey assertion bound to a BFF session; /login/complete
 	// finishes it, writes the authenticated user_id to the session, and redirects
 	// back to harbor-hot/authorize/complete.
-	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(svc), bff.DiscoverableUserResolver{})
+	//
+	// AUTHORIZE_COMPLETE_URL must be the absolute URL of the /authorize/complete
+	// endpoint on harbor-hot (M2 fix: the relative path resolves against the
+	// harbor-mgmt origin and 404s — the absolute URL is required).
+	authorizeCompleteURL := os.Getenv("AUTHORIZE_COMPLETE_URL")
+	if authorizeCompleteURL == "" {
+		if pool != nil {
+			// A real DB is wired — this is a production deployment. Refusing to
+			// start without AUTHORIZE_COMPLETE_URL prevents the M2 bug from
+			// silently 404ing at the last step of every login.
+			logger.Error("AUTHORIZE_COMPLETE_URL must be set when DATABASE_URL is configured — refusing to start")
+			stop()
+			pool.Close()
+			if redisClient != nil {
+				if err := redisClient.Close(); err != nil {
+					logger.Warn("redis close error on exit", "error", err)
+				}
+			}
+			os.Exit(1)
+		}
+		// Dev/test mode: fall back to a relative path so the integration tests
+		// and local dev work without extra env config.
+		logger.Warn("AUTHORIZE_COMPLETE_URL not set — using relative /authorize/complete fallback (dev only; will 404 in production)")
+		authorizeCompleteURL = "/authorize/complete"
+	}
+	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(svc), bff.DiscoverableUserResolver{}, authorizeCompleteURL)
 	mux.HandleFunc("GET /login", loginHandler.BeginLogin)
 	mux.HandleFunc("POST /login/complete", loginHandler.FinishLogin)
 

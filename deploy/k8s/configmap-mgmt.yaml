@@ -19,3 +19,12 @@ data:
   WEBAUTHN_RP_ID: "example.com"
   WEBAUTHN_RP_NAME: "Harbor"
   WEBAUTHN_ORIGIN: "https://dashboard.example.com"
+  # Absolute URL of harbor-hot's /authorize/complete endpoint. After a
+  # successful passkey assertion harbor-mgmt redirects the browser here to
+  # resume the OIDC flow. It MUST be absolute (a relative path resolves against
+  # the harbor-mgmt origin and 404s — audit finding M2) and, because the BFF
+  # cookie uses the __Host- prefix, MUST share the public origin with harbor-hot
+  # (single-host, path-routed ingress — see deploy/README.md). harbor-mgmt
+  # refuses to start if DATABASE_URL is set but this is empty.
+  # SCAFFOLD: replace example.com with your real domain (matches ISSUER host).
+  AUTHORIZE_COMPLETE_URL: "https://auth.example.com/authorize/complete"

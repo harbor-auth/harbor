@@ -72,17 +72,22 @@ func (DiscoverableUserResolver) ResolveUser(_ context.Context, _ *http.Request, 
 // It reads the BFF session, resolves the user identity, calls BeginAssertion,
 // sets the BFF cookie, and returns the assertion options.
 type LoginHandler struct {
-	sessions     BFFSessionStore
-	webauthn     WebAuthnService
-	userResolver UserResolver
+	sessions             BFFSessionStore
+	webauthn             WebAuthnService
+	userResolver         UserResolver
+	authorizeCompleteURL string
 }
 
 // NewLoginHandler creates a handler for the /login endpoint.
-func NewLoginHandler(sessions BFFSessionStore, webauthn WebAuthnService, resolver UserResolver) *LoginHandler {
+// authorizeCompleteURL is the absolute URL of the /authorize/complete endpoint
+// on harbor-hot (e.g. "https://auth.example.com/authorize/complete"). It must
+// be non-empty in production deployments (M2 fix: avoids relative-URL 404).
+func NewLoginHandler(sessions BFFSessionStore, webauthn WebAuthnService, resolver UserResolver, authorizeCompleteURL string) *LoginHandler {
 	return &LoginHandler{
-		sessions:     sessions,
-		webauthn:     webauthn,
-		userResolver: resolver,
+		sessions:             sessions,
+		webauthn:             webauthn,
+		userResolver:         resolver,
+		authorizeCompleteURL: authorizeCompleteURL,
 	}
 }
 
@@ -111,6 +116,19 @@ func (h *LoginHandler) BeginLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		writeLoginError(w, http.StatusInternalServerError, "server_error", "could not retrieve session")
 		return
+	}
+
+	// Enforce browser nonce gate (audit finding C3 — session fixation defense).
+	// The nonce was minted at /authorize and its hash stored in the session.
+	// A request that cannot present the matching cookie did not originate from
+	// the browser that started the flow — refuse immediately. Never set the
+	// BFF cookie from the URL param (that was the fixation vector).
+	if len(session.BrowserNonceHash) > 0 {
+		nonce, nonceErr := ReadBFFNonceCookie(r)
+		if nonceErr != nil || !NonceMatches(nonce, session.BrowserNonceHash) {
+			writeLoginError(w, http.StatusBadRequest, "invalid_request", "browser nonce mismatch")
+			return
+		}
 	}
 
 	// Resolve the user identity. DiscoverableUserResolver returns ErrDiscoverable
@@ -144,10 +162,14 @@ func (h *LoginHandler) BeginLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set the BFF session cookie for CSRF binding
+	// Set the BFF session cookie. The nonce gate above has already proven that
+	// this browser originated the flow at /authorize (it holds the matching nonce),
+	// so binding requestID (which came from the URL) to the cookie is now safe.
+	// Without the nonce gate this was the fixation vector — the gate must precede
+	// this call.
 	SetBFFCookie(w, requestID, DefaultCookieMaxAge)
 
-	// Also set the WebAuthn session key cookie (separate from BFF cookie)
+	// Set the WebAuthn session key cookie (separate from BFF session cookie).
 	setWebAuthnSessionCookie(w, sessionKey)
 
 	// Return assertion options
@@ -259,6 +281,24 @@ func (h *LoginHandler) FinishLoginWithParsedData(w http.ResponseWriter, r *http.
 	requestID := ReadBFFCookie(r)
 	sessionKey := readWebAuthnSessionCookie(r)
 
+	// Fetch the BFF session to enforce the browser nonce gate (audit finding C3).
+	session, sessErr := h.sessions.Get(r.Context(), requestID)
+	if sessErr != nil {
+		if errors.Is(sessErr, ErrBFFSessionNotFound) || errors.Is(sessErr, ErrBFFSessionExpired) {
+			writeLoginError(w, http.StatusBadRequest, "session_expired", "session not found or expired")
+			return
+		}
+		writeLoginError(w, http.StatusInternalServerError, "server_error", "could not retrieve session")
+		return
+	}
+	if len(session.BrowserNonceHash) > 0 {
+		nonce, nonceErr := ReadBFFNonceCookie(r)
+		if nonceErr != nil || !NonceMatches(nonce, session.BrowserNonceHash) {
+			writeLoginError(w, http.StatusBadRequest, "invalid_request", "browser nonce mismatch")
+			return
+		}
+	}
+
 	// Branch on the resolver type: discoverable path uses FinishDiscoverableLogin
 	// (the authenticator identifies the user via userHandle); known-user path uses
 	// FinishLogin as before.
@@ -290,7 +330,9 @@ func (h *LoginHandler) FinishLoginWithParsedData(w http.ResponseWriter, r *http.
 	// Clear the WebAuthn session cookie (one-time use)
 	clearWebAuthnSessionCookie(w)
 
-	// Redirect to /authorize/complete with request_id
-	redirectURL := "/authorize/complete?request_id=" + requestID
+	// Redirect to the absolute authorize/complete URL (M2 fix: the relative path
+	// /authorize/complete resolves against the harbor-mgmt origin, but that
+	// endpoint is registered on harbor-hot — the absolute URL is required).
+	redirectURL := h.authorizeCompleteURL + "?request_id=" + requestID
 	http.Redirect(w, r, redirectURL, http.StatusFound)
 }

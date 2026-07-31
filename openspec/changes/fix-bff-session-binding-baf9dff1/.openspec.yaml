@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-07-31
+goal: Prevent account takeover via attacker-minted request_id by binding BFF
+  sessions to browser nonce; fix absolute AUTHORIZE_COMPLETE_URL redirect

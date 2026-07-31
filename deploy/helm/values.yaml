@@ -121,6 +121,15 @@ mgmt:
     # Fully-qualified origin permitted to run ceremonies (the dashboard/BFF
     # origin, NOT the issuer).
     rpOrigin: https://dashboard.example.com
+  # Absolute URL of harbor-hot's /authorize/complete endpoint. After a
+  # successful passkey assertion harbor-mgmt redirects the browser here to
+  # resume the OIDC flow. It MUST be absolute (a relative path resolves against
+  # the harbor-mgmt origin and 404s — audit finding M2) and, because the BFF
+  # cookie carries the __Host- prefix, MUST share the public origin with
+  # harbor-hot (single-host path-routed ingress — see deploy/README.md).
+  # harbor-mgmt refuses to start if DATABASE_URL is set but this is empty.
+  # SCAFFOLD: set to https://<ingress.host>/authorize/complete.
+  authorizeCompleteURL: https://auth.example.com/authorize/complete
   # Relay / BYO-domain configuration for DNS setup instructions.
   # mtaDomain is the regional MTA that receives inbound mail (MX record target).
   # relayDomain is the regional relay domain for SPF/DKIM records.

@@ -326,6 +326,39 @@ func TestInMemoryBFFSessionStore_SetAuthMethod_Expired(t *testing.T) {
 	}
 }
 
+func TestInMemoryBFFSessionStore_BrowserNonceHashRoundTrip(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+
+	nonce := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+		0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
+		0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+		0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20}
+
+	record := BFFSessionRecord{
+		RequestID:        "req-nonce",
+		ExpiresAt:        time.Now().Add(5 * time.Minute),
+		BrowserNonceHash: nonce,
+	}
+
+	if err := store.Create(ctx, record); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	got, err := store.Get(ctx, "req-nonce")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if len(got.BrowserNonceHash) != len(nonce) {
+		t.Fatalf("BrowserNonceHash length = %d, want %d", len(got.BrowserNonceHash), len(nonce))
+	}
+	for i, b := range nonce {
+		if got.BrowserNonceHash[i] != b {
+			t.Errorf("BrowserNonceHash[%d] = %#x, want %#x", i, got.BrowserNonceHash[i], b)
+		}
+	}
+}
+
 func TestInMemoryBFFSessionStore_ConcurrentAccess(t *testing.T) {
 	store := NewInMemoryBFFSessionStore()
 	ctx := context.Background()

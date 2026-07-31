@@ -135,7 +135,7 @@ func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bff.I
 	// Now let the generated code register the spec-defined routes on the same mux.
 	oidcHandler := openapi.HandlerFromMux(srv, mux)
 
-	loginHandler := bff.NewLoginHandler(store, &mockWebAuthn{userID: itUserID}, &mockResolver{})
+	loginHandler := bff.NewLoginHandler(store, &mockWebAuthn{userID: itUserID}, &mockResolver{}, "/authorize/complete")
 	return oidcHandler, loginHandler, store
 }
 
@@ -201,8 +201,22 @@ func TestBFFFlow_FullHappyPath(t *testing.T) {
 		t.Fatalf("session.UserID = %q, want empty before login", sess.UserID)
 	}
 
-	// --- Stage 2: GET /login reads the session and sets the BFF cookie ---
+	// Collect the browser nonce cookie set by /authorize. BeginLogin verifies it
+	// against the session's BrowserNonceHash (audit finding C3 gate).
+	var authNonceCookie *http.Cookie
+	for _, c := range authRec.Result().Cookies() {
+		if c.Name == bff.NonceCookieName {
+			authNonceCookie = c
+		}
+	}
+	if authNonceCookie == nil {
+		t.Fatal("/authorize did not set the browser nonce cookie")
+	}
+
+	// --- Stage 2: GET /login verifies the nonce gate and sets the BFF cookie ---
 	loginReq := httptest.NewRequest(http.MethodGet, itLoginPath+"?request_id="+requestID, nil)
+	// Propagate the nonce cookie from /authorize — the gate requires it.
+	loginReq.AddCookie(authNonceCookie)
 	loginRec := httptest.NewRecorder()
 	loginHandler.BeginLogin(loginRec, loginReq)
 
@@ -225,9 +239,12 @@ func TestBFFFlow_FullHappyPath(t *testing.T) {
 
 	// --- Stage 3: POST /login/complete validates the cookie and writes user_id ---
 	completeReq := httptest.NewRequest(http.MethodPost, itLoginPath+"/complete", nil)
+	// Propagate all cookies from BeginLogin (BFF + WebAuthn session key).
 	for _, c := range loginCookies {
 		completeReq.AddCookie(c)
 	}
+	// Also propagate the nonce cookie — FinishLoginWithParsedData re-validates it.
+	completeReq.AddCookie(authNonceCookie)
 	completeRec := httptest.NewRecorder()
 	loginHandler.FinishLoginWithParsedData(completeRec, completeReq, &protocol.ParsedCredentialAssertionData{})
 
@@ -252,6 +269,9 @@ func TestBFFFlow_FullHappyPath(t *testing.T) {
 	// --- Stage 4: GET /authorize/complete reads user_id and issues a code ---
 	resumeReq := httptest.NewRequest(http.MethodGet, "/authorize/complete?request_id="+requestID, nil)
 	resumeReq.AddCookie(&http.Cookie{Name: bff.CookieName, Value: requestID})
+	// Propagate the nonce cookie — GetAuthorizeComplete enforces the nonce gate
+	// (audit finding C3) before issuing any code.
+	resumeReq.AddCookie(authNonceCookie)
 	resumeRec := httptest.NewRecorder()
 	oidcHandler.ServeHTTP(resumeRec, resumeReq)
 

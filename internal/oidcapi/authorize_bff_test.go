@@ -1,7 +1,9 @@
 package oidcapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -70,6 +72,10 @@ func newBFFFlowServer(t *testing.T) (*httptest.Server, *bff.InMemoryBFFSessionSt
 // the request_id, so the passkey ceremony runs before any token is minted. This
 // is the core of the auth-bypass fix (audit blocker 1.1): /authorize can no
 // longer mint a code for whoever happens to call it.
+//
+// Task 4: also asserts that a browser nonce cookie is set and that the stored
+// BrowserNonceHash matches its SHA-256, preventing session fixation
+// (fix-bff-session-binding C3).
 func TestAuthorize_BFFFlow_RedirectsToLogin(t *testing.T) {
 	ts, store := newBFFFlowServer(t)
 
@@ -114,6 +120,48 @@ func TestAuthorize_BFFFlow_RedirectsToLogin(t *testing.T) {
 	}
 	if session.UserID != "" {
 		t.Fatalf("session UserID = %q, want empty (request is unauthenticated)", session.UserID)
+	}
+
+	// --- Nonce binding assertions (fix-bff-session-binding Task 4) ---
+	//
+	// A browser nonce cookie must be set so BeginLogin can prove the browser
+	// that received the redirect is the same one that started /authorize.
+	var nonceCookie *http.Cookie
+	for _, c := range res.Cookies() {
+		if c.Name == bff.NonceCookieName {
+			nonceCookie = c
+			break
+		}
+	}
+	if nonceCookie == nil {
+		t.Fatalf("missing %s cookie — nonce binding not established", bff.NonceCookieName)
+	}
+
+	// The cookie value must be a valid base64url-encoded 32-byte nonce.
+	rawNonce, decErr := base64.RawURLEncoding.DecodeString(nonceCookie.Value)
+	if decErr != nil {
+		t.Fatalf("nonce cookie value is not valid base64url: %v", decErr)
+	}
+	if len(rawNonce) != 32 {
+		t.Fatalf("nonce length = %d, want 32", len(rawNonce))
+	}
+
+	// The session must carry the SHA-256 hash of that nonce — not the raw value.
+	if len(session.BrowserNonceHash) == 0 {
+		t.Fatal("session.BrowserNonceHash is empty — hash was not stored")
+	}
+	expectedHash := bff.HashNonce(rawNonce)
+	if !bytes.Equal(session.BrowserNonceHash, expectedHash) {
+		t.Fatal("session.BrowserNonceHash does not match SHA-256 of cookie nonce")
+	}
+
+	// The nonce cookie must not appear in the response body (it is HttpOnly,
+	// but we also assert it isn't echoed in any other form).
+	if nonceCookie.HttpOnly != true {
+		t.Error("nonce cookie must be HttpOnly")
+	}
+	if nonceCookie.Secure != true {
+		t.Error("nonce cookie must be Secure")
 	}
 }
 
@@ -190,12 +238,12 @@ func TestAuthorizeComplete_SessionExistsButNoUser_ErrorPageNoCode(t *testing.T) 
 		t.Fatalf("session.UserID = %q, want empty", session.UserID)
 	}
 
-	// Now call /authorize/complete with the real request_id but WITHOUT having
-	// completed the passkey ceremony (UserID still empty).
-	completeRes, err := noRedirectClient().Get(ts.URL + "/authorize/complete?request_id=" + requestID)
-	if err != nil {
-		t.Fatalf("GET /authorize/complete: %v", err)
-	}
+	// Now call /authorize/complete with the real request_id AND the matching
+	// browser nonce cookie (extracted from the /authorize response), but WITHOUT
+	// having completed the passkey ceremony (UserID still empty). Seeding the
+	// nonce ensures this test exercises the UserID gate, not the nonce gate.
+	nonceCookie := nonceCookieFrom(t, res)
+	completeRes := getAuthorizeCompleteWithCookie(t, ts, requestID, nonceCookie)
 	defer func() { _ = completeRes.Body.Close() }()
 
 	// Must be an error page — no code issued for unauthenticated session.
@@ -204,6 +252,118 @@ func TestAuthorizeComplete_SessionExistsButNoUser_ErrorPageNoCode(t *testing.T) 
 	}
 	if loc := completeRes.Header.Get("Location"); loc != "" {
 		t.Fatalf("unexpected redirect %q — must not issue code for unauthenticated session", loc)
+	}
+}
+
+// nonceCookieFrom extracts the browser nonce cookie set by a /authorize
+// response so a follow-up request can present it at /authorize/complete.
+func nonceCookieFrom(t *testing.T, res *http.Response) *http.Cookie {
+	t.Helper()
+	for _, c := range res.Cookies() {
+		if c.Name == bff.NonceCookieName {
+			return c
+		}
+	}
+	t.Fatalf("missing %s cookie in /authorize response", bff.NonceCookieName)
+	return nil
+}
+
+// getAuthorizeCompleteWithCookie issues GET /authorize/complete?request_id=<id>
+// without following redirects, optionally attaching the given cookie (nil to
+// omit it). Returns the raw response so the caller can inspect status/Location.
+func getAuthorizeCompleteWithCookie(t *testing.T, ts *httptest.Server, requestID string, cookie *http.Cookie) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/authorize/complete?request_id="+requestID, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	res, err := noRedirectClient().Do(req)
+	if err != nil {
+		t.Fatalf("GET /authorize/complete: %v", err)
+	}
+	return res
+}
+
+// seedAuthenticatedSession creates a BFF session directly in the store carrying
+// a valid UserID and the SHA-256 hash of the returned raw nonce. This lets the
+// nonce-gate tests target /authorize/complete with a session that would issue a
+// code IF (and only if) the presented browser nonce matches — isolating the
+// nonce check from the UserID check.
+func seedAuthenticatedSession(t *testing.T, store *bff.InMemoryBFFSessionStore, requestID string) []byte {
+	t.Helper()
+	nonce, err := bff.NewBrowserNonce()
+	if err != nil {
+		t.Fatalf("NewBrowserNonce: %v", err)
+	}
+	record := bff.BFFSessionRecord{
+		RequestID:        requestID,
+		State:            testState,
+		ClientID:         testClientID,
+		RedirectURI:      testRedirectURI,
+		Scope:            "openid profile",
+		UserID:           "user-abc-123",
+		BrowserNonceHash: bff.HashNonce(nonce),
+		ExpiresAt:        time.Now().Add(5 * time.Minute),
+	}
+	if err := store.Create(context.Background(), record); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	return nonce
+}
+
+// FIXATION / nonce-gate regression: an authenticated BFF session must NOT yield
+// a code at /authorize/complete when the caller presents NO browser nonce
+// cookie. Without the gate, an attacker who learned a request_id could complete
+// the flow from a different browser. The response must be the no-redirect error
+// page (no Location, no code).
+func TestAuthorizeComplete_MissingNonce_ErrorPageNoCode(t *testing.T) {
+	ts, store := newBFFFlowServer(t)
+	const requestID = "seeded-request-id-missing-nonce"
+	_ = seedAuthenticatedSession(t, store, requestID)
+
+	// Call /authorize/complete with the real request_id but NO nonce cookie.
+	res := getAuthorizeCompleteWithCookie(t, ts, requestID, nil)
+	defer func() { _ = res.Body.Close() }()
+
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (error page)", res.StatusCode)
+	}
+	if loc := res.Header.Get("Location"); loc != "" {
+		t.Fatalf("unexpected redirect %q — must not issue a code without a matching browser nonce", loc)
+	}
+}
+
+// FIXATION / nonce-gate regression: an authenticated BFF session must NOT yield
+// a code at /authorize/complete when the caller presents the WRONG browser
+// nonce cookie (a nonce whose hash does not match the stored one). This is the
+// cross-browser takeover case: the attacker's browser holds its own nonce, not
+// the victim's. The response must be the no-redirect error page.
+func TestAuthorizeComplete_WrongNonce_ErrorPageNoCode(t *testing.T) {
+	ts, store := newBFFFlowServer(t)
+	const requestID = "seeded-request-id-wrong-nonce"
+	_ = seedAuthenticatedSession(t, store, requestID)
+
+	// Present a DIFFERENT (attacker-controlled) nonce whose hash cannot match.
+	wrongNonce, err := bff.NewBrowserNonce()
+	if err != nil {
+		t.Fatalf("NewBrowserNonce: %v", err)
+	}
+	wrongCookie := &http.Cookie{
+		Name:  bff.NonceCookieName,
+		Value: base64.RawURLEncoding.EncodeToString(wrongNonce),
+	}
+
+	res := getAuthorizeCompleteWithCookie(t, ts, requestID, wrongCookie)
+	defer func() { _ = res.Body.Close() }()
+
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (error page)", res.StatusCode)
+	}
+	if loc := res.Header.Get("Location"); loc != "" {
+		t.Fatalf("unexpected redirect %q — a mismatched browser nonce must never issue a code", loc)
 	}
 }
 
