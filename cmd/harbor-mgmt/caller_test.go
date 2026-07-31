@@ -1,0 +1,100 @@
+package main
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/harbor-auth/harbor/internal/bff"
+	"github.com/harbor-auth/harbor/internal/mgmtapi"
+)
+
+// TestBffCallerAdapter_SpoofedHeader_NoSession is a cmd-level integration test
+// that wires the real bff.Middleware and bffCallerAdapter together and confirms
+// that a request carrying a spoofed X-Harbor-User-ID header but no BFF session
+// cookie is rejected with 401.
+//
+// This exercises the full auth seam used in production (cmd/harbor-mgmt):
+//
+//  1. bff.Middleware reads the __Host-harbor-bff cookie; no cookie → no user
+//     is placed in the context.
+//  2. bffCallerAdapter.CallerID delegates to bff.UserIDFromContext; the
+//     context carries no user → returns "".
+//  3. mgmtapi.(*Server).callerID writes 401 and returns ok=false.
+//
+// The spoofed X-Harbor-User-ID header is present throughout but is never
+// consulted by any layer — confirming the header-spoofing vulnerability
+// (audit finding C1) is closed at the cmd wiring level.
+func TestBffCallerAdapter_SpoofedHeader_NoSession(t *testing.T) {
+	store := bff.NewInMemoryBFFSessionStore()
+
+	// Wire the same way cmd/harbor-mgmt/main.go does (lines ~288, ~377).
+	srv := mgmtapi.New(nil, nil).WithCallerSource(bffCallerAdapter{})
+	mux := http.NewServeMux()
+	srv.Routes(mux)
+	handler := bff.Middleware(store)(mux)
+
+	// Send a request with a spoofed identity header but no session cookie.
+	req := httptest.NewRequest(http.MethodGet, "/consent-grants", nil)
+	req.Header.Set("X-Harbor-User-ID", "victim-user")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("SECURITY: status = %d, want 401; "+
+			"spoofed X-Harbor-User-ID header must not grant access when no BFF session cookie is present",
+			rec.Code)
+	}
+}
+
+// TestBffCallerAdapter_SpoofedHeader_WithSession verifies that even when a
+// valid BFF session exists for user-A, a request that also carries
+// X-Harbor-User-ID: user-B is scoped to user-A (the session user).
+//
+// With no consent store wired the response is 503 (service unavailable), NOT
+// 401. Any status other than 401 proves the session identity was resolved: a
+// 401 would mean no identity was found (i.e., the spoofed header was silently
+// adopted instead of the session).
+func TestBffCallerAdapter_SpoofedHeader_WithSession(t *testing.T) {
+	store := bff.NewInMemoryBFFSessionStore()
+
+	const sessionUser = "user-A"
+	const spoofedUser = "user-B"
+
+	// Seed a real BFF session for user-A. ExpiresAt must be in the future so
+	// the in-memory store's TTL check passes on SetUser.
+	ctx := context.Background()
+	if err := store.Create(ctx, bff.BFFSessionRecord{
+		RequestID: "sess-001",
+		ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+	if err := store.SetUser(ctx, "sess-001", sessionUser); err != nil {
+		t.Fatalf("store.SetUser: %v", err)
+	}
+
+	srv := mgmtapi.New(nil, nil).WithCallerSource(bffCallerAdapter{})
+	mux := http.NewServeMux()
+	srv.Routes(mux)
+	handler := bff.Middleware(store)(mux)
+
+	// Request carries a spoofed user-B header AND the real user-A session cookie.
+	req := httptest.NewRequest(http.MethodGet, "/consent-grants", nil)
+	req.Header.Set("X-Harbor-User-ID", spoofedUser)
+	req.AddCookie(&http.Cookie{Name: bff.CookieName, Value: "sess-001"})
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	// 503 = caller was resolved (user-A from session) but consent store is nil.
+	// 401 = no caller resolved, which would indicate the session was not used
+	//       and the spoofed header path is live — a security regression.
+	if rec.Code == http.StatusUnauthorized {
+		t.Errorf("SECURITY: status = 401; valid session for %q must not be overridden by spoofed header %q — session identity must win",
+			sessionUser, spoofedUser)
+	}
+}

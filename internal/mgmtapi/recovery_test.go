@@ -132,9 +132,9 @@ func TestPostRecoveryCodes_Success(t *testing.T) {
 	gen := &fakeRecoveryCodeGenerator{}
 	store := &fakeRecoveryCodeStore{}
 	s, _ := newRecoveryServer(gen, store, &fakeRecoveryVerifier{})
+	s = s.WithCallerSource(fakeCallerSource{userID: "user-1"})
 
 	req := httptest.NewRequest(http.MethodPost, "/recovery/codes", strings.NewReader("{}"))
-	req.Header.Set(UserIDHeader, "user-1")
 	rec := httptest.NewRecorder()
 	s.PostRecoveryCodes(rec, req)
 
@@ -164,9 +164,8 @@ func TestPostRecoveryCodes_Unauthorized(t *testing.T) {
 }
 
 func TestPostRecoveryCodes_Unavailable(t *testing.T) {
-	s := New(nil, nil) // no recovery wired
+	s := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-1"}) // no recovery wired
 	req := httptest.NewRequest(http.MethodPost, "/recovery/codes", strings.NewReader("{}"))
-	req.Header.Set(UserIDHeader, "user-1")
 	rec := httptest.NewRecorder()
 	s.PostRecoveryCodes(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {
@@ -177,8 +176,8 @@ func TestPostRecoveryCodes_Unavailable(t *testing.T) {
 func TestPostRecoveryCodes_RateLimited(t *testing.T) {
 	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
 	s.WithRecoveryRateLimiter(&fakeRecoveryLimiter{allow: false})
+	s = s.WithCallerSource(fakeCallerSource{userID: "user-1"})
 	req := httptest.NewRequest(http.MethodPost, "/recovery/codes", strings.NewReader("{}"))
-	req.Header.Set(UserIDHeader, "user-1")
 	rec := httptest.NewRecorder()
 	s.PostRecoveryCodes(rec, req)
 	if rec.Code != http.StatusTooManyRequests {
@@ -188,8 +187,8 @@ func TestPostRecoveryCodes_RateLimited(t *testing.T) {
 
 func TestPostRecoveryCodes_GenerateError(t *testing.T) {
 	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{err: errors.New("rng down")}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s = s.WithCallerSource(fakeCallerSource{userID: "user-1"})
 	req := httptest.NewRequest(http.MethodPost, "/recovery/codes", strings.NewReader("{}"))
-	req.Header.Set(UserIDHeader, "user-1")
 	rec := httptest.NewRecorder()
 	s.PostRecoveryCodes(rec, req)
 	if rec.Code != http.StatusInternalServerError {
@@ -199,8 +198,8 @@ func TestPostRecoveryCodes_GenerateError(t *testing.T) {
 
 func TestPostRecoveryCodes_StoreError(t *testing.T) {
 	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{err: errors.New("db down")}, &fakeRecoveryVerifier{})
+	s = s.WithCallerSource(fakeCallerSource{userID: "user-1"})
 	req := httptest.NewRequest(http.MethodPost, "/recovery/codes", strings.NewReader("{}"))
-	req.Header.Set(UserIDHeader, "user-1")
 	rec := httptest.NewRecorder()
 	s.PostRecoveryCodes(rec, req)
 	if rec.Code != http.StatusInternalServerError {
@@ -510,9 +509,9 @@ func TestListCredentialsByUser_Success(t *testing.T) {
 	}}
 	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
 	s.WithRecoveryFactors(lister)
+	s.WithCallerSource(fakeCallerSource{userID: "user-1"})
 
 	req := httptest.NewRequest(http.MethodGet, "/recovery/factors", nil)
-	req.Header.Set(UserIDHeader, "user-1")
 	rec := httptest.NewRecorder()
 	s.ListCredentialsByUser(rec, req)
 
@@ -534,9 +533,9 @@ func TestListCredentialsByUser_Success(t *testing.T) {
 func TestListCredentialsByUser_EmptyIsArray(t *testing.T) {
 	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
 	s.WithRecoveryFactors(&fakeRecoveryFactorLister{}) // nil factors
+	s.WithCallerSource(fakeCallerSource{userID: "user-1"})
 
 	req := httptest.NewRequest(http.MethodGet, "/recovery/factors", nil)
-	req.Header.Set(UserIDHeader, "user-1")
 	rec := httptest.NewRecorder()
 	s.ListCredentialsByUser(rec, req)
 
@@ -562,9 +561,9 @@ func TestListCredentialsByUser_Unauthorized(t *testing.T) {
 
 func TestListCredentialsByUser_Unavailable(t *testing.T) {
 	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s.WithCallerSource(fakeCallerSource{userID: "user-1"})
 	// No factor lister wired.
 	req := httptest.NewRequest(http.MethodGet, "/recovery/factors", nil)
-	req.Header.Set(UserIDHeader, "user-1")
 	rec := httptest.NewRecorder()
 	s.ListCredentialsByUser(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {
@@ -576,8 +575,8 @@ func TestListCredentialsByUser_RateLimited(t *testing.T) {
 	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
 	s.WithRecoveryFactors(&fakeRecoveryFactorLister{})
 	s.WithRecoveryRateLimiter(&fakeRecoveryLimiter{allow: false})
+	s.WithCallerSource(fakeCallerSource{userID: "user-1"})
 	req := httptest.NewRequest(http.MethodGet, "/recovery/factors", nil)
-	req.Header.Set(UserIDHeader, "user-1")
 	rec := httptest.NewRecorder()
 	s.ListCredentialsByUser(rec, req)
 	if rec.Code != http.StatusTooManyRequests {
@@ -588,8 +587,8 @@ func TestListCredentialsByUser_RateLimited(t *testing.T) {
 func TestListCredentialsByUser_ListError(t *testing.T) {
 	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
 	s.WithRecoveryFactors(&fakeRecoveryFactorLister{err: errors.New("db down")})
+	s.WithCallerSource(fakeCallerSource{userID: "user-1"})
 	req := httptest.NewRequest(http.MethodGet, "/recovery/factors", nil)
-	req.Header.Set(UserIDHeader, "user-1")
 	rec := httptest.NewRecorder()
 	s.ListCredentialsByUser(rec, req)
 	if rec.Code != http.StatusInternalServerError {
@@ -600,11 +599,11 @@ func TestListCredentialsByUser_ListError(t *testing.T) {
 func TestListCredentialsByUser_Routed(t *testing.T) {
 	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
 	s.WithRecoveryFactors(&fakeRecoveryFactorLister{factors: []RecoveryFactor{{ID: "cred-1", Type: "passkey"}}})
+	s.WithCallerSource(fakeCallerSource{userID: "user-1"})
 	mux := http.NewServeMux()
 	s.Routes(mux)
 
 	req := httptest.NewRequest(http.MethodGet, "/recovery/factors", nil)
-	req.Header.Set(UserIDHeader, "user-1")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

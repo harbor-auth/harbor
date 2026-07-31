@@ -58,8 +58,8 @@ type RelayAddressesListResponse struct {
 }
 
 // GetRelayAddresses handles GET /relay-addresses — returns all relay addresses
-// for the authenticated user. The user ID comes from the X-Harbor-User-ID header
-// set by upstream authentication. The real email is NOT returned (it is encrypted
+// for the authenticated user. The caller identity is resolved from the
+// authenticated BFF session caller. The real email is NOT returned (it is encrypted
 // at rest and would require the user's DEK to decrypt); only the relay metadata
 // is exposed.
 func (s *Server) GetRelayAddresses(w http.ResponseWriter, r *http.Request) {
@@ -67,10 +67,8 @@ func (s *Server) GetRelayAddresses(w http.ResponseWriter, r *http.Request) {
 	outcome := telemetry.OutcomeError
 	defer func() { recordRequest(telemetry.EndpointRelay, outcome, start) }()
 
-	userID := r.Header.Get(UserIDHeader)
-	if userID == "" {
-		recordError(telemetry.EndpointRelay, "unauthorized")
-		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
+	userID, ok := s.callerID(w, r, telemetry.EndpointRelay)
+	if !ok {
 		return
 	}
 
@@ -112,10 +110,8 @@ func (s *Server) DeleteRelayAddress(w http.ResponseWriter, r *http.Request) {
 	outcome := telemetry.OutcomeError
 	defer func() { recordRequest(telemetry.EndpointRelay, outcome, start) }()
 
-	userID := r.Header.Get(UserIDHeader)
-	if userID == "" {
-		recordError(telemetry.EndpointRelay, "unauthorized")
-		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
+	userID, ok := s.callerID(w, r, telemetry.EndpointRelay)
+	if !ok {
 		return
 	}
 
@@ -234,10 +230,8 @@ func (s *Server) PostBYODomain(w http.ResponseWriter, r *http.Request) {
 	outcome := telemetry.OutcomeError
 	defer func() { recordRequest(telemetry.EndpointRelay, outcome, start) }()
 
-	userID := r.Header.Get(UserIDHeader)
-	if userID == "" {
-		recordError(telemetry.EndpointRelay, "unauthorized")
-		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
+	userID, ok := s.callerID(w, r, telemetry.EndpointRelay)
+	if !ok {
 		return
 	}
 
@@ -331,10 +325,8 @@ func (s *Server) GetBYODomains(w http.ResponseWriter, r *http.Request) {
 	outcome := telemetry.OutcomeError
 	defer func() { recordRequest(telemetry.EndpointRelay, outcome, start) }()
 
-	userID := r.Header.Get(UserIDHeader)
-	if userID == "" {
-		recordError(telemetry.EndpointRelay, "unauthorized")
-		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
+	userID, ok := s.callerID(w, r, telemetry.EndpointRelay)
+	if !ok {
 		return
 	}
 
@@ -369,10 +361,8 @@ func (s *Server) PostBYODomainVerify(w http.ResponseWriter, r *http.Request) {
 	outcome := telemetry.OutcomeError
 	defer func() { recordRequest(telemetry.EndpointRelay, outcome, start) }()
 
-	userID := r.Header.Get(UserIDHeader)
-	if userID == "" {
-		recordError(telemetry.EndpointRelay, "unauthorized")
-		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
+	userID, ok := s.callerID(w, r, telemetry.EndpointRelay)
+	if !ok {
 		return
 	}
 
@@ -448,10 +438,8 @@ func (s *Server) GetBYODomainDNSStatus(w http.ResponseWriter, r *http.Request) {
 	outcome := telemetry.OutcomeError
 	defer func() { recordRequest(telemetry.EndpointRelay, outcome, start) }()
 
-	userID := r.Header.Get(UserIDHeader)
-	if userID == "" {
-		recordError(telemetry.EndpointRelay, "unauthorized")
-		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
+	userID, ok := s.callerID(w, r, telemetry.EndpointRelay)
+	if !ok {
 		return
 	}
 
@@ -526,10 +514,8 @@ func (s *Server) DeleteBYODomain(w http.ResponseWriter, r *http.Request) {
 	outcome := telemetry.OutcomeError
 	defer func() { recordRequest(telemetry.EndpointRelay, outcome, start) }()
 
-	userID := r.Header.Get(UserIDHeader)
-	if userID == "" {
-		recordError(telemetry.EndpointRelay, "unauthorized")
-		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
+	userID, ok := s.callerID(w, r, telemetry.EndpointRelay)
+	if !ok {
 		return
 	}
 

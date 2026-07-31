@@ -87,12 +87,11 @@ func TestGetRelayAddresses_Success(t *testing.T) {
 		},
 	}
 
-	srv := New(nil, nil).WithRelayStore(store)
+	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userID.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	req := httptest.NewRequest("GET", "/relay-addresses", nil)
-	req.Header.Set(UserIDHeader, userID.String())
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, req)
@@ -133,12 +132,11 @@ func TestGetRelayAddresses_Success(t *testing.T) {
 func TestGetRelayAddresses_EmptyList(t *testing.T) {
 	store := &fakeRelayStore{addresses: nil}
 
-	srv := New(nil, nil).WithRelayStore(store)
+	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: "user-with-no-relays"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	req := httptest.NewRequest("GET", "/relay-addresses", nil)
-	req.Header.Set(UserIDHeader, "user-with-no-relays")
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, req)
@@ -164,7 +162,7 @@ func TestGetRelayAddresses_Unauthorized(t *testing.T) {
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
-	// No X-Harbor-User-ID header
+	// No authenticated caller (no CallerSource wired).
 	req := httptest.NewRequest("GET", "/relay-addresses", nil)
 	rec := httptest.NewRecorder()
 
@@ -186,12 +184,11 @@ func TestGetRelayAddresses_Unauthorized(t *testing.T) {
 
 func TestGetRelayAddresses_ServiceUnavailable(t *testing.T) {
 	// No relay store wired
-	srv := New(nil, nil)
+	srv := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	req := httptest.NewRequest("GET", "/relay-addresses", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, req)
@@ -206,12 +203,11 @@ func TestGetRelayAddresses_StoreError(t *testing.T) {
 		listErr: errors.New("database connection failed"),
 	}
 
-	srv := New(nil, nil).WithRelayStore(store)
+	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	req := httptest.NewRequest("GET", "/relay-addresses", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, req)
@@ -231,13 +227,12 @@ func TestGetRelayAddresses_OnlyReturnsOwnAddresses(t *testing.T) {
 		},
 	}
 
-	srv := New(nil, nil).WithRelayStore(store)
+	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userA.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	// User A requests their addresses
 	req := httptest.NewRequest("GET", "/relay-addresses", nil)
-	req.Header.Set(UserIDHeader, userA.String())
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -266,12 +261,11 @@ func TestDeleteRelayAddress_Success(t *testing.T) {
 		addresses: []*relay.Address{addr},
 	}
 
-	srv := New(nil, nil).WithRelayStore(store)
+	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userID.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	req := httptest.NewRequest("DELETE", "/relay-addresses/token-to-deactivate", nil)
-	req.Header.Set(UserIDHeader, userID.String())
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, req)
@@ -287,12 +281,11 @@ func TestDeleteRelayAddress_Success(t *testing.T) {
 func TestDeleteRelayAddress_NotFound(t *testing.T) {
 	store := &fakeRelayStore{addresses: nil}
 
-	srv := New(nil, nil).WithRelayStore(store)
+	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	req := httptest.NewRequest("DELETE", "/relay-addresses/nonexistent-token", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, req)
@@ -309,7 +302,7 @@ func TestDeleteRelayAddress_Unauthorized(t *testing.T) {
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
-	// No X-Harbor-User-ID header
+	// No authenticated caller (no CallerSource wired).
 	req := httptest.NewRequest("DELETE", "/relay-addresses/some-token", nil)
 	rec := httptest.NewRecorder()
 
@@ -322,12 +315,11 @@ func TestDeleteRelayAddress_Unauthorized(t *testing.T) {
 
 func TestDeleteRelayAddress_ServiceUnavailable(t *testing.T) {
 	// No relay store wired
-	srv := New(nil, nil)
+	srv := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	req := httptest.NewRequest("DELETE", "/relay-addresses/some-token", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, req)
@@ -346,12 +338,11 @@ func TestDeleteRelayAddress_DeactivateError(t *testing.T) {
 		deactivateErr: errors.New("deactivate failed"),
 	}
 
-	srv := New(nil, nil).WithRelayStore(store)
+	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userID.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	req := httptest.NewRequest("DELETE", "/relay-addresses/token-abc", nil)
-	req.Header.Set(UserIDHeader, userID.String())
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, req)
@@ -377,13 +368,12 @@ func TestSecurity_CrossUserRelayDeactivation(t *testing.T) {
 		},
 	}
 
-	srv := New(nil, nil).WithRelayStore(store)
+	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userA.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	// User A attempts to deactivate user B's relay address
 	req := httptest.NewRequest("DELETE", "/relay-addresses/token-belongs-to-userB", nil)
-	req.Header.Set(UserIDHeader, userA.String())
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -410,13 +400,12 @@ func TestSecurity_CrossUserRelayLeakage_List(t *testing.T) {
 		},
 	}
 
-	srv := New(nil, nil).WithRelayStore(store)
+	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userA.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	// User A requests their addresses
 	req := httptest.NewRequest("GET", "/relay-addresses", nil)
-	req.Header.Set(UserIDHeader, userA.String())
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -529,13 +518,12 @@ func TestPostBYODomain_Success(t *testing.T) {
 	userID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
 	store := newFakeBYODomainStore()
 
-	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id")
+	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userID.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	body := `{"domain": "mail.example.com"}`
 	req := httptest.NewRequest("POST", "/byo-domains", bytes.NewBufferString(body))
-	req.Header.Set(UserIDHeader, userID.String())
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -578,7 +566,7 @@ func TestPostBYODomain_Unauthorized(t *testing.T) {
 
 	body := `{"domain": "mail.example.com"}`
 	req := httptest.NewRequest("POST", "/byo-domains", bytes.NewBufferString(body))
-	// No user ID header
+	// No authenticated caller (no CallerSource wired).
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, req)
@@ -592,13 +580,12 @@ func TestPostBYODomain_InvalidDomain(t *testing.T) {
 	userID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
 	store := newFakeBYODomainStore()
 
-	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id")
+	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userID.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	body := `{"domain": "invalid"}`
 	req := httptest.NewRequest("POST", "/byo-domains", bytes.NewBufferString(body))
-	req.Header.Set(UserIDHeader, userID.String())
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -612,13 +599,12 @@ func TestPostBYODomain_InvalidDomain(t *testing.T) {
 func TestPostBYODomain_ServiceUnavailable(t *testing.T) {
 	userID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
 	// No BYO-domain store configured
-	srv := New(nil, nil)
+	srv := New(nil, nil).WithCallerSource(fakeCallerSource{userID: userID.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	body := `{"domain": "mail.example.com"}`
 	req := httptest.NewRequest("POST", "/byo-domains", bytes.NewBufferString(body))
-	req.Header.Set(UserIDHeader, userID.String())
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, req)
@@ -645,12 +631,11 @@ func TestGetBYODomains_Success(t *testing.T) {
 	}
 	store.domains["mail.example.com"] = domain
 
-	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id")
+	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userID.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	req := httptest.NewRequest("GET", "/byo-domains", nil)
-	req.Header.Set(UserIDHeader, userID.String())
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, req)
@@ -690,12 +675,11 @@ func TestDeleteBYODomain_Success(t *testing.T) {
 	}
 	store.domains["mail.example.com"] = domain
 
-	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id")
+	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userID.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	req := httptest.NewRequest("DELETE", "/byo-domains/mail.example.com", nil)
-	req.Header.Set(UserIDHeader, userID.String())
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, req)
@@ -713,12 +697,11 @@ func TestDeleteBYODomain_NotFound(t *testing.T) {
 	userID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
 	store := newFakeBYODomainStore()
 
-	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id")
+	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userID.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	req := httptest.NewRequest("DELETE", "/byo-domains/nonexistent.example.com", nil)
-	req.Header.Set(UserIDHeader, userID.String())
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, req)
@@ -747,13 +730,12 @@ func TestSecurity_CrossUserBYODomainAccess(t *testing.T) {
 		ExpiresAt:      time.Now().Add(72 * time.Hour),
 	}
 
-	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id")
+	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userA.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	// User A tries to delete user B's domain
 	req := httptest.NewRequest("DELETE", "/byo-domains/userb-domain.example.com", nil)
-	req.Header.Set(UserIDHeader, userA.String())
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, req)
@@ -796,13 +778,12 @@ func TestSecurity_CrossUserBYODomainList(t *testing.T) {
 		ExpiresAt: time.Now().Add(72 * time.Hour),
 	}
 
-	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id")
+	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userA.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	// User A requests their domains
 	req := httptest.NewRequest("GET", "/byo-domains", nil)
-	req.Header.Set(UserIDHeader, userA.String())
 	rec := httptest.NewRecorder()
 
 	mux.ServeHTTP(rec, req)

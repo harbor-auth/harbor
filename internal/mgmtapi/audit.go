@@ -95,7 +95,7 @@ func auditPayloadAAD(userID string) []byte {
 //
 // Responses:
 //   - 200 OK                  on success ({events: [...]})
-//   - 401 Unauthorized        missing X-Harbor-User-ID
+//   - 401 Unauthorized        missing authenticated BFF session
 //   - 503 Service Unavailable audit trail not configured
 //   - 500 Internal Server Error DB or crypto failure
 func (s *Server) GetAuditEvents(w http.ResponseWriter, r *http.Request) {
@@ -103,10 +103,8 @@ func (s *Server) GetAuditEvents(w http.ResponseWriter, r *http.Request) {
 	outcome := telemetry.OutcomeError
 	defer func() { recordRequest(telemetry.EndpointAudit, outcome, start) }()
 
-	userID := r.Header.Get(UserIDHeader)
-	if userID == "" {
-		recordError(telemetry.EndpointAudit, "unauthorized")
-		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
+	userID, ok := s.callerID(w, r, telemetry.EndpointAudit)
+	if !ok {
 		return
 	}
 

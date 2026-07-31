@@ -84,9 +84,14 @@ func newTestAuditDeps(store AuditStore, users AuditUserReader, keys AuditKeyUnwr
 }
 
 // newAuditMux builds a mgmtapi Server with the given AuditTrailDeps wired and
-// returns its ServeMux, ready for httptest requests.
-func newAuditMux(deps *AuditTrailDeps) *http.ServeMux {
+// returns its ServeMux, ready for httptest requests. A non-empty userID seeds
+// the authenticated caller via a fakeCallerSource; an empty userID leaves the
+// server without a caller source so requests resolve as unauthenticated (401).
+func newAuditMux(deps *AuditTrailDeps, userID string) *http.ServeMux {
 	srv := New(nil, nil).WithAuditTrail(deps)
+	if userID != "" {
+		srv = srv.WithCallerSource(fakeCallerSource{userID: userID})
+	}
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 	return mux
@@ -100,10 +105,10 @@ func TestGetAuditEvents_Unauthorized(t *testing.T) {
 		&fakeAuditUserReader{region: "EU"},
 		&fakeAuditKeyUnwrapper{},
 		&fakeAuditDecryptor{},
-	))
+	), "")
 
 	req := httptest.NewRequest("GET", "/audit-events", nil)
-	// No X-Harbor-User-ID header.
+	// No authenticated caller.
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -121,12 +126,11 @@ func TestGetAuditEvents_Unauthorized(t *testing.T) {
 
 func TestGetAuditEvents_ServiceUnavailable(t *testing.T) {
 	// nil auditTrail → 503.
-	srv := New(nil, nil)
+	srv := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
 	req := httptest.NewRequest("GET", "/audit-events", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -174,10 +178,9 @@ func TestGetAuditEvents_Success(t *testing.T) {
 		&fakeAuditKeyUnwrapper{},
 		// Decryptor returns the detail JSON for any non-empty ciphertext.
 		&fakeAuditDecryptor{plaintext: []byte(detail)},
-	))
+	), "user-123")
 
 	req := httptest.NewRequest("GET", "/audit-events", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -230,10 +233,9 @@ func TestGetAuditEvents_OnlyOwnEvents(t *testing.T) {
 		&fakeAuditUserReader{region: "EU"},
 		&fakeAuditKeyUnwrapper{},
 		&fakeAuditDecryptor{},
-	))
+	), "user-A")
 
 	req := httptest.NewRequest("GET", "/audit-events", nil)
-	req.Header.Set(UserIDHeader, "user-A")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -268,10 +270,9 @@ func TestGetAuditEvents_CryptoShredSkeletonFallback(t *testing.T) {
 		&fakeAuditKeyUnwrapper{},
 		// Decryptor returns ErrDecryptFailed — simulates DEK destroyed.
 		&fakeAuditDecryptor{err: crypto.ErrDecryptFailed},
-	))
+	), "user-erasure")
 
 	req := httptest.NewRequest("GET", "/audit-events", nil)
-	req.Header.Set(UserIDHeader, "user-erasure")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -301,10 +302,9 @@ func TestGetAuditEvents_UserLoadError(t *testing.T) {
 		&fakeAuditUserReader{err: errors.New("DB connection failed")},
 		&fakeAuditKeyUnwrapper{},
 		&fakeAuditDecryptor{},
-	))
+	), "user-123")
 
 	req := httptest.NewRequest("GET", "/audit-events", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -326,10 +326,9 @@ func TestGetAuditEvents_DEKUnwrapError(t *testing.T) {
 		&fakeAuditUserReader{region: "EU"},
 		&fakeAuditKeyUnwrapper{err: errors.New("HSM unavailable")},
 		&fakeAuditDecryptor{},
-	))
+	), "user-123")
 
 	req := httptest.NewRequest("GET", "/audit-events", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -351,10 +350,9 @@ func TestGetAuditEvents_StoreError(t *testing.T) {
 		&fakeAuditUserReader{region: "EU"},
 		&fakeAuditKeyUnwrapper{},
 		&fakeAuditDecryptor{},
-	))
+	), "user-123")
 
 	req := httptest.NewRequest("GET", "/audit-events", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -376,10 +374,9 @@ func TestGetAuditEvents_EmptyList(t *testing.T) {
 		&fakeAuditUserReader{region: "EU"},
 		&fakeAuditKeyUnwrapper{},
 		&fakeAuditDecryptor{},
-	))
+	), "user-no-events")
 
 	req := httptest.NewRequest("GET", "/audit-events", nil)
-	req.Header.Set(UserIDHeader, "user-no-events")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -404,10 +401,9 @@ func TestGetAuditEvents_PaginationClamped(t *testing.T) {
 		&fakeAuditUserReader{region: "EU"},
 		&fakeAuditKeyUnwrapper{},
 		&fakeAuditDecryptor{},
-	))
+	), "user-123")
 
 	req := httptest.NewRequest("GET", "/audit-events?limit=200&offset=25", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 
@@ -433,10 +429,9 @@ func TestGetAuditEvents_DefaultPagination(t *testing.T) {
 		&fakeAuditUserReader{region: "EU"},
 		&fakeAuditKeyUnwrapper{},
 		&fakeAuditDecryptor{},
-	))
+	), "user-123")
 
 	req := httptest.NewRequest("GET", "/audit-events", nil)
-	req.Header.Set(UserIDHeader, "user-123")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 

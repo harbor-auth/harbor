@@ -94,7 +94,9 @@ func newMFAServer(svc MFAService) *Server {
 	return New(nil, nil).WithMFA(svc)
 }
 
-// mfaRequest builds an authenticated (unless userID is empty) MFA request.
+// mfaRequest builds an MFA request. Authentication is wired on the server via
+// WithCallerSource; the userID parameter is retained for call-site readability
+// but no longer sets a request header.
 func mfaRequest(method, path, body, userID string) *http.Request {
 	var r *http.Request
 	if body == "" {
@@ -102,9 +104,7 @@ func mfaRequest(method, path, body, userID string) *http.Request {
 	} else {
 		r = httptest.NewRequest(method, path, strings.NewReader(body))
 	}
-	if userID != "" {
-		r.Header.Set(UserIDHeader, userID)
-	}
+	_ = userID // authentication is via server CallerSource, not a request header
 	return r
 }
 
@@ -112,7 +112,7 @@ func mfaRequest(method, path, body, userID string) *http.Request {
 
 func TestPostMFAEnroll_Success(t *testing.T) {
 	svc := &fakeMFAService{}
-	s := newMFAServer(svc)
+	s := newMFAServer(svc).WithCallerSource(fakeCallerSource{userID: "user-1"})
 
 	rec := httptest.NewRecorder()
 	s.PostMFAEnroll(rec, mfaRequest(http.MethodPost, "/mfa/enroll", "{}", "user-1"))
@@ -136,7 +136,7 @@ func TestPostMFAEnroll_Success(t *testing.T) {
 }
 
 func TestPostMFAEnroll_AlreadyEnrolled(t *testing.T) {
-	s := newMFAServer(&fakeMFAService{enrollErr: mfa.ErrAlreadyEnrolled})
+	s := newMFAServer(&fakeMFAService{enrollErr: mfa.ErrAlreadyEnrolled}).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.PostMFAEnroll(rec, mfaRequest(http.MethodPost, "/mfa/enroll", "{}", "user-1"))
 	if rec.Code != http.StatusConflict {
@@ -154,7 +154,7 @@ func TestPostMFAEnroll_Unauthorized(t *testing.T) {
 }
 
 func TestPostMFAEnroll_Unavailable(t *testing.T) {
-	s := New(nil, nil) // no MFA wired
+	s := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-1"}) // no MFA wired
 	rec := httptest.NewRecorder()
 	s.PostMFAEnroll(rec, mfaRequest(http.MethodPost, "/mfa/enroll", "{}", "user-1"))
 	if rec.Code != http.StatusServiceUnavailable {
@@ -163,7 +163,7 @@ func TestPostMFAEnroll_Unavailable(t *testing.T) {
 }
 
 func TestPostMFAEnroll_ServerError(t *testing.T) {
-	s := newMFAServer(&fakeMFAService{enrollErr: errors.New("db down")})
+	s := newMFAServer(&fakeMFAService{enrollErr: errors.New("db down")}).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.PostMFAEnroll(rec, mfaRequest(http.MethodPost, "/mfa/enroll", "{}", "user-1"))
 	if rec.Code != http.StatusInternalServerError {
@@ -175,7 +175,7 @@ func TestPostMFAEnroll_ServerError(t *testing.T) {
 
 func TestPostMFAActivate_Success(t *testing.T) {
 	svc := &fakeMFAService{}
-	s := newMFAServer(svc)
+	s := newMFAServer(svc).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.PostMFAActivate(rec, mfaRequest(http.MethodPost, "/mfa/activate", `{"code":"123456"}`, "user-1"))
 	if rec.Code != http.StatusOK {
@@ -187,7 +187,7 @@ func TestPostMFAActivate_Success(t *testing.T) {
 }
 
 func TestPostMFAActivate_InvalidCode(t *testing.T) {
-	s := newMFAServer(&fakeMFAService{activateErr: mfa.ErrInvalidCode})
+	s := newMFAServer(&fakeMFAService{activateErr: mfa.ErrInvalidCode}).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.PostMFAActivate(rec, mfaRequest(http.MethodPost, "/mfa/activate", `{"code":"000000"}`, "user-1"))
 	if rec.Code != http.StatusUnauthorized {
@@ -196,7 +196,7 @@ func TestPostMFAActivate_InvalidCode(t *testing.T) {
 }
 
 func TestPostMFAActivate_NotEnrolled(t *testing.T) {
-	s := newMFAServer(&fakeMFAService{activateErr: mfa.ErrNotEnrolled})
+	s := newMFAServer(&fakeMFAService{activateErr: mfa.ErrNotEnrolled}).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.PostMFAActivate(rec, mfaRequest(http.MethodPost, "/mfa/activate", `{"code":"123456"}`, "user-1"))
 	if rec.Code != http.StatusBadRequest {
@@ -205,7 +205,7 @@ func TestPostMFAActivate_NotEnrolled(t *testing.T) {
 }
 
 func TestPostMFAActivate_MalformedBody(t *testing.T) {
-	s := newMFAServer(&fakeMFAService{})
+	s := newMFAServer(&fakeMFAService{}).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.PostMFAActivate(rec, mfaRequest(http.MethodPost, "/mfa/activate", `{not json`, "user-1"))
 	if rec.Code != http.StatusBadRequest {
@@ -215,7 +215,7 @@ func TestPostMFAActivate_MalformedBody(t *testing.T) {
 
 func TestPostMFAActivate_MissingCode(t *testing.T) {
 	svc := &fakeMFAService{}
-	s := newMFAServer(svc)
+	s := newMFAServer(svc).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.PostMFAActivate(rec, mfaRequest(http.MethodPost, "/mfa/activate", `{}`, "user-1"))
 	if rec.Code != http.StatusBadRequest {
@@ -236,7 +236,7 @@ func TestPostMFAActivate_Unauthorized(t *testing.T) {
 }
 
 func TestPostMFAActivate_Unavailable(t *testing.T) {
-	s := New(nil, nil)
+	s := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.PostMFAActivate(rec, mfaRequest(http.MethodPost, "/mfa/activate", `{"code":"123456"}`, "user-1"))
 	if rec.Code != http.StatusServiceUnavailable {
@@ -248,7 +248,7 @@ func TestPostMFAActivate_Unavailable(t *testing.T) {
 
 func TestPostMFAVerify_Success(t *testing.T) {
 	svc := &fakeMFAService{}
-	s := newMFAServer(svc)
+	s := newMFAServer(svc).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.PostMFAVerify(rec, mfaRequest(http.MethodPost, "/mfa/verify", `{"code":"123456"}`, "user-1"))
 	if rec.Code != http.StatusOK {
@@ -260,7 +260,7 @@ func TestPostMFAVerify_Success(t *testing.T) {
 }
 
 func TestPostMFAVerify_InvalidCode(t *testing.T) {
-	s := newMFAServer(&fakeMFAService{verifyErr: mfa.ErrInvalidCode})
+	s := newMFAServer(&fakeMFAService{verifyErr: mfa.ErrInvalidCode}).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.PostMFAVerify(rec, mfaRequest(http.MethodPost, "/mfa/verify", `{"code":"000000"}`, "user-1"))
 	if rec.Code != http.StatusUnauthorized {
@@ -269,7 +269,7 @@ func TestPostMFAVerify_InvalidCode(t *testing.T) {
 }
 
 func TestPostMFAVerify_NotEnrolled(t *testing.T) {
-	s := newMFAServer(&fakeMFAService{verifyErr: mfa.ErrNotEnrolled})
+	s := newMFAServer(&fakeMFAService{verifyErr: mfa.ErrNotEnrolled}).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.PostMFAVerify(rec, mfaRequest(http.MethodPost, "/mfa/verify", `{"code":"123456"}`, "user-1"))
 	if rec.Code != http.StatusBadRequest {
@@ -287,7 +287,7 @@ func TestPostMFAVerify_Unauthorized(t *testing.T) {
 }
 
 func TestPostMFAVerify_Unavailable(t *testing.T) {
-	s := New(nil, nil)
+	s := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.PostMFAVerify(rec, mfaRequest(http.MethodPost, "/mfa/verify", `{"code":"123456"}`, "user-1"))
 	if rec.Code != http.StatusServiceUnavailable {
@@ -299,7 +299,7 @@ func TestPostMFAVerify_Unavailable(t *testing.T) {
 
 func TestPostMFAVerifyRecovery_Success(t *testing.T) {
 	svc := &fakeMFAService{}
-	s := newMFAServer(svc)
+	s := newMFAServer(svc).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.PostMFAVerifyRecovery(rec, mfaRequest(http.MethodPost, "/mfa/verify-recovery", `{"code":"CODE-1111"}`, "user-1"))
 	if rec.Code != http.StatusOK {
@@ -311,7 +311,7 @@ func TestPostMFAVerifyRecovery_Success(t *testing.T) {
 }
 
 func TestPostMFAVerifyRecovery_InvalidCode(t *testing.T) {
-	s := newMFAServer(&fakeMFAService{recoveryErr: mfa.ErrInvalidCode})
+	s := newMFAServer(&fakeMFAService{recoveryErr: mfa.ErrInvalidCode}).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.PostMFAVerifyRecovery(rec, mfaRequest(http.MethodPost, "/mfa/verify-recovery", `{"code":"WRONG"}`, "user-1"))
 	if rec.Code != http.StatusUnauthorized {
@@ -320,7 +320,7 @@ func TestPostMFAVerifyRecovery_InvalidCode(t *testing.T) {
 }
 
 func TestPostMFAVerifyRecovery_MalformedBody(t *testing.T) {
-	s := newMFAServer(&fakeMFAService{})
+	s := newMFAServer(&fakeMFAService{}).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.PostMFAVerifyRecovery(rec, mfaRequest(http.MethodPost, "/mfa/verify-recovery", `{not json`, "user-1"))
 	if rec.Code != http.StatusBadRequest {
@@ -338,7 +338,7 @@ func TestPostMFAVerifyRecovery_Unauthorized(t *testing.T) {
 }
 
 func TestPostMFAVerifyRecovery_Unavailable(t *testing.T) {
-	s := New(nil, nil)
+	s := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.PostMFAVerifyRecovery(rec, mfaRequest(http.MethodPost, "/mfa/verify-recovery", `{"code":"CODE-1111"}`, "user-1"))
 	if rec.Code != http.StatusServiceUnavailable {
@@ -353,7 +353,7 @@ func TestGetMFAFactors_Success(t *testing.T) {
 		{ID: "f1", Type: mfa.FactorTypeTOTP, Used: true, CreatedAt: time.Unix(1700000000, 0)},
 		{ID: "f2", Type: mfa.FactorTypeRecovery, Used: false, CreatedAt: time.Unix(1700000001, 0)},
 	}}
-	s := newMFAServer(svc)
+	s := newMFAServer(svc).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.GetMFAFactors(rec, mfaRequest(http.MethodGet, "/mfa/factors", "", "user-1"))
 
@@ -373,7 +373,7 @@ func TestGetMFAFactors_Success(t *testing.T) {
 }
 
 func TestGetMFAFactors_EmptyIsArray(t *testing.T) {
-	s := newMFAServer(&fakeMFAService{}) // nil listResult
+	s := newMFAServer(&fakeMFAService{}).WithCallerSource(fakeCallerSource{userID: "user-1"}) // nil listResult
 	rec := httptest.NewRecorder()
 	s.GetMFAFactors(rec, mfaRequest(http.MethodGet, "/mfa/factors", "", "user-1"))
 	if rec.Code != http.StatusOK {
@@ -395,7 +395,7 @@ func TestGetMFAFactors_Unauthorized(t *testing.T) {
 }
 
 func TestGetMFAFactors_Unavailable(t *testing.T) {
-	s := New(nil, nil)
+	s := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.GetMFAFactors(rec, mfaRequest(http.MethodGet, "/mfa/factors", "", "user-1"))
 	if rec.Code != http.StatusServiceUnavailable {
@@ -404,7 +404,7 @@ func TestGetMFAFactors_Unavailable(t *testing.T) {
 }
 
 func TestGetMFAFactors_ListError(t *testing.T) {
-	s := newMFAServer(&fakeMFAService{listErr: errors.New("db down")})
+	s := newMFAServer(&fakeMFAService{listErr: errors.New("db down")}).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 	s.GetMFAFactors(rec, mfaRequest(http.MethodGet, "/mfa/factors", "", "user-1"))
 	if rec.Code != http.StatusInternalServerError {
@@ -415,13 +415,13 @@ func TestGetMFAFactors_ListError(t *testing.T) {
 // --- DELETE /mfa/factors/{id} ---
 
 // deleteMFAFactor routes a DELETE through the mux so the {id} path value is set.
+// Authentication is wired on the server via WithCallerSource; the userID
+// parameter is retained for call-site readability but no longer sets a header.
 func deleteMFAFactor(s *Server, id, userID string) *httptest.ResponseRecorder {
 	mux := http.NewServeMux()
 	s.Routes(mux)
 	req := httptest.NewRequest(http.MethodDelete, "/mfa/factors/"+id, nil)
-	if userID != "" {
-		req.Header.Set(UserIDHeader, userID)
-	}
+	_ = userID // authentication is via server CallerSource, not a request header
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	return rec
@@ -429,7 +429,7 @@ func deleteMFAFactor(s *Server, id, userID string) *httptest.ResponseRecorder {
 
 func TestDeleteMFAFactor_Success(t *testing.T) {
 	svc := &fakeMFAService{}
-	s := newMFAServer(svc)
+	s := newMFAServer(svc).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := deleteMFAFactor(s, "factor-1", "user-1")
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204; body=%s", rec.Code, rec.Body.String())
@@ -448,7 +448,7 @@ func TestDeleteMFAFactor_Unauthorized(t *testing.T) {
 }
 
 func TestDeleteMFAFactor_Unavailable(t *testing.T) {
-	s := New(nil, nil)
+	s := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := deleteMFAFactor(s, "factor-1", "user-1")
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rec.Code)
@@ -456,7 +456,7 @@ func TestDeleteMFAFactor_Unavailable(t *testing.T) {
 }
 
 func TestDeleteMFAFactor_DisableError(t *testing.T) {
-	s := newMFAServer(&fakeMFAService{disableErr: errors.New("db down")})
+	s := newMFAServer(&fakeMFAService{disableErr: errors.New("db down")}).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := deleteMFAFactor(s, "factor-1", "user-1")
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500", rec.Code)
@@ -467,12 +467,11 @@ func TestDeleteMFAFactor_DisableError(t *testing.T) {
 
 func TestRoutesRegistersMFA(t *testing.T) {
 	svc := &fakeMFAService{}
-	s := newMFAServer(svc)
+	s := newMFAServer(svc).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	mux := http.NewServeMux()
 	s.Routes(mux)
 
 	req := httptest.NewRequest(http.MethodPost, "/mfa/enroll", strings.NewReader("{}"))
-	req.Header.Set(UserIDHeader, "user-1")
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {

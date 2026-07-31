@@ -70,11 +70,14 @@ type mfaStatusResponse struct {
 	Status string `json:"status"`
 }
 
-// mfaUserID resolves the authenticated user id from the upstream-set header,
+// mfaUserID resolves the authenticated user id from the BFF session context,
 // writing a 401 and returning ok=false when absent. Every MFA endpoint is for
 // an already-authenticated user managing their own factors.
 func (s *Server) mfaUserID(w http.ResponseWriter, r *http.Request) (string, bool) {
-	userID := r.Header.Get(UserIDHeader)
+	var userID string
+	if s.callerSource != nil {
+		userID = s.callerSource.CallerID(r.Context())
+	}
 	if userID == "" {
 		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
 		return "", false
