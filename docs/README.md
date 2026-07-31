@@ -71,10 +71,10 @@ docs/plans/         → future WHAT — intent not yet built
 | [kyverno-policies](plans/kyverno-policies.md) | building on Weft (`feat_41ebcf7f`) | §4.4, §1.5, §A.8 | `deploy/kyverno/` |
 | [production-readiness](plans/production-readiness.md) | audit doc | — | see [`plans/production-readiness.md`](plans/production-readiness.md) |
 | [audit-2026-07-30-wiring-and-auth](plans/audit-2026-07-30-wiring-and-auth.md) | audit doc | — | see [`plans/audit-2026-07-30-wiring-and-auth.md`](plans/audit-2026-07-30-wiring-and-auth.md) |
-| [fix-mgmt-context-auth](plans/fix-mgmt-context-auth.md) | draft — Wave 7 root (C1 🔴) | §9, §6.5, §11.3 | `internal/mgmtapi/`, `internal/bff/`, `e2e/` |
-| [admin-endpoint-auth](plans/admin-endpoint-auth.md) | draft — Wave 7 root (C2 🔴) | §7.3, §7.4, §3.5, §6.5 | `internal/oidcapi/`, `cmd/harbor-hot/`, `api/openapi/`, `deploy/` |
-| [fix-bff-session-binding](plans/fix-bff-session-binding.md) | draft — Wave 7 root (C3 🔴) | §9, §11.2, §11.7 | `internal/bff/`, `internal/oidcapi/`, `cmd/harbor-hot/`, `cmd/harbor-mgmt/` |
-| [hardening-cleanup](plans/hardening-cleanup.md) | draft — Wave 7 root (M4/M5) | §6.5, §3.4, §7.5 | `internal/bff/`, `internal/httpserver/`, `internal/oidcapi/`, `internal/relay/` |
+| [fix-mgmt-context-auth](plans/fix-mgmt-context-auth.md) | building on Weft (`feat_887df986`) — Wave 7 root (C1 🔴) | §9, §6.5, §11.3 | `internal/mgmtapi/`, `internal/bff/`, `e2e/` |
+| [admin-endpoint-auth](plans/admin-endpoint-auth.md) | building on Weft (`feat_96d1d95a`) — Wave 7 root (C2 🔴) | §7.3, §7.4, §3.5, §6.5 | `internal/oidcapi/`, `cmd/harbor-hot/`, `api/openapi/`, `deploy/` |
+| [fix-bff-session-binding](plans/fix-bff-session-binding.md) | building on Weft (`feat_baf9dff1`) — Wave 7 root (C3 🔴) | §9, §11.2, §11.7 | `internal/bff/`, `internal/oidcapi/`, `cmd/harbor-hot/`, `cmd/harbor-mgmt/` |
+| [hardening-cleanup](plans/hardening-cleanup.md) | building on Weft (`feat_64e522c7`) — Wave 7 root (M4/M5) | §6.5, §3.4, §7.5 | `internal/bff/`, `internal/httpserver/`, `internal/oidcapi/`, `internal/relay/` |
 | [production-wiring-collapse](plans/production-wiring-collapse.md) | draft — Wave 7 (H1/H8/M1) | §4.1, §4.4, §10, §1.7 | `cmd/harbor-hot/`, `cmd/harbor-mgmt/`, `internal/oidc/`, `internal/clients/` |
 | [client-secret-auth](plans/client-secret-auth.md) | draft — Wave 7 (C4 🔴) | §3.3, §3.1 | `internal/oidcapi/`, `internal/clients/` |
 | [unify-token-verification](plans/unify-token-verification.md) | draft — Wave 7 (H4/H5) | §3.3, §3.5, §7.3, §11.7 | `internal/oidc/`, `internal/oidcapi/` |
