@@ -94,6 +94,13 @@ type BFFSessionRecord struct {
 	// (docs/DESIGN.md §3.1, §7.3).
 	MFAVerifiedAt time.Time
 
+	// BrowserNonceHash is the SHA-256 hash of the one-time browser nonce
+	// minted at /authorize. It is used to bind the session to the specific
+	// browser that initiated the flow and prevent session fixation attacks
+	// (docs/plans/fix-bff-session-binding.md). The hash is stored rather than
+	// the raw nonce so that a store compromise does not yield live cookies.
+	BrowserNonceHash []byte
+
 	// ExpiresAt is the absolute time after which the session is invalid.
 	// Callers must enforce this; the store may also TTL-evict.
 	ExpiresAt time.Time
