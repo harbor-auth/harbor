@@ -139,17 +139,52 @@ jobs:
             exit 1
           fi
 
-  # helm-lint — validates the Helm chart on every PR. Helm is pre-installed on
-  # ubuntu-latest runners so no Nix shell is needed. Runs independently of the
-  # Nix-based checks so a chart syntax error doesn't block the Go test output.
+  # helm-lint — validates the Helm chart on every PR in TWO configurations:
+  #
+  #   1. Default values (relay.enabled=false) — catches regressions in the base chart.
+  #   2. Relay enabled (--set relay.enabled=true) — forces relay templates to render so
+  #      lint and template errors in configmap-relay, deployment-relay, secret-relay,
+  #      service-relay, and networkpolicy-relay are caught in CI.
+  #
+  # Background: deploy/helm/values.yaml ships with relay.enabled=false, so a plain
+  # `helm lint deploy/helm/` never renders any relay template. That is exactly how
+  # #82 (harbor-relay) shipped with no NetworkPolicy while CI stayed green throughout
+  # — the whole template set was invisible to the linter. #92 fixed the missing policy
+  # after the fact; this step prevents the same blind spot recurring.
+  #
+  # Each configuration runs BOTH `helm lint` (schema/structure check) AND
+  # `helm template | python3 yaml-parse` (actual rendering + YAML validity).
+  # `helm lint` alone does not catch a template that fails to render or emits
+  # invalid YAML; `helm template` is what actually exercises the rendering path.
+  # No cluster is required — a successful `helm template` plus a YAML parse is
+  # sufficient to prove the templates are well-formed.
+  #
+  # Helm is pre-installed on ubuntu-latest runners; Python 3 + PyYAML are too.
+  # Runs independently of the Nix-based checks so a chart syntax error does not
+  # block the Go test output.
   helm-lint:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Lint Helm chart
+      # --- pass 1: default values (relay.enabled=false) ---
+      - name: Lint Helm chart (defaults)
         run: helm lint deploy/helm/
+
+      - name: Template Helm chart (defaults)
+        run: |
+          helm template harbor deploy/helm/ > /tmp/harbor-defaults.yaml
+          python3 -c "import yaml; list(yaml.safe_load_all(open('/tmp/harbor-defaults.yaml'))); print('yaml parse: OK')"
+
+      # --- pass 2: relay enabled (templates that are invisible at defaults) ---
+      - name: Lint Helm chart (relay.enabled=true)
+        run: helm lint deploy/helm/ --set relay.enabled=true
+
+      - name: Template Helm chart (relay.enabled=true)
+        run: |
+          helm template harbor deploy/helm/ --set relay.enabled=true > /tmp/harbor-relay.yaml
+          python3 -c "import yaml; list(yaml.safe_load_all(open('/tmp/harbor-relay.yaml'))); print('yaml parse: OK')"
 
   # e2e — Foundation F8: the composed OIDC harness run on every PR.
   # Runs `make e2e` (docker-compose + `go test -tags=e2e ./e2e/...`) in the
