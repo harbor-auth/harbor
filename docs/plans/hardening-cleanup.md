@@ -130,6 +130,47 @@ contract), §7.5 (relay addressing). No DESIGN change.
 - `.gitignore`, `tools/lint/filesize/` — hygiene + guard
 - `db/migrations/0017_logout_uris.up.sql` — timeout header
 
+## Added after launch — 2026-07-31
+
+10. **The relay Helm templates are never linted.**
+    `deploy/helm/values.yaml` sets `relay.enabled: false`, so the
+    `helm lint deploy/helm/` that CI runs **never renders** `configmap-relay`,
+    `deployment-relay`, `secret-relay`, `service-relay` or
+    `networkpolicy-relay`. The relay merged in #82 with **no NetworkPolicy at
+    all** and CI stayed green throughout, because the whole template set was
+    invisible to the linter. Caught by hand, fixed in #92 — but every future
+    relay template has the same blind spot.
+
+    FIX: in `.github/workflows/ci.yml`, extend the existing `helm-lint` job to
+    validate the chart in **two** configurations: (1) defaults, as today, and
+    (2) optional components on — at minimum `--set relay.enabled=true`.
+
+    Use `helm lint` **and** `helm template` for each. `lint` alone does not
+    catch a template that fails to render or emits invalid YAML; `helm template`
+    is what actually exercises it. Do not add a cluster dependency — `helm
+    template` succeeding plus a YAML parse is sufficient. Prefer a small matrix
+    or two explicit steps over duplicating the job, and keep it fast.
+
+    **Prove the guard works before calling it done:** temporarily break a relay
+    template (reference an undefined value), confirm the new CI step FAILS, then
+    revert. A guard that cannot fail is not a guard — the same failure mode as a
+    plan `status:` field asserting success while verifying nothing, which is
+    what this whole wave exists to clean up.
+
+> ### Rebase note
+>
+> `main` has moved since this plan was written. **PR #82** (harbor-relay binary)
+> and **PR #92** (relay NetworkPolicy + `enforceAuth` default `true`) have both
+> landed. Rebase onto `origin/main` before continuing.
+>
+> This directly affects item 7: `.gitignore` on main **already** gained a
+> `/harbor-relay` entry via #82. Keep **both** that entry and the nested-path fix
+> for `cmd/harbor-hot/harbor-hot` — that binary is still tracked on main and
+> still needs removing. Item 7 is otherwise unchanged.
+>
+> Item 4 (`relay.FormatEmail` / `RELAY_DOMAIN`) remains this feature's work; #92
+> deliberately left it alone to avoid colliding with the in-flight task.
+
 ## Implementation checklist
 
 - [ ] `Origin`/`Sec-Fetch-Site` middleware; apply to all four mutating dashboard routes
