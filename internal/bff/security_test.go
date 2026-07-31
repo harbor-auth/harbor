@@ -232,7 +232,7 @@ func TestSecurity_SessionFixation_AttackerMintedRequestID(t *testing.T) {
 
 	// The nonce gate MUST refuse: missing nonce ≠ stored hash.
 	if rec.Code == http.StatusOK {
-		t.Errorf("status = 200: BeginLogin accepted victim request with no nonce cookie — "+
+		t.Errorf("status = 200: BeginLogin accepted victim request with no nonce cookie — " +
 			"session fixation is NOT prevented (want 4xx refusal)")
 	}
 	if rec.Code/100 == 3 {
