@@ -35,14 +35,14 @@ func (s *Server) metadata() openapi.OpenIDProviderMetadata {
 	revocationEndpoint := base + "/revoke"
 	introspectionEndpoint := base + "/introspect"
 	return openapi.OpenIDProviderMetadata{
-		Issuer:                base,
-		AuthorizationEndpoint: base + "/authorize",
-		TokenEndpoint:         base + "/token",
-		UserinfoEndpoint:      &userinfoEndpoint,
-		EndSessionEndpoint:    &endSessionEndpoint,
-		RevocationEndpoint:    &revocationEndpoint,
-		IntrospectionEndpoint: &introspectionEndpoint,
-		JwksUri:               base + "/jwks.json",
+		Issuer:                 base,
+		AuthorizationEndpoint:  base + "/authorize",
+		TokenEndpoint:          base + "/token",
+		UserinfoEndpoint:       &userinfoEndpoint,
+		EndSessionEndpoint:     &endSessionEndpoint,
+		RevocationEndpoint:     &revocationEndpoint,
+		IntrospectionEndpoint:  &introspectionEndpoint,
+		JwksUri:                base + "/jwks.json",
 		ResponseTypesSupported: []string{"code"},
 		SubjectTypesSupported: []openapi.OpenIDProviderMetadataSubjectTypesSupported{
 			openapi.Pairwise,

@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -30,7 +31,9 @@ func WithRecovery(next http.Handler, logger *slog.Logger) http.Handler {
 				// silently abort a handler (e.g. when the client disconnects).
 				// Re-panic so the server handles it as intended rather than
 				// converting it into a spurious logged 500.
-				if rec == http.ErrAbortHandler {
+				// recover() yields `any`, so assert to error before errors.Is —
+				// a wrapped ErrAbortHandler would slip past a bare == compare.
+				if err, ok := rec.(error); ok && errors.Is(err, http.ErrAbortHandler) {
 					panic(rec)
 				}
 				// Log at ERROR. The panic value (rec) is intentionally not

@@ -69,6 +69,56 @@ const (
 	binarySniffBytes = 8 * 1024
 )
 
+// legacyOversizeBaseline freezes the §1.10 violations that predate this check
+// being wired into agent-check. It is a RATCHET, not an exemption list:
+//
+//   - a file listed here fails if it grows BEYOND its recorded count;
+//   - a file NOT listed here fails the moment it exceeds the normal limit;
+//   - entries may shrink or disappear as files are split — never grow, and
+//     nothing new may be added. Adding an entry is how this guard dies quietly,
+//     so treat a PR that does so as a design discussion, not a lint fix.
+//
+// Turning the check on with 34 files already over the line would have meant
+// either failing every build or silently weakening the limits. Freezing the debt
+// keeps the guard live for all new code while leaving the split work to its own
+// change (docs/design/principles/skills-and-small-files.md §1.10).
+var legacyOversizeBaseline = map[string]int{
+	"cmd/harbor-hot/main.go":                    697,
+	"cmd/harbor-mgmt/main.go":                   554,
+	"e2e/enrollment_test.go":                    533,
+	"e2e/flow_test.go":                          749,
+	"internal/bff/dashboard.go":                 536,
+	"internal/bff/login_test.go":                798,
+	"internal/clients/grants_test.go":           505,
+	"internal/clients/ratelimit_test.go":        702,
+	"internal/clients/sessions_test.go":         727,
+	"internal/crypto/keyprovider_kms.go":        415,
+	"internal/crypto/keyprovider_kms_test.go":   923,
+	"internal/crypto/rotation_store_db_test.go": 644,
+	"internal/crypto/signer_kms_test.go":        671,
+	"internal/identity/recovery_test.go":        635,
+	"internal/mfa/service.go":                   435,
+	"internal/mgmtapi/consent_test.go":          570,
+	"internal/mgmtapi/recovery.go":              592,
+	"internal/mgmtapi/recovery_test.go":         801,
+	"internal/mgmtapi/relay.go":                 587,
+	"internal/mgmtapi/relay_test.go":            807,
+	"internal/oidc/chaos_test.go":               1052,
+	"internal/oidc/jwt_issuer_test.go":          740,
+	"internal/oidc/refresh_test.go":             785,
+	"internal/oidc/service.go":                  975,
+	"internal/oidc/service_test.go":             787,
+	"internal/oidcapi/ratelimit_test.go":        525,
+	"internal/oidcapi/revoke_test.go":           703,
+	"internal/relay/address_test.go":            526,
+	"internal/relay/auth_test.go":               540,
+	"internal/relay/domain.go":                  501,
+	"internal/relay/domain_test.go":             682,
+	"internal/relay/forward_test.go":            737,
+	"internal/relay/mta.go":                     647,
+	"internal/relay/mta_test.go":                701,
+}
+
 type finding struct {
 	path  string
 	count int
@@ -148,6 +198,14 @@ func scanGoFiles(root string) ([]finding, error) {
 		limit := maxNonTestGoLines
 		if strings.HasSuffix(path, "_test.go") {
 			limit = maxTestGoLines
+		}
+		// A baselined file is judged against its frozen count, not the limit:
+		// it may shrink, but any growth is a regression and fails.
+		if frozen, ok := legacyOversizeBaseline[path]; ok {
+			if lines > frozen {
+				out = append(out, finding{path: path, count: lines, limit: frozen, unit: "lines (frozen baseline — may not grow)"})
+			}
+			return nil
 		}
 		if lines > limit {
 			out = append(out, finding{path: path, count: lines, limit: limit, unit: "lines"})

@@ -221,7 +221,10 @@ func TestWithRecovery_Returns500(t *testing.T) {
 		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusInternalServerError)
 	}
 
-	body, _ := io.ReadAll(res.Body)
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
 	if strings.Contains(string(body), panicMsg) {
 		t.Fatalf("response body must not contain panic value; got %q", body)
 	}
@@ -231,7 +234,10 @@ func TestWithRecovery_Returns500(t *testing.T) {
 // the harbor_http_panics_total counter by exactly one.
 func TestWithRecovery_IncrementsCounter(t *testing.T) {
 	// Gather baseline count before the panic.
-	baselineSamples, _ := telemetry.Registry().Gather()
+	baselineSamples, err := telemetry.Registry().Gather()
+	if err != nil {
+		t.Fatalf("gather baseline metrics: %v", err)
+	}
 	baseline := panicCounterValue(baselineSamples)
 
 	panicking := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
