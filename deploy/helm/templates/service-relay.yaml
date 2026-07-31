@@ -1,0 +1,22 @@
+{{- if .Values.relay.enabled }}
+# Service for harbor-relay. Maps the public SMTP port (servicePort: 25) → the
+# non-privileged container port so the pod never binds a privileged port. For a
+# real internet-facing MX this must be externally reachable (type LoadBalancer
+# on a cloud, or NodePort / a node hostPort on bare metal).
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "harbor.fullname" . }}-relay
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.relay.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.relay.service.type }}
+  selector:
+    {{- include "harbor.relay.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: smtp
+      port: {{ .Values.relay.servicePort }}
+      targetPort: smtp
+      protocol: TCP
+{{- end }}

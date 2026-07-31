@@ -99,6 +99,47 @@ app.kubernetes.io/component: cold-path
 {{- end -}}
 {{- end -}}
 
+{{/* ---- harbor-relay labels / selectors ---- */}}
+
+{{/* Immutable selector subset for harbor-relay (safe for .spec.selector). */}}
+{{- define "harbor.relay.selectorLabels" -}}
+app.kubernetes.io/name: harbor-relay
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end -}}
+
+{{/* Full label set for harbor-relay resources. */}}
+{{- define "harbor.relay.labels" -}}
+{{ include "harbor.labels" . }}
+{{ include "harbor.relay.selectorLabels" . }}
+app.kubernetes.io/component: relay-mta
+{{- end -}}
+
+{{- define "harbor.relay.serviceAccountName" -}}
+{{- printf "%s-relay-sa" (include "harbor.fullname" .) -}}
+{{- end -}}
+
+{{- define "harbor.relay.secretName" -}}
+{{- if .Values.relay.secrets.existingSecret -}}
+{{- .Values.relay.secrets.existingSecret -}}
+{{- else -}}
+{{- printf "%s-relay-secrets" (include "harbor.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Build the harbor-relay image reference. Prefers a per-component immutable
+digest; otherwise falls back to the shared global tag.
+*/}}
+{{- define "harbor.relay.image" -}}
+{{- $registry := .Values.global.image.registry -}}
+{{- $repo := .Values.relay.image.repository -}}
+{{- if .Values.relay.image.digest -}}
+{{- printf "%s/%s@%s" $registry $repo .Values.relay.image.digest -}}
+{{- else -}}
+{{- printf "%s/%s:%s" $registry $repo .Values.global.image.tag -}}
+{{- end -}}
+{{- end -}}
+
 {{/* ---- Image references ---- */}}
 
 {{/*

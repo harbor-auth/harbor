@@ -60,6 +60,16 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}},enable=${{ !startsWith(github.ref_name, 'v0.') }}
 
+      - name: Extract Docker metadata — harbor-relay
+        id: meta-relay
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/harbor-relay
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref_name, 'v0.') }}
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -94,6 +104,18 @@ jobs:
           cache-from: type=gha,scope=harbor-mgmt-release
           cache-to: type=gha,scope=harbor-mgmt-release,mode=max
 
+      - name: Build & push harbor-relay
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.relay
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta-relay.outputs.tags }}
+          labels: ${{ steps.meta-relay.outputs.labels }}
+          cache-from: type=gha,scope=harbor-relay-release
+          cache-to: type=gha,scope=harbor-relay-release,mode=max
+
       # Create the GitHub Release with auto-generated notes (PRs + commits
       # since the previous tag). For pre-release tags (semver pre-release
       # component present), the Release is marked as a pre-release.
@@ -108,6 +130,7 @@ jobs:
             ```
             docker pull ghcr.io/harbor-auth/harbor/harbor-hot:${{ github.ref_name }}
             docker pull ghcr.io/harbor-auth/harbor/harbor-mgmt:${{ github.ref_name }}
+            docker pull ghcr.io/harbor-auth/harbor/harbor-relay:${{ github.ref_name }}
             ```
 
             See [SECURITY.md](https://github.com/harbor-auth/harbor/blob/main/SECURITY.md) before deploying — Harbor is pre-production software.

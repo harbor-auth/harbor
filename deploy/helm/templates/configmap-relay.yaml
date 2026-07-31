@@ -1,0 +1,24 @@
+{{- if .Values.relay.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "harbor.fullname" . }}-relay-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.relay.labels" . | nindent 4 }}
+data:
+  # Non-privileged SMTP listen port (the Service maps public :25 → this).
+  PORT: {{ .Values.relay.port | quote }}
+  # REGION binds this MTA to a region so region-pinned decryption is enforced.
+  REGION: {{ .Values.region | default "EU" | quote }}
+  # Relay domain suffix used to validate inbound recipients.
+  RELAY_DOMAIN: {{ .Values.relay.domain | quote }}
+  # Outbound smarthost for forwarding (empty ⇒ accept-but-don't-forward).
+  RELAY_SMARTHOST: {{ .Values.relay.smarthost | quote }}
+  # Envelope sender for forwarded mail (bounces return here).
+  RELAY_RETURN_PATH: {{ .Values.relay.returnPath | quote }}
+  # DKIM selector for ARC sealing (empty ⇒ ARC sealing skipped).
+  RELAY_DKIM_SELECTOR: {{ .Values.relay.dkimSelector | quote }}
+  # Reject inbound mail failing SPF/DKIM/DMARC when "true".
+  RELAY_ENFORCE_AUTH: {{ .Values.relay.enforceAuth | quote }}
+{{- end }}
