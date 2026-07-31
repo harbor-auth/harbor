@@ -20,6 +20,14 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-connect-timeout: "5"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "30"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "30"
+    # Block privileged admin endpoints at the ingress layer — defence-in-depth
+    # on top of application-level auth. The /admin/* paths must never be
+    # reachable from the internet regardless of auth state.
+    nginx.ingress.kubernetes.io/server-snippet: |
+      location ~* ^/admin {
+        deny all;
+        return 403;
+      }
 spec:
   ingressClassName: nginx
   tls:
