@@ -35,9 +35,22 @@ type RateLimitConfig struct {
 	Logger *slog.Logger
 	// TrustedForwardedHeader is the header a trusted upstream proxy sets with the
 	// real client IP (e.g. "X-Forwarded-For"). It is consulted only for the
-	// anonymous (no client_id) bucket. Empty means "trust no forwarded header"
-	// and fall back to the transport RemoteAddr.
+	// anonymous (no client_id) bucket when TrustedProxyHops > 0.
 	TrustedForwardedHeader string
+	// TrustedProxyHops is the number of trusted reverse-proxy hops between the
+	// internet and Harbor. When 0 (the default), the forwarded header is ignored
+	// entirely and RemoteAddr is used — safe for direct exposure. When N > 0,
+	// the Nth-from-right entry in TrustedForwardedHeader is used: each trusted
+	// proxy appends its observed client IP on the right, so only the rightmost
+	// entries are unforgeable.
+	//
+	// With nginx-ingress's default $proxy_add_x_forwarded_for, the client can
+	// inject arbitrary leftmost entries, making TRUSTED_PROXY_HOPS=0 the safe
+	// default. Set TRUSTED_PROXY_HOPS=1 for a single nginx-ingress, =2 if an
+	// additional L7 load balancer also appends. Over-counting hops reads into
+	// the attacker-controlled region (bypass); under-counting buckets on a proxy
+	// IP (over-limit). Count only proxies you control that append to the header.
+	TrustedProxyHops int
 }
 
 // RateLimitMiddleware returns net/http middleware that rate-limits a single
@@ -73,7 +86,7 @@ func RateLimitMiddleware(cfg RateLimitConfig) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			identifier := rateLimitIdentifier(r, cfg.TrustedForwardedHeader)
+			identifier := rateLimitIdentifier(r, cfg.TrustedForwardedHeader, cfg.TrustedProxyHops)
 			key := clients.RateLimitKey(string(cfg.Endpoint), identifier)
 
 			allowed, retryAfter, err := cfg.Limiter.Allow(r.Context(), key)
@@ -110,25 +123,37 @@ func RateLimitMiddleware(cfg RateLimitConfig) func(http.Handler) http.Handler {
 // §2.3.1), otherwise the source IP. Both are acceptable rate-limit keys and
 // neither creates per-user tracking (client_id is RP-scoped; IP is not tied to
 // a Harbor user identity).
-func rateLimitIdentifier(r *http.Request, trustedHeader string) string {
+func rateLimitIdentifier(r *http.Request, trustedHeader string, trustedHops int) string {
 	if clientID, _, ok := r.BasicAuth(); ok && clientID != "" {
 		return clientID
 	}
-	return clientIP(r, trustedHeader)
+	return clientIP(r, trustedHeader, trustedHops)
 }
 
-// clientIP extracts the source IP, preferring the leftmost address in the
-// trusted forwarded header (the original client) when one is configured and
-// present, and falling back to the transport RemoteAddr. When RemoteAddr has no
-// port it is returned as-is.
-func clientIP(r *http.Request, trustedHeader string) string {
-	if trustedHeader != "" {
+// clientIP extracts the source IP using the trusted-proxy-hop model.
+//
+// When trustedHops is 0 (the default), the forwarded header is ignored and
+// RemoteAddr is always used — safe when Harbor is directly exposed.
+//
+// When trustedHops is N > 0, it takes the Nth-from-right entry in trustedHeader.
+// nginx-ingress's default $proxy_add_x_forwarded_for APPENDS the observed
+// client IP to the right of any client-supplied header values, so only the
+// rightmost entries are unforgeable. TRUSTED_PROXY_HOPS=1 recovers the real
+// client IP behind a single nginx-ingress; =2 for an additional L7 LB that
+// also appends. If the header is shorter than hops (attacker stripped it),
+// we fall back to RemoteAddr — never to the leftmost/forgeable entry.
+func clientIP(r *http.Request, trustedHeader string, trustedHops int) string {
+	if trustedHops > 0 && trustedHeader != "" {
 		if v := r.Header.Get(trustedHeader); v != "" {
-			// "X-Forwarded-For: client, proxy1, proxy2" — the leftmost entry is
-			// the original client.
-			if first := strings.TrimSpace(strings.Split(v, ",")[0]); first != "" {
-				return first
+			parts := strings.Split(v, ",")
+			// Take the Nth-from-right entry (1-indexed): hops=1 → rightmost.
+			idx := len(parts) - trustedHops
+			if idx >= 0 {
+				if ip := strings.TrimSpace(parts[idx]); ip != "" {
+					return ip
+				}
 			}
+			// Header shorter than hops or empty entry — fall through to RemoteAddr.
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
