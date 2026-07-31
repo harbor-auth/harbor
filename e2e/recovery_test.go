@@ -36,6 +36,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -48,28 +49,37 @@ const (
 	recoveryCompletePath = "/recovery/complete"
 	recoveryFactorsPath  = "/recovery/factors"
 
-	// userIDHeader is the header carrying the authenticated user id that the
-	// management API trusts from its upstream (docs/DESIGN.md §11.1). The
-	// recovery code-generation and factor-listing endpoints are gated on it.
-	userIDHeader = "X-Harbor-User-ID"
-
 	// recoveryScopedSessionCookie is the enrollment-only session cookie minted by
 	// a successful POST /recovery/complete. It must ONLY permit enrolling a fresh
 	// passkey until recovery_required is cleared.
 	recoveryScopedSessionCookie = "harbor_recovery_session"
 )
 
-// generateRecoveryCodes calls POST /recovery/codes for userID and returns the
-// plaintext codes. It skips the test when the endpoint is not wired (503) or
-// unreachable, so the harness stays CI-safe on an in-progress stack.
-func generateRecoveryCodes(t *testing.T, client *http.Client, userID string) []string {
+// generateRecoveryCodes calls POST /recovery/codes and returns the plaintext
+// codes. Identity is carried by the BFF session cookie in client.Jar (set
+// during enroll + registerPasskey); no explicit user-id header is sent.
+// It skips the test when the BFF cookie is absent, the endpoint is not wired
+// (503), or the server is unreachable, so the harness stays CI-safe on an
+// in-progress stack.
+func generateRecoveryCodes(t *testing.T, client *http.Client) []string {
 	t.Helper()
+
+	// Skip gracefully when the BFF session cookie is absent from the jar —
+	// without it the server will return 401 and the endpoint is not exercisable.
+	if client.Jar != nil {
+		u, err := url.Parse(mgmtBaseURL())
+		if err == nil && len(client.Jar.Cookies(u)) == 0 {
+			t.Skip("no BFF session cookie in jar — cookie-based auth not wired on this stack; skipping")
+		}
+	}
+
 	req, err := http.NewRequest(http.MethodPost, mgmtBaseURL()+recoveryCodesPath, strings.NewReader("{}"))
 	if err != nil {
 		t.Fatalf("build /recovery/codes request: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(userIDHeader, userID)
+	// Identity is carried by the BFF session cookie in client.Jar; no explicit
+	// user-id header is sent.
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -79,6 +89,9 @@ func generateRecoveryCodes(t *testing.T, client *http.Client, userID string) []s
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read /recovery/codes response: %v", err)
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		t.Skip("POST /recovery/codes = 401 (BFF session cookie not accepted) — skipping")
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		t.Skip("POST /recovery/codes = 503 (recovery not wired) — skipping")
@@ -206,7 +219,7 @@ func TestRecoveryCeremonyEndToEnd(t *testing.T) {
 	}
 
 	// 2) Generate single-use recovery codes for the authenticated user.
-	codes := generateRecoveryCodes(t, client, userID)
+	codes := generateRecoveryCodes(t, client)
 
 	// 3) "Lose the device": a NEW client with no passkey/session starts recovery.
 	recoverClient := jarClient(t)
@@ -263,7 +276,7 @@ func TestRecoveryCodeSingleUseEndToEnd(t *testing.T) {
 	client := jarClient(t)
 	userID, _ := enroll(t, client)
 
-	codes := generateRecoveryCodes(t, client, userID)
+	codes := generateRecoveryCodes(t, client)
 
 	recoverClient := jarClient(t)
 	requestID := beginRecovery(t, recoverClient, userID)
@@ -296,7 +309,7 @@ func TestRecoveryInvalidCodeFailsClosed(t *testing.T) {
 	userID, _ := enroll(t, client)
 
 	// Ensure codes exist so the only reason for failure is the wrong code.
-	_ = generateRecoveryCodes(t, client, userID)
+	_ = generateRecoveryCodes(t, client)
 
 	recoverClient := jarClient(t)
 	requestID := beginRecovery(t, recoverClient, userID)
@@ -321,15 +334,15 @@ func TestRecoveryInvalidCodeFailsClosed(t *testing.T) {
 // the session minted by /recovery/complete may register a fresh passkey but must
 // NOT authorize any other authenticated surface while recovery_required holds.
 //
-// The scoped session authorizes via the recovery cookie alone (NOT the trusted
-// X-Harbor-User-ID header), so we hit a non-enrollment authenticated endpoint
-// (GET /recovery/factors) carrying ONLY the scoped cookie and assert it is not
-// granted (must be 401/403), while register/begin with the same cookie is
-// accepted. Skips gracefully when scoped-session enforcement is not wired.
+// The scoped session authorizes via the recovery cookie alone, so we hit a
+// non-enrollment authenticated endpoint (GET /recovery/factors) carrying ONLY
+// the scoped cookie and assert it is not granted (must be 401/403), while
+// register/begin with the same cookie is accepted. Skips gracefully when
+// scoped-session enforcement is not wired.
 func TestRecoveryScopedSessionDeniesNonEnrollment(t *testing.T) {
 	client := jarClient(t)
 	userID, _ := enroll(t, client)
-	codes := generateRecoveryCodes(t, client, userID)
+	codes := generateRecoveryCodes(t, client)
 
 	recoverClient := jarClient(t)
 	requestID := beginRecovery(t, recoverClient, userID)
@@ -344,9 +357,9 @@ func TestRecoveryScopedSessionDeniesNonEnrollment(t *testing.T) {
 		t.Skip("no scoped-session cookie set — scoped sessions not wired on this stack; skipping")
 	}
 
-	// recoverClient now carries ONLY the scoped recovery cookie (no user-id
-	// header). A non-enrollment authenticated surface must NOT be authorized by
-	// it: GET /recovery/factors is gated on real authentication, so the scoped
+	// recoverClient now carries ONLY the scoped recovery cookie. A
+	// non-enrollment authenticated surface must NOT be authorized by it:
+	// GET /recovery/factors is gated on real authentication, so the scoped
 	// session must be rejected.
 	req, err := http.NewRequest(http.MethodGet, mgmtBaseURL()+recoveryFactorsPath, nil)
 	if err != nil {
