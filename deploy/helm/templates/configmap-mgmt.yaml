@@ -22,6 +22,13 @@ data:
   WEBAUTHN_RP_ID: {{ .Values.mgmt.webauthn.rpId | quote }}
   WEBAUTHN_RP_DISPLAY_NAME: {{ .Values.mgmt.webauthn.rpName | quote }}
   WEBAUTHN_RP_ORIGINS: {{ .Values.mgmt.webauthn.rpOrigin | quote }}
+  # Absolute URL harbor-mgmt redirects the browser to after a successful passkey
+  # assertion, resuming the OIDC flow on harbor-hot's /authorize/complete. MUST
+  # be absolute and share the public origin with harbor-hot (the __Host- BFF
+  # cookie cannot span two hosts — see deploy/README.md). A relative path would
+  # 404 against the harbor-mgmt origin (audit finding M2). harbor-mgmt refuses
+  # to start if DATABASE_URL is set but this is empty.
+  AUTHORIZE_COMPLETE_URL: {{ .Values.mgmt.authorizeCompleteURL | quote }}
   # Relay / BYO-domain configuration. These domains are used to generate DNS
   # setup instructions for users who bring their own custom email domains.
   # MTA_DOMAIN is the regional MTA that receives inbound mail (e.g., mta-eu.harbor.id).

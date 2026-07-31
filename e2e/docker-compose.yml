@@ -52,3 +52,52 @@ services:
       # go run compiles harbor-hot on a cold start; start_period keeps those
       # early (pre-ready) failures from counting against `retries`.
       start_period: 120s
+
+  # harbor-mgmt: the cold-path management / BFF binary that runs the passkey
+  # login ceremony (/login, /login/complete). e2e/bff_login_test.go drives it at
+  # localhost:8081 to exercise the authenticated login → /authorize/complete →
+  # /token flow end-to-end.
+  harbor-mgmt:
+    image: golang:1.26
+    working_dir: /src
+    command: ["go", "run", "./cmd/harbor-mgmt"]
+    environment:
+      PORT: "8081"
+      # Bind the RP-origin host to a region so the fail-closed region middleware
+      # resolves it at boot instead of refusing to start.
+      REGION: "EU"
+      # Dev mode bypasses the fail-closed startup guard so this stack runs
+      # without DATABASE_URL/REDIS_URL.
+      HARBOR_DEV_MODE: "1"
+      # WebAuthn Relying Party config. Passkeys registered here are asserted on
+      # this same origin during the login ceremony.
+      WEBAUTHN_RP_ID: "localhost"
+      WEBAUTHN_RP_DISPLAY_NAME: "Harbor"
+      WEBAUTHN_RP_ORIGINS: "http://localhost:8081"
+      # After a successful passkey assertion harbor-mgmt redirects the browser to
+      # harbor-hot's /authorize/complete to resume the OIDC flow (audit fix M2).
+      # This MUST be the ABSOLUTE URL of that endpoint on harbor-hot — a relative
+      # path would resolve against the harbor-mgmt origin (:8081) and 404. Both
+      # binaries share the localhost origin here, mirroring the single public
+      # host / path-routed topology required in production (see deploy/README.md)
+      # because the __Host- BFF cookie cannot span two different hosts.
+      AUTHORIZE_COMPLETE_URL: "http://localhost:8080/authorize/complete"
+    ports:
+      - "8081:8081"
+    volumes:
+      # Mount the repo read-only; go run compiles harbor-mgmt from source inside
+      # the pinned golang image so the e2e run needs no local Go toolchain.
+      - ..:/src:ro
+    # Wait for harbor-hot to be READY first: the login flow resumes on
+    # harbor-hot's /authorize/complete, so it must be up before mgmt is useful.
+    depends_on:
+      harbor-hot:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/healthz"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+      # go run compiles harbor-mgmt on a cold start; start_period keeps those
+      # early (pre-ready) failures from counting against `retries`.
+      start_period: 120s
