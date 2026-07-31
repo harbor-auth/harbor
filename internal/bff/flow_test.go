@@ -269,6 +269,9 @@ func TestBFFFlow_FullHappyPath(t *testing.T) {
 	// --- Stage 4: GET /authorize/complete reads user_id and issues a code ---
 	resumeReq := httptest.NewRequest(http.MethodGet, "/authorize/complete?request_id="+requestID, nil)
 	resumeReq.AddCookie(&http.Cookie{Name: bff.CookieName, Value: requestID})
+	// Propagate the nonce cookie — GetAuthorizeComplete enforces the nonce gate
+	// (audit finding C3) before issuing any code.
+	resumeReq.AddCookie(authNonceCookie)
 	resumeRec := httptest.NewRecorder()
 	oidcHandler.ServeHTTP(resumeRec, resumeReq)
 

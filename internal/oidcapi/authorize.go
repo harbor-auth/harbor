@@ -248,6 +248,20 @@ func (s *Server) GetAuthorizeComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enforce the browser nonce gate (audit finding C3 — session fixation defense,
+	// docs/plans/fix-bff-session-binding.md). The nonce was minted at /authorize
+	// and its SHA-256 stored in the session. A request that cannot present the
+	// matching cookie did not originate from the browser that started the flow —
+	// fail closed with the no-redirect error page (§11.7): never redirect to a URI
+	// whose session ownership is unproven.
+	if len(session.BrowserNonceHash) > 0 {
+		nonce, nonceErr := bff.ReadBFFNonceCookie(r)
+		if nonceErr != nil || !bff.NonceMatches(nonce, session.BrowserNonceHash) {
+			writeAuthorizeErrorPage(w)
+			return
+		}
+	}
+
 	// Verify user has authenticated (UserID must be set by /login/complete)
 	if session.UserID == "" {
 		writeAuthorizeErrorPage(w)
@@ -305,8 +319,9 @@ func (s *Server) GetAuthorizeComplete(w http.ResponseWriter, r *http.Request) {
 	// Delete BFF session (one-time use)
 	_ = s.bffSessions.Delete(r.Context(), requestID) //nolint:errcheck // best-effort: session expires via TTL anyway
 
-	// Clear BFF cookie
+	// Clear BFF cookies (session binding + browser nonce), one-time use.
 	bff.ClearBFFCookie(w)
+	bff.ClearBFFNonceCookie(w)
 
 	// Redirect to RP with auth code
 	q := url.Values{}
