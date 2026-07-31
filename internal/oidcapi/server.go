@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/harbor-auth/harbor/internal/bff"
@@ -236,6 +237,29 @@ type EndpointRateLimit struct {
 	Path string
 	// Middleware is the per-endpoint RateLimitMiddleware to apply on Path.
 	Middleware func(http.Handler) http.Handler
+}
+
+// WithAdminAuth wraps base so that any request whose path begins with
+// "/admin/" is first passed through the provided authentication middleware
+// before reaching base; every other path is served by base unchanged. This
+// applies admin authentication to ALL current and future admin endpoints
+// without editing the spec-generated router (openapi.HandlerFromMux): the
+// middleware wraps the whole router but is dispatched per path prefix, so a
+// non-admin request is never touched.
+//
+// Matching is by path prefix across all HTTP methods. The prefix is tested
+// before base's own routing runs so an unauthenticated admin request is
+// rejected before any handler logic executes.
+func WithAdminAuth(base http.Handler, mw func(http.Handler) http.Handler) http.Handler {
+	const adminPrefix = "/admin/"
+	adminHandler := mw(base)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, adminPrefix) {
+			adminHandler.ServeHTTP(w, r)
+			return
+		}
+		base.ServeHTTP(w, r)
+	})
 }
 
 // WithRateLimits wraps base so that a request whose path exactly matches a
