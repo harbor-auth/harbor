@@ -205,3 +205,89 @@ func TestBuildBFFDeps(t *testing.T) {
 		}
 	})
 }
+
+func TestLoadAdminToken(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// A 32-byte token for production tests.
+	const validToken = "12345678901234567890123456789012" // exactly 32 bytes
+	const shortToken = "tooshort"                         // 8 bytes < 32
+
+	tests := []struct {
+		name       string
+		dbSet      bool
+		devMode    string
+		adminToken string
+		wantErr    bool
+		wantToken  string
+	}{
+		{
+			name:      "no DB, token unset => no error, empty token",
+			dbSet:     false,
+			wantErr:   false,
+			wantToken: "",
+		},
+		{
+			name:       "no DB, token set => no error, token returned",
+			dbSet:      false,
+			adminToken: validToken,
+			wantErr:    false,
+			wantToken:  validToken,
+		},
+		{
+			name:    "DB set, prod, token unset => error",
+			dbSet:   true,
+			wantErr: true,
+		},
+		{
+			name:       "DB set, prod, token too short => error",
+			dbSet:      true,
+			adminToken: shortToken,
+			wantErr:    true,
+		},
+		{
+			name:       "DB set, prod, token >= 32 bytes => ok",
+			dbSet:      true,
+			adminToken: validToken,
+			wantErr:    false,
+			wantToken:  validToken,
+		},
+		{
+			name:    "DB set, dev mode, token unset => ok (warn only)",
+			dbSet:   true,
+			devMode: "1",
+			wantErr: false,
+		},
+		{
+			name:       "DB set, dev mode, token short => ok (warn only)",
+			dbSet:      true,
+			devMode:    "1",
+			adminToken: shortToken,
+			wantErr:    false,
+			wantToken:  shortToken,
+		},
+		{
+			name:       "DB set, dev mode, token valid => ok",
+			dbSet:      true,
+			devMode:    "1",
+			adminToken: validToken,
+			wantErr:    false,
+			wantToken:  validToken,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("ADMIN_API_TOKEN", tt.adminToken)
+			t.Setenv("HARBOR_DEV_MODE", tt.devMode)
+
+			got, err := loadAdminToken(tt.dbSet, logger)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("loadAdminToken() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.wantToken {
+				t.Errorf("loadAdminToken() = %q, want %q", got, tt.wantToken)
+			}
+		})
+	}
+}
