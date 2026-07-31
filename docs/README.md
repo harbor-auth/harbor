@@ -70,6 +70,19 @@ docs/plans/         → future WHAT — intent not yet built
 | [webauthn-db-wiring](plans/webauthn-db-wiring.md) | ❌ failed on Weft (`feat_ac6b4036`) — needs re-launch | §4.1, §4.4, §9 | `cmd/harbor-mgmt/` |
 | [kyverno-policies](plans/kyverno-policies.md) | building on Weft (`feat_41ebcf7f`) | §4.4, §1.5, §A.8 | `deploy/kyverno/` |
 | [production-readiness](plans/production-readiness.md) | audit doc | — | see [`plans/production-readiness.md`](plans/production-readiness.md) |
+| [audit-2026-07-30-wiring-and-auth](plans/audit-2026-07-30-wiring-and-auth.md) | audit doc | — | see [`plans/audit-2026-07-30-wiring-and-auth.md`](plans/audit-2026-07-30-wiring-and-auth.md) |
+| [fix-mgmt-context-auth](plans/fix-mgmt-context-auth.md) | draft — Wave 7 root (C1 🔴) | §9, §6.5, §11.3 | `internal/mgmtapi/`, `internal/bff/`, `e2e/` |
+| [admin-endpoint-auth](plans/admin-endpoint-auth.md) | draft — Wave 7 root (C2 🔴) | §7.3, §7.4, §3.5, §6.5 | `internal/oidcapi/`, `cmd/harbor-hot/`, `api/openapi/`, `deploy/` |
+| [fix-bff-session-binding](plans/fix-bff-session-binding.md) | draft — Wave 7 root (C3 🔴) | §9, §11.2, §11.7 | `internal/bff/`, `internal/oidcapi/`, `cmd/harbor-hot/`, `cmd/harbor-mgmt/` |
+| [hardening-cleanup](plans/hardening-cleanup.md) | draft — Wave 7 root (M4/M5) | §6.5, §3.4, §7.5 | `internal/bff/`, `internal/httpserver/`, `internal/oidcapi/`, `internal/relay/` |
+| [production-wiring-collapse](plans/production-wiring-collapse.md) | draft — Wave 7 (H1/H8/M1) | §4.1, §4.4, §10, §1.7 | `cmd/harbor-hot/`, `cmd/harbor-mgmt/`, `internal/oidc/`, `internal/clients/` |
+| [client-secret-auth](plans/client-secret-auth.md) | draft — Wave 7 (C4 🔴) | §3.3, §3.1 | `internal/oidcapi/`, `internal/clients/` |
+| [unify-token-verification](plans/unify-token-verification.md) | draft — Wave 7 (H4/H5) | §3.3, §3.5, §7.3, §11.7 | `internal/oidc/`, `internal/oidcapi/` |
+| [unify-consent-ledger](plans/unify-consent-ledger.md) | draft — Wave 7 (H6) | §11.3, §3.2, §10 | `db/migrations/`, `internal/clients/`, `internal/oidc/`, `internal/mgmtapi/` |
+| [end-session-logout](plans/end-session-logout.md) | draft — Wave 7 (H2) | §3.3, §3.5, §9 | `cmd/harbor-hot/`, `internal/oidcapi/` |
+| [wire-revocation-pipeline](plans/wire-revocation-pipeline.md) | draft — Wave 7 (H3) | §3.5, §7.4 | `cmd/harbor-hot/`, `internal/oidc/`, `internal/clients/` |
+| [totp-mfa](plans/totp-mfa.md) | draft — Wave 7 (H7) | §7.1, §3.1, §3.3, §4.4 | `internal/bff/`, `internal/mfa/`, `internal/mgmtapi/`, `cmd/harbor-mgmt/` |
+| [refresh-session-claims](plans/refresh-session-claims.md) | draft — Wave 7 (M3) | §3.5, §10, §3.1 | `db/migrations/`, `internal/clients/`, `internal/oidc/` |
 
 > **Wave 6 — Phase-0 Critical Fixes** (from the [production-readiness audit](plans/production-readiness.md)): `webauthn-db-rewire`, `fix-auth-bypass`, `admin-endpoint-auth`, `client-secret-auth` (all **P0**), plus `hsm-signing-key`, `totp-mfa`, `end-session-logout` (**P1**) and `acr-amr-dynamic` (**P2**). These block production launch and take priority over finishing Wave 5. See [`plans/README.md`](plans/README.md#wave-6--phase-0-critical-fixes-2026-07-production-readiness-audit) for the gate order.
 
