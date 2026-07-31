@@ -87,7 +87,7 @@ func TestGetRelayAddresses_Success(t *testing.T) {
 		},
 	}
 
-	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userID.String()})
+	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userID.String()}).WithRelayDomain("relay.eu.harbor.id")
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -116,8 +116,8 @@ func TestGetRelayAddresses_Success(t *testing.T) {
 	if resp.Addresses[0].State != "active" {
 		t.Errorf("addresses[0].state = %q, want %q", resp.Addresses[0].State, "active")
 	}
-	if resp.Addresses[0].RelayEmail != "token-abc123@relay.EU.harbor.id" {
-		t.Errorf("addresses[0].relay_email = %q, want token-abc123@relay.EU.harbor.id", resp.Addresses[0].RelayEmail)
+	if resp.Addresses[0].RelayEmail != "token-abc123@relay.eu.harbor.id" {
+		t.Errorf("addresses[0].relay_email = %q, want token-abc123@relay.eu.harbor.id", resp.Addresses[0].RelayEmail)
 	}
 
 	// Check deactivated address has deactivated_at

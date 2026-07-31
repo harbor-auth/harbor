@@ -215,20 +215,21 @@ func TestNewAddress(t *testing.T) {
 
 func TestFormatEmail(t *testing.T) {
 	tests := []struct {
-		token  string
-		region region.Region
-		want   string
+		token       string
+		relayDomain string
+		want        string
 	}{
-		{"abc123", region.EU, "abc123@relay.EU.harbor.id"},
-		{"xyz789", region.US, "xyz789@relay.US.harbor.id"},
-		{"token", region.APAC, "token@relay.APAC.harbor.id"},
+		{"abc123", "relay.eu.harbor.id", "abc123@relay.eu.harbor.id"},
+		{"xyz789", "relay.us.harbor.id", "xyz789@relay.us.harbor.id"},
+		{"token", "relay.apac.harbor.id", "token@relay.apac.harbor.id"},
+		{"tok", "custom.example.com", "tok@custom.example.com"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {
-			got := FormatEmail(tt.token, tt.region)
+			got := FormatEmail(tt.token, tt.relayDomain)
 			if got != tt.want {
-				t.Errorf("FormatEmail(%q, %q) = %q, want %q", tt.token, tt.region, got, tt.want)
+				t.Errorf("FormatEmail(%q, %q) = %q, want %q", tt.token, tt.relayDomain, got, tt.want)
 			}
 		})
 	}
