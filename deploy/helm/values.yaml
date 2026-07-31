@@ -179,7 +179,30 @@ relay:
   dkimSelector: ""
   # Reject inbound mail that fails SPF/DKIM/DMARC. Start false (monitor-only)
   # and tighten once pass rates are confirmed.
-  enforceAuth: false
+  # Reject inbound mail that fails SPF/DKIM/DMARC, rather than merely logging
+  # the verdict. Defaults to TRUE (fail closed): an inbound relay that forwards
+  # unauthenticated mail delivers spoofed messages to users' real inboxes AND
+  # ARC-seals them on the way out, which makes the forgery look MORE trustworthy
+  # to the receiving provider, not less. Set false only for a deliberate,
+  # temporary bring-up while DNS is still propagating.
+  enforceAuth: true
+  # NetworkPolicy for the relay. The egress list is an allow-list, so a
+  # compromised MTA — the only pod accepting unauthenticated internet
+  # connections, and one that can decrypt user email mappings — cannot open an
+  # arbitrary outbound connection.
+  networkPolicy:
+    enabled: true
+    # TCP ports the relay may dial outbound to deliver forwarded mail.
+    # 587 = submission (STARTTLS, the norm), 465 = implicit TLS, 25 = MTA-to-MTA.
+    smarthostPorts:
+      - 587
+      - 465
+      - 25
+    # CIDRs the smarthost lives in. Empty means "anywhere" (0.0.0.0/0) — fine
+    # for a hosted provider, but NARROW THIS if your smarthost has a stable
+    # address: it is the one rule standing between a compromised relay and
+    # arbitrary outbound egress.
+    smarthostCIDRs: []
   resources:
     requests:
       cpu: 50m

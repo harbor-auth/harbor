@@ -1,0 +1,83 @@
+{{- if and .Values.relay.enabled .Values.relay.networkPolicy.enabled }}
+# NetworkPolicy: harbor-relay — the inbound email MTA.
+#
+# This is the most sensitive pod in the cluster to leave unconstrained: it is the
+# ONLY component that accepts unauthenticated connections from the open internet
+# (SMTP has no pre-auth), and it holds BOTH DATABASE_URL and HARBOR_KMS_SECRET —
+# so a compromised relay can unwrap per-user DEKs and decrypt the real email
+# address behind every relay token (docs/DESIGN.md §7.5.6, §4.4). harbor-hot and
+# harbor-mgmt have had policies since they were added; the relay shipped without
+# one. This closes that gap.
+#
+# The egress list is the point: it is an ALLOW-LIST, so a compromised MTA cannot
+# open an arbitrary outbound connection to exfiltrate decrypted mappings. It may
+# reach exactly DNS, Postgres, and the mail path — nothing else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "harbor.fullname" . }}-relay
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.relay.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "harbor.relay.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Inbound SMTP from anywhere. Unlike harbor-mgmt (pod-to-pod only) this MUST
+    # be world-reachable: any sending MTA on the internet delivers here, and the
+    # Service is a LoadBalancer, not an nginx Ingress. Authentication of the
+    # SENDER is SPF/DKIM/DMARC at the application layer (relay.enforceAuth), not
+    # anything the network can express — which is exactly why the egress rules
+    # below matter.
+    - from:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - port: {{ .Values.relay.port }}
+          protocol: TCP
+  egress:
+    # DNS — required, and not optional for correctness: SPF, DKIM and DMARC are
+    # all TXT lookups. Blocking 53 does not fail closed, it makes every
+    # authentication check return temperror.
+    - to:
+        - namespaceSelector: {}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Postgres — the relay_addresses mapping lookup.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: postgresql
+      ports:
+        - port: 5432
+          protocol: TCP
+    # Outbound mail to the smarthost. Restricted to the submission/SMTP ports so
+    # a compromised relay cannot dial an arbitrary port outbound. Note harbor-hot
+    # and harbor-mgmt deliberately exclude RFC1918 ranges from their world-egress
+    # rule; the relay must NOT do that when the smarthost is in-cluster or on a
+    # private network, so the smarthost target is configurable below.
+    #
+    # No Redis rule: harbor-relay does not use Redis.
+    - to:
+        {{- if .Values.relay.networkPolicy.smarthostCIDRs }}
+        {{- range .Values.relay.networkPolicy.smarthostCIDRs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+        {{- else }}
+        - ipBlock:
+            cidr: 0.0.0.0/0
+        {{- end }}
+      ports:
+        {{- range .Values.relay.networkPolicy.smarthostPorts }}
+        - port: {{ . }}
+          protocol: TCP
+        {{- end }}
+{{- end }}
