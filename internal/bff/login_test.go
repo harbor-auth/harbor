@@ -73,7 +73,7 @@ func (m *mockUserResolver) ResolveUser(ctx context.Context, r *http.Request, ses
 
 func TestLoginHandler_BeginLogin_MissingRequestID(t *testing.T) {
 	store := NewInMemoryBFFSessionStore()
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodGet, "/login", nil)
 	rec := httptest.NewRecorder()
@@ -95,7 +95,7 @@ func TestLoginHandler_BeginLogin_MissingRequestID(t *testing.T) {
 
 func TestLoginHandler_BeginLogin_SessionNotFound(t *testing.T) {
 	store := NewInMemoryBFFSessionStore()
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodGet, "/login?request_id=nonexistent", nil)
 	rec := httptest.NewRecorder()
@@ -131,7 +131,7 @@ func TestLoginHandler_BeginLogin_SessionExpired(t *testing.T) {
 	store.sessions[record.RequestID] = record
 	store.mu.Unlock()
 
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodGet, "/login?request_id=expired-session", nil)
 	req = req.WithContext(ctx)
@@ -173,7 +173,7 @@ func TestLoginHandler_BeginLogin_UserNotIdentified(t *testing.T) {
 		},
 	}
 
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, resolver)
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, resolver, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodGet, "/login?request_id=valid-session", nil)
 	req = req.WithContext(ctx)
@@ -215,7 +215,7 @@ func TestLoginHandler_BeginLogin_WebAuthnError(t *testing.T) {
 		},
 	}
 
-	handler := NewLoginHandler(store, webauthn, &mockUserResolver{})
+	handler := NewLoginHandler(store, webauthn, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodGet, "/login?request_id=valid-session", nil)
 	req = req.WithContext(ctx)
@@ -260,7 +260,7 @@ func TestLoginHandler_BeginLogin_HappyPath(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodGet, "/login?request_id=valid-session", nil)
 	// Simulate the nonce cookie set by /authorize in the browser.
@@ -331,7 +331,7 @@ func TestLoginHandler_BeginLogin_HappyPath(t *testing.T) {
 
 func TestLoginHandler_FinishLogin_MissingBFFCookie(t *testing.T) {
 	store := NewInMemoryBFFSessionStore()
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
 	rec := httptest.NewRecorder()
@@ -353,7 +353,7 @@ func TestLoginHandler_FinishLogin_MissingBFFCookie(t *testing.T) {
 
 func TestLoginHandler_FinishLogin_MissingWebAuthnCookie(t *testing.T) {
 	store := NewInMemoryBFFSessionStore()
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
 	req.AddCookie(&http.Cookie{Name: CookieName, Value: "test-request-id"})
@@ -376,7 +376,7 @@ func TestLoginHandler_FinishLogin_MissingWebAuthnCookie(t *testing.T) {
 
 func TestLoginHandler_FinishLogin_SessionNotFound(t *testing.T) {
 	store := NewInMemoryBFFSessionStore()
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
 	req.AddCookie(&http.Cookie{Name: CookieName, Value: "nonexistent"})
@@ -412,7 +412,7 @@ func TestLoginHandler_FinishLogin_InvalidBody(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	// Invalid JSON body
 	req := httptest.NewRequest(http.MethodPost, "/login/complete", strings.NewReader("not valid json"))
@@ -462,7 +462,7 @@ func TestLoginHandler_FinishLogin_HappyPath(t *testing.T) {
 	}
 
 	// Test the core logic via FinishLoginWithParsedData
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
 	req.AddCookie(&http.Cookie{Name: CookieName, Value: "valid-session"})
@@ -477,13 +477,13 @@ func TestLoginHandler_FinishLogin_HappyPath(t *testing.T) {
 	// Use the testable method that accepts pre-parsed data
 	handler.FinishLoginWithParsedData(rec, req, &protocol.ParsedCredentialAssertionData{})
 
-	// Should redirect to /authorize/complete
+	// Should redirect to /authorize/complete (absolute URL — M2 fix)
 	if rec.Code != http.StatusFound {
 		t.Errorf("status = %d, want %d", rec.Code, http.StatusFound)
 	}
 
 	location := rec.Header().Get("Location")
-	expectedLocation := "/authorize/complete?request_id=valid-session"
+	expectedLocation := "http://localhost:8080/authorize/complete?request_id=valid-session"
 	if location != expectedLocation {
 		t.Errorf("Location = %q, want %q", location, expectedLocation)
 	}
@@ -551,7 +551,7 @@ func TestLoginHandler_BeginLogin_Discoverable_HappyPath(t *testing.T) {
 		},
 	}
 
-	handler := NewLoginHandler(store, webauthn, DiscoverableUserResolver{})
+	handler := NewLoginHandler(store, webauthn, DiscoverableUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodGet, "/login?request_id=valid-session", nil)
 	req = req.WithContext(ctx)
@@ -606,7 +606,7 @@ func TestLoginHandler_BeginLogin_Discoverable_WebAuthnError(t *testing.T) {
 		},
 	}
 
-	handler := NewLoginHandler(store, webauthn, DiscoverableUserResolver{})
+	handler := NewLoginHandler(store, webauthn, DiscoverableUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodGet, "/login?request_id=valid-session", nil)
 	req = req.WithContext(ctx)
@@ -654,7 +654,7 @@ func TestLoginHandler_FinishLogin_Discoverable_HappyPath(t *testing.T) {
 		},
 	}
 
-	handler := NewLoginHandler(store, webauthn, DiscoverableUserResolver{})
+	handler := NewLoginHandler(store, webauthn, DiscoverableUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
 	req.AddCookie(&http.Cookie{Name: CookieName, Value: "valid-session"})
@@ -693,8 +693,8 @@ func TestLoginHandler_FinishLogin_Discoverable_HappyPath(t *testing.T) {
 	}
 
 	location := rec.Header().Get("Location")
-	if location != "/authorize/complete?request_id=valid-session" {
-		t.Errorf("Location = %q, want /authorize/complete?request_id=valid-session", location)
+	if location != "http://localhost:8080/authorize/complete?request_id=valid-session" {
+		t.Errorf("Location = %q, want http://localhost:8080/authorize/complete?request_id=valid-session", location)
 	}
 }
 
@@ -717,7 +717,7 @@ func TestLoginHandler_FinishLogin_Discoverable_Failure(t *testing.T) {
 		},
 	}
 
-	handler := NewLoginHandler(store, webauthn, DiscoverableUserResolver{})
+	handler := NewLoginHandler(store, webauthn, DiscoverableUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
 	req.AddCookie(&http.Cookie{Name: CookieName, Value: "valid-session"})
@@ -764,7 +764,7 @@ func TestLoginHandler_FinishLogin_Discoverable_NotCalledForKnownUser(t *testing.
 	}
 
 	// Use a standard (non-discoverable) resolver.
-	handler := NewLoginHandler(store, webauthn, &mockUserResolver{})
+	handler := NewLoginHandler(store, webauthn, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
 	req.AddCookie(&http.Cookie{Name: CookieName, Value: "valid-session"})
@@ -801,7 +801,7 @@ func TestLoginHandler_FinishLogin_WebAuthnFailure(t *testing.T) {
 		},
 	}
 
-	handler := NewLoginHandler(store, webauthn, &mockUserResolver{})
+	handler := NewLoginHandler(store, webauthn, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
 	req.AddCookie(&http.Cookie{Name: CookieName, Value: "valid-session"})

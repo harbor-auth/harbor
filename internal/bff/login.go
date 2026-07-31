@@ -72,17 +72,22 @@ func (DiscoverableUserResolver) ResolveUser(_ context.Context, _ *http.Request, 
 // It reads the BFF session, resolves the user identity, calls BeginAssertion,
 // sets the BFF cookie, and returns the assertion options.
 type LoginHandler struct {
-	sessions     BFFSessionStore
-	webauthn     WebAuthnService
-	userResolver UserResolver
+	sessions             BFFSessionStore
+	webauthn             WebAuthnService
+	userResolver         UserResolver
+	authorizeCompleteURL string
 }
 
 // NewLoginHandler creates a handler for the /login endpoint.
-func NewLoginHandler(sessions BFFSessionStore, webauthn WebAuthnService, resolver UserResolver) *LoginHandler {
+// authorizeCompleteURL is the absolute URL of the /authorize/complete endpoint
+// on harbor-hot (e.g. "https://auth.example.com/authorize/complete"). It must
+// be non-empty in production deployments (M2 fix: avoids relative-URL 404).
+func NewLoginHandler(sessions BFFSessionStore, webauthn WebAuthnService, resolver UserResolver, authorizeCompleteURL string) *LoginHandler {
 	return &LoginHandler{
-		sessions:     sessions,
-		webauthn:     webauthn,
-		userResolver: resolver,
+		sessions:             sessions,
+		webauthn:             webauthn,
+		userResolver:         resolver,
+		authorizeCompleteURL: authorizeCompleteURL,
 	}
 }
 
@@ -325,7 +330,9 @@ func (h *LoginHandler) FinishLoginWithParsedData(w http.ResponseWriter, r *http.
 	// Clear the WebAuthn session cookie (one-time use)
 	clearWebAuthnSessionCookie(w)
 
-	// Redirect to /authorize/complete with request_id
-	redirectURL := "/authorize/complete?request_id=" + requestID
+	// Redirect to the absolute authorize/complete URL (M2 fix: the relative path
+	// /authorize/complete resolves against the harbor-mgmt origin, but that
+	// endpoint is registered on harbor-hot — the absolute URL is required).
+	redirectURL := h.authorizeCompleteURL + "?request_id=" + requestID
 	http.Redirect(w, r, redirectURL, http.StatusFound)
 }

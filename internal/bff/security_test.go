@@ -61,7 +61,7 @@ func TestSecurity_TamperedRequestID(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	// Cookie carries a forged value — not a real session ID in the store.
 	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
@@ -105,7 +105,7 @@ func TestSecurity_ReplayAfterDeletion(t *testing.T) {
 		t.Fatalf("delete: %v", err)
 	}
 
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	// Attacker replays the old cookie after the session was consumed.
 	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
@@ -146,7 +146,7 @@ func TestSecurity_CrossTabIsolation(t *testing.T) {
 		t.Fatalf("create B: %v", err)
 	}
 
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	// Tab A completes the ceremony using its own cookie.
 	reqA := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
@@ -221,7 +221,7 @@ func TestSecurity_SessionFixation_AttackerMintedRequestID(t *testing.T) {
 		t.Fatalf("create attacker session: %v", err)
 	}
 
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	// Victim is lured to /login?request_id=R — they have NO nonce cookie
 	// because they never visited /authorize.
@@ -277,7 +277,7 @@ func TestSecurity_BeginLogin_RefusesWithMissingNonce(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodGet, "/login?request_id=nonce-session", nil)
 	// No nonce cookie — should be refused.
@@ -320,7 +320,7 @@ func TestSecurity_BeginLogin_RefusesWithWrongNonce(t *testing.T) {
 		t.Fatalf("NewBrowserNonce (wrong): %v", err)
 	}
 
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodGet, "/login?request_id=nonce-session", nil)
 	req.AddCookie(&http.Cookie{
@@ -362,7 +362,7 @@ func TestSecurity_FinishLogin_RefusesWithMissingNonce(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
 	req.AddCookie(&http.Cookie{Name: CookieName, Value: "nonce-session"})
@@ -415,7 +415,7 @@ func TestSecurity_FinishLogin_RefusesWithWrongNonce(t *testing.T) {
 		t.Fatalf("NewBrowserNonce (wrong): %v", err)
 	}
 
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
 	req.AddCookie(&http.Cookie{Name: CookieName, Value: "nonce-session"})
@@ -466,7 +466,7 @@ func TestSecurity_NonceNeverInResponseBody(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	t.Run("BeginLogin response does not contain nonce", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/login?request_id=nonce-leak-check", nil)
@@ -534,7 +534,7 @@ func TestSecurity_CSRFBindingEnforced(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	// POST /login/complete without the __Host-harbor-bff cookie.
 	// This simulates a CSRF attack from another origin — it cannot set or read the

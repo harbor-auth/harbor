@@ -135,7 +135,7 @@ func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bff.I
 	// Now let the generated code register the spec-defined routes on the same mux.
 	oidcHandler := openapi.HandlerFromMux(srv, mux)
 
-	loginHandler := bff.NewLoginHandler(store, &mockWebAuthn{userID: itUserID}, &mockResolver{})
+	loginHandler := bff.NewLoginHandler(store, &mockWebAuthn{userID: itUserID}, &mockResolver{}, "/authorize/complete")
 	return oidcHandler, loginHandler, store
 }
 
