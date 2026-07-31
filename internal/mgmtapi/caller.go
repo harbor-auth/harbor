@@ -31,9 +31,9 @@ type CallerSource interface {
 // ok=false. Handlers should return immediately when ok is false.
 //
 // This is the single place where "who is the caller?" is decided for every
-// user-scoped cold-path endpoint. Deleting the old r.Header.Get(UserIDHeader)
-// call sites and replacing them with this helper removes the spoofable-header
-// vulnerability at every call site simultaneously.
+// user-scoped cold-path endpoint. All previous r.Header.Get call sites that
+// read a client-supplied identity header have been replaced with this helper,
+// removing the spoofable-header vulnerability at every call site simultaneously.
 func (s *Server) callerID(w http.ResponseWriter, r *http.Request, endpoint telemetry.EndpointName) (string, bool) {
 	var userID string
 	if s.callerSource != nil {
