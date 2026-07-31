@@ -2,6 +2,7 @@ package bff
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -240,13 +241,20 @@ func TestLoginHandler_BeginLogin_HappyPath(t *testing.T) {
 	store := NewInMemoryBFFSessionStore()
 	ctx := context.Background()
 
-	// Create a valid session
+	// Generate a browser nonce (as /authorize does before redirecting to /login).
+	nonce, err := NewBrowserNonce()
+	if err != nil {
+		t.Fatalf("NewBrowserNonce: %v", err)
+	}
+
+	// Create a valid session with the nonce hash pre-seeded.
 	record := BFFSessionRecord{
-		RequestID:   "valid-session",
-		ClientID:    "test-client",
-		RedirectURI: "https://example.com/callback",
-		State:       "oauth-state",
-		ExpiresAt:   time.Now().Add(5 * time.Minute),
+		RequestID:        "valid-session",
+		ClientID:         "test-client",
+		RedirectURI:      "https://example.com/callback",
+		State:            "oauth-state",
+		BrowserNonceHash: HashNonce(nonce),
+		ExpiresAt:        time.Now().Add(5 * time.Minute),
 	}
 	if err := store.Create(ctx, record); err != nil {
 		t.Fatalf("create session: %v", err)
@@ -255,6 +263,11 @@ func TestLoginHandler_BeginLogin_HappyPath(t *testing.T) {
 	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
 
 	req := httptest.NewRequest(http.MethodGet, "/login?request_id=valid-session", nil)
+	// Simulate the nonce cookie set by /authorize in the browser.
+	req.AddCookie(&http.Cookie{
+		Name:  NonceCookieName,
+		Value: base64.RawURLEncoding.EncodeToString(nonce),
+	})
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 
@@ -269,7 +282,9 @@ func TestLoginHandler_BeginLogin_HappyPath(t *testing.T) {
 		t.Errorf("Content-Type = %q, want %q", ct, "application/json")
 	}
 
-	// Check cookies
+	// BeginLogin sets the BFF cookie only AFTER the nonce gate has verified that
+	// the request originated from the browser that started the flow at /authorize.
+	// Setting it before the gate was the fixation vector (audit finding C3).
 	cookies := rec.Result().Cookies()
 	var hasBFFCookie, hasWebAuthnCookie bool
 	for _, c := range cookies {
@@ -427,13 +442,20 @@ func TestLoginHandler_FinishLogin_HappyPath(t *testing.T) {
 	store := NewInMemoryBFFSessionStore()
 	ctx := context.Background()
 
-	// Create a valid session
+	// Generate a browser nonce (as /authorize does before redirecting to /login).
+	nonce, err := NewBrowserNonce()
+	if err != nil {
+		t.Fatalf("NewBrowserNonce: %v", err)
+	}
+
+	// Create a valid session with the nonce hash pre-seeded.
 	record := BFFSessionRecord{
-		RequestID:   "valid-session",
-		ClientID:    "test-client",
-		RedirectURI: "https://example.com/callback",
-		State:       "oauth-state",
-		ExpiresAt:   time.Now().Add(5 * time.Minute),
+		RequestID:        "valid-session",
+		ClientID:         "test-client",
+		RedirectURI:      "https://example.com/callback",
+		State:            "oauth-state",
+		BrowserNonceHash: HashNonce(nonce),
+		ExpiresAt:        time.Now().Add(5 * time.Minute),
 	}
 	if err := store.Create(ctx, record); err != nil {
 		t.Fatalf("create session: %v", err)
@@ -445,6 +467,11 @@ func TestLoginHandler_FinishLogin_HappyPath(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
 	req.AddCookie(&http.Cookie{Name: CookieName, Value: "valid-session"})
 	req.AddCookie(&http.Cookie{Name: webauthnSessionCookieName, Value: "session-key"})
+	// Simulate the nonce cookie set by /authorize in the browser.
+	req.AddCookie(&http.Cookie{
+		Name:  NonceCookieName,
+		Value: base64.RawURLEncoding.EncodeToString(nonce),
+	})
 	rec := httptest.NewRecorder()
 
 	// Use the testable method that accepts pre-parsed data

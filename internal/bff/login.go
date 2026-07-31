@@ -113,6 +113,19 @@ func (h *LoginHandler) BeginLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enforce browser nonce gate (audit finding C3 — session fixation defense).
+	// The nonce was minted at /authorize and its hash stored in the session.
+	// A request that cannot present the matching cookie did not originate from
+	// the browser that started the flow — refuse immediately. Never set the
+	// BFF cookie from the URL param (that was the fixation vector).
+	if len(session.BrowserNonceHash) > 0 {
+		nonce, nonceErr := ReadBFFNonceCookie(r)
+		if nonceErr != nil || !NonceMatches(nonce, session.BrowserNonceHash) {
+			writeLoginError(w, http.StatusBadRequest, "invalid_request", "browser nonce mismatch")
+			return
+		}
+	}
+
 	// Resolve the user identity. DiscoverableUserResolver returns ErrDiscoverable
 	// to signal that we should skip user resolution and use the discoverable
 	// credential flow instead.
@@ -144,10 +157,14 @@ func (h *LoginHandler) BeginLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set the BFF session cookie for CSRF binding
+	// Set the BFF session cookie. The nonce gate above has already proven that
+	// this browser originated the flow at /authorize (it holds the matching nonce),
+	// so binding requestID (which came from the URL) to the cookie is now safe.
+	// Without the nonce gate this was the fixation vector — the gate must precede
+	// this call.
 	SetBFFCookie(w, requestID, DefaultCookieMaxAge)
 
-	// Also set the WebAuthn session key cookie (separate from BFF cookie)
+	// Set the WebAuthn session key cookie (separate from BFF session cookie).
 	setWebAuthnSessionCookie(w, sessionKey)
 
 	// Return assertion options
@@ -258,6 +275,24 @@ func (h *LoginHandler) FinishLogin(w http.ResponseWriter, r *http.Request) {
 func (h *LoginHandler) FinishLoginWithParsedData(w http.ResponseWriter, r *http.Request, parsedResponse *protocol.ParsedCredentialAssertionData) {
 	requestID := ReadBFFCookie(r)
 	sessionKey := readWebAuthnSessionCookie(r)
+
+	// Fetch the BFF session to enforce the browser nonce gate (audit finding C3).
+	session, sessErr := h.sessions.Get(r.Context(), requestID)
+	if sessErr != nil {
+		if errors.Is(sessErr, ErrBFFSessionNotFound) || errors.Is(sessErr, ErrBFFSessionExpired) {
+			writeLoginError(w, http.StatusBadRequest, "session_expired", "session not found or expired")
+			return
+		}
+		writeLoginError(w, http.StatusInternalServerError, "server_error", "could not retrieve session")
+		return
+	}
+	if len(session.BrowserNonceHash) > 0 {
+		nonce, nonceErr := ReadBFFNonceCookie(r)
+		if nonceErr != nil || !NonceMatches(nonce, session.BrowserNonceHash) {
+			writeLoginError(w, http.StatusBadRequest, "invalid_request", "browser nonce mismatch")
+			return
+		}
+	}
 
 	// Branch on the resolver type: discoverable path uses FinishDiscoverableLogin
 	// (the authenticator identifies the user via userHandle); known-user path uses
