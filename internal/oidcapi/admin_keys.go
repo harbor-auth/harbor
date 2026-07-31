@@ -23,9 +23,9 @@ const maxRotateBodyBytes = 4 * 1024
 // either as the `?emergency=true` query parameter or in the optional JSON body;
 // the query parameter takes precedence.
 //
-// Admin authentication is enforced by middleware wired in front of this handler
-// (the OpenAPI contract documents the 401 response); this handler assumes the
-// caller is already authorized.
+// Admin authentication is enforced by WithAdminAuth (server.go), which wraps
+// the spec-generated router and rejects any unauthenticated /admin/ request
+// before this handler runs; this handler assumes the caller is already authorized.
 func (s *Server) PostAdminKeysRotate(w http.ResponseWriter, r *http.Request) {
 	if s.rotator == nil {
 		writeError(w, http.StatusNotImplemented, "not_implemented", "signing key rotation is not configured")
