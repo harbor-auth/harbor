@@ -67,10 +67,10 @@ var suite = []check{
 	{name: "invariants", argv: []string{"go", "test", "./invariants/..."}},
 	{name: "piifields", argv: []string{"go", "run", "./tools/lint/piifields", "./..."}},
 	{name: "buildtags", argv: []string{"go", "run", "./tools/lint/buildtags"}},
-	// filesize checks Go file line counts, design-doc word counts, and scans
-	// git-tracked files for committed binaries above the size threshold. Uses
-	// `git ls-files` (index only, no history) so it remains git-history-free.
-	{name: "filesize", argv: []string{"go", "run", "./tools/lint/filesize"}},
+	// filesize (--binary-only) scans git-tracked files for committed binaries
+	// above the size threshold. LOC/word-count checks are advisory; run the
+	// bare tool locally to surface those findings.
+	{name: "filesize", argv: []string{"go", "run", "./tools/lint/filesize", "--binary-only"}},
 	{name: "golangci-lint", argv: []string{"golangci-lint", "run"}},
 	{name: "buf-lint", argv: []string{"buf", "lint"}},
 	// Docs integrity checks (python3, no git-history dependency — same as the

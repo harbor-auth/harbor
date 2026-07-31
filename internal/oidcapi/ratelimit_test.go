@@ -282,6 +282,32 @@ func TestRateLimitMiddleware_ClientIDPreferredOverIP(t *testing.T) {
 	}
 }
 
+// TestRateLimitMiddleware_TrustedForwardedHeader verifies that the configured
+// trusted forwarded header supplies the client IP for the anonymous bucket
+// using the Nth-from-right (rightmost) address — the IP the outermost trusted
+// proxy observed, which the client cannot forge (M4 fix).
+func TestRateLimitMiddleware_TrustedForwardedHeader(t *testing.T) {
+	stub := &stubLimiter{allowed: true}
+	h := RateLimitMiddleware(RateLimitConfig{
+		Limiter:                stub,
+		Endpoint:               telemetry.EndpointToken,
+		Window:                 time.Minute,
+		TrustedForwardedHeader: "X-Forwarded-For",
+		TrustedProxyHops:       1,
+	})(okNextHandler())
+
+	req := rateLimitReq("", "10.9.9.9:1234")
+	req.Header.Set("X-Forwarded-For", "203.0.113.7, 10.9.9.9")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// With TrustedProxyHops=1 the rightmost entry (10.9.9.9, what nginx observed)
+	// must be used — NOT the leftmost attacker-controlled 203.0.113.7.
+	if got, want := stub.lastKey(), "token:10.9.9.9"; got != want {
+		t.Fatalf("forwarded key = %q, want %q", got, want)
+	}
+}
+
 // TestRateLimitMiddleware_TrustedProxyHops verifies the trusted-proxy-hop model:
 // with TrustedProxyHops=1 the Nth-from-right (rightmost) XFF entry is used,
 // which is the IP the outermost trusted proxy observed — unforgeable by the client.
