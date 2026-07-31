@@ -7,15 +7,21 @@
 // the exact silent-failure shape §1.11 exists to prevent: a principle nothing
 // mechanically checks is a principle that quietly erodes.
 //
-// This tool enforces two thresholds:
+// This tool enforces three thresholds:
 //   - Go source files (excluding generated/vendored code) must stay under a
 //     line-count budget — a higher budget for _test.go files, since table-driven
 //     tests legitimately run longer than the logic they exercise.
 //   - docs/design/**/*.md files must stay under a word-count budget, matching
 //     the ~2,000-word target stated in §1.10 and the design docs' own headers.
+//   - Every file tracked in git must stay under a byte-size budget. A committed
+//     binary is a supply-chain smell: nobody reviews it and it is not rebuilt
+//     from source on every CI run. `git ls-files` enumerates tracked files;
+//     any file that exceeds maxTrackedFileBytes AND looks binary (NUL byte in
+//     the first 8 KiB) is flagged. Fail-closed: if git is unavailable the check
+//     errors rather than silently passing.
 //
-// It is stdlib-only (bufio + filepath.WalkDir) so it runs anywhere the pinned
-// toolchain does (Foundation F3). It is wired into `make agent-check`
+// It is stdlib-only (bufio + filepath.WalkDir + os/exec) so it runs anywhere
+// the pinned toolchain does (Foundation F3). It is wired into `make agent-check`
 // (Foundation F6) so the check is part of the single trusted verdict.
 //
 // Usage:
@@ -25,9 +31,11 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -47,6 +55,18 @@ const (
 	maxNonTestGoLines = 400
 	maxTestGoLines    = 500
 	maxDesignDocWords = 2000
+
+	// maxTrackedFileBytes is the upper bound for any binary file tracked in git.
+	// Compiled binaries are typically tens of MiB; legitimate source artefacts
+	// (generated protobuf, go.sum) rarely approach this. 1 MiB is a conservative
+	// ceiling that catches accidentally committed binaries without false-positives
+	// on the current tree. Only files that also look binary (NUL byte in first
+	// 8 KiB) are flagged — large text files (go.sum, docs) are not penalised.
+	maxTrackedFileBytes = 1 * 1024 * 1024 // 1 MiB
+
+	// binarySniffBytes is how many bytes to read when deciding whether a file
+	// looks binary. Matches the heuristic used by git and file(1).
+	binarySniffBytes = 8 * 1024
 )
 
 type finding struct {
@@ -73,13 +93,21 @@ func main() {
 	}
 	findings = append(findings, docFindings...)
 
+	binaryFindings, err := scanTrackedBinaries()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "filesize: error scanning tracked binaries: %v\n", err)
+		os.Exit(1)
+	}
+	findings = append(findings, binaryFindings...)
+
 	if len(findings) == 0 {
 		fmt.Println("filesize: clean — no files exceed the §1.10 small-files thresholds.")
 		os.Exit(0)
 	}
 
 	fmt.Fprintf(os.Stderr, "filesize: %d file(s) exceed the §1.10 small-files thresholds.\n", len(findings))
-	fmt.Fprintf(os.Stderr, "A large file mixes concerns — split along a package/file boundary (see docs/design/principles/skills-and-small-files.md §1.10).\n\n")
+	fmt.Fprintf(os.Stderr, "A large file mixes concerns — split along a package/file boundary (see docs/design/principles/skills-and-small-files.md §1.10).\n")
+	fmt.Fprintf(os.Stderr, "Committed binaries must be removed with `git rm --cached` and added to .gitignore.\n\n")
 	for _, f := range findings {
 		fmt.Fprintf(os.Stderr, "  %s: %d %s (limit %d)\n", f.path, f.count, f.unit, f.limit)
 	}
@@ -189,6 +217,64 @@ func countLines(path string) (int, error) {
 		return 0, err
 	}
 	return n, nil
+}
+
+// scanTrackedBinaries calls `git ls-files -z` to enumerate every file tracked
+// in the current git index and flags any whose on-disk size exceeds
+// maxTrackedFileBytes AND whose content looks binary. Using the index (not git
+// history) keeps this check git-history-free and safe to run in agent-check.
+//
+// Fail-closed: if git is unavailable or the repo state is unreadable the
+// function returns an error — a missing tool is never a silent pass.
+func scanTrackedBinaries() ([]finding, error) {
+	cmd := exec.Command("git", "ls-files", "-z")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git ls-files: %w", err)
+	}
+	var findings []finding
+	for _, path := range strings.Split(string(out), "\x00") {
+		if path == "" {
+			continue
+		}
+		info, statErr := os.Stat(path)
+		if statErr != nil || info.IsDir() {
+			continue // deleted or a submodule directory; skip
+		}
+		size := int(info.Size())
+		if size <= maxTrackedFileBytes {
+			continue
+		}
+		binary, sniffErr := looksBinary(path)
+		if sniffErr != nil || !binary {
+			continue // unreadable or text (e.g. large go.sum); skip
+		}
+		findings = append(findings, finding{
+			path:  path,
+			count: size,
+			limit: maxTrackedFileBytes,
+			unit:  "bytes",
+		})
+	}
+	return findings, nil
+}
+
+// looksBinary reports whether the file at path appears to be binary by
+// checking for a NUL byte in the first binarySniffBytes, matching the
+// heuristic used by git and file(1).
+func looksBinary(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close() //nolint:errcheck // deferred os.File.Close on a read-only file; see error-handling.md §1.11
+
+	buf := make([]byte, binarySniffBytes)
+	n, err := f.Read(buf)
+	if err != nil && n == 0 {
+		return false, err
+	}
+	return bytes.IndexByte(buf[:n], 0) >= 0, nil
 }
 
 // countWords returns the number of whitespace-separated words in path.

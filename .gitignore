@@ -5,6 +5,8 @@
 /harbor-hot
 /harbor-mgmt
 /harbor-relay
+cmd/harbor-hot/harbor-hot
+cmd/harbor-mgmt/harbor-mgmt
 check-results.json
 
 # Test / coverage
