@@ -211,6 +211,15 @@ func (s *Server) WithRelayStore(relays RelayStore) *Server {
 	return s
 }
 
+// WithRelayDomain sets the regional relay domain used to format relay email
+// addresses (e.g. "relay.eu.harbor.id"). This is used independently of the
+// BYO-domain store — call this alongside WithRelayStore when relay address
+// formatting is needed without BYO-domain management. Returns s for chaining.
+func (s *Server) WithRelayDomain(relayDomain string) *Server {
+	s.relayDomain = relayDomain
+	return s
+}
+
 // WithBYODomainStore attaches the BYO-domain store and verifier for custom
 // domain management. When set, the /byo-domains endpoints are available.
 // A nil store returns 503 Service Unavailable. Returns s for chaining.

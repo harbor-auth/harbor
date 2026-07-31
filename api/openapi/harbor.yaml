@@ -593,6 +593,14 @@ components:
             RP-Initiated Logout endpoint (OIDC RP-Initiated Logout 1.0). Terminates
             the user's session at this OP. Requires id_token_hint to identify the
             user/client pair.
+        revocation_endpoint:
+          type: string
+          format: uri
+          description: Token revocation endpoint (RFC 7009).
+        introspection_endpoint:
+          type: string
+          format: uri
+          description: Token introspection endpoint (RFC 7662).
         jwks_uri:
           type: string
           format: uri
@@ -610,11 +618,11 @@ components:
           example: ["pairwise"]
         id_token_signing_alg_values_supported:
           type: array
-          description: Asymmetric signing only; `none`/HS* are rejected (DESIGN §7).
+          description: Asymmetric signing only; `none`/HS* are rejected (DESIGN §7). Only ES256 is emitted.
           items:
             type: string
-            enum: ["ES256", "EdDSA"]
-          example: ["ES256", "EdDSA"]
+            enum: ["ES256"]
+          example: ["ES256"]
         grant_types_supported:
           type: array
           description: >-

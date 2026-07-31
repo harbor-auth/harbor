@@ -283,8 +283,9 @@ func TestRateLimitMiddleware_ClientIDPreferredOverIP(t *testing.T) {
 }
 
 // TestRateLimitMiddleware_TrustedForwardedHeader verifies that the configured
-// trusted forwarded header supplies the client IP for the anonymous bucket,
-// using the leftmost (original client) address.
+// trusted forwarded header supplies the client IP for the anonymous bucket
+// using the Nth-from-right (rightmost) address — the IP the outermost trusted
+// proxy observed, which the client cannot forge (M4 fix).
 func TestRateLimitMiddleware_TrustedForwardedHeader(t *testing.T) {
 	stub := &stubLimiter{allowed: true}
 	h := RateLimitMiddleware(RateLimitConfig{
@@ -292,6 +293,7 @@ func TestRateLimitMiddleware_TrustedForwardedHeader(t *testing.T) {
 		Endpoint:               telemetry.EndpointToken,
 		Window:                 time.Minute,
 		TrustedForwardedHeader: "X-Forwarded-For",
+		TrustedProxyHops:       1,
 	})(okNextHandler())
 
 	req := rateLimitReq("", "10.9.9.9:1234")
@@ -299,8 +301,122 @@ func TestRateLimitMiddleware_TrustedForwardedHeader(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 
-	if got, want := stub.lastKey(), "token:203.0.113.7"; got != want {
+	// With TrustedProxyHops=1 the rightmost entry (10.9.9.9, what nginx observed)
+	// must be used — NOT the leftmost attacker-controlled 203.0.113.7.
+	if got, want := stub.lastKey(), "token:10.9.9.9"; got != want {
 		t.Fatalf("forwarded key = %q, want %q", got, want)
+	}
+}
+
+// TestRateLimitMiddleware_TrustedProxyHops verifies the trusted-proxy-hop model:
+// with TrustedProxyHops=1 the Nth-from-right (rightmost) XFF entry is used,
+// which is the IP the outermost trusted proxy observed — unforgeable by the client.
+func TestRateLimitMiddleware_TrustedProxyHops(t *testing.T) {
+	stub := &stubLimiter{allowed: true}
+	h := RateLimitMiddleware(RateLimitConfig{
+		Limiter:                stub,
+		Endpoint:               telemetry.EndpointToken,
+		Window:                 time.Minute,
+		TrustedForwardedHeader: "X-Forwarded-For",
+		TrustedProxyHops:       1,
+	})(okNextHandler())
+
+	// nginx-ingress appends the real client IP on the right;
+	// the leftmost entry is attacker-controlled and must NOT be used.
+	req := rateLimitReq("", "10.9.9.9:1234")
+	req.Header.Set("X-Forwarded-For", "203.0.113.7, 10.9.9.9")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// Rightmost entry (what nginx observed) is 10.9.9.9.
+	if got, want := stub.lastKey(), "token:10.9.9.9"; got != want {
+		t.Fatalf("hop-1 key = %q, want %q", got, want)
+	}
+}
+
+// TestRateLimitMiddleware_TrustedProxyHopsZeroIgnoresHeader verifies that the
+// default (TrustedProxyHops=0) ignores the forwarded header entirely and falls
+// back to RemoteAddr, even when TrustedForwardedHeader is set.
+func TestRateLimitMiddleware_TrustedProxyHopsZeroIgnoresHeader(t *testing.T) {
+	stub := &stubLimiter{allowed: true}
+	h := RateLimitMiddleware(RateLimitConfig{
+		Limiter:                stub,
+		Endpoint:               telemetry.EndpointToken,
+		Window:                 time.Minute,
+		TrustedForwardedHeader: "X-Forwarded-For",
+		TrustedProxyHops:       0, // default: trust nothing
+	})(okNextHandler())
+
+	req := rateLimitReq("", "10.9.9.9:1234")
+	req.Header.Set("X-Forwarded-For", "203.0.113.7, 10.9.9.9")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// Must use RemoteAddr (10.9.9.9), not the header.
+	if got, want := stub.lastKey(), "token:10.9.9.9"; got != want {
+		t.Fatalf("hops=0 key = %q, want %q (must use RemoteAddr)", got, want)
+	}
+}
+
+// TestRateLimitMiddleware_ForgedXFFCannotEscapeBucket is the M4 regression test.
+// It verifies that a client sending a different random leftmost XFF entry on
+// every request cannot escape their rate-limit bucket when TrustedProxyHops=1.
+// The rightmost entry (appended by nginx-ingress) is the unforgeable real IP.
+func TestRateLimitMiddleware_ForgedXFFCannotEscapeBucket(t *testing.T) {
+	lim := clients.NewMemoryRateLimiter(clients.RateLimiterConfig{Limit: 2, Window: time.Minute})
+	h := RateLimitMiddleware(RateLimitConfig{
+		Limiter:                lim,
+		Endpoint:               telemetry.EndpointToken,
+		Window:                 time.Minute,
+		TrustedForwardedHeader: "X-Forwarded-For",
+		TrustedProxyHops:       1,
+	})(okNextHandler())
+
+	realIP := "198.51.100.5"
+	// Each request carries a different forged leftmost entry but the same
+	// nginx-appended real IP on the right.
+	forgedPrefixes := []string{"1.2.3.4", "5.6.7.8", "9.10.11.12"}
+
+	for i, forged := range forgedPrefixes {
+		req := rateLimitReq("", realIP+":9999")
+		req.Header.Set("X-Forwarded-For", forged+", "+realIP)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if i < 2 {
+			// First two requests allowed (within limit=2).
+			if rec.Code != http.StatusOK {
+				t.Fatalf("request %d: status = %d, want 200", i, rec.Code)
+			}
+		} else {
+			// Third request must be rate-limited despite the forged new leftmost entry.
+			if rec.Code != http.StatusTooManyRequests {
+				t.Fatalf("M4 regression: forged XFF escaped the rate-limit bucket; status = %d, want 429", rec.Code)
+			}
+		}
+	}
+}
+
+// TestRateLimitMiddleware_TrustedProxyHopsUnderflow verifies that when the XFF
+// header is shorter than TrustedProxyHops (attacker stripped entries), the
+// middleware falls back to RemoteAddr rather than reading a forgeable entry.
+func TestRateLimitMiddleware_TrustedProxyHopsUnderflow(t *testing.T) {
+	stub := &stubLimiter{allowed: true}
+	h := RateLimitMiddleware(RateLimitConfig{
+		Limiter:                stub,
+		Endpoint:               telemetry.EndpointToken,
+		Window:                 time.Minute,
+		TrustedForwardedHeader: "X-Forwarded-For",
+		TrustedProxyHops:       2, // expects 2 entries, but header has only 1
+	})(okNextHandler())
+
+	req := rateLimitReq("", "10.1.2.3:5678")
+	req.Header.Set("X-Forwarded-For", "203.0.113.1") // only 1 entry, hops=2 can't be satisfied
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	// Must fall back to RemoteAddr, not the single (potentially forgeable) entry.
+	if got, want := stub.lastKey(), "token:10.1.2.3"; got != want {
+		t.Fatalf("underflow key = %q, want %q (must fall back to RemoteAddr)", got, want)
 	}
 }
 

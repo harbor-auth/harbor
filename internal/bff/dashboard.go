@@ -106,19 +106,26 @@ func NewDashboardHandler(
 
 // Routes registers the dashboard routes on mux behind RequireFullScope.
 // All routes require the BFF session middleware to be active upstream.
+// Mutating POST routes are additionally protected by DashboardCSRF (second
+// CSRF layer on top of the SameSite=Strict cookie).
 func (h *DashboardHandler) Routes(mux *http.ServeMux) {
-	wrap := func(handler http.Handler) http.Handler {
+	// read-only routes: RequireFullScope only.
+	read := func(handler http.Handler) http.Handler {
 		return RequireFullScope(handler)
 	}
-	mux.Handle("GET /dashboard", wrap(http.HandlerFunc(h.GetDashboard)))
-	mux.Handle("GET /dashboard/apps", wrap(http.HandlerFunc(h.GetConnectedApps)))
-	mux.Handle("POST /dashboard/apps/{grant_id}/revoke", wrap(http.HandlerFunc(h.PostRevokeApp)))
-	mux.Handle("GET /dashboard/activity", wrap(http.HandlerFunc(h.GetActivity)))
-	mux.Handle("GET /dashboard/sessions", wrap(http.HandlerFunc(h.GetSessions)))
-	mux.Handle("POST /dashboard/sessions/{session_id}/revoke", wrap(http.HandlerFunc(h.PostRevokeSession)))
-	mux.Handle("POST /dashboard/credentials/{credential_id}/revoke", wrap(http.HandlerFunc(h.PostRevokeCredential)))
-	mux.Handle("GET /dashboard/relay", wrap(http.HandlerFunc(h.GetRelayToggles)))
-	mux.Handle("POST /dashboard/relay/{address_id}/deactivate", wrap(http.HandlerFunc(h.PostDeactivateRelay)))
+	// mutating routes: RequireFullScope + DashboardCSRF (defence in depth).
+	mutating := func(handler http.Handler) http.Handler {
+		return RequireFullScope(DashboardCSRF(handler))
+	}
+	mux.Handle("GET /dashboard", read(http.HandlerFunc(h.GetDashboard)))
+	mux.Handle("GET /dashboard/apps", read(http.HandlerFunc(h.GetConnectedApps)))
+	mux.Handle("POST /dashboard/apps/{grant_id}/revoke", mutating(http.HandlerFunc(h.PostRevokeApp)))
+	mux.Handle("GET /dashboard/activity", read(http.HandlerFunc(h.GetActivity)))
+	mux.Handle("GET /dashboard/sessions", read(http.HandlerFunc(h.GetSessions)))
+	mux.Handle("POST /dashboard/sessions/{session_id}/revoke", mutating(http.HandlerFunc(h.PostRevokeSession)))
+	mux.Handle("POST /dashboard/credentials/{credential_id}/revoke", mutating(http.HandlerFunc(h.PostRevokeCredential)))
+	mux.Handle("GET /dashboard/relay", read(http.HandlerFunc(h.GetRelayToggles)))
+	mux.Handle("POST /dashboard/relay/{address_id}/deactivate", mutating(http.HandlerFunc(h.PostDeactivateRelay)))
 }
 
 // --- view data types (passed to html/template; all user-supplied strings are
@@ -176,6 +183,11 @@ func (h *DashboardHandler) GetConnectedApps(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	if h.consents == nil {
+		http.Error(w, "consent store not available", http.StatusServiceUnavailable)
+		return
+	}
+
 	grants, err := h.consents.List(r.Context(), userID)
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "bff: dashboard: list consent grants failed",
@@ -195,6 +207,11 @@ func (h *DashboardHandler) PostRevokeApp(w http.ResponseWriter, r *http.Request)
 	userID := UserIDFromContext(r.Context())
 	if userID == "" {
 		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+
+	if h.consents == nil {
+		http.Error(w, "consent store not available", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -322,6 +339,11 @@ func (h *DashboardHandler) GetSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.sessions == nil || h.credentials == nil {
+		http.Error(w, "session store not available", http.StatusServiceUnavailable)
+		return
+	}
+
 	sessions, err := h.sessions.ListSessionsByUser(r.Context(), userID)
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "bff: dashboard: list sessions failed", "error", err)
@@ -349,6 +371,11 @@ func (h *DashboardHandler) PostRevokeSession(w http.ResponseWriter, r *http.Requ
 	userID := UserIDFromContext(r.Context())
 	if userID == "" {
 		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+
+	if h.sessions == nil {
+		http.Error(w, "session store not available", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -395,6 +422,11 @@ func (h *DashboardHandler) PostRevokeCredential(w http.ResponseWriter, r *http.R
 	userID := UserIDFromContext(r.Context())
 	if userID == "" {
 		http.Error(w, "authentication required", http.StatusUnauthorized)
+		return
+	}
+
+	if h.credentials == nil {
+		http.Error(w, "credential store not available", http.StatusServiceUnavailable)
 		return
 	}
 

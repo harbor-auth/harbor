@@ -32,20 +32,24 @@ func (s *Server) metadata() openapi.OpenIDProviderMetadata {
 	base := strings.TrimRight(s.issuer, "/")
 	userinfoEndpoint := base + "/userinfo"
 	endSessionEndpoint := base + "/end_session"
+	revocationEndpoint := base + "/revoke"
+	introspectionEndpoint := base + "/introspect"
 	return openapi.OpenIDProviderMetadata{
 		Issuer:                 base,
 		AuthorizationEndpoint:  base + "/authorize",
 		TokenEndpoint:          base + "/token",
 		UserinfoEndpoint:       &userinfoEndpoint,
 		EndSessionEndpoint:     &endSessionEndpoint,
+		RevocationEndpoint:     &revocationEndpoint,
+		IntrospectionEndpoint:  &introspectionEndpoint,
 		JwksUri:                base + "/jwks.json",
 		ResponseTypesSupported: []string{"code"},
 		SubjectTypesSupported: []openapi.OpenIDProviderMetadataSubjectTypesSupported{
 			openapi.Pairwise,
 		},
+		// ES256 only — EdDSA is not supported by the issuer or verifier.
 		IdTokenSigningAlgValuesSupported: []openapi.OpenIDProviderMetadataIdTokenSigningAlgValuesSupported{
 			openapi.ES256,
-			openapi.EdDSA,
 		},
 		// OAuth 2.1: Authorization Code + refresh only — no implicit/ROPC (§3.1).
 		// (These enum constants carry the full type prefix because the same

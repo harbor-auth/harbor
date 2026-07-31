@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-07-31
+goal: Ship a batch of security-hardening and cleanup fixes across the BFF, HTTP server, relay, OIDC discovery, DB pool, and rate limiter — CSRF protection on dashboard mutations, panic recovery with a metrics counter, nil-safe dashboard rendering, RELAY_DOMAIN threaded through email formatting, corrected OIDC discovery metadata, explicit pgxpool sizing, removal of a committed binary, migration lock/statement timeouts, and a trusted-proxy-hop client-IP model replacing leftmost-XFF

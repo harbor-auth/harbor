@@ -188,10 +188,10 @@ func NewAddress(gen TokenGenerator, userID uuid.UUID, clientID string, realEmail
 	return addr, mapping, nil
 }
 
-// FormatEmail returns the full relay email address for a given token and region.
-// Format: <token>@relay.<region>.harbor.id
-func FormatEmail(token string, reg region.Region) string {
-	return fmt.Sprintf("%s@relay.%s.harbor.id", token, reg)
+// FormatEmail returns the full relay email address for a given token and relay domain.
+// Format: <token>@<relayDomain>
+func FormatEmail(token string, relayDomain string) string {
+	return fmt.Sprintf("%s@%s", token, relayDomain)
 }
 
 // ParseState validates and returns a State from a string.

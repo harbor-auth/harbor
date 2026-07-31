@@ -91,7 +91,7 @@ func (s *Server) GetRelayAddresses(w http.ResponseWriter, r *http.Request) {
 		Addresses: make([]RelayAddressResponse, len(addresses)),
 	}
 	for i, addr := range addresses {
-		resp.Addresses[i] = addressToResponse(addr)
+		resp.Addresses[i] = addressToResponse(addr, s.relayDomain)
 	}
 
 	outcome = telemetry.OutcomeSuccess
@@ -207,10 +207,10 @@ type DNSSetupStatusResponse struct {
 }
 
 // addressToResponse converts a relay.Address to the JSON response type.
-func addressToResponse(addr *relay.Address) RelayAddressResponse {
+func addressToResponse(addr *relay.Address, relayDomain string) RelayAddressResponse {
 	resp := RelayAddressResponse{
 		RelayToken: addr.Token,
-		RelayEmail: relay.FormatEmail(addr.Token, addr.Region),
+		RelayEmail: relay.FormatEmail(addr.Token, relayDomain),
 		ClientID:   addr.ClientID,
 		State:      string(addr.State),
 		Region:     string(addr.Region),

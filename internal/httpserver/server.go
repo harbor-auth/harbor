@@ -37,7 +37,7 @@ func Run(ctx context.Context, addr string, h http.Handler, logger *slog.Logger) 
 	// from tying up the hot path (docs/DESIGN.md §6.5).
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           h,
+		Handler:           WithRecovery(h, logger),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,

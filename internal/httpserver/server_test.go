@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -8,8 +9,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
+
+	dto "github.com/prometheus/client_model/go"
+
+	"github.com/harbor-auth/harbor/internal/telemetry"
 )
 
 func TestHealthMux(t *testing.T) {
@@ -190,6 +196,119 @@ func TestRun_ServesRequests(t *testing.T) {
 
 	cancel()
 	<-errCh
+}
+
+// TestWithRecovery_Returns500 verifies that a panicking handler yields a 500
+// response and does not leak the panic value to the client.
+func TestWithRecovery_Returns500(t *testing.T) {
+	panicMsg := "secret internal state"
+	panicking := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		panic(panicMsg)
+	})
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	handler := WithRecovery(panicking, logger)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	handler.ServeHTTP(rec, req)
+
+	res := rec.Result()
+	defer func() { _ = res.Body.Close() }()
+
+	if res.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", res.StatusCode, http.StatusInternalServerError)
+	}
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if strings.Contains(string(body), panicMsg) {
+		t.Fatalf("response body must not contain panic value; got %q", body)
+	}
+}
+
+// TestWithRecovery_IncrementsCounter verifies that a recovered panic increments
+// the harbor_http_panics_total counter by exactly one.
+func TestWithRecovery_IncrementsCounter(t *testing.T) {
+	// Gather baseline count before the panic.
+	baselineSamples, err := telemetry.Registry().Gather()
+	if err != nil {
+		t.Fatalf("gather baseline metrics: %v", err)
+	}
+	baseline := panicCounterValue(baselineSamples)
+
+	panicking := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		panic("boom")
+	})
+	handler := WithRecovery(panicking, discardLogger())
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	afterSamples, err := telemetry.Registry().Gather()
+	if err != nil {
+		t.Fatalf("gather metrics: %v", err)
+	}
+	after := panicCounterValue(afterSamples)
+
+	if after-baseline != 1 {
+		t.Fatalf("harbor_http_panics_total delta = %.0f, want 1", after-baseline)
+	}
+}
+
+// TestWithRecovery_LogContainsNoSecrets verifies the slog error entry does not
+// include the panic value or any PII.
+func TestWithRecovery_LogContainsNoSecrets(t *testing.T) {
+	sensitiveValue := "sensitive-panic-value-12345"
+	panicking := http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {
+		panic(sensitiveValue)
+	})
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	handler := WithRecovery(panicking, logger)
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+
+	logOutput := logBuf.String()
+	if !strings.Contains(logOutput, "ERROR") {
+		t.Fatalf("expected ERROR log entry; got %q", logOutput)
+	}
+	if strings.Contains(logOutput, sensitiveValue) {
+		t.Fatalf("log must not contain panic value; got %q", logOutput)
+	}
+}
+
+// TestWithRecovery_NoPanic verifies that a non-panicking handler passes through
+// normally with its original status code.
+func TestWithRecovery_NoPanic(t *testing.T) {
+	normal := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	handler := WithRecovery(normal, discardLogger())
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+
+	if rec.Result().StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Result().StatusCode, http.StatusOK)
+	}
+}
+
+// panicCounterValue extracts the current value of harbor_http_panics_total
+// from a gathered metric family slice. Returns 0 if the metric is not yet
+// registered (i.e. no panics have fired yet in this process).
+func panicCounterValue(families []*dto.MetricFamily) float64 {
+	for _, mf := range families {
+		if mf.GetName() == "harbor_http_panics_total" {
+			for _, m := range mf.GetMetric() {
+				return m.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
 }
 
 // waitForServer polls the given URL until it responds or timeout expires.

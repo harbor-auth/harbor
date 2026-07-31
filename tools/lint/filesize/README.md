@@ -22,6 +22,11 @@ as a codebase grows.
 - **`docs/design/**/*.md`** files: flagged if they exceed **2,000 words**,
   matching the target already stated throughout the docs tree (`DESIGN.md`,
   `docs/README.md`, `.agents/docs.md`).
+- **Git-tracked binary files**: any file tracked by `git ls-files` that
+  exceeds **1 MiB** _and_ looks binary (NUL byte in the first 8 KiB) is
+  flagged. A committed binary is a supply-chain smell — it is an artefact
+  nobody reviews and that is not rebuilt from source on every CI run.
+  Large text files (e.g. `go.sum`) are not penalised by this check.
 
 ## What it does NOT check
 
@@ -30,6 +35,8 @@ as a codebase grows.
   the §1.10-governed design tree).
 - Non-Go source (frontend, if/when one exists) — out of scope for this tool;
   add a sibling checker if that need arises.
+- Binary files smaller than 1 MiB or text files of any size (the committed-
+  binary guard uses size + binary-sniff, not size alone).
 
 ## Run it
 

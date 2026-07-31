@@ -555,9 +555,22 @@ func buildRateLimits(redisClient *redis.Client, logger *slog.Logger) []oidcapi.E
 		logger.Warn("rate limiting disabled via RATE_LIMIT_DISABLED", "component", "harbor-hot")
 	}
 
-	// A trusted upstream proxy (if any) sets the real client IP here; consulted
-	// only for the anonymous bucket. Empty means "trust no forwarded header".
+	// TRUSTED_PROXY_HOPS configures the trusted-proxy-hop model for deriving the
+	// real client IP from a forwarded header. Default 0 = trust nothing, use
+	// RemoteAddr directly (safe for direct internet exposure).
+	//
+	// Set TRUSTED_PROXY_HOPS=1 when nginx-ingress is the sole proxy (it appends
+	// the observed client IP to the right of X-Forwarded-For). Set =2 if an
+	// additional L7 load balancer also appends. Only count proxies you control
+	// that append to the header — see deploy/README.md for the footgun details.
+	trustedHops := envInt("TRUSTED_PROXY_HOPS", 0)
+	// TRUSTED_FORWARDED_HEADER names the header the outermost trusted proxy sets.
+	// When TRUSTED_PROXY_HOPS > 0 and this is empty, X-Forwarded-For is used
+	// (the nginx-ingress standard). Ignored when TRUSTED_PROXY_HOPS=0.
 	trustedHeader := envString("TRUSTED_FORWARDED_HEADER", "")
+	if trustedHops > 0 && trustedHeader == "" {
+		trustedHeader = "X-Forwarded-For"
+	}
 
 	limits := make([]oidcapi.EndpointRateLimit, 0, len(hotPathLimits))
 	for _, spec := range hotPathLimits {
@@ -575,6 +588,7 @@ func buildRateLimits(redisClient *redis.Client, logger *slog.Logger) []oidcapi.E
 			Window:                 window,
 			Logger:                 logger,
 			TrustedForwardedHeader: trustedHeader,
+			TrustedProxyHops:       trustedHops,
 		})
 		limits = append(limits, oidcapi.EndpointRateLimit{Path: spec.path, Middleware: mw})
 	}
