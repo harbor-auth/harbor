@@ -93,18 +93,13 @@ func TestGetOpenIDConfiguration_PairwiseOnly(t *testing.T) {
 	}
 }
 
-// Security invariant (docs/DESIGN.md §7): asymmetric signing only — no `none`/HS*.
+// Security invariant (docs/DESIGN.md §7): ES256 only — EdDSA is not supported
+// by the issuer or verifier and must not be advertised.
 func TestGetOpenIDConfiguration_AsymmetricSigningOnly(t *testing.T) {
 	doc := decodeDiscovery(t, "https://eu.harbor.id")
 	algs := toStrings(t, doc["id_token_signing_alg_values_supported"])
-	if len(algs) == 0 {
-		t.Fatal("id_token_signing_alg_values_supported is empty")
-	}
-	allowed := map[string]bool{"ES256": true, "EdDSA": true}
-	for _, a := range algs {
-		if !allowed[a] {
-			t.Fatalf("disallowed signing alg %q — asymmetric only (ES256/EdDSA)", a)
-		}
+	if len(algs) != 1 || algs[0] != "ES256" {
+		t.Fatalf("id_token_signing_alg_values_supported = %v, want [ES256] only", algs)
 	}
 }
 
@@ -129,6 +124,21 @@ func TestGetOpenIDConfiguration_GrantTypes(t *testing.T) {
 	for _, g := range grants {
 		if !allowed[g] {
 			t.Fatalf("disallowed grant type %q — Authorization Code + refresh only", g)
+		}
+	}
+}
+
+// Discovery must advertise revocation and introspection endpoints that actually exist.
+func TestGetOpenIDConfiguration_RevocationAndIntrospectionEndpoints(t *testing.T) {
+	doc := decodeDiscovery(t, "https://eu.harbor.id")
+
+	want := map[string]string{
+		"revocation_endpoint":    "https://eu.harbor.id/revoke",
+		"introspection_endpoint": "https://eu.harbor.id/introspect",
+	}
+	for k, v := range want {
+		if doc[k] != v {
+			t.Fatalf("%s = %v, want %q", k, doc[k], v)
 		}
 	}
 }
