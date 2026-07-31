@@ -2,8 +2,10 @@ package bff
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -174,6 +176,340 @@ func TestSecurity_CrossTabIsolation(t *testing.T) {
 	if sessB.UserID != "" {
 		t.Errorf("session B.UserID = %q, must not be affected by tab A's FinishLogin", sessB.UserID)
 	}
+}
+
+// =============================================================
+// Browser Nonce Gate Tests (audit finding C3 — session fixation)
+// These tests FAIL before tasks 4-5 implement the nonce gate in
+// BeginLogin and FinishLoginWithParsedData.
+// =============================================================
+
+// TestSecurity_SessionFixation_AttackerMintedRequestID is the headline regression
+// test for login session fixation (audit finding C3 / fix-bff-session-binding).
+//
+// Attack scenario:
+//  1. Attacker calls /authorize with their own client_id + redirect_uri,
+//     capturing request_id=R and its associated browser nonce cookie.
+//  2. Attacker lures the victim to /login?request_id=R.
+//  3. Victim's browser has NO nonce cookie — they never visited /authorize.
+//
+// With the nonce gate, BeginLogin must refuse immediately: missing nonce cookie
+// proves this request did not originate from the browser that initiated the
+// flow. No BFF cookie must be set, and no code is ever issued.
+//
+// This test FAILS before tasks 4-5 implement the gate.
+func TestSecurity_SessionFixation_AttackerMintedRequestID(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+
+	// Mint an attacker-controlled nonce and store its hash in the session,
+	// exactly as /authorize would after the fix is deployed.
+	attackerNonce, err := NewBrowserNonce()
+	if err != nil {
+		t.Fatalf("NewBrowserNonce: %v", err)
+	}
+
+	attackerSession := BFFSessionRecord{
+		RequestID:        "attacker-session-R",
+		ClientID:         "attacker-client-id",
+		RedirectURI:      "https://attacker.example.com/steal",
+		State:            "attacker-state",
+		BrowserNonceHash: HashNonce(attackerNonce),
+		ExpiresAt:        time.Now().Add(5 * time.Minute),
+	}
+	if err := store.Create(ctx, attackerSession); err != nil {
+		t.Fatalf("create attacker session: %v", err)
+	}
+
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+
+	// Victim is lured to /login?request_id=R — they have NO nonce cookie
+	// because they never visited /authorize.
+	req := httptest.NewRequest(http.MethodGet, "/login?request_id=attacker-session-R", nil)
+	// Deliberately no __Host-harbor-bff-nonce cookie.
+	rec := httptest.NewRecorder()
+	handler.BeginLogin(rec, req)
+
+	// The nonce gate MUST refuse: missing nonce ≠ stored hash.
+	if rec.Code == http.StatusOK {
+		t.Errorf("status = 200: BeginLogin accepted victim request with no nonce cookie — "+
+			"session fixation is NOT prevented (want 4xx refusal)")
+	}
+	if rec.Code/100 == 3 {
+		t.Errorf("status = %d: BeginLogin issued a redirect without nonce validation — "+
+			"session fixation is NOT prevented", rec.Code)
+	}
+	// No Location header — must not redirect the victim anywhere.
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("Location = %q: must not redirect when nonce is absent", loc)
+	}
+	// The attacker's session must remain unauthenticated — the victim's
+	// passkey assertion must never be written into it.
+	sess, err := store.Get(ctx, "attacker-session-R")
+	if err != nil {
+		t.Fatalf("get attacker session: %v", err)
+	}
+	if sess.UserID != "" {
+		t.Errorf("attacker session.UserID = %q: must not be populated by victim request", sess.UserID)
+	}
+}
+
+// TestSecurity_BeginLogin_RefusesWithMissingNonce verifies that BeginLogin refuses
+// when the session has a BrowserNonceHash but no nonce cookie is present in the
+// request. This is the gate at the very start of the login ceremony.
+//
+// This test FAILS before tasks 4-5 implement the gate.
+func TestSecurity_BeginLogin_RefusesWithMissingNonce(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+
+	nonce, err := NewBrowserNonce()
+	if err != nil {
+		t.Fatalf("NewBrowserNonce: %v", err)
+	}
+	sess := BFFSessionRecord{
+		RequestID:        "nonce-session",
+		ClientID:         "test-client",
+		BrowserNonceHash: HashNonce(nonce),
+		ExpiresAt:        time.Now().Add(5 * time.Minute),
+	}
+	if err := store.Create(ctx, sess); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+
+	req := httptest.NewRequest(http.MethodGet, "/login?request_id=nonce-session", nil)
+	// No nonce cookie — should be refused.
+	rec := httptest.NewRecorder()
+	handler.BeginLogin(rec, req)
+
+	if rec.Code == http.StatusOK {
+		t.Errorf("status = 200: BeginLogin accepted request with missing nonce cookie (want 4xx)")
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("Location = %q: must not redirect when nonce is absent", loc)
+	}
+}
+
+// TestSecurity_BeginLogin_RefusesWithWrongNonce verifies that BeginLogin refuses
+// when the nonce cookie value does not match the session's BrowserNonceHash.
+// An attacker who captures the request_id cannot forge a valid nonce.
+//
+// This test FAILS before tasks 4-5 implement the gate.
+func TestSecurity_BeginLogin_RefusesWithWrongNonce(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+
+	legitimateNonce, err := NewBrowserNonce()
+	if err != nil {
+		t.Fatalf("NewBrowserNonce (legitimate): %v", err)
+	}
+	sess := BFFSessionRecord{
+		RequestID:        "nonce-session",
+		ClientID:         "test-client",
+		BrowserNonceHash: HashNonce(legitimateNonce),
+		ExpiresAt:        time.Now().Add(5 * time.Minute),
+	}
+	if err := store.Create(ctx, sess); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	wrongNonce, err := NewBrowserNonce()
+	if err != nil {
+		t.Fatalf("NewBrowserNonce (wrong): %v", err)
+	}
+
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+
+	req := httptest.NewRequest(http.MethodGet, "/login?request_id=nonce-session", nil)
+	req.AddCookie(&http.Cookie{
+		Name:  NonceCookieName,
+		Value: base64.RawURLEncoding.EncodeToString(wrongNonce),
+	})
+	rec := httptest.NewRecorder()
+	handler.BeginLogin(rec, req)
+
+	if rec.Code == http.StatusOK {
+		t.Errorf("status = 200: BeginLogin accepted request with wrong nonce (want 4xx)")
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("Location = %q: must not redirect on nonce mismatch", loc)
+	}
+}
+
+// TestSecurity_FinishLogin_RefusesWithMissingNonce verifies that FinishLogin
+// refuses when the session has a BrowserNonceHash but the request carries no
+// nonce cookie. Even possession of the correct BFF session cookie is insufficient
+// without the matching browser nonce.
+//
+// This test FAILS before tasks 4-5 implement the gate.
+func TestSecurity_FinishLogin_RefusesWithMissingNonce(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+
+	nonce, err := NewBrowserNonce()
+	if err != nil {
+		t.Fatalf("NewBrowserNonce: %v", err)
+	}
+	sess := BFFSessionRecord{
+		RequestID:        "nonce-session",
+		ClientID:         "test-client",
+		BrowserNonceHash: HashNonce(nonce),
+		ExpiresAt:        time.Now().Add(5 * time.Minute),
+	}
+	if err := store.Create(ctx, sess); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+
+	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
+	req.AddCookie(&http.Cookie{Name: CookieName, Value: "nonce-session"})
+	req.AddCookie(&http.Cookie{Name: webauthnSessionCookieName, Value: "session-key"})
+	// No nonce cookie.
+	rec := httptest.NewRecorder()
+	handler.FinishLoginWithParsedData(rec, req, &protocol.ParsedCredentialAssertionData{})
+
+	if rec.Code == http.StatusFound {
+		t.Errorf("status = 302: FinishLogin redirected without nonce validation (want 4xx)")
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("Location = %q: must not redirect when nonce is absent", loc)
+	}
+	// The session must remain unauthenticated — userID must not be written.
+	updated, err := store.Get(ctx, "nonce-session")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if updated.UserID != "" {
+		t.Errorf("session.UserID = %q: must not be set without valid nonce", updated.UserID)
+	}
+}
+
+// TestSecurity_FinishLogin_RefusesWithWrongNonce verifies that FinishLogin refuses
+// when the nonce cookie does not match the session's BrowserNonceHash. A forged or
+// replayed nonce must not allow the ceremony to complete.
+//
+// This test FAILS before tasks 4-5 implement the gate.
+func TestSecurity_FinishLogin_RefusesWithWrongNonce(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+
+	legitimateNonce, err := NewBrowserNonce()
+	if err != nil {
+		t.Fatalf("NewBrowserNonce (legitimate): %v", err)
+	}
+	sess := BFFSessionRecord{
+		RequestID:        "nonce-session",
+		ClientID:         "test-client",
+		BrowserNonceHash: HashNonce(legitimateNonce),
+		ExpiresAt:        time.Now().Add(5 * time.Minute),
+	}
+	if err := store.Create(ctx, sess); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	wrongNonce, err := NewBrowserNonce()
+	if err != nil {
+		t.Fatalf("NewBrowserNonce (wrong): %v", err)
+	}
+
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+
+	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
+	req.AddCookie(&http.Cookie{Name: CookieName, Value: "nonce-session"})
+	req.AddCookie(&http.Cookie{Name: webauthnSessionCookieName, Value: "session-key"})
+	req.AddCookie(&http.Cookie{
+		Name:  NonceCookieName,
+		Value: base64.RawURLEncoding.EncodeToString(wrongNonce),
+	})
+	rec := httptest.NewRecorder()
+	handler.FinishLoginWithParsedData(rec, req, &protocol.ParsedCredentialAssertionData{})
+
+	if rec.Code == http.StatusFound {
+		t.Errorf("status = 302: FinishLogin redirected with wrong nonce (want 4xx)")
+	}
+	if loc := rec.Header().Get("Location"); loc != "" {
+		t.Errorf("Location = %q: must not redirect on nonce mismatch", loc)
+	}
+	updated, err := store.Get(ctx, "nonce-session")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if updated.UserID != "" {
+		t.Errorf("session.UserID = %q: must not be set on nonce mismatch", updated.UserID)
+	}
+}
+
+// TestSecurity_NonceNeverInResponseBody verifies that the raw browser nonce value
+// is never echoed in any response body or redirect Location header.
+// The nonce lives exclusively in the browser cookie; the server stores only its
+// SHA-256 hash. A compromised response must not yield a replayable nonce.
+func TestSecurity_NonceNeverInResponseBody(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+
+	nonce, err := NewBrowserNonce()
+	if err != nil {
+		t.Fatalf("NewBrowserNonce: %v", err)
+	}
+	encodedNonce := base64.RawURLEncoding.EncodeToString(nonce)
+
+	sess := BFFSessionRecord{
+		RequestID:        "nonce-leak-check",
+		ClientID:         "test-client",
+		BrowserNonceHash: HashNonce(nonce),
+		ExpiresAt:        time.Now().Add(5 * time.Minute),
+	}
+	if err := store.Create(ctx, sess); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{})
+
+	t.Run("BeginLogin response does not contain nonce", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/login?request_id=nonce-leak-check", nil)
+		req.AddCookie(&http.Cookie{
+			Name:  NonceCookieName,
+			Value: encodedNonce,
+		})
+		rec := httptest.NewRecorder()
+		handler.BeginLogin(rec, req)
+
+		body := rec.Body.String()
+		if strings.Contains(body, encodedNonce) {
+			t.Errorf("BeginLogin response body contains raw nonce (base64url-encoded): must never be returned")
+		}
+		if loc := rec.Header().Get("Location"); strings.Contains(loc, encodedNonce) {
+			t.Errorf("BeginLogin Location header contains raw nonce: must never be exposed")
+		}
+	})
+
+	t.Run("error responses do not contain nonce", func(t *testing.T) {
+		// A request with missing nonce triggers an error response — verify the
+		// error body does not accidentally echo back the nonce from any context.
+		req := httptest.NewRequest(http.MethodGet, "/login?request_id=nonce-leak-check", nil)
+		// Deliberately wrong nonce to provoke an error path.
+		wrongNonce, err := NewBrowserNonce()
+		if err != nil {
+			t.Fatalf("NewBrowserNonce: %v", err)
+		}
+		req.AddCookie(&http.Cookie{
+			Name:  NonceCookieName,
+			Value: base64.RawURLEncoding.EncodeToString(wrongNonce),
+		})
+		rec := httptest.NewRecorder()
+		handler.BeginLogin(rec, req)
+
+		body := rec.Body.String()
+		if strings.Contains(body, encodedNonce) {
+			t.Errorf("error response body contains legitimate nonce: must never be returned")
+		}
+		if strings.Contains(body, base64.RawURLEncoding.EncodeToString(wrongNonce)) {
+			t.Errorf("error response body contains wrong nonce: must never echo cookie values")
+		}
+	})
 }
 
 // TestSecurity_CSRFBindingEnforced verifies that /login/complete requires the BFF
