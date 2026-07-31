@@ -278,8 +278,12 @@ func runBFFPasskeyFlowDetailed(t *testing.T) (bffFlowResult, bffNonceFlowState, 
 	}
 	defer func() { _ = finishResp.Body.Close() }()
 	if finishResp.StatusCode != http.StatusFound {
-		body, _ := io.ReadAll(finishResp.Body)
-		t.Logf("POST /login/complete = %d, want 302\n%s", finishResp.StatusCode, body)
+		body, readErr := io.ReadAll(finishResp.Body)
+		if readErr != nil {
+			t.Logf("POST /login/complete = %d, want 302 (body read error: %v)", finishResp.StatusCode, readErr)
+		} else {
+			t.Logf("POST /login/complete = %d, want 302\n%s", finishResp.StatusCode, body)
+		}
 		return bffFlowResult{}, bffNonceFlowState{}, false
 	}
 
@@ -299,8 +303,12 @@ func runBFFPasskeyFlowDetailed(t *testing.T) (bffFlowResult, bffNonceFlowState, 
 	}
 	defer func() { _ = compResp.Body.Close() }()
 	if compResp.StatusCode != http.StatusFound {
-		body, _ := io.ReadAll(compResp.Body)
-		t.Logf("GET /authorize/complete = %d, want 302\n%s", compResp.StatusCode, body)
+		body, readErr := io.ReadAll(compResp.Body)
+		if readErr != nil {
+			t.Logf("GET /authorize/complete = %d, want 302 (body read error: %v)", compResp.StatusCode, readErr)
+		} else {
+			t.Logf("GET /authorize/complete = %d, want 302\n%s", compResp.StatusCode, body)
+		}
 		return bffFlowResult{}, bffNonceFlowState{}, false
 	}
 	if loc := compResp.Header.Get("Location"); !strings.HasPrefix(loc, demoRedirectURI) {
@@ -329,8 +337,12 @@ func runBFFPasskeyFlowDetailed(t *testing.T) (bffFlowResult, bffNonceFlowState, 
 	tokenResp := postToken(t, code, verifier, demoRedirectURI)
 	defer func() { _ = tokenResp.Body.Close() }()
 	if tokenResp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(tokenResp.Body)
-		t.Logf("POST /token = %d, want 200\n%s", tokenResp.StatusCode, body)
+		body, readErr := io.ReadAll(tokenResp.Body)
+		if readErr != nil {
+			t.Logf("POST /token = %d, want 200 (body read error: %v)", tokenResp.StatusCode, readErr)
+		} else {
+			t.Logf("POST /token = %d, want 200\n%s", tokenResp.StatusCode, body)
+		}
 		return bffFlowResult{}, bffNonceFlowState{}, false
 	}
 	tokenBody, err := io.ReadAll(tokenResp.Body)
