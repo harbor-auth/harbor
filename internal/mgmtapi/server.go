@@ -113,6 +113,11 @@ type Server struct {
 	// /compliance/erase endpoints. Nil puts those routes into a 503 state.
 	compliance *ComplianceDeps
 
+	// callerSource resolves the authenticated caller's user ID from the BFF
+	// session context for every user-scoped endpoint. Injected by
+	// WithCallerSource; a nil source causes user-scoped endpoints to return 401.
+	callerSource CallerSource
+
 	logger *slog.Logger
 }
 
