@@ -85,18 +85,27 @@ func (q *Queries) EnqueueRevocation(ctx context.Context, arg EnqueueRevocationPa
 }
 
 const fetchPendingRevocations = `-- name: FetchPendingRevocations :many
-SELECT id, reason, user_id, client_id, grant_id, status, retry_count, next_attempt_at, created_at FROM revocation_outbox
-WHERE status = 'pending'
-  AND next_attempt_at <= now()
-ORDER BY next_attempt_at ASC
-LIMIT $1
-FOR UPDATE SKIP LOCKED
+WITH claimed AS (
+    SELECT id FROM revocation_outbox
+    WHERE status = 'pending'
+      AND next_attempt_at <= now()
+    ORDER BY next_attempt_at ASC
+    LIMIT $1
+    FOR UPDATE SKIP LOCKED
+)
+UPDATE revocation_outbox AS outbox
+SET next_attempt_at = now() + interval '30 seconds'
+FROM claimed
+WHERE outbox.id = claimed.id
+RETURNING outbox.id, outbox.reason, outbox.user_id, outbox.client_id, outbox.grant_id, outbox.status, outbox.retry_count, outbox.next_attempt_at, outbox.created_at
 `
 
-// Fetch pending revocation signals ready for delivery. Uses FOR UPDATE SKIP
-// LOCKED to allow multiple workers without contention. Limited to batch_size
-// rows to avoid long transactions. Only fetches rows whose next_attempt_at
-// has passed (respecting exponential backoff).
+// Atomically lease pending signals before returning them. A bare SELECT FOR
+// UPDATE is insufficient here because sqlc executes it in its own implicit
+// transaction and releases the locks before delivery. Moving next_attempt_at
+// forward in the same statement ensures sibling replicas cannot claim the
+// same signal while this worker is delivering it. A crashed worker's lease
+// expires after 30 seconds and the durable row becomes eligible again.
 func (q *Queries) FetchPendingRevocations(ctx context.Context, limit int32) ([]RevocationOutbox, error) {
 	rows, err := q.db.Query(ctx, fetchPendingRevocations, limit)
 	if err != nil {

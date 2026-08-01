@@ -69,3 +69,10 @@ Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3
 3. Add canonical scope-update and atomic grant-plus-session revocation queries.
 4. Regenerate sqlc output and run migration/code-generation and Go checks.
 5. Rebase the shared branch, commit, push, and report task completion.
+
+## Task 11: replica-safe revocation and theft handling
+
+1. Run the focused revocation lifecycle tests from Task 10 and confirm their intended failures.
+2. Make outbox delivery claim-safe and acknowledgement failures observable, drain durable work immediately on worker startup, and make refresh rotation a database compare-and-swap.
+3. Verify durable JTI propagation and shared logout/theft behavior with the focused clients, OIDC, and OIDC API suites, including race coverage.
+4. Run repository validation, commit, rebase the shared branch, and push.

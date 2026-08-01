@@ -43,6 +43,15 @@ SET revoked_at = now()
 WHERE id = $1
   AND revoked_at IS NULL;
 
+-- name: RevokeSessionIfActive :execrows
+-- Compare-and-swap used by refresh rotation. Exactly one concurrent replica
+-- may transition the old token from active to revoked.
+UPDATE sessions
+SET revoked_at = now()
+WHERE id = $1
+  AND revoked_at IS NULL
+  AND expires_at > now();
+
 -- RevokeSessionsByUser revokes every active session for a user (e.g. "sign out
 -- everywhere", or a forced logout on credential change; DESIGN §9).
 -- name: RevokeSessionsByUser :exec

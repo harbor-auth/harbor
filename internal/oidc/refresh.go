@@ -151,11 +151,14 @@ func (s *InMemorySessionStore) RevokeSession(_ context.Context, id string) error
 func (s *InMemorySessionStore) RotateSession(_ context.Context, oldID string, newSession RefreshSession) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Revoke old — under the lock, so no crash window between revoke and create.
-	if e, ok := s.byID[oldID]; ok {
-		e.revoked = true
-		e.s.RevokedAt = time.Now()
+	// Compare-and-swap the old session. A concurrent replica that observed the
+	// token before the winner rotated it must not mint a second successor.
+	e, ok := s.byID[oldID]
+	if !ok || e.revoked || !time.Now().Before(e.s.ExpiresAt) {
+		return ErrRefreshTokenRevoked
 	}
+	e.revoked = true
+	e.s.RevokedAt = time.Now()
 	// Create new.
 	entry := &sessionEntry{s: newSession}
 	s.byID[newSession.ID] = entry

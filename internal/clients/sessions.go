@@ -23,6 +23,7 @@ type sessionQuerier interface {
 	GetSessionByHash(ctx context.Context, refreshTokenHash []byte) (db.Session, error)
 	ListSessionsByUser(ctx context.Context, userID pgtype.UUID) ([]db.Session, error)
 	RevokeSession(ctx context.Context, id pgtype.UUID) error
+	RevokeSessionIfActive(ctx context.Context, id pgtype.UUID) (int64, error)
 	// RevokeSessionsByUser is retained for the future "sign out everywhere"
 	// (global user logout) path; the hot-path theft-signal uses RevokeSessionsByUserClient.
 	RevokeSessionsByUser(ctx context.Context, userID pgtype.UUID) error
@@ -218,8 +219,12 @@ func (s *DBSessionStore) RotateSession(ctx context.Context, oldID string, newSes
 	if err := oldUID.Scan(oldID); err != nil {
 		return fmt.Errorf("sessions: parse old session ID %q: %w", oldID, err)
 	}
-	if err := qtx.RevokeSession(ctx, oldUID); err != nil {
+	rows, err := qtx.RevokeSessionIfActive(ctx, oldUID)
+	if err != nil {
 		return fmt.Errorf("sessions: rotate (revoke in tx): %w", err)
+	}
+	if rows != 1 {
+		return oidc.ErrRefreshTokenRevoked
 	}
 
 	params, err := buildCreateSessionParams(newSession)

@@ -129,6 +129,7 @@ func (o *DBRevocationOutbox) DeliverPending(ctx context.Context, sink oidc.Sessi
 				o.logger.ErrorContext(ctx, "revocation_outbox: failed to mark entry as failed (TTL exceeded)",
 					slog.String("entry_id", entry.ID),
 					slog.Any("error", markErr))
+				return fmt.Errorf("revocation_outbox: persist failed status for %s: %w", entry.ID, markErr)
 			} else {
 				o.logger.WarnContext(ctx, "revocation_outbox: entry marked failed after TTL exceeded",
 					slog.String("entry_id", entry.ID),
@@ -145,6 +146,7 @@ func (o *DBRevocationOutbox) DeliverPending(ctx context.Context, sink oidc.Sessi
 				o.logger.ErrorContext(ctx, "revocation_outbox: failed to mark entry as delivered",
 					slog.String("entry_id", entry.ID),
 					slog.Any("error", markErr))
+				return fmt.Errorf("revocation_outbox: persist delivered status for %s: %w", entry.ID, markErr)
 			}
 			continue
 		}
@@ -172,6 +174,7 @@ func (o *DBRevocationOutbox) DeliverPending(ctx context.Context, sink oidc.Sessi
 			o.logger.ErrorContext(ctx, "revocation_outbox: failed to increment retry",
 				slog.String("entry_id", entry.ID),
 				slog.Any("error", retryErr))
+			return fmt.Errorf("revocation_outbox: persist retry for %s: %w", entry.ID, retryErr)
 		}
 	}
 

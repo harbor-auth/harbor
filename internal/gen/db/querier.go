@@ -100,10 +100,12 @@ type Querier interface {
 	// payloads, relay mappings, etc.) becomes permanently unrecoverable in one
 	// stroke (DESIGN §compliance-export, invariant 1). NOT a row deletion.
 	EraseUserDEK(ctx context.Context, id pgtype.UUID) error
-	// Fetch pending revocation signals ready for delivery. Uses FOR UPDATE SKIP
-	// LOCKED to allow multiple workers without contention. Limited to batch_size
-	// rows to avoid long transactions. Only fetches rows whose next_attempt_at
-	// has passed (respecting exponential backoff).
+	// Atomically lease pending signals before returning them. A bare SELECT FOR
+	// UPDATE is insufficient here because sqlc executes it in its own implicit
+	// transaction and releases the locks before delivery. Moving next_attempt_at
+	// forward in the same statement ensures sibling replicas cannot claim the
+	// same signal while this worker is delivering it. A crashed worker's lease
+	// expires after 30 seconds and the durable row becomes eligible again.
 	FetchPendingRevocations(ctx context.Context, limit int32) ([]RevocationOutbox, error)
 	// FindGrantByPPID looks up an active grant by its pairwise_sub (PPID) and
 	// client_id. Used during RP-Initiated Logout to reverse-lookup the userID from
@@ -268,6 +270,9 @@ type Querier interface {
 	// during client deletion (RFC 7592) to clean up user authorizations.
 	RevokeGrantsByClient(ctx context.Context, clientID string) error
 	RevokeSession(ctx context.Context, id pgtype.UUID) error
+	// Compare-and-swap used by refresh rotation. Exactly one concurrent replica
+	// may transition the old token from active to revoked.
+	RevokeSessionIfActive(ctx context.Context, id pgtype.UUID) (int64, error)
 	// RevokeSessionsByGrant revokes every active session for a specific grant —
 	// used when a user revokes a connected app (DESIGN §11.3). Scoped to a single
 	// grant so revoking one app connection does not affect other grants for the

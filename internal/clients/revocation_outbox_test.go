@@ -449,22 +449,20 @@ func TestComputeNextAttempt_ExponentialBackoff(t *testing.T) {
 	}
 }
 
-// concurrentOutboxQuerier deliberately models the current SQL contract: both
-// replicas can observe the same pending row before either acknowledges it.
-// A replica-safe outbox must claim and process the row in one transaction, so
-// only one FetchPendingRevocations call may receive it.
+// concurrentOutboxQuerier models the atomic lease performed by the generated
+// FetchPendingRevocations query: both replicas race to claim the same row, but
+// only the winner receives it for delivery.
 type concurrentOutboxQuerier struct {
-	row           db.RevocationOutbox
-	fetchBarrier  sync.WaitGroup
-	returnBarrier sync.WaitGroup
-	mu            sync.Mutex
-	delivered     bool
+	row          db.RevocationOutbox
+	fetchBarrier sync.WaitGroup
+	mu           sync.Mutex
+	claimed      bool
+	delivered    bool
 }
 
 func newConcurrentOutboxQuerier(row db.RevocationOutbox) *concurrentOutboxQuerier {
 	q := &concurrentOutboxQuerier{row: row}
 	q.fetchBarrier.Add(2)
-	q.returnBarrier.Add(2)
 	return q
 }
 
@@ -476,17 +474,12 @@ func (q *concurrentOutboxQuerier) FetchPendingRevocations(context.Context, int32
 	q.fetchBarrier.Done()
 	q.fetchBarrier.Wait()
 	q.mu.Lock()
-	if q.delivered {
-		q.mu.Unlock()
+	defer q.mu.Unlock()
+	if q.claimed || q.delivered {
 		return nil, nil
 	}
-	row := q.row
-	q.mu.Unlock()
-	// Both replicas have now observed the row as pending before either is
-	// allowed to begin delivery.
-	q.returnBarrier.Done()
-	q.returnBarrier.Wait()
-	return []db.RevocationOutbox{row}, nil
+	q.claimed = true
+	return []db.RevocationOutbox{q.row}, nil
 }
 
 func (q *concurrentOutboxQuerier) MarkRevocationDelivered(context.Context, pgtype.UUID) error {

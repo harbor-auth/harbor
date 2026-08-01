@@ -210,6 +210,24 @@ func (q *Queries) RevokeSession(ctx context.Context, id pgtype.UUID) error {
 	return err
 }
 
+const revokeSessionIfActive = `-- name: RevokeSessionIfActive :execrows
+UPDATE sessions
+SET revoked_at = now()
+WHERE id = $1
+  AND revoked_at IS NULL
+  AND expires_at > now()
+`
+
+// Compare-and-swap used by refresh rotation. Exactly one concurrent replica
+// may transition the old token from active to revoked.
+func (q *Queries) RevokeSessionIfActive(ctx context.Context, id pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeSessionIfActive, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const revokeSessionsByGrant = `-- name: RevokeSessionsByGrant :exec
 UPDATE sessions
 SET revoked_at = now()

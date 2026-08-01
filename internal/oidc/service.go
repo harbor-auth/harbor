@@ -788,6 +788,10 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	// With a pool-wired DBSessionStore this is a single transaction; with
 	// InMemorySessionStore it is atomic under the store's mutex.
 	if err := s.sessionStore.RotateSession(ctx, session.ID, newSession); err != nil {
+		if errors.Is(err, ErrRefreshTokenRevoked) {
+			s.signalRefreshReuse(ctx, session)
+			return nil, &TokenError{Code: ErrCodeInvalidGrant, Description: "refresh token already used", Status: 400}
+		}
 		s.logger.ErrorContext(ctx, "refresh: session rotation failed",
 			slog.String("client_id", session.ClientID),
 			slog.Any("error", err))
