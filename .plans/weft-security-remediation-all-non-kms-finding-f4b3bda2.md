@@ -141,6 +141,14 @@ Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3
    authenticator without weakening existing assertions.
 5. Rebase the shared branch, commit the test-only contract, and push.
 
+## Task 21: atomic BFF continuation and Redis mutations
+
+1. Run the Task 20 race and expiry tests to identify the remaining unsafe paths.
+2. Keep authorization-code issuance behind the session store's atomic one-time consume gate and preserve nonce, PKCE, CSRF, cookie, and ownership validation.
+3. Make every Redis session mutation reject missing keys and keys without a positive remaining TTL without rewriting the record.
+4. Run focused BFF/OIDC API tests, race coverage, and repository validation.
+5. Rebase the shared branch, commit, push, and report task completion.
+
 ## Task 20: BFF consume and Redis expiry race tests
 
 1. Add concurrent authorize-completion coverage proving exactly one request can

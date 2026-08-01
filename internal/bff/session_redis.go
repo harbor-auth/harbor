@@ -97,14 +97,13 @@ if not data then
     return 0
 end
 
+local ttl = redis.call('TTL', KEYS[1])
+if ttl <= 0 then
+    return 0
+end
 local record = cjson.decode(data)
 record.UserID = ARGV[1]
-local ttl = redis.call('TTL', KEYS[1])
-if ttl > 0 then
-    redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
-else
-    redis.call('SET', KEYS[1], cjson.encode(record))
-end
+redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
 return 1
 `)
 
@@ -124,16 +123,15 @@ if not data then
     return 0
 end
 
+local ttl = redis.call('TTL', KEYS[1])
+if ttl <= 0 then
+    return 0
+end
 local record = cjson.decode(data)
 record.UserID = ARGV[1]
 record.RecoveryRequired = (ARGV[2] == "true")
 record.SessionScope = ARGV[3]
-local ttl = redis.call('TTL', KEYS[1])
-if ttl > 0 then
-    redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
-else
-    redis.call('SET', KEYS[1], cjson.encode(record))
-end
+redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
 return 1
 `)
 
@@ -151,14 +149,13 @@ if not data then
     return 0
 end
 
+local ttl = redis.call('TTL', KEYS[1])
+if ttl <= 0 then
+    return 0
+end
 local record = cjson.decode(data)
 record.AuthMethod = ARGV[1]
-local ttl = redis.call('TTL', KEYS[1])
-if ttl > 0 then
-    redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
-else
-    redis.call('SET', KEYS[1], cjson.encode(record))
-end
+redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
 return 1
 `)
 
@@ -176,14 +173,13 @@ if not data then
     return 0
 end
 
+local ttl = redis.call('TTL', KEYS[1])
+if ttl <= 0 then
+    return 0
+end
 local record = cjson.decode(data)
 record.MFAVerifiedAt = ARGV[1]
-local ttl = redis.call('TTL', KEYS[1])
-if ttl > 0 then
-    redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
-else
-    redis.call('SET', KEYS[1], cjson.encode(record))
-end
+redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
 return 1
 `)
 
