@@ -98,6 +98,51 @@ func TestParseEnforceAuthErrorNamesTheVariable(t *testing.T) {
 	}
 }
 
+// TestResolveRelayAuthEnforcement pins the environment boundary around the
+// monitoring-only relay mode. Production must explicitly enable enforcement;
+// an unset or false value is a startup error, not permission to begin accepting
+// unauthenticated mail. Only an explicit development/test process may opt out.
+func TestResolveRelayAuthEnforcement(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		devMode bool
+		raw     string
+		want    bool
+		wantErr bool
+	}{
+		{name: "production explicitly enabled", raw: "true", want: true},
+		{name: "production unset fails startup", raw: "", wantErr: true},
+		{name: "production false fails startup", raw: "false", wantErr: true},
+		{name: "production off fails startup", raw: "off", wantErr: true},
+		{name: "development unset may monitor", devMode: true, raw: "", want: false},
+		{name: "development explicitly disabled", devMode: true, raw: "false", want: false},
+		{name: "development may enforce", devMode: true, raw: "true", want: true},
+		{name: "invalid value always fails", devMode: true, raw: "sometimes", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := resolveRelayAuthEnforcement(tc.devMode, tc.raw)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("resolveRelayAuthEnforcement(%v, %q) = %v, nil; want startup error", tc.devMode, tc.raw, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveRelayAuthEnforcement(%v, %q): %v", tc.devMode, tc.raw, err)
+			}
+			if got != tc.want {
+				t.Errorf("resolveRelayAuthEnforcement(%v, %q) = %v, want %v", tc.devMode, tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
 func contains(haystack, needle string) bool {
 	return len(haystack) >= len(needle) && func() bool {
 		for i := 0; i+len(needle) <= len(haystack); i++ {

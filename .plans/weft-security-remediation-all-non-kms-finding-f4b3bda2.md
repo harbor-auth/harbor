@@ -191,3 +191,13 @@ Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3
    gates on MFA, recovery, enrollment, and dynamic-registration endpoints.
 4. Run the focused suites and confirm the new assertions fail for the intended
    missing hardening, then format, commit, rebase, and push the test-only work.
+
+## Task 26: relay authentication mode red tests
+
+1. Pin startup configuration so production requires authentication enforcement
+   while an explicit development/test mode may retain monitoring behavior.
+2. Add a request-time backstop proving an enforced relay cannot accept mail
+   when its authenticator dependency is absent.
+3. Run the focused command and relay package tests and confirm the new contracts
+   fail for the intended missing mode validation and fail-open request path.
+4. Format, commit, rebase the shared branch, push, and report task completion.
