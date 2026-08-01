@@ -9,6 +9,9 @@ metadata:
     app.kubernetes.io/part-of: harbor
 data:
   PORT: "8081"
+  REGION: "EU"
+  HARBOR_DEV_MODE: "false"
+  KMS_KEY_MAP: "EU=REPLACE_WITH_REGIONAL_KMS_KEY_ID"
   # WebAuthn Relying Party config (docs/DESIGN.md §3.1).
   #   RP_ID    — effective domain (no scheme/port). Passkeys are scoped to
   #              this; it MUST be a registrable suffix of the origin below.
@@ -17,8 +20,8 @@ data:
   #              with your real domain.
   #   RP_NAME  — human-facing Relying Party name shown in browser passkey prompts.
   WEBAUTHN_RP_ID: "example.com"
-  WEBAUTHN_RP_NAME: "Harbor"
-  WEBAUTHN_ORIGIN: "https://dashboard.example.com"
+  WEBAUTHN_RP_DISPLAY_NAME: "Harbor"
+  WEBAUTHN_RP_ORIGINS: "https://dashboard.example.com"
   # Absolute URL of harbor-hot's /authorize/complete endpoint. After a
   # successful passkey assertion harbor-mgmt redirects the browser here to
   # resume the OIDC flow. It MUST be absolute (a relative path resolves against
@@ -28,3 +31,5 @@ data:
   # refuses to start if DATABASE_URL is set but this is empty.
   # SCAFFOLD: replace example.com with your real domain (matches ISSUER host).
   AUTHORIZE_COMPLETE_URL: "https://auth.example.com/authorize/complete"
+  MTA_DOMAIN: "mta-eu.harbor.id"
+  RELAY_DOMAIN: "relay.eu.harbor.id"

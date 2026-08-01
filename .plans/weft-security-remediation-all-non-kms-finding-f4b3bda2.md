@@ -247,3 +247,17 @@ Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3
 2. Reject `RATE_LIMIT_DISABLED` outside explicit development mode and make sensitive hot-path limiter outages return a bounded failure response.
 3. Add a shared management abuse gate backed by Redis and attach independent production buckets to MFA, recovery, enrollment, and registration routes.
 4. Preserve explicit development/test behavior, run focused security tests and repository validation, then rebase, commit, and push.
+
+## Task 28: Helm and raw manifest security contracts
+
+1. Add one executable render contract covering both Helm output and the raw
+   Kustomize base, and run it first to capture the existing deployment drift.
+2. Require immutable digest image references plus the cluster signature-policy
+   marker for hot and management workloads.
+3. Reconcile the production secret/config contract: PostgreSQL, Redis, regional
+   `KMS_KEY_MAP`, runtime mode, and WebAuthn names must match in both variants;
+   local KMS secrets must remain absent.
+4. Assert pod hardening and narrowly scoped DNS, PostgreSQL, Redis, KMS HTTPS,
+   and Linkerd egress in both rendered variants.
+5. Wire the contract into CI, run focused render checks and repository gates,
+   then rebase, commit, and push the shared branch.

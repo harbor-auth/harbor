@@ -59,19 +59,16 @@ spec:
       ports:
         - port: 6379
           protocol: TCP
-    # External SMTP for email relay (STARTTLS on 587, implicit TLS on 465).
-    # harbor-mgmt sends transactional email through an outbound relay; without
-    # this rule all SMTP traffic is silently blocked by Calico.
+    # Regional KMS API. Limit external access to TLS and exclude cluster CIDRs.
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
             except:
               - 10.0.0.0/8
+              - 172.16.0.0/12
               - 192.168.0.0/16
       ports:
-        - port: 587
-          protocol: TCP
-        - port: 465
+        - port: 443
           protocol: TCP
     # Linkerd control-plane — proxy sidecars must reach the linkerd namespace:
     #   8080 linkerd-identity  (mTLS cert issuance)

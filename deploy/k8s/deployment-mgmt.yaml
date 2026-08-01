@@ -54,15 +54,14 @@ spec:
               app.kubernetes.io/name: harbor-mgmt
       containers:
         - name: harbor-mgmt
-          # SCAFFOLD: pin to an immutable digest before production (see hot).
-          image: ghcr.io/harbor-auth/harbor/harbor-mgmt:latest
+          # Fail-closed placeholder. Replace with the signed release digest.
+          image: ghcr.io/harbor-auth/harbor/harbor-mgmt@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 8081
-          # No REDIS_URL here: harbor-mgmt does not use the auth-code store.
-          # Config (incl. WEBAUTHN_RP_*) then secrets (DATABASE_URL/
-          # HARBOR_KEK_SECRET).
+          # Config then secrets (DATABASE_URL/REDIS_URL). Regional KMS key IDs
+          # are non-secret config; credentials come from workload identity.
           envFrom:
             - configMapRef:
                 name: harbor-mgmt-config

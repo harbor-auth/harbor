@@ -15,3 +15,5 @@ data:
   # REGION binds the issuer host to a region so the fail-closed region
   # middleware resolves /authorize and /token (docs/DESIGN.md §5).
   REGION: {{ .Values.region | default "EU" | quote }}
+  HARBOR_DEV_MODE: "false"
+  KMS_KEY_MAP: {{ required "kmsKeyMap is required in production" .Values.kmsKeyMap | quote }}

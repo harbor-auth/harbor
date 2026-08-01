@@ -1,3 +1,4 @@
+{{- $digest := required "hot.image.digest must pin a signed sha256 image" .Values.hot.image.digest -}}
 # Deployment: harbor-hot — the stateless, internet-facing OIDC hot path
 # (/authorize, /token, /jwks, discovery). Stateless by design, so it scales
 # horizontally freely — replica count is driven by the HPA (hpa-hot.yaml); the
@@ -65,7 +66,7 @@ spec:
             - name: http
               containerPort: {{ .Values.hot.port }}
           # Non-secret config first, then secrets (DATABASE_URL/REDIS_URL/
-          # KEK_SECRET), then KMS credentials (AWS_ACCESS_KEY_ID/
+          # ADMIN_API_TOKEN), then KMS credentials (AWS_ACCESS_KEY_ID/
           # AWS_SECRET_ACCESS_KEY). envFrom keeps sources cleanly separated.
           envFrom:
             - configMapRef:
