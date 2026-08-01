@@ -100,6 +100,31 @@ func TestBFFConfigValidate(t *testing.T) {
 	}
 }
 
+func TestProductionBFFConfigRejectsInsecureLoginURL(t *testing.T) {
+	t.Setenv("HARBOR_DEV_MODE", "")
+	cfg := bffConfig{LoginURL: "http://login.example.com/login", SessionTTL: 5 * time.Minute}
+	if err := cfg.validate(); err == nil {
+		t.Fatal("production accepted an HTTP LOGIN_URL; browser authentication redirects must use HTTPS")
+	}
+}
+
+func TestProductionStartupValidatesAbuseAndExternalURLs(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	assembly := string(source)
+	for _, required := range []string{
+		"RATE_LIMIT_DISABLED is not allowed in production",
+		"validateProductionURL(\"ISSUER\"",
+		"validateProductionURL(\"LOGIN_URL\"",
+	} {
+		if !strings.Contains(assembly, required) {
+			t.Errorf("production harbor-hot startup does not enforce %q", required)
+		}
+	}
+}
+
 func TestLoadBFFConfig(t *testing.T) {
 	// Save and restore environment after test.
 	restore := func(keys ...string) func() {

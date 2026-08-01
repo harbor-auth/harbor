@@ -180,3 +180,14 @@ Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3
    authenticated administrator for dynamic client registration.
 4. Run focused production-graph and management tests, then repository checks.
 5. Rebase the shared branch, commit, push, record the result, and complete the task.
+
+## Task 24: production abuse configuration red tests
+
+1. Pin production startup to reject `RATE_LIMIT_DISABLED` and non-HTTPS issuer,
+   login, registration, WebAuthn origin, and relying-party host configuration.
+2. Require rate-limiter backend failures to stop token requests instead of
+   passing them through.
+3. Add a management composition-root contract requiring outage-aware abuse
+   gates on MFA, recovery, enrollment, and dynamic-registration endpoints.
+4. Run the focused suites and confirm the new assertions fail for the intended
+   missing hardening, then format, commit, rebase, and push the test-only work.

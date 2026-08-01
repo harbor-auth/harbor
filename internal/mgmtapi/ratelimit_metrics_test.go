@@ -6,6 +6,8 @@ package mgmtapi_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/harbor-auth/harbor/internal/mgmtapi"
@@ -40,6 +42,25 @@ func rateLimitSample(t *testing.T, name string, want map[string]string) (float64
 		}
 	}
 	return 0, nil, false
+}
+
+func TestSensitiveRoutesHaveOutageAwareAbuseGates(t *testing.T) {
+	files := []string{"server.go", "enroll.go", "register.go", "mfa.go", "recovery.go"}
+	var source strings.Builder
+	for _, name := range files {
+		body, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		source.Write(body)
+	}
+
+	for _, endpoint := range []string{"enroll", "register", "mfa", "recovery"} {
+		marker := "abuseGate.Check(r.Context(), \"" + endpoint + "\""
+		if !strings.Contains(source.String(), marker) {
+			t.Errorf("%s endpoints lack an outage-aware abuse gate (want %q)", endpoint, marker)
+		}
+	}
 }
 
 func TestWriteRateLimited_Returns429AndAggregateMetric(t *testing.T) {

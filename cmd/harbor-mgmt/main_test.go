@@ -87,3 +87,35 @@ func TestProductionLiveGraphContainsNoScaffolds(t *testing.T) {
 		}
 	}
 }
+
+func TestProductionStartupValidatesOriginsHostsAndRegistrationURL(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	assembly := string(source)
+	for _, required := range []string{
+		"validateProductionURL(\"AUTHORIZE_COMPLETE_URL\"",
+		"validateProductionOrigins",
+		"validateProductionHost(\"WEBAUTHN_RP_ID\"",
+		"validateProductionURL(\"REGISTRATION_BASE_URL\"",
+	} {
+		if !strings.Contains(assembly, required) {
+			t.Errorf("production harbor-mgmt startup does not enforce %q", required)
+		}
+	}
+}
+
+func TestProductionGraphWiresOutageAwareAbuseProtection(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	assembly := string(source)
+	for _, endpoint := range []string{"mfa", "recovery", "enrollment", "registration"} {
+		marker := "WithProductionAbuseProtection(" + endpoint
+		if !strings.Contains(assembly, marker) {
+			t.Errorf("production graph lacks outage-aware abuse protection for %s endpoints (want %q)", endpoint, marker)
+		}
+	}
+}
