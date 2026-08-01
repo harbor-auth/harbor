@@ -226,7 +226,7 @@ func (s *Server) PostRegister(w http.ResponseWriter, r *http.Request) {
 // wrong token cannot be discovered via a timing side-channel.
 func (s *Server) initialAccessTokenAuthorized(r *http.Request) bool {
 	if s.initialAccessTokenHash == nil {
-		return true
+		return !s.registrationAuthorizationRequired
 	}
 	token := bearerToken(r)
 	if token == "" {

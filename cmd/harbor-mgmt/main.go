@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -19,6 +20,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	awskms "github.com/aws/aws-sdk-go-v2/service/kms"
 
 	"github.com/harbor-auth/harbor/internal/bff"
 	"github.com/harbor-auth/harbor/internal/clients"
@@ -49,6 +53,121 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	var err error
+	if envBool("HARBOR_DEV_MODE") {
+		logger.Warn("HARBOR_DEV_MODE enabled — using development scaffolds")
+		err = runDevelopment(ctx, logger)
+	} else {
+		err = runProduction(ctx, logger)
+	}
+	if err != nil && ctx.Err() == nil {
+		logger.Error("harbor-mgmt exited", "error", err)
+		os.Exit(1)
+	}
+}
+
+// runProduction is the fail-closed composition root. Every stateful dependency
+// served from this graph is shared by all replicas.
+func runProduction(ctx context.Context, logger *slog.Logger) error {
+	pool, err := clients.ConnectDB(ctx, logger)
+	if err != nil {
+		return fmt.Errorf("connect database: %w", err)
+	}
+	if pool == nil {
+		return errors.New("production requires DATABASE_URL")
+	}
+	defer pool.Close()
+
+	redisClient, err := clients.ConnectRedis(ctx, logger)
+	if err != nil {
+		return fmt.Errorf("connect redis: %w", err)
+	}
+	if redisClient == nil {
+		return errors.New("production requires REDIS_URL")
+	}
+	defer func() { _ = redisClient.Close() }()
+
+	kekResolver, err := crypto.NewKEKResolverFromEnv()
+	if err != nil {
+		return fmt.Errorf("configure KMS key map: %w", err)
+	}
+	awsConfig, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("load KMS client configuration: %w", err)
+	}
+	kp := crypto.NewKMSKeyProvider(crypto.NewAWSKMSClient(awskms.NewFromConfig(awsConfig)), kekResolver)
+
+	q := db.New(pool)
+	bffStore := bff.NewRedisBFFSessionStore(redisClient, bffSessionTTL)
+	enrollmentSessions := mgmtapi.NewRedisEnrollmentSessionStore(redisClient)
+	credentialStore := webauthn.NewDBStore(q).WithPool(pool)
+	ceremonySessions := webauthn.NewRedisSessionStore(redisClient, bffSessionTTL)
+	rpID := os.Getenv("WEBAUTHN_RP_ID")
+	rpOrigins := splitAndTrim(os.Getenv("WEBAUTHN_RP_ORIGINS"))
+	if rpID == "" || len(rpOrigins) == 0 {
+		return errors.New("production requires WEBAUTHN_RP_ID and WEBAUTHN_RP_ORIGINS")
+	}
+	webauthnService, err := webauthn.NewService(webauthn.Config{
+		RPID: rpID, RPDisplayName: getenv("WEBAUTHN_RP_DISPLAY_NAME", "Harbor"), RPOrigins: rpOrigins,
+	}, credentialStore, ceremonySessions)
+	if err != nil {
+		return fmt.Errorf("configure webauthn: %w", err)
+	}
+
+	persister := clients.NewDBUserPersister(q)
+	enroller := identity.NewEnroller(kp, crypto.NewCipher(), persister)
+	grantStore := clients.NewDBGrantStore(q)
+	sessionStore := clients.NewDBSessionStoreWithPool(q, pool)
+	registrationStore := clients.NewDBClientRegistrationStore(q)
+	recoveryStore := clients.NewDBRecoveryStore(q, q)
+	recoveryManager := identity.NewRecoveryManager()
+	recoveryService := identity.NewRecoveryService(recoveryStore)
+	recoveryCeremonies := mgmtapi.NewRedisRecoveryCeremonyStore(redisClient)
+	mfaService, err := mfa.NewService(mfa.ServiceConfig{
+		Store: mfa.NewDBStore(q), Cipher: crypto.NewCipher(), Keys: clients.NewDBMFAKeyResolver(q, kp),
+	})
+	if err != nil {
+		return fmt.Errorf("configure MFA: %w", err)
+	}
+
+	registrationBaseURL := os.Getenv("REGISTRATION_BASE_URL")
+	if registrationBaseURL == "" {
+		return errors.New("production requires REGISTRATION_BASE_URL")
+	}
+	initialAccessToken := os.Getenv("INITIAL_ACCESS_TOKEN")
+	if initialAccessToken == "" {
+		return errors.New("production dynamic registration requires INITIAL_ACCESS_TOKEN")
+	}
+	mgmtServer := mgmtapi.New(enroller, logger).
+		WithEnrollmentSessions(enrollmentSessions).
+		WithCallerSource(bffCallerAdapter{}).
+		WithConsentStore(grantStore).
+		WithSessionRevoker(sessionStore).
+		WithClientRegistration(registrationStore, registrationBaseURL).
+		WithInitialAccessToken(initialAccessToken).
+		RequireRegistrationAuthorization().
+		WithRecovery(recoveryManager, recoveryStore, recoveryService, recoveryCeremonies).
+		WithMFA(mfaService)
+
+	mux := httpserver.NewHealthMux()
+	webauthn.NewHandler(webauthnService).WithEnrollmentSessions(enrollmentSessions).RegisterRoutes(mux)
+	mgmtServer.Routes(mux)
+	authorizeCompleteURL := os.Getenv("AUTHORIZE_COMPLETE_URL")
+	if authorizeCompleteURL == "" {
+		return errors.New("production requires AUTHORIZE_COMPLETE_URL")
+	}
+	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(webauthnService), bff.DiscoverableUserResolver{}, authorizeCompleteURL)
+	mux.HandleFunc("GET /login", loginHandler.BeginLogin)
+	mux.HandleFunc("POST /login/complete", loginHandler.FinishLogin)
+	handler := bff.Middleware(bffStore)(mux)
+	handler = mgmtapi.RegionMiddleware(telemetry.New(logger))(handler)
+	return httpserver.Run(ctx, ":"+getenv("PORT", "8081"), handler, logger)
+}
+
+func runDevelopment(ctx context.Context, logger *slog.Logger) error {
+	// Development retains the legacy explicit cleanup calls; cancellation is
+	// owned by main's signal context.
+	stop := func() {}
 
 	// DB-backed stores plug in when DATABASE_URL is configured; otherwise we run
 	// on in-memory dev scaffolds (docs/DESIGN.md §10).
@@ -360,7 +479,6 @@ func main() {
 	webauthn.RegisterRoutes(mux, svc)
 	mgmtServer.Routes(mux)
 	dashHandler.Routes(mux)
-	mux.HandleFunc("POST /users/enroll", enrollHandler(enroller, logger))
 
 	// BFF login endpoints (docs/plans/bff-session-middleware.md §11.2 step 2).
 	// /login initiates the passkey assertion bound to a BFF session; /login/complete
@@ -470,6 +588,7 @@ func main() {
 		}
 		os.Exit(1)
 	}
+	return nil
 }
 
 // enrollHandler returns a handler for POST /users/enroll. It reads a JSON body
@@ -576,4 +695,13 @@ func splitAndTrim(raw string) []string {
 		}
 	}
 	return out
+}
+
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }

@@ -49,6 +49,10 @@ type Server struct {
 	// endpoint returns 401 and persists nothing (RFC 7591 §1.2, §3). Nil disables
 	// the gate (open registration). The token is stored HASHED, never plaintext.
 	initialAccessTokenHash []byte
+	// registrationAuthorizationRequired makes an absent initial-access token
+	// fail closed. Production enables this unconditionally; development may
+	// deliberately leave registration open.
+	registrationAuthorizationRequired bool
 	// consents provides access to consent grants for the authenticated user.
 	// May be nil in dev-scaffold mode; GetConsentGrants then returns 503.
 	consents ConsentStore
@@ -167,6 +171,13 @@ func (s *Server) WithInitialAccessToken(token string) *Server {
 	if token != "" {
 		s.initialAccessTokenHash = HashSecret(token)
 	}
+	return s
+}
+
+// RequireRegistrationAuthorization prevents anonymous dynamic registration
+// even when an operator forgot to configure an initial-access token.
+func (s *Server) RequireRegistrationAuthorization() *Server {
+	s.registrationAuthorizationRequired = true
 	return s
 }
 

@@ -162,3 +162,13 @@ Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3
 4. Require an external KMS provider and validate every production dependency
    before the HTTP listener starts.
 5. Run focused and repository validation, rebase, commit, and push.
+
+## Task 4: durable harbor-mgmt production graph
+
+1. Isolate production startup from explicitly opted-in development scaffolds.
+2. Compose PostgreSQL-backed identity, grants, sessions, registration, recovery,
+   MFA, and WebAuthn stores with Redis-backed BFF, enrollment, and ceremony state.
+3. Serve the real WebAuthn handler and require an initial-access token or an
+   authenticated administrator for dynamic client registration.
+4. Run focused production-graph and management tests, then repository checks.
+5. Rebase the shared branch, commit, push, record the result, and complete the task.
