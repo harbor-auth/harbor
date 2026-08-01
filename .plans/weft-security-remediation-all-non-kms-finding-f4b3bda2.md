@@ -42,3 +42,11 @@ did not yet exist on `origin`; the required pre-push rebase incorporated Task 1.
 1. Model the guarded credential counter update in the DB-store fake, including a hook that simulates another replica winning between the read and update.
 2. Add DB-store tests for stale concurrent updates, guarded no-ops, and authenticators that do not implement a signature counter (zero to zero).
 3. Run the focused WebAuthn tests and confirm the new security assertions fail for the expected reason, then commit, rebase, and push the test-only change.
+## Task 10: multi-replica revocation lifecycle tests
+
+1. Inspect the revocation worker, durable outbox, revoked-JTI store/pub-sub, refresh reuse, and logout lifecycle seams.
+2. Add focused red tests for persistence-before-acknowledgement, concurrent replica claiming, restart recovery, pub/sub propagation, and shared refresh-family revocation.
+3. Run the scoped tests and confirm each new test fails for the intended missing behavior while existing tests still pass.
+4. Format, commit, rebase the shared branch if it exists, and push the test-only change.
+
+Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3bda2` did not exist when the task started, so the checkout was initially based on `origin/main` (`8f308f8`). The required pre-push rebase incorporated the other published test tasks.

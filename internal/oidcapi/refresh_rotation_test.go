@@ -2,10 +2,12 @@ package oidcapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
@@ -23,9 +25,20 @@ import (
 //     succeeds in Refresh() (resolver reads grants written at code exchange)
 func newRefreshFlowServerFull(t *testing.T) (*httptest.Server, *oidc.InMemorySessionStore, *oidc.InMemoryClientRegistry) {
 	t.Helper()
+	sessions := oidc.NewInMemorySessionStore()
+	grants := oidc.NewInMemoryGrantStore()
+	clients := oidc.NewInMemoryClientRegistry()
+	ts := newRefreshFlowReplica(t, sessions, grants, clients)
+	return ts, sessions, clients
+}
+
+// newRefreshFlowReplica constructs one HTTP replica over shared durable-state
+// test doubles. Tests use multiple instances to ensure correctness does not
+// depend on process-local service state.
+func newRefreshFlowReplica(t *testing.T, sessions oidc.SessionStore, grants *oidc.InMemoryGrantStore, clients *oidc.InMemoryClientRegistry) *httptest.Server {
+	t.Helper()
 	const userID = "00000000-0000-0000-0000-000000000042"
 
-	clients := oidc.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
 		ID:            testClientID,
 		RedirectURIs:  []string{testRedirectURI},
@@ -39,15 +52,11 @@ func newRefreshFlowServerFull(t *testing.T) (*httptest.Server, *oidc.InMemorySes
 		Secret: bytes.Repeat([]byte{0x01}, 32), // deterministic 256-bit test secret
 	})
 
-	grants := oidc.NewInMemoryGrantStore()
-
 	resolver := oidc.NewPPIDSessionResolver(oidc.PPIDSessionResolverConfig{
 		Auth:   oidc.NewFixedAuthSource(userID),
 		Loader: loader,
 		Grants: grants,
 	})
-
-	sessions := oidc.NewInMemorySessionStore()
 
 	svc := oidc.NewService(oidc.ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
@@ -63,7 +72,7 @@ func newRefreshFlowServerFull(t *testing.T) (*httptest.Server, *oidc.InMemorySes
 	h := openapi.HandlerFromMux(srv, http.NewServeMux())
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
-	return ts, sessions, clients
+	return ts
 }
 
 // newRefreshFlowServerWithStore is like newRefreshFlowServer but also returns
@@ -376,5 +385,108 @@ func TestToken_RefreshTheftSignal_RevokesFamily(t *testing.T) {
 	assertNoStore(t, res3)
 	if code := decodeOAuthErrorCode(t, res3); code != "invalid_grant" {
 		t.Fatalf("post-theft token2 error = %q, want invalid_grant", code)
+	}
+}
+
+func TestToken_ConcurrentReplicasRotateRefreshTokenOnce(t *testing.T) {
+	sessions := newSynchronizedLookupSessionStore()
+	grants := oidc.NewInMemoryGrantStore()
+	clients := oidc.NewInMemoryClientRegistry()
+	replicaA := newRefreshFlowReplica(t, sessions, grants, clients)
+	replicaB := newRefreshFlowReplica(t, sessions, grants, clients)
+	refreshToken := mintRefreshToken(t, replicaA)
+
+	start := make(chan struct{})
+	statuses := make(chan int, 2)
+	var requests sync.WaitGroup
+	requests.Add(2)
+	for _, replica := range []*httptest.Server{replicaA, replicaB} {
+		go func(ts *httptest.Server) {
+			defer requests.Done()
+			<-start
+			res := postRefresh(t, ts, refreshToken)
+			statuses <- res.StatusCode
+			_ = res.Body.Close()
+		}(replica)
+	}
+	close(start)
+	requests.Wait()
+	close(statuses)
+
+	successes := 0
+	invalidGrants := 0
+	for status := range statuses {
+		switch status {
+		case http.StatusOK:
+			successes++
+		case http.StatusBadRequest:
+			invalidGrants++
+		}
+	}
+	if successes != 1 || invalidGrants != 1 {
+		t.Fatalf("concurrent refresh rotation statuses: successes=%d invalid_grants=%d, want 1 each", successes, invalidGrants)
+	}
+}
+
+// synchronizedLookupSessionStore makes both replicas complete their lookup of
+// the original active token before either proceeds to rotation. A durable
+// RotateSession implementation must still allow only one compare-and-swap to
+// succeed.
+type synchronizedLookupSessionStore struct {
+	store   *oidc.InMemorySessionStore
+	lookups sync.WaitGroup
+}
+
+func newSynchronizedLookupSessionStore() *synchronizedLookupSessionStore {
+	s := &synchronizedLookupSessionStore{store: oidc.NewInMemorySessionStore()}
+	s.lookups.Add(2)
+	return s
+}
+
+func (s *synchronizedLookupSessionStore) CreateSession(ctx context.Context, session oidc.RefreshSession) error {
+	return s.store.CreateSession(ctx, session)
+}
+
+func (s *synchronizedLookupSessionStore) GetSessionByTokenHash(ctx context.Context, hash []byte) (oidc.RefreshSession, error) {
+	session, err := s.store.GetSessionByTokenHash(ctx, hash)
+	s.lookups.Done()
+	s.lookups.Wait()
+	return session, err
+}
+
+func (s *synchronizedLookupSessionStore) RevokeSession(ctx context.Context, id string) error {
+	return s.store.RevokeSession(ctx, id)
+}
+
+func (s *synchronizedLookupSessionStore) RotateSession(ctx context.Context, oldID string, session oidc.RefreshSession) error {
+	return s.store.RotateSession(ctx, oldID, session)
+}
+
+func (s *synchronizedLookupSessionStore) RevokeSessionsByUserClient(ctx context.Context, userID, clientID string) error {
+	return s.store.RevokeSessionsByUserClient(ctx, userID, clientID)
+}
+
+func (s *synchronizedLookupSessionStore) RevokeSessionsByGrant(ctx context.Context, grantID string) error {
+	return s.store.RevokeSessionsByGrant(ctx, grantID)
+}
+
+func TestToken_LogoutOnOneReplicaRevokesRefreshOnSibling(t *testing.T) {
+	sessions := oidc.NewInMemorySessionStore()
+	grants := oidc.NewInMemoryGrantStore()
+	clients := oidc.NewInMemoryClientRegistry()
+	replicaA := newRefreshFlowReplica(t, sessions, grants, clients)
+	replicaB := newRefreshFlowReplica(t, sessions, grants, clients)
+	refreshToken := mintRefreshToken(t, replicaA)
+
+	if err := sessions.RevokeSessionsByUserClient(context.Background(), "00000000-0000-0000-0000-000000000042", testClientID); err != nil {
+		t.Fatalf("logout revoke: %v", err)
+	}
+	res := postRefresh(t, replicaB, refreshToken)
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("sibling accepted refresh after logout: status=%d, want 400", res.StatusCode)
+	}
+	if code := decodeOAuthErrorCode(t, res); code != "invalid_grant" {
+		t.Fatalf("sibling refresh after logout error=%q, want invalid_grant", code)
 	}
 }

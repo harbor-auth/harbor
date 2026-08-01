@@ -220,3 +220,42 @@ func TestRevocationWorker_Run_PassesCorrectSink(t *testing.T) {
 		t.Error("DeliverPending was called with wrong SessionStore")
 	}
 }
+
+// TestRevocationWorker_Run_DeliversImmediatelyAfterRestart pins the restart
+// recovery contract: a newly elected replica must drain durable pending work
+// immediately, rather than leaving a security revocation unprocessed until the
+// first polling interval elapses.
+func TestRevocationWorker_Run_DeliversImmediatelyAfterRestart(t *testing.T) {
+	delivered := make(chan struct{}, 1)
+	outbox := &mockOutboxDeliverer{
+		deliverFunc: func(context.Context, SessionStore) error {
+			select {
+			case delivered <- struct{}{}:
+			default:
+			}
+			return nil
+		},
+	}
+	worker := NewRevocationWorker(RevocationWorkerConfig{
+		Outbox:       outbox,
+		SessionStore: NewInMemorySessionStore(),
+		TickInterval: time.Hour,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		worker.Run(ctx)
+		close(done)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	select {
+	case <-delivered:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("pending revocation was not delivered immediately after worker restart")
+	}
+}
