@@ -1,5 +1,16 @@
 # Security remediation: all non-KMS findings
 
+## Task 33: sign release images and publish production digests
+
+1. Capture the canonical digest output from each hot, management, and migration
+   image build instead of treating a commit tag as the deployment identity.
+2. Grant only the GitHub OIDC permission needed for keyless signing, install
+   Cosign, and sign each exact registry digest after it is pushed.
+3. Replace the production global tag pin with independent component digest
+   pins and update all three values atomically in the GitOps commit.
+4. Render and validate the Helm production output, run repository checks, then
+   rebase, commit, and push the shared branch.
+
 ## Task 19: session-bound MFA step-up and abuse controls
 
 1. Run the Task 18 contract tests and inspect BFF session, management handler,
