@@ -13,6 +13,10 @@ func mintAccessToken(t *testing.T, ts *httptest.Server) string {
 	t.Helper()
 	code := mintCode(t, ts)
 	res := postToken(t, ts, validTokenForm(code))
+	if res.StatusCode == http.StatusUnauthorized {
+		_ = res.Body.Close()
+		res = postTokenWithBasic(t, ts, validTokenForm(code), testClientID, testClientSecret)
+	}
 	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("token status = %d, want 200", res.StatusCode)
@@ -33,6 +37,10 @@ func mintIDToken(t *testing.T, ts *httptest.Server) string {
 	t.Helper()
 	code := mintCode(t, ts)
 	res := postToken(t, ts, validTokenForm(code))
+	if res.StatusCode == http.StatusUnauthorized {
+		_ = res.Body.Close()
+		res = postTokenWithBasic(t, ts, validTokenForm(code), testClientID, testClientSecret)
+	}
 	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("token status = %d, want 200", res.StatusCode)

@@ -14,12 +14,14 @@ const grantTypeRefreshToken = "refresh_token"
 
 // TokenRequest is the raw, untrusted form input to /token.
 type TokenRequest struct {
-	GrantType    string
-	Code         string
-	RedirectURI  string
-	ClientID     string
-	CodeVerifier string
-	RefreshToken string
+	GrantType        string
+	Code             string
+	RedirectURI      string
+	ClientID         string
+	ClientSecret     string
+	ClientAuthMethod string
+	CodeVerifier     string
+	RefreshToken     string
 }
 
 // ValidateTokenParams checks the grant_type and required-parameter presence

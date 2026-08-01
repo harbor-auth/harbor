@@ -16,6 +16,12 @@ type ClientCredentials struct {
 	ClientSecret string
 }
 
+// validateClientCredentials is retained for package callers and delegates to
+// the shared authenticator. Introspection and revocation require Basic auth.
+func validateClientCredentials(ctx context.Context, registry oidc.ClientRegistry, clientID, secret string) (oidc.Client, bool) {
+	return oidc.AuthenticateClient(ctx, registry, clientID, oidc.ClientAuthSecretBasic, secret)
+}
+
 // parseBasicAuth extracts client_id and client_secret from an HTTP Basic
 // Authorization header. Returns (credentials, true) on success, or
 // (ClientCredentials{}, false) if the header is missing, malformed, or not
@@ -60,27 +66,4 @@ func parseBasicAuth(r *http.Request) (ClientCredentials, bool) {
 		ClientID:     clientID,
 		ClientSecret: clientSecret,
 	}, true
-}
-
-// validateClientCredentials checks if the client_id exists in the registry and
-// validates the secret. Returns (client, true) if valid, or (Client{}, false)
-// if the client is unknown or credentials are invalid.
-//
-// SCAFFOLD: Harbor's current design uses public clients (PKCE replaces secrets).
-// This function validates that the client exists — actual secret comparison is
-// not yet wired. When confidential client support is added, this should compare
-// the secret against a stored hash.
-func validateClientCredentials(ctx context.Context, clients oidc.ClientRegistry, clientID, secret string) (oidc.Client, bool) {
-	client, found := clients.Lookup(ctx, clientID)
-	if !found {
-		return oidc.Client{}, false
-	}
-	// TODO(introspect): compare secret against stored hash when confidential
-	// clients are supported. For now, existence check is sufficient for public
-	// clients that authenticate via PKCE on the /token endpoint.
-	//
-	// The secret parameter is intentionally unused until confidential client
-	// support is added — the function signature is forward-compatible.
-	_ = secret
-	return client, true
 }

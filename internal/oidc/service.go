@@ -503,7 +503,6 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 	if terr := ValidateTokenParams(req); terr != nil {
 		return nil, terr
 	}
-
 	stored, found, consumed, err := s.codes.Peek(ctx, req.Code)
 	if err != nil {
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not read authorization code", Status: 500}
@@ -522,6 +521,9 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 	// the code intact for the legitimate owner.
 	if terr := ValidateTokenExchange(req, stored, s.now()); terr != nil {
 		return nil, terr
+	}
+	if _, ok := s.AuthenticateClient(ctx, req.ClientID, req.ClientAuthMethod, req.ClientSecret); !ok {
+		return nil, &TokenError{Code: ErrCodeInvalidClient, Description: "client authentication failed", Status: 401}
 	}
 
 	// Only now consume (single-use). Handle a lost race on the tombstone.
@@ -721,8 +723,8 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	if ctx.Err() != nil {
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "context cancelled (client disconnect or shutdown)", Status: 500}
 	}
-	if _, ok := s.clients.Lookup(ctx, session.ClientID); !ok {
-		return nil, &TokenError{Code: ErrCodeInvalidClient, Description: "client is no longer registered", Status: 401}
+	if _, ok := s.AuthenticateClient(ctx, session.ClientID, req.ClientAuthMethod, req.ClientSecret); !ok {
+		return nil, &TokenError{Code: ErrCodeInvalidClient, Description: "client authentication failed", Status: 401}
 	}
 
 	// All fallible reads and computations happen BEFORE RotateSession so that

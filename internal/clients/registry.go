@@ -76,11 +76,17 @@ func (r *DBClientRegistry) Lookup(ctx context.Context, clientID string) (oidc.Cl
 // rowToClient maps a sqlc RelyingParty row to the oidc domain type. It is a
 // pure function so it is directly unit-testable without a DB.
 func rowToClient(row db.RelyingParty) oidc.Client {
+	var authMethod string
+	if row.TokenEndpointAuthMethod != nil {
+		authMethod = *row.TokenEndpointAuthMethod
+	}
 	return oidc.Client{
-		ID:            row.ClientID,
-		SectorID:      row.SectorID,
-		RedirectURIs:  row.RedirectUris,
-		LogoutURIs:    row.LogoutUris,
-		ScopesAllowed: row.ScopesAllowed,
+		ID:                      row.ClientID,
+		SectorID:                row.SectorID,
+		RedirectURIs:            row.RedirectUris,
+		LogoutURIs:              row.LogoutUris,
+		ScopesAllowed:           row.ScopesAllowed,
+		TokenEndpointAuthMethod: authMethod,
+		SecretHash:              row.ClientSecretHash,
 	}
 }

@@ -201,3 +201,11 @@ Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3
 3. Run the focused command and relay package tests and confirm the new contracts
    fail for the intended missing mode validation and fail-open request path.
 4. Format, commit, rebase the shared branch, push, and report task completion.
+
+## Task 7: durable OIDC client authenticator
+
+1. Extend the OIDC client model and durable registry mapping with the registered token endpoint authentication method and secret hash.
+2. Implement one constant-time client authenticator shared by direct service calls and HTTP endpoints.
+3. Parse token endpoint Basic/post credentials, reject conflicts and method mismatches before consuming authorization codes or rotating refresh tokens.
+4. Require confidential client authentication for introspection and revocation and preserve cross-client isolation without an admin bypass.
+5. Run focused and repository checks, rebase the shared branch, commit, push, and report task completion.

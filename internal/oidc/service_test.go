@@ -306,9 +306,11 @@ func (s consumeErrAuthCodeStore) Consume(_ context.Context, _ string) (ConsumeRe
 
 func TestService_Token_ConsumeError(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
+	registry := NewInMemoryClientRegistry()
+	registry.Put(testClient())
 	svc := NewService(ServiceConfig{
 		Issuer:  "https://eu.harbor.id",
-		Clients: NewInMemoryClientRegistry(),
+		Clients: registry,
 		Codes: consumeErrAuthCodeStore{
 			code:       validAuthCode(now),
 			consumeErr: errors.New("consume transaction failed"),
@@ -357,10 +359,12 @@ func TestService_Token_IssueError(t *testing.T) {
 	if err := codes.Save(context.Background(), validAuthCode(now)); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
+	registry := NewInMemoryClientRegistry()
+	registry.Put(testClient())
 
 	svc := NewService(ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
-		Clients:  NewInMemoryClientRegistry(),
+		Clients:  registry,
 		Codes:    codes,
 		Tokens:   errTokenIssuer{issueErr: errors.New("signing key unavailable")},
 		Sessions: NewStubSessionResolver("demo-subject-ppid"),

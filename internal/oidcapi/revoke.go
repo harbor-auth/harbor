@@ -46,6 +46,11 @@ func (s *Server) PostRevoke(w http.ResponseWriter, r *http.Request) {
 		writeRevokeUnauthorized(w, "revocation not configured")
 		return
 	}
+	if _, valid := s.svc.AuthenticateClient(r.Context(), creds.ClientID, oidc.ClientAuthSecretBasic, creds.ClientSecret); !valid {
+		recordError(telemetry.EndpointRevoke, "invalid_client")
+		writeRevokeUnauthorized(w, "client authentication failed")
+		return
+	}
 
 	// Step 3: Parse the form body.
 	// Cap the body before parsing to prevent memory exhaustion (docs/DESIGN.md §6.5).
