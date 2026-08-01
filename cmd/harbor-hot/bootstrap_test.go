@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -186,6 +187,30 @@ func TestBootstrapProductionModeMissingConfig(t *testing.T) {
 	_, err = BootstrapSigningKeys(ctx, cfg)
 	if err == nil {
 		t.Error("expected error for missing Region")
+	}
+}
+
+func TestBootstrapProductionModeRejectsLocalKeyProvider(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	localProvider, err := crypto.NewLocalKeyProvider("test-secret-32-bytes-long!!!!!!")
+	if err != nil {
+		t.Fatalf("NewLocalKeyProvider: %v", err)
+	}
+
+	_, err = BootstrapSigningKeys(ctx, BootstrapConfig{
+		DatabaseURL:     "postgres://localhost/test",
+		Region:          "us-east-1",
+		KeyProvider:     localProvider,
+		SigningKeyStore: newFakeSigningKeyStore(),
+		Logger:          logger,
+	})
+	if err == nil {
+		t.Fatal("production bootstrap accepted local crypto; external KMS must be required")
+	}
+	if !strings.Contains(err.Error(), "external KMS") {
+		t.Fatalf("production bootstrap error = %q, want external KMS requirement", err)
 	}
 }
 

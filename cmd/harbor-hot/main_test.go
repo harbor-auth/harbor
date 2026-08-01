@@ -3,6 +3,8 @@ package main
 import (
 	"io"
 	"log/slog"
+	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -289,5 +291,66 @@ func TestLoadAdminToken(t *testing.T) {
 				t.Errorf("loadAdminToken() = %q, want %q", got, tt.wantToken)
 			}
 		})
+	}
+}
+
+func TestProductionReadinessRequiresCompleteDurableGraph(t *testing.T) {
+	t.Setenv("HARBOR_DEV_MODE", "")
+	t.Setenv("REDIS_URL", "")
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	err := validateProductionReadiness(bffConfig{}, bffDeps{}, logger)
+	if err == nil {
+		t.Fatal("validateProductionReadiness() accepted an empty production graph")
+	}
+
+	// Keep this list at the object-graph boundary. A configured URL alone is
+	// not proof that the live service received the durable implementation.
+	for _, dependency := range []string{
+		"PostgreSQL",
+		"Redis",
+		"external KMS",
+		"durable client registry",
+		"durable authorization code store",
+		"durable grant store",
+		"durable session store",
+		"durable revocation store",
+		"revocation outbox worker",
+		"JWT verifier",
+		"logout verifier",
+		"session revoker",
+	} {
+		if !strings.Contains(err.Error(), dependency) {
+			t.Errorf("startup error %q does not identify missing %s", err, dependency)
+		}
+	}
+}
+
+func TestProductionLiveGraphContainsNoScaffoldConstructors(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	start := strings.Index(string(source), "func run(")
+	end := strings.Index(string(source), "// noopSessionRevoker")
+	if start < 0 || end <= start {
+		t.Fatal("could not isolate run production assembly")
+	}
+	productionAssembly := string(source[start:end])
+
+	// These constructors and concrete no-op values make insecure behavior
+	// reachable from run's live HTTP handler. Explicitly isolated dev/test
+	// helpers may continue to exist, but run must not assemble them.
+	for _, forbidden := range []string{
+		"oidc.NewPlaceholderIssuer()",
+		"oidc.NewInMemoryClientRegistry()",
+		"oidc.NewInMemoryAuthCodeStore()",
+		"oidc.NewInMemoryGrantStore()",
+		"noopSessionRevoker{}",
+		`ID:            "demo-client"`,
+	} {
+		if strings.Contains(productionAssembly, forbidden) {
+			t.Errorf("live harbor-hot graph still references forbidden scaffold %q", forbidden)
+		}
 	}
 }
