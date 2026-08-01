@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +30,12 @@ const testLoginURL = "https://mgmt.harbor.id/login"
 // was created.
 func newBFFFlowServer(t *testing.T) (*httptest.Server, *bff.InMemoryBFFSessionStore) {
 	t.Helper()
+	store := bff.NewInMemoryBFFSessionStore()
+	return newBFFFlowServerWithStore(t, store), store
+}
+
+func newBFFFlowServerWithStore(t *testing.T, store bff.BFFSessionStore) *httptest.Server {
+	t.Helper()
 	clients := oidc.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
 		ID:            testClientID,
@@ -38,17 +47,25 @@ func newBFFFlowServer(t *testing.T) (*httptest.Server, *bff.InMemoryBFFSessionSt
 	if err != nil {
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
+	grants := oidc.NewInMemoryGrantStore()
 	svc := oidc.NewService(oidc.ServiceConfig{
 		Issuer:  "https://eu.harbor.id",
 		Clients: clients,
 		Codes:   oidc.NewInMemoryAuthCodeStore(),
 		Tokens:  oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
+		Grants:  grants,
 		// The stub resolver would issue a code in the legacy path; with the BFF
 		// store wired below, /authorize must never reach it for an unauthenticated
 		// request — it redirects to login instead.
 		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
 	})
-	store := bff.NewInMemoryBFFSessionStore()
+	// Authenticated-session tests use this fixed user and target completion,
+	// rather than the explicit-consent handoff covered by consent tests.
+	if _, err := grants.CreateGrant(context.Background(), oidc.NewGrant{
+		UserID: "user-abc-123", ClientID: testClientID, Scopes: []string{"openid", "profile"},
+	}); err != nil {
+		t.Fatalf("seed grant: %v", err)
+	}
 	srv := New(Config{
 		Issuer:        "https://eu.harbor.id",
 		Service:       svc,
@@ -64,7 +81,16 @@ func newBFFFlowServer(t *testing.T) (*httptest.Server, *bff.InMemoryBFFSessionSt
 	h := openapi.HandlerFromMux(srv, mux)
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
-	return ts, store
+	return ts
+}
+
+type consumeErrorBFFStore struct {
+	bff.BFFSessionStore
+	err error
+}
+
+func (s consumeErrorBFFStore) Consume(context.Context, string) (bff.BFFSessionRecord, error) {
+	return bff.BFFSessionRecord{}, s.err
 }
 
 // With the BFF flow enabled, GET /authorize for an unauthenticated browser must
@@ -422,4 +448,87 @@ func TestAuthorizeComplete_MissingRequestID_ErrorPage(t *testing.T) {
 	if loc := res.Header.Get("Location"); loc != "" {
 		t.Fatalf("unexpected redirect %q — must not redirect without request_id", loc)
 	}
+}
+
+func TestAuthorizeComplete_ConcurrentRequestsConsumeSessionOnce(t *testing.T) {
+	ts, store := newBFFFlowServer(t)
+	const requestID = "concurrent-authorize-completion"
+	nonce := seedAuthenticatedSession(t, store, requestID)
+	cookie := &http.Cookie{Name: bff.NonceCookieName, Value: base64.RawURLEncoding.EncodeToString(nonce)}
+
+	const attempts = 16
+	start := make(chan struct{})
+	statuses := make(chan int, attempts)
+	locations := make(chan string, attempts)
+	var wg sync.WaitGroup
+	for range attempts {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			res := getAuthorizeCompleteWithCookie(t, ts, requestID, cookie)
+			defer func() { _ = res.Body.Close() }()
+			statuses <- res.StatusCode
+			locations <- res.Header.Get("Location")
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(statuses)
+	close(locations)
+
+	redirects := 0
+	for status := range statuses {
+		if status == http.StatusFound {
+			redirects++
+		} else if status != http.StatusBadRequest {
+			t.Errorf("completion status = %d, want 302 for winner or 400 for replay", status)
+		}
+	}
+	if redirects != 1 {
+		t.Fatalf("successful redirects = %d, want exactly 1", redirects)
+	}
+	redirectLocations := 0
+	for location := range locations {
+		if location != "" {
+			redirectLocations++
+			vals := locationQueryValue(t, location, testRedirectURI)
+			if vals.Get("code") == "" {
+				t.Errorf("winning redirect has no authorization code: %q", location)
+			}
+		}
+	}
+	if redirectLocations != 1 {
+		t.Errorf("responses with Location = %d, want exactly 1", redirectLocations)
+	}
+}
+
+func TestAuthorizeComplete_ConsumeFailureFailsClosed(t *testing.T) {
+	base := bff.NewInMemoryBFFSessionStore()
+	const requestID = "consume-store-failure"
+	nonce := seedAuthenticatedSession(t, base, requestID)
+	store := consumeErrorBFFStore{BFFSessionStore: base, err: errors.New("redis unavailable")}
+	ts := newBFFFlowServerWithStore(t, store)
+	cookie := &http.Cookie{Name: bff.NonceCookieName, Value: base64.RawURLEncoding.EncodeToString(nonce)}
+
+	res := getAuthorizeCompleteWithCookie(t, ts, requestID, cookie)
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", res.StatusCode)
+	}
+	if location := res.Header.Get("Location"); location != "" {
+		t.Fatalf("unexpected redirect on consume failure: %q", location)
+	}
+}
+
+func locationQueryValue(t *testing.T, location, base string) url.Values {
+	t.Helper()
+	u, err := url.Parse(location)
+	if err != nil {
+		t.Fatalf("parse Location: %v", err)
+	}
+	if u.Scheme+"://"+u.Host+u.Path != base {
+		t.Fatalf("redirect base = %q, want %q", u.Scheme+"://"+u.Host+u.Path, base)
+	}
+	return u.Query()
 }

@@ -357,3 +357,80 @@ func TestRedisBFFSessionStore_ConcurrentAccess(t *testing.T) {
 		}
 	}
 }
+
+func TestRedisBFFSessionStore_MutationsDoNotCreateMissingSessions(t *testing.T) {
+	mutations := redisSessionMutations()
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			store, mr := newTestRedisStore(t)
+			const requestID = "missing-session"
+
+			err := mutate(context.Background(), store, requestID)
+			if !errors.Is(err, ErrBFFSessionNotFound) {
+				t.Fatalf("mutation error = %v, want ErrBFFSessionNotFound", err)
+			}
+			if mr.Exists(sessionKey(requestID)) {
+				t.Fatal("mutation recreated a missing session")
+			}
+		})
+	}
+}
+
+func TestRedisBFFSessionStore_MutationsRejectRecordsWithoutPositiveTTL(t *testing.T) {
+	mutations := redisSessionMutations()
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			store, mr := newTestRedisStore(t)
+			ctx := context.Background()
+			const requestID = "non-expiring-session"
+			record := BFFSessionRecord{
+				RequestID: requestID,
+				ExpiresAt: time.Now().Add(5 * time.Minute),
+			}
+			if err := store.Create(ctx, record); err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			key := sessionKey(requestID)
+			before, err := mr.Get(key)
+			if err != nil {
+				t.Fatalf("read seeded record: %v", err)
+			}
+			mr.SetTTL(key, 0)
+			if ttl := mr.TTL(key); ttl > 0 {
+				t.Fatalf("test setup TTL = %v, want non-positive", ttl)
+			}
+
+			err = mutate(ctx, store, requestID)
+			if !errors.Is(err, ErrBFFSessionNotFound) {
+				t.Fatalf("mutation error = %v, want ErrBFFSessionNotFound", err)
+			}
+			after, getErr := mr.Get(key)
+			if getErr != nil {
+				t.Fatalf("read record after rejected mutation: %v", getErr)
+			}
+			if after != before {
+				t.Fatal("mutation rewrote a session whose TTL was non-positive")
+			}
+		})
+	}
+}
+
+func redisSessionMutations() map[string]func(context.Context, *RedisBFFSessionStore, string) error {
+	return map[string]func(context.Context, *RedisBFFSessionStore, string) error{
+		"set user": func(ctx context.Context, store *RedisBFFSessionStore, requestID string) error {
+			return store.SetUser(ctx, requestID, "user-456")
+		},
+		"set user recovery status": func(ctx context.Context, store *RedisBFFSessionStore, requestID string) error {
+			return store.SetUserWithRecoveryStatus(ctx, requestID, "user-456", true)
+		},
+		"set MFA verified": func(ctx context.Context, store *RedisBFFSessionStore, requestID string) error {
+			return store.SetMFAVerified(ctx, requestID, time.Now())
+		},
+		"set auth method": func(ctx context.Context, store *RedisBFFSessionStore, requestID string) error {
+			return store.SetAuthMethod(ctx, requestID, oidc.AuthMethodWebAuthn)
+		},
+		"set consent pending": func(ctx context.Context, store *RedisBFFSessionStore, requestID string) error {
+			return store.SetConsentPending(ctx, requestID)
+		},
+	}
+}

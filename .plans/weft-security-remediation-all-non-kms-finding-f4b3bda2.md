@@ -128,3 +128,15 @@ Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3
 4. Run the focused suites and confirm the new tests fail for the missing shared
    authenticator without weakening existing assertions.
 5. Rebase the shared branch, commit the test-only contract, and push.
+
+## Task 20: BFF consume and Redis expiry race tests
+
+1. Add concurrent authorize-completion coverage proving exactly one request can
+   consume a nonce-bound authenticated session and redirect with a code.
+2. Inject a session-store consume failure and prove completion fails closed
+   without an RP redirect or authorization code.
+3. Cover missing and non-expiring Redis records across every session mutation,
+   requiring an error and no record recreation or mutation.
+4. Retain the production nonce-gate coverage for legacy records at login and
+   authorize completion, then run focused tests and capture expected failures.
+5. Format, commit, rebase the shared branch, push, and report task completion.
