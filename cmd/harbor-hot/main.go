@@ -32,6 +32,8 @@ import (
 	"syscall"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	awskms "github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
@@ -104,26 +106,15 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		defer pool.Close()
 	}
 
-	// Signing stack: real ES256 JWT issuer + JWKS + rotator when a DB is wired;
-	// unsigned placeholder otherwise.
-	tokenIssuer := oidc.TokenIssuer(oidc.NewPlaceholderIssuer())
-	var signers []crypto.Signer
-	var rotator *crypto.KeyRotator
-	if pool != nil {
-		tokenIssuer, signers, rotator, err = buildSigningStack(ctx, pool, logger)
-		if err != nil {
-			return err
-		}
-	} else {
-		logger.Warn("DATABASE_URL not set — using unsigned placeholder token issuer (dev only; NEVER for production)")
-	}
-
 	// BFF session resolver dependencies: secret loader (DEK unwrapping for PPID
 	// derivation) and grant store (consent records). Reuses the already-opened
 	// pool rather than re-connecting; returns zero-value deps when pool is nil.
-	deps, err := buildBFFDepsFromPool(pool, logger)
-	if err != nil {
-		return err
+	var deps bffDeps
+	if envBool("HARBOR_DEV_MODE") {
+		deps, err = buildBFFDepsFromPool(pool, logger)
+		if err != nil {
+			return err
+		}
 	}
 	logger.Info("BFF DB-backed dependencies wired",
 		"secret_loader_wired", deps.secretLoader != nil,
@@ -136,10 +127,6 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// entirely or fall back to the insecure demo-user stub resolver — both are
 	// total auth bypasses (audit blocker 1.1). The HARBOR_DEV_MODE escape hatch
 	// allows local dev and e2e tests to run without the full stack.
-	if err := validateProductionReadiness(bffCfg, deps, logger); err != nil {
-		return err
-	}
-
 	issuer := envString("ISSUER", "https://harbor.local")
 
 	// Bind the issuer host to a region so the region middleware resolves it.
@@ -151,22 +138,6 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		}
 	}
 
-	// Wire the OIDC service with scaffold implementations for dev/test.
-	// In production, these are replaced with DB-backed implementations.
-	clientRegistry := oidc.NewInMemoryClientRegistry()
-	// Seed a demo client for e2e tests (matches e2e/flow_test.go expectations).
-	clientRegistry.Put(oidc.Client{
-		ID:            "demo-client",
-		SectorID:      "localhost",
-		RedirectURIs:  []string{"http://localhost/callback", "http://localhost:8081/callback"},
-		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
-	})
-
-	// Grant store for consent records. The end_session handler reverse-looks-up
-	// the internal userID from an id_token_hint's PPID via this store. In
-	// production this is a DB-backed clients.DBGrantStore.
-	grantStore := oidc.NewInMemoryGrantStore()
-
 	// Session resolver: the real PPIDSessionResolver when the DB-backed deps are
 	// wired (production), else the demo-user stub in dev mode. The real resolver
 	// reads the authenticated user from the BFF session context (bff.BFFAuthSource
@@ -174,37 +145,12 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// secret, and derives a per-RP PPID while recording consent. This closes the
 	// auth bypass (audit blocker 1.1): /authorize can no longer mint tokens for a
 	// fixed demo user.
-	sessions, err := newSessionResolver(deps, logger)
+	apiCfg, graph, err := buildHotGraph(ctx, issuer, pool, redisClient, deps, logger)
 	if err != nil {
 		return err
 	}
-
-	oidcSvc := oidc.NewService(oidc.ServiceConfig{
-		Issuer:   issuer,
-		Clients:  clientRegistry,
-		Codes:    oidc.NewInMemoryAuthCodeStore(),
-		Tokens:   tokenIssuer,
-		Sessions: sessions,
-		Logger:   logger,
-	})
-
-	// RP-Initiated Logout (/end_session) dependencies. In dev/test scaffolding
-	// there is no configured signer, so the LogoutVerifier is left nil and the
-	// end_session handler degrades gracefully — it redirects to /logged-out
-	// without revoking. Production wiring supplies a JWTVerifier (built from the
-	// active signer + region issuer) and a DB-backed SessionRevoker here.
-	var logoutVerifier oidcapi.LogoutVerifier
-	sessionRevoker := noopSessionRevoker{}
-
-	apiCfg := oidcapi.Config{
-		Issuer:         issuer,
-		Service:        oidcSvc,
-		Signers:        signers,
-		Rotator:        rotator,
-		LogoutVerifier: logoutVerifier,
-		Grants:         grantStore,
-		Clients:        clientRegistry,
-		SessionRevoker: sessionRevoker,
+	if err := validateProductionReadiness(bffCfg, graph, logger); err != nil {
+		return err
 	}
 
 	// Wire the BFF login flow when LOGIN_URL is configured: /authorize then
@@ -270,13 +216,112 @@ func run(ctx context.Context, logger *slog.Logger) error {
 }
 
 // noopSessionRevoker is a dev/test scaffold implementation of
-// oidcapi.SessionRevoker. It records nothing — dev runs use the stub session
-// resolver and do not persist refresh sessions, so there is nothing to revoke.
-// Production wiring replaces this with a DB-backed clients.DBSessionStore.
+// oidcapi.SessionRevoker. It is constructed only by buildDevHotGraph.
 type noopSessionRevoker struct{}
 
 func (noopSessionRevoker) RevokeSessionsByUserClient(_ context.Context, _, _ string) error {
 	return nil
+}
+
+type redisRevocationPublisher struct{ client *redis.Client }
+
+func (p redisRevocationPublisher) Publish(ctx context.Context, channel, message string) error {
+	return p.client.Publish(ctx, channel, message).Err()
+}
+
+type revokedJTILister struct{ store *clients.DBRevokedJTIStore }
+
+func (l revokedJTILister) ListActiveJTIs(ctx context.Context) ([]string, error) {
+	rows, err := l.store.ListActive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	jtis := make([]string, len(rows))
+	for i := range rows {
+		jtis[i] = rows[i].JTI
+	}
+	return jtis, nil
+}
+
+type revokedJTIChecker struct{ store *clients.DBRevokedJTIStore }
+
+func (c revokedJTIChecker) IsRevoked(ctx context.Context, jti string) (bool, error) {
+	_, found, err := c.store.GetByJTI(ctx, jti)
+	return found, err
+}
+
+type codeFamilyRevoker struct{ sessions *clients.DBSessionStore }
+
+func (r codeFamilyRevoker) RevokeCodeFamily(ctx context.Context, code oidc.AuthCode) error {
+	return r.sessions.RevokeSessionsByUserClient(ctx, code.UserID, code.ClientID)
+}
+
+func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redisClient *redis.Client, deps bffDeps, logger *slog.Logger) (oidcapi.Config, hotGraph, error) {
+	if envBool("HARBOR_DEV_MODE") {
+		return buildDevHotGraph(issuer, logger)
+	}
+	if pool == nil || redisClient == nil {
+		return oidcapi.Config{}, hotGraph{}, errors.New("production harbor-hot requires PostgreSQL and Redis")
+	}
+
+	keyProvider, err := buildExternalKeyProvider(ctx)
+	if err != nil {
+		return oidcapi.Config{}, hotGraph{}, err
+	}
+	q := gendb.New(pool)
+	deps = bffDeps{secretLoader: clients.NewDBSecretLoader(q, keyProvider, crypto.NewCipher()), grantStore: clients.NewDBGrantStore(q)}
+	tokenIssuer, signers, rotator, err := buildSigningStackWithProvider(ctx, pool, keyProvider, logger)
+	if err != nil {
+		return oidcapi.Config{}, hotGraph{}, err
+	}
+	registry := clients.NewDBClientRegistry(q).WithLogger(logger)
+	codes := clients.NewRedisAuthCodeStore(redisClient, time.Minute)
+	grants := clients.NewDBGrantStore(q)
+	sessionStore := clients.NewDBSessionStoreWithPool(q, pool)
+	outbox := clients.NewDBRevocationOutbox(q, logger)
+	revokedStore := clients.NewDBRevokedJTIStore(q)
+	filter := oidc.NewBloomRevocationFilter(oidc.DefaultBloomCapacity, oidc.DefaultBloomFPRate)
+	if _, err := oidc.RehydrateFilter(ctx, revokedJTILister{revokedStore}, filter, logger); err != nil {
+		return oidcapi.Config{}, hotGraph{}, fmt.Errorf("harbor-hot: rehydrate revocations: %w", err)
+	}
+	subscriber := clients.NewRevocationSubscriber(clients.RevocationSubscriberConfig{Client: redisClient, Filter: filter, Logger: logger})
+	go func() {
+		if err := subscriber.Run(ctx); err != nil && ctx.Err() == nil {
+			logger.Error("revocation subscriber stopped", "error", err)
+		}
+	}()
+	worker := oidc.NewRevocationWorker(oidc.RevocationWorkerConfig{Outbox: outbox, SessionStore: sessionStore, Logger: logger})
+	go worker.Run(ctx)
+	verifier, err := oidc.NewJWTVerifier(oidc.JWTVerifierConfig{Signer: signers[0], Filter: filter, RevokedChecker: revokedJTIChecker{revokedStore}, ExpectedIssuer: issuer})
+	if err != nil {
+		return oidcapi.Config{}, hotGraph{}, fmt.Errorf("harbor-hot: build JWT verifier: %w", err)
+	}
+	resolver, err := newSessionResolver(deps, logger)
+	if err != nil {
+		return oidcapi.Config{}, hotGraph{}, err
+	}
+	svc := oidc.NewService(oidc.ServiceConfig{Issuer: issuer, Clients: registry, Codes: codes, Tokens: tokenIssuer, Sessions: resolver, SessionStore: sessionStore, Grants: grants, Revocations: codeFamilyRevoker{sessionStore}, Outbox: outbox, Logger: logger})
+	return oidcapi.Config{Issuer: issuer, Service: svc, Signers: signers, Rotator: rotator, RevokedJTIStore: revokedStore, RevocationFilter: filter, RevocationPublisher: redisRevocationPublisher{redisClient}, RevokedJTIChecker: revokedJTIChecker{revokedStore}, LogoutVerifier: verifier, Grants: grants, Clients: registry, SessionRevoker: sessionStore}, hotGraph{postgres: true, redis: true, externalKMS: true, clientRegistry: true, authCodes: true, grants: true, sessions: true, revocations: true, outboxWorker: true, jwtVerifier: true, logoutVerifier: true, sessionRevoker: true}, nil
+}
+
+func buildDevHotGraph(issuer string, logger *slog.Logger) (oidcapi.Config, hotGraph, error) {
+	registry := oidc.NewInMemoryClientRegistry()
+	registry.Put(oidc.Client{ID: "demo-client", SectorID: "localhost", RedirectURIs: []string{"http://localhost/callback", "http://localhost:8081/callback"}, ScopesAllowed: []string{"openid", "profile", "email", "offline_access"}})
+	grants := oidc.NewInMemoryGrantStore()
+	svc := oidc.NewService(oidc.ServiceConfig{Issuer: issuer, Clients: registry, Codes: oidc.NewInMemoryAuthCodeStore(), Tokens: oidc.NewPlaceholderIssuer(), Sessions: oidc.NewStubSessionResolver("demo-user-ppid"), Grants: grants, Logger: logger})
+	return oidcapi.Config{Issuer: issuer, Service: svc, Grants: grants, Clients: registry, SessionRevoker: noopSessionRevoker{}}, hotGraph{}, nil
+}
+
+func buildExternalKeyProvider(ctx context.Context) (crypto.KeyProvider, error) {
+	resolver, err := crypto.NewKEKResolverFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("external KMS configuration required: %w", err)
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("external KMS client configuration: %w", err)
+	}
+	return crypto.NewKMSKeyProvider(crypto.NewAWSKMSClient(awskms.NewFromConfig(awsCfg)), resolver), nil
 }
 
 // buildSigningStack wires the real ES256 signing path for harbor-hot: it loads
@@ -289,16 +334,15 @@ func (noopSessionRevoker) RevokeSessionsByUserClient(_ context.Context, _, _ str
 // harbor-mgmt HARBOR_KMS_SECRET guard) — otherwise signing keys would be sealed
 // under a derivable dev key.
 func buildSigningStack(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) (oidc.TokenIssuer, []crypto.Signer, *crypto.KeyRotator, error) {
-	reg := envString("REGION", "EU")
-
-	kekSecret := envString("KEK_SECRET", "")
-	if kekSecret == "" {
-		return nil, nil, nil, errors.New("KEK_SECRET must be set when DATABASE_URL is configured — refusing to seal signing keys under a derivable dev key")
-	}
-	kp, err := crypto.NewLocalKeyProvider(kekSecret)
+	kp, err := buildExternalKeyProvider(ctx)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("harbor-hot: build key provider: %w", err)
+		return nil, nil, nil, err
 	}
+	return buildSigningStackWithProvider(ctx, pool, kp, logger)
+}
+
+func buildSigningStackWithProvider(ctx context.Context, pool *pgxpool.Pool, kp crypto.KeyProvider, logger *slog.Logger) (oidc.TokenIssuer, []crypto.Signer, *crypto.KeyRotator, error) {
+	reg := envString("REGION", "EU")
 
 	keyStore := clients.NewDBSigningKeyStore(gendb.New(pool))
 	loader := clients.NewSigningKeyLoader(keyStore, kp, reg)
@@ -329,8 +373,13 @@ type bffDeps struct {
 	// secretLoader decrypts a user's pairwise secret for PPID derivation.
 	secretLoader *clients.DBSecretLoader
 	// grantStore reads and writes consent grants (the pairwise_sub an RP sees).
-	grantStore *clients.DBGrantStore
+	grantStore                                                *clients.DBGrantStore
+	postgres, redis, externalKMS                              bool
+	clientRegistry, authCodes, grants, sessions, revocations  bool
+	outboxWorker, jwtVerifier, logoutVerifier, sessionRevoker bool
 }
+
+type hotGraph = bffDeps
 
 // buildBFFDepsFromPool constructs the BFF session resolver dependencies from an
 // already-opened DB pool. The caller (run) manages the pool lifecycle; this
@@ -421,7 +470,7 @@ func newSessionResolver(deps bffDeps, logger *slog.Logger) (oidc.SessionResolver
 //
 // Dev and e2e runs set HARBOR_DEV_MODE=1 to bypass this guard; they accept the
 // security trade-off of running without a real identity backend.
-func validateProductionReadiness(cfg bffConfig, deps bffDeps, logger *slog.Logger) error {
+func validateProductionReadiness(cfg bffConfig, graph bffDeps, logger *slog.Logger) error {
 	if envBool("HARBOR_DEV_MODE") {
 		logger.Warn("HARBOR_DEV_MODE enabled — skipping production readiness checks (NEVER use in production)")
 		return nil
@@ -437,11 +486,21 @@ func validateProductionReadiness(cfg bffConfig, deps bffDeps, logger *slog.Logge
 	if cfg.DatabaseURL == "" {
 		missing = append(missing, "DATABASE_URL")
 	}
-	if deps.secretLoader == nil {
-		missing = append(missing, "secret_loader (requires DATABASE_URL + HARBOR_KMS_SECRET)")
+	checks := []struct {
+		ready bool
+		name  string
+	}{
+		{graph.postgres, "PostgreSQL"}, {graph.redis, "Redis"}, {graph.externalKMS, "external KMS"},
+		{graph.clientRegistry, "durable client registry"}, {graph.authCodes, "durable authorization code store"},
+		{graph.grants, "durable grant store"}, {graph.sessions, "durable session store"},
+		{graph.revocations, "durable revocation store"}, {graph.outboxWorker, "revocation outbox worker"},
+		{graph.jwtVerifier, "JWT verifier"}, {graph.logoutVerifier, "logout verifier"},
+		{graph.sessionRevoker, "session revoker"},
 	}
-	if deps.grantStore == nil {
-		missing = append(missing, "grant_store (requires DATABASE_URL)")
+	for _, check := range checks {
+		if !check.ready {
+			missing = append(missing, check.name)
+		}
 	}
 
 	if len(missing) > 0 {

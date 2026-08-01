@@ -140,3 +140,13 @@ Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3
 4. Retain the production nonce-gate coverage for legacy records at login and
    authorize completion, then run focused tests and capture expected failures.
 5. Format, commit, rebase the shared branch, push, and report task completion.
+
+## Task 2: durable harbor-hot production graph
+
+1. Isolate all scaffold construction behind the explicit development mode.
+2. Assemble the production OIDC graph from one PostgreSQL pool and one Redis client.
+3. Rehydrate and subscribe the revoked-JTI filter, start the durable outbox worker,
+   and share the JWT verifier with logout and token consumers.
+4. Require an external KMS provider and validate every production dependency
+   before the HTTP listener starts.
+5. Run focused and repository validation, rebase, commit, and push.

@@ -124,6 +124,9 @@ func bootstrapProductionMode(ctx context.Context, cfg BootstrapConfig, logger *s
 	if cfg.Region == "" {
 		return nil, fmt.Errorf("bootstrap: Region required when DATABASE_URL is set")
 	}
+	if providerName, ok := cfg.KeyProvider.(fmt.Stringer); ok && providerName.String() == "localKeyProvider(DEV-ONLY)" {
+		return nil, fmt.Errorf("bootstrap: external KMS KeyProvider required in production")
+	}
 
 	// Load existing live keys from the database.
 	liveKeys, err := cfg.SigningKeyStore.ListLive(ctx)

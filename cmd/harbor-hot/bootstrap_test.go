@@ -163,10 +163,7 @@ func TestBootstrapProductionModeMissingConfig(t *testing.T) {
 	}
 
 	// Missing SigningKeyStore.
-	kp, err := crypto.NewLocalKeyProvider("test-secret-32-bytes-long!!!!!!")
-	if err != nil {
-		t.Fatalf("NewLocalKeyProvider: %v", err)
-	}
+	kp := productionTestKeyProvider()
 	cfg = BootstrapConfig{
 		DatabaseURL: "postgres://localhost/test",
 		KeyProvider: kp,
@@ -218,10 +215,7 @@ func TestBootstrapProductionModeGeneratesKey(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	kp, err := crypto.NewLocalKeyProvider("test-secret-32-bytes-long!!!!!!")
-	if err != nil {
-		t.Fatalf("NewLocalKeyProvider: %v", err)
-	}
+	kp := productionTestKeyProvider()
 	store := newFakeSigningKeyStore()
 
 	cfg := BootstrapConfig{
@@ -272,10 +266,7 @@ func TestBootstrapProductionModeLoadsExistingKey(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	kp, err := crypto.NewLocalKeyProvider("test-secret-32-bytes-long!!!!!!")
-	if err != nil {
-		t.Fatalf("NewLocalKeyProvider: %v", err)
-	}
+	kp := productionTestKeyProvider()
 	store := newFakeSigningKeyStore()
 
 	// Pre-create a signing key in the store.
@@ -335,6 +326,13 @@ func TestBootstrapProductionModeLoadsExistingKey(t *testing.T) {
 	if len(sig) != 64 {
 		t.Errorf("signature length = %d, want 64", len(sig))
 	}
+}
+
+func productionTestKeyProvider() crypto.KeyProvider {
+	return crypto.NewKMSKeyProvider(
+		crypto.NewFakeKMSClient(),
+		crypto.NewStaticKEKResolver(map[string]string{"us-east-1": "test-kek"}),
+	)
 }
 
 func TestBootstrapFromEnv(t *testing.T) {
