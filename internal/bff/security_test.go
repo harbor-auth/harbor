@@ -139,6 +139,8 @@ func TestSecurity_CrossTabIsolation(t *testing.T) {
 		ClientID:  "test-client",
 		ExpiresAt: time.Now().Add(5 * time.Minute),
 	}
+	nonceCookieA := browserNonceCookieFor(&sessionA)
+	browserNonceCookieFor(&sessionB)
 	if err := store.Create(ctx, sessionA); err != nil {
 		t.Fatalf("create A: %v", err)
 	}
@@ -152,6 +154,7 @@ func TestSecurity_CrossTabIsolation(t *testing.T) {
 	reqA := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
 	reqA.AddCookie(&http.Cookie{Name: CookieName, Value: "session-tab-A"})
 	reqA.AddCookie(&http.Cookie{Name: webauthnSessionCookieName, Value: "webauthn-key-A"})
+	reqA.AddCookie(nonceCookieA)
 	recA := httptest.NewRecorder()
 	handler.FinishLoginWithParsedData(recA, reqA, &protocol.ParsedCredentialAssertionData{})
 
