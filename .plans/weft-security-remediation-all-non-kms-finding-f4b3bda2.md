@@ -219,3 +219,11 @@ Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3
 3. Parse token endpoint Basic/post credentials, reject conflicts and method mismatches before consuming authorization codes or rotating refresh tokens.
 4. Require confidential client authentication for introspection and revocation and preserve cross-client isolation without an admin bypass.
 5. Run focused and repository checks, rebase the shared branch, commit, push, and report task completion.
+
+## Task 27: require relay authentication outside development
+
+1. Run the relay authentication contract tests from Task 26 and confirm the intended startup and request-path failures.
+2. Resolve authentication enforcement explicitly from development mode and reject production startup without the required authenticator configuration.
+3. Make the SMTP request path fail closed whenever enforcement is enabled but no authenticator is available, retaining monitoring-only scaffold behavior solely in explicit development mode.
+4. Run focused relay tests plus repository formatting, build, vet, test, agent, and generation checks.
+5. Rebase the shared branch, commit, push, store the result in Hippo, and complete the Weft task.
