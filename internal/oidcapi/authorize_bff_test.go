@@ -314,6 +314,45 @@ func seedAuthenticatedSession(t *testing.T, store *bff.InMemoryBFFSessionStore, 
 	return nonce
 }
 
+// FIXATION / nonce-gate regression: an authenticated BFF session whose stored
+// BrowserNonceHash is absent must fail closed even when the caller presents a
+// syntactically valid browser nonce cookie. Legacy or malformed sessions must
+// never bypass the binding gate and yield an authorization code.
+func TestAuthorizeComplete_MissingNonceHash_ErrorPageNoCode(t *testing.T) {
+	ts, store := newBFFFlowServer(t)
+	const requestID = "seeded-request-id-missing-nonce-hash"
+	record := bff.BFFSessionRecord{
+		RequestID:   requestID,
+		State:       testState,
+		ClientID:    testClientID,
+		RedirectURI: testRedirectURI,
+		Scope:       "openid profile",
+		UserID:      "user-abc-123",
+		ExpiresAt:   time.Now().Add(5 * time.Minute),
+	}
+	if err := store.Create(context.Background(), record); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	nonce, err := bff.NewBrowserNonce()
+	if err != nil {
+		t.Fatalf("NewBrowserNonce: %v", err)
+	}
+	nonceCookie := &http.Cookie{
+		Name:  bff.NonceCookieName,
+		Value: base64.RawURLEncoding.EncodeToString(nonce),
+	}
+
+	res := getAuthorizeCompleteWithCookie(t, ts, requestID, nonceCookie)
+	defer func() { _ = res.Body.Close() }()
+
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (error page)", res.StatusCode)
+	}
+	if loc := res.Header.Get("Location"); loc != "" {
+		t.Fatalf("unexpected redirect %q — must not issue a code without a stored browser nonce hash", loc)
+	}
+}
+
 // FIXATION / nonce-gate regression: an authenticated BFF session must NOT yield
 // a code at /authorize/complete when the caller presents NO browser nonce
 // cookie. Without the gate, an attacker who learned a request_id could complete

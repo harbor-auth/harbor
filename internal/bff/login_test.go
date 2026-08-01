@@ -71,6 +71,16 @@ func (m *mockUserResolver) ResolveUser(ctx context.Context, r *http.Request, ses
 	return []byte("test-user-id"), nil
 }
 
+func browserNonceCookieFor(record *BFFSessionRecord) *http.Cookie {
+	nonce := make([]byte, 32)
+	copy(nonce, record.RequestID)
+	record.BrowserNonceHash = HashNonce(nonce)
+	return &http.Cookie{
+		Name:  NonceCookieName,
+		Value: base64.RawURLEncoding.EncodeToString(nonce),
+	}
+}
+
 func TestLoginHandler_BeginLogin_MissingRequestID(t *testing.T) {
 	store := NewInMemoryBFFSessionStore()
 	handler := NewLoginHandler(store, &mockWebAuthnService{}, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
@@ -152,6 +162,56 @@ func TestLoginHandler_BeginLogin_SessionExpired(t *testing.T) {
 	}
 }
 
+func TestLoginHandler_BeginLogin_MissingBrowserNonceHash(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+	record := BFFSessionRecord{
+		RequestID: "valid-session",
+		ClientID:  "test-client",
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	if err := store.Create(ctx, record); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	var beginLoginCalled bool
+	webauthn := &mockWebAuthnService{
+		beginLoginFunc: func(ctx context.Context, userID []byte) (*protocol.CredentialAssertion, string, error) {
+			beginLoginCalled = true
+			return &protocol.CredentialAssertion{}, "session-key", nil
+		},
+	}
+	handler := NewLoginHandler(store, webauthn, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
+
+	req := httptest.NewRequest(http.MethodGet, "/login?request_id=valid-session", nil)
+	req.AddCookie(&http.Cookie{
+		Name:  NonceCookieName,
+		Value: base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+	})
+	rec := httptest.NewRecorder()
+
+	handler.BeginLogin(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	var resp loginErrorResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Code != "invalid_request" {
+		t.Errorf("code = %q, want %q", resp.Code, "invalid_request")
+	}
+	if beginLoginCalled {
+		t.Error("BeginLogin must not start WebAuthn when BrowserNonceHash is absent")
+	}
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == CookieName {
+			t.Error("BeginLogin must not set the BFF cookie when BrowserNonceHash is absent")
+		}
+	}
+}
+
 func TestLoginHandler_BeginLogin_UserNotIdentified(t *testing.T) {
 	store := NewInMemoryBFFSessionStore()
 	ctx := context.Background()
@@ -162,6 +222,7 @@ func TestLoginHandler_BeginLogin_UserNotIdentified(t *testing.T) {
 		ClientID:  "test-client",
 		ExpiresAt: time.Now().Add(5 * time.Minute),
 	}
+	nonceCookie := browserNonceCookieFor(&record)
 	if err := store.Create(ctx, record); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -176,6 +237,7 @@ func TestLoginHandler_BeginLogin_UserNotIdentified(t *testing.T) {
 	handler := NewLoginHandler(store, &mockWebAuthnService{}, resolver, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodGet, "/login?request_id=valid-session", nil)
+	req.AddCookie(nonceCookie)
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 
@@ -204,6 +266,7 @@ func TestLoginHandler_BeginLogin_WebAuthnError(t *testing.T) {
 		ClientID:  "test-client",
 		ExpiresAt: time.Now().Add(5 * time.Minute),
 	}
+	nonceCookie := browserNonceCookieFor(&record)
 	if err := store.Create(ctx, record); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -218,6 +281,7 @@ func TestLoginHandler_BeginLogin_WebAuthnError(t *testing.T) {
 	handler := NewLoginHandler(store, webauthn, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodGet, "/login?request_id=valid-session", nil)
+	req.AddCookie(nonceCookie)
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 
@@ -435,6 +499,62 @@ func TestLoginHandler_FinishLogin_InvalidBody(t *testing.T) {
 	}
 }
 
+func TestLoginHandler_FinishLoginWithParsedData_MissingBrowserNonceHash(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+	record := BFFSessionRecord{
+		RequestID: "valid-session",
+		ClientID:  "test-client",
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	if err := store.Create(ctx, record); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	var finishLoginCalled bool
+	webauthn := &mockWebAuthnService{
+		finishLoginFunc: func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, error) {
+			finishLoginCalled = true
+			return "authenticated-user-id", nil
+		},
+	}
+	handler := NewLoginHandler(store, webauthn, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
+
+	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
+	req.AddCookie(&http.Cookie{Name: CookieName, Value: "valid-session"})
+	req.AddCookie(&http.Cookie{Name: webauthnSessionCookieName, Value: "session-key"})
+	req.AddCookie(&http.Cookie{
+		Name:  NonceCookieName,
+		Value: base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+	})
+	rec := httptest.NewRecorder()
+
+	handler.FinishLoginWithParsedData(rec, req, &protocol.ParsedCredentialAssertionData{})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	var resp loginErrorResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Errorf("decode response: %v", err)
+	} else if resp.Code != "invalid_request" {
+		t.Errorf("code = %q, want %q", resp.Code, "invalid_request")
+	}
+	if finishLoginCalled {
+		t.Error("FinishLogin must not finish WebAuthn when BrowserNonceHash is absent")
+	}
+	if location := rec.Header().Get("Location"); location != "" {
+		t.Errorf("Location = %q, want no redirect", location)
+	}
+	unchangedSession, err := store.Get(ctx, "valid-session")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if unchangedSession.UserID != "" {
+		t.Errorf("session.UserID = %q, want empty", unchangedSession.UserID)
+	}
+}
+
 // TestLoginHandler_FinishLogin_HappyPath tests the successful login completion flow.
 // Since creating valid WebAuthn assertion data is complex, we use a testable
 // version of the handler that accepts pre-parsed data.
@@ -534,6 +654,7 @@ func TestLoginHandler_BeginLogin_Discoverable_HappyPath(t *testing.T) {
 		ClientID:  "test-client",
 		ExpiresAt: time.Now().Add(5 * time.Minute),
 	}
+	nonceCookie := browserNonceCookieFor(&record)
 	if err := store.Create(ctx, record); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -554,6 +675,7 @@ func TestLoginHandler_BeginLogin_Discoverable_HappyPath(t *testing.T) {
 	handler := NewLoginHandler(store, webauthn, DiscoverableUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodGet, "/login?request_id=valid-session", nil)
+	req.AddCookie(nonceCookie)
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 
@@ -596,6 +718,7 @@ func TestLoginHandler_BeginLogin_Discoverable_WebAuthnError(t *testing.T) {
 		ClientID:  "test-client",
 		ExpiresAt: time.Now().Add(5 * time.Minute),
 	}
+	nonceCookie := browserNonceCookieFor(&record)
 	if err := store.Create(ctx, record); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -609,6 +732,7 @@ func TestLoginHandler_BeginLogin_Discoverable_WebAuthnError(t *testing.T) {
 	handler := NewLoginHandler(store, webauthn, DiscoverableUserResolver{}, "http://localhost:8080/authorize/complete")
 
 	req := httptest.NewRequest(http.MethodGet, "/login?request_id=valid-session", nil)
+	req.AddCookie(nonceCookie)
 	req = req.WithContext(ctx)
 	rec := httptest.NewRecorder()
 
@@ -639,6 +763,7 @@ func TestLoginHandler_FinishLogin_Discoverable_HappyPath(t *testing.T) {
 		State:       "oauth-state",
 		ExpiresAt:   time.Now().Add(5 * time.Minute),
 	}
+	nonceCookie := browserNonceCookieFor(&record)
 	if err := store.Create(ctx, record); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -659,6 +784,7 @@ func TestLoginHandler_FinishLogin_Discoverable_HappyPath(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
 	req.AddCookie(&http.Cookie{Name: CookieName, Value: "valid-session"})
 	req.AddCookie(&http.Cookie{Name: webauthnSessionCookieName, Value: "discoverable-session-key"})
+	req.AddCookie(nonceCookie)
 	rec := httptest.NewRecorder()
 
 	handler.FinishLoginWithParsedData(rec, req, &protocol.ParsedCredentialAssertionData{})
@@ -707,6 +833,7 @@ func TestLoginHandler_FinishLogin_Discoverable_Failure(t *testing.T) {
 		ClientID:  "test-client",
 		ExpiresAt: time.Now().Add(5 * time.Minute),
 	}
+	nonceCookie := browserNonceCookieFor(&record)
 	if err := store.Create(ctx, record); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -722,6 +849,7 @@ func TestLoginHandler_FinishLogin_Discoverable_Failure(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
 	req.AddCookie(&http.Cookie{Name: CookieName, Value: "valid-session"})
 	req.AddCookie(&http.Cookie{Name: webauthnSessionCookieName, Value: "discoverable-session-key"})
+	req.AddCookie(nonceCookie)
 	rec := httptest.NewRecorder()
 
 	handler.FinishLoginWithParsedData(rec, req, &protocol.ParsedCredentialAssertionData{})
@@ -751,6 +879,7 @@ func TestLoginHandler_FinishLogin_Discoverable_NotCalledForKnownUser(t *testing.
 		ClientID:  "test-client",
 		ExpiresAt: time.Now().Add(5 * time.Minute),
 	}
+	nonceCookie := browserNonceCookieFor(&record)
 	if err := store.Create(ctx, record); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -769,6 +898,7 @@ func TestLoginHandler_FinishLogin_Discoverable_NotCalledForKnownUser(t *testing.
 	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
 	req.AddCookie(&http.Cookie{Name: CookieName, Value: "valid-session"})
 	req.AddCookie(&http.Cookie{Name: webauthnSessionCookieName, Value: "session-key"})
+	req.AddCookie(nonceCookie)
 	rec := httptest.NewRecorder()
 
 	handler.FinishLoginWithParsedData(rec, req, &protocol.ParsedCredentialAssertionData{})
@@ -791,6 +921,7 @@ func TestLoginHandler_FinishLogin_WebAuthnFailure(t *testing.T) {
 		ClientID:  "test-client",
 		ExpiresAt: time.Now().Add(5 * time.Minute),
 	}
+	nonceCookie := browserNonceCookieFor(&record)
 	if err := store.Create(ctx, record); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -806,6 +937,7 @@ func TestLoginHandler_FinishLogin_WebAuthnFailure(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
 	req.AddCookie(&http.Cookie{Name: CookieName, Value: "valid-session"})
 	req.AddCookie(&http.Cookie{Name: webauthnSessionCookieName, Value: "session-key"})
+	req.AddCookie(nonceCookie)
 	rec := httptest.NewRecorder()
 
 	// Use the testable method

@@ -254,12 +254,14 @@ func (s *Server) GetAuthorizeComplete(w http.ResponseWriter, r *http.Request) {
 	// matching cookie did not originate from the browser that started the flow —
 	// fail closed with the no-redirect error page (§11.7): never redirect to a URI
 	// whose session ownership is unproven.
-	if len(session.BrowserNonceHash) > 0 {
-		nonce, nonceErr := bff.ReadBFFNonceCookie(r)
-		if nonceErr != nil || !bff.NonceMatches(nonce, session.BrowserNonceHash) {
-			writeAuthorizeErrorPage(w)
-			return
-		}
+	if len(session.BrowserNonceHash) == 0 {
+		writeAuthorizeErrorPage(w)
+		return
+	}
+	nonce, nonceErr := bff.ReadBFFNonceCookie(r)
+	if nonceErr != nil || !bff.NonceMatches(nonce, session.BrowserNonceHash) {
+		writeAuthorizeErrorPage(w)
+		return
 	}
 
 	// Verify user has authenticated (UserID must be set by /login/complete)

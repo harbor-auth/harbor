@@ -123,12 +123,14 @@ func (h *LoginHandler) BeginLogin(w http.ResponseWriter, r *http.Request) {
 	// A request that cannot present the matching cookie did not originate from
 	// the browser that started the flow — refuse immediately. Never set the
 	// BFF cookie from the URL param (that was the fixation vector).
-	if len(session.BrowserNonceHash) > 0 {
-		nonce, nonceErr := ReadBFFNonceCookie(r)
-		if nonceErr != nil || !NonceMatches(nonce, session.BrowserNonceHash) {
-			writeLoginError(w, http.StatusBadRequest, "invalid_request", "browser nonce mismatch")
-			return
-		}
+	if len(session.BrowserNonceHash) == 0 {
+		writeLoginError(w, http.StatusBadRequest, "invalid_request", "browser nonce mismatch")
+		return
+	}
+	nonce, nonceErr := ReadBFFNonceCookie(r)
+	if nonceErr != nil || !NonceMatches(nonce, session.BrowserNonceHash) {
+		writeLoginError(w, http.StatusBadRequest, "invalid_request", "browser nonce mismatch")
+		return
 	}
 
 	// Resolve the user identity. DiscoverableUserResolver returns ErrDiscoverable
@@ -291,12 +293,14 @@ func (h *LoginHandler) FinishLoginWithParsedData(w http.ResponseWriter, r *http.
 		writeLoginError(w, http.StatusInternalServerError, "server_error", "could not retrieve session")
 		return
 	}
-	if len(session.BrowserNonceHash) > 0 {
-		nonce, nonceErr := ReadBFFNonceCookie(r)
-		if nonceErr != nil || !NonceMatches(nonce, session.BrowserNonceHash) {
-			writeLoginError(w, http.StatusBadRequest, "invalid_request", "browser nonce mismatch")
-			return
-		}
+	if len(session.BrowserNonceHash) == 0 {
+		writeLoginError(w, http.StatusBadRequest, "invalid_request", "browser nonce mismatch")
+		return
+	}
+	nonce, nonceErr := ReadBFFNonceCookie(r)
+	if nonceErr != nil || !NonceMatches(nonce, session.BrowserNonceHash) {
+		writeLoginError(w, http.StatusBadRequest, "invalid_request", "browser nonce mismatch")
+		return
 	}
 
 	// Branch on the resolver type: discoverable path uses FinishDiscoverableLogin
