@@ -84,6 +84,10 @@ type registerResponse struct {
 //   - 503 Service Unavailable registration not wired (no store)
 //   - 500 Internal Server Error credential minting or persistence failure
 func (s *Server) PostRegister(w http.ResponseWriter, r *http.Request) {
+	if s.abuseGate != nil && !s.abuseGate.Check(r.Context(), "register", abuseSource(r)) {
+		s.writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
+		return
+	}
 	start := time.Now()
 	outcome := telemetry.OutcomeError
 	defer func() { recordRequest(telemetry.EndpointRegister, outcome, start) }()

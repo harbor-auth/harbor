@@ -8,9 +8,8 @@
 //     across replicas).
 //   - REDIS_URL unset -> in-memory MemoryRateLimiter (single-replica dev/test
 //     fallback). This keeps local runs working without Redis.
-//   - RATE_LIMIT_DISABLED truthy -> limiters are nil, so RateLimitMiddleware
-//     becomes a transparent passthrough (an explicit escape hatch for load
-//     tests).
+//   - RATE_LIMIT_DISABLED truthy -> development-only transparent passthrough;
+//     production rejects this setting at startup.
 //
 // Each hot-path endpoint gets its OWN limiter (independent bucket namespace and
 // its own limit/window), configurable via environment variables with sane
@@ -23,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -132,6 +132,14 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// total auth bypasses (audit blocker 1.1). The HARBOR_DEV_MODE escape hatch
 	// allows local dev and e2e tests to run without the full stack.
 	issuer := envString("ISSUER", "https://harbor.local")
+	if !envBool("HARBOR_DEV_MODE") {
+		if err := validateProductionURL("ISSUER", issuer); err != nil {
+			return err
+		}
+		if err := validateProductionURL("LOGIN_URL", bffCfg.LoginURL); err != nil {
+			return err
+		}
+	}
 
 	// Bind the issuer host to a region so the region middleware resolves it.
 	// In production, the issuer is region-specific (e.g. https://eu.harbor.id);
@@ -485,6 +493,9 @@ func validateProductionReadiness(cfg bffConfig, graph bffDeps, logger *slog.Logg
 		logger.Warn("HARBOR_DEV_MODE enabled — skipping production readiness checks (NEVER use in production)")
 		return nil
 	}
+	if envBool("RATE_LIMIT_DISABLED") {
+		return errors.New("RATE_LIMIT_DISABLED is not allowed in production")
+	}
 
 	var missing []string
 	if cfg.LoginURL == "" {
@@ -580,6 +591,12 @@ func (c bffConfig) validate() error {
 		if u.Host == "" {
 			return fmt.Errorf("invalid LOGIN_URL %q: missing host", c.LoginURL)
 		}
+		if !envBool("HARBOR_DEV_MODE") && u.Scheme != "https" {
+			hostIP := net.ParseIP(u.Hostname())
+			if u.Hostname() != "localhost" && (hostIP == nil || !hostIP.IsLoopback()) {
+				return fmt.Errorf("invalid LOGIN_URL %q: production login URL must use HTTPS", c.LoginURL)
+			}
+		}
 	}
 	if c.SessionTTL <= 0 {
 		return fmt.Errorf("invalid BFF_SESSION_TTL: must be positive, got %s", c.SessionTTL)
@@ -616,8 +633,9 @@ var hotPathLimits = []endpointLimitSpec{
 }
 
 // buildRateLimits constructs one rate-limit middleware per hot-path endpoint.
-// When RATE_LIMIT_DISABLED is truthy every limiter is nil, so the middleware is
-// a transparent passthrough. Otherwise each endpoint gets its own limiter
+// In explicit development mode RATE_LIMIT_DISABLED makes every limiter nil, so
+// the middleware is a transparent passthrough. Production rejects the setting
+// during readiness validation. Otherwise each endpoint gets its own limiter
 // (Redis-backed when redisClient is non-nil, else in-memory) with an
 // independent bucket namespace and its own configurable limit/window.
 func buildRateLimits(redisClient *redis.Client, logger *slog.Logger) []oidcapi.EndpointRateLimit {
@@ -658,12 +676,24 @@ func buildRateLimits(redisClient *redis.Client, logger *slog.Logger) []oidcapi.E
 			Endpoint:               spec.endpoint,
 			Window:                 window,
 			Logger:                 logger,
+			FailClosedOnError:      !envBool("HARBOR_DEV_MODE"),
 			TrustedForwardedHeader: trustedHeader,
 			TrustedProxyHops:       trustedHops,
 		})
 		limits = append(limits, oidcapi.EndpointRateLimit{Path: spec.path, Middleware: mw})
 	}
 	return limits
+}
+
+func validateProductionURL(name, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid %s: %w", name, err)
+	}
+	if u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+		return fmt.Errorf("invalid %s: production requires an absolute credential-free HTTPS URL", name)
+	}
+	return nil
 }
 
 // newLimiter returns the backend limiter for one endpoint: Redis-backed when a

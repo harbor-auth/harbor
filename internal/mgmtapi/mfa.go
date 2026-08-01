@@ -74,6 +74,10 @@ type mfaStatusResponse struct {
 // writing a 401 and returning ok=false when absent. Every MFA endpoint is for
 // an already-authenticated user managing their own factors.
 func (s *Server) mfaUserID(w http.ResponseWriter, r *http.Request) (string, bool) {
+	if s.abuseGate != nil && !s.abuseGate.Check(r.Context(), "mfa", abuseSource(r)) {
+		s.writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
+		return "", false
+	}
 	var userID string
 	if s.callerSource != nil {
 		userID = s.callerSource.CallerID(r.Context())

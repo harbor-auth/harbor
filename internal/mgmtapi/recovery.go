@@ -255,6 +255,10 @@ type recoveryCodesResponse struct {
 //   - 503 Service Unavailable recovery not wired
 //   - 500 Internal Server Error generation or persistence failure
 func (s *Server) PostRecoveryCodes(w http.ResponseWriter, r *http.Request) {
+	if s.abuseGate != nil && !s.abuseGate.Check(r.Context(), "recovery", r.RemoteAddr) {
+		s.writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
+		return
+	}
 	var userID string
 	if s.callerSource != nil {
 		userID = s.callerSource.CallerID(r.Context())
@@ -333,6 +337,9 @@ type recoveryBeginResponse struct {
 //   - 503 Service Unavailable recovery not wired
 //   - 500 Internal Server Error ceremony persistence failure
 func (s *Server) PostRecoveryBegin(w http.ResponseWriter, r *http.Request) {
+	if s.rejectAbuse(w, r, "recovery") {
+		return
+	}
 	if s.recoveryCeremonies == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "recovery service not configured")
 		return
@@ -423,6 +430,9 @@ type recoveryCompleteResponse struct {
 //   - 503 Service Unavailable recovery not wired
 //   - 500 Internal Server Error scoped-session or ceremony failure
 func (s *Server) PostRecoveryComplete(w http.ResponseWriter, r *http.Request) {
+	if s.rejectAbuse(w, r, "recovery") {
+		return
+	}
 	if s.recoveryCeremonies == nil || s.recoveryVerifier == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "recovery service not configured")
 		return

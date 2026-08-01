@@ -25,9 +25,9 @@ type RateLimiter interface {
 	//     zero when allowed
 	//   - err: non-nil on infrastructure errors (Redis unavailable, etc.)
 	//
-	// Callers MUST implement fail-open semantics: if err != nil, allow the
-	// request (log loudly, emit metrics) rather than blocking legitimate
-	// traffic during Redis outages.
+	// Callers choose an explicit outage policy. Credential issuance, MFA,
+	// recovery, enrollment, and registration MUST fail closed (or switch to a
+	// bounded local limiter); lower-risk endpoints may deliberately fail open.
 	Allow(ctx context.Context, key string) (allowed bool, retryAfter time.Duration, err error)
 }
 
@@ -44,8 +44,8 @@ var _ RateLimiter = (*RedisRateLimiter)(nil)
 //   - Current window count + (previous window count * overlap ratio) = effective count
 //   - If effective count >= limit, request is denied with Retry-After
 //
-// Fail-open posture: Redis unavailability returns an error; the caller (middleware)
-// is responsible for allowing the request and logging/emitting metrics.
+// Redis unavailability returns an error; the caller is responsible for applying
+// its explicit endpoint-specific outage policy and logging/emitting metrics.
 type RedisRateLimiter struct {
 	client    *redis.Client
 	keyPrefix string

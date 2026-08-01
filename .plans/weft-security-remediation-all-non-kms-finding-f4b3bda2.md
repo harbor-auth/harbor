@@ -227,3 +227,10 @@ Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3
 3. Make the SMTP request path fail closed whenever enforcement is enabled but no authenticator is available, retaining monitoring-only scaffold behavior solely in explicit development mode.
 4. Run focused relay tests plus repository formatting, build, vet, test, agent, and generation checks.
 5. Rebase the shared branch, commit, push, store the result in Hippo, and complete the Weft task.
+
+## Task 25: fail-closed production abuse and URL configuration
+
+1. Validate every production-facing URL, WebAuthn origin, and RP host as strict HTTPS/host inputs before constructing either server graph.
+2. Reject `RATE_LIMIT_DISABLED` outside explicit development mode and make sensitive hot-path limiter outages return a bounded failure response.
+3. Add a shared management abuse gate backed by Redis and attach independent production buckets to MFA, recovery, enrollment, and registration routes.
+4. Preserve explicit development/test behavior, run focused security tests and repository validation, then rebase, commit, and push.

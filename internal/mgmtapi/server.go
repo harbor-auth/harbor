@@ -121,6 +121,9 @@ type Server struct {
 	// session context for every user-scoped endpoint. Injected by
 	// WithCallerSource; a nil source causes user-scoped endpoints to return 401.
 	callerSource CallerSource
+	// abuseGate is configured only by the production composition root. It uses
+	// shared Redis limiters and denies on missing/unavailable backend state.
+	abuseGate *productionAbuseGate
 
 	logger *slog.Logger
 }

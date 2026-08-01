@@ -55,6 +55,10 @@ type enrollResponse struct {
 //   - 503 Service Unavailable enrollment not wired (no DB / KEK)
 //   - 500 Internal Server Error any other enrollment failure
 func (s *Server) PostEnroll(w http.ResponseWriter, r *http.Request) {
+	if s.abuseGate != nil && !s.abuseGate.Check(r.Context(), "enroll", abuseSource(r)) {
+		s.writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
+		return
+	}
 	start := time.Now()
 	outcome := telemetry.OutcomeError
 	defer func() { recordRequest(telemetry.EndpointEnroll, outcome, start) }()

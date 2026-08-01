@@ -14,7 +14,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -23,6 +25,7 @@ import (
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	awskms "github.com/aws/aws-sdk-go-v2/service/kms"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/harbor-auth/harbor/internal/bff"
 	"github.com/harbor-auth/harbor/internal/clients"
@@ -73,6 +76,25 @@ func main() {
 // runProduction is the fail-closed composition root. Every stateful dependency
 // served from this graph is shared by all replicas.
 func runProduction(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.RuntimeConfig) error {
+	if envBool("RATE_LIMIT_DISABLED") {
+		return errors.New("RATE_LIMIT_DISABLED is not allowed in production")
+	}
+	authorizeCompleteURL := os.Getenv("AUTHORIZE_COMPLETE_URL")
+	if err := validateProductionURL("AUTHORIZE_COMPLETE_URL", authorizeCompleteURL); err != nil {
+		return err
+	}
+	registrationBaseURL := os.Getenv("REGISTRATION_BASE_URL")
+	if err := validateProductionURL("REGISTRATION_BASE_URL", registrationBaseURL); err != nil {
+		return err
+	}
+	rpID := os.Getenv("WEBAUTHN_RP_ID")
+	if err := validateProductionHost("WEBAUTHN_RP_ID", rpID); err != nil {
+		return err
+	}
+	rpOrigins := splitAndTrim(os.Getenv("WEBAUTHN_RP_ORIGINS"))
+	if err := validateProductionOrigins(rpOrigins, rpID); err != nil {
+		return err
+	}
 	pool, err := clients.ConnectDB(ctx, logger)
 	if err != nil {
 		return fmt.Errorf("connect database: %w", err)
@@ -106,11 +128,6 @@ func runProduction(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.R
 	enrollmentSessions := mgmtapi.NewRedisEnrollmentSessionStore(redisClient)
 	credentialStore := webauthn.NewDBStore(q).WithPool(pool)
 	ceremonySessions := webauthn.NewRedisSessionStore(redisClient, bffSessionTTL)
-	rpID := os.Getenv("WEBAUTHN_RP_ID")
-	rpOrigins := splitAndTrim(os.Getenv("WEBAUTHN_RP_ORIGINS"))
-	if rpID == "" || len(rpOrigins) == 0 {
-		return errors.New("production requires WEBAUTHN_RP_ID and WEBAUTHN_RP_ORIGINS")
-	}
 	webauthnService, err := webauthn.NewService(webauthn.Config{
 		RPID: rpID, RPDisplayName: getenv("WEBAUTHN_RP_DISPLAY_NAME", "Harbor"), RPOrigins: rpOrigins,
 	}, credentialStore, ceremonySessions)
@@ -134,10 +151,6 @@ func runProduction(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.R
 		return fmt.Errorf("configure MFA: %w", err)
 	}
 
-	registrationBaseURL := os.Getenv("REGISTRATION_BASE_URL")
-	if registrationBaseURL == "" {
-		return errors.New("production requires REGISTRATION_BASE_URL")
-	}
 	initialAccessToken := os.Getenv("INITIAL_ACCESS_TOKEN")
 	if initialAccessToken == "" {
 		return errors.New("production dynamic registration requires INITIAL_ACCESS_TOKEN")
@@ -153,14 +166,18 @@ func runProduction(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.R
 		WithRecovery(recoveryManager, recoveryStore, recoveryService, recoveryCeremonies).
 		WithScopedSessionIssuer(&recoverySessionIssuer{bffSessions: bffStore, enrollmentSessions: enrollmentSessions}).
 		WithMFA(mfaService)
+	mfaAbuseProtection := newMgmtLimiter(redisClient, "mfa", 30, time.Minute, logger)
+	recoveryAbuseProtection := newMgmtLimiter(redisClient, "recovery", 20, time.Minute, logger)
+	enrollmentAbuseProtection := newMgmtLimiter(redisClient, "enroll", 10, time.Minute, logger)
+	registrationAbuseProtection := newMgmtLimiter(redisClient, "register", 10, time.Minute, logger)
+	mgmtServer.WithProductionAbuseProtection(mfaAbuseProtection.endpoint, mfaAbuseProtection.limiter)
+	mgmtServer.WithProductionAbuseProtection(recoveryAbuseProtection.endpoint, recoveryAbuseProtection.limiter)
+	mgmtServer.WithProductionAbuseProtection(enrollmentAbuseProtection.endpoint, enrollmentAbuseProtection.limiter)
+	mgmtServer.WithProductionAbuseProtection(registrationAbuseProtection.endpoint, registrationAbuseProtection.limiter)
 
 	mux := httpserver.NewHealthMux()
 	webauthn.NewHandler(webauthnService).WithEnrollmentSessions(enrollmentSessions).RegisterRoutes(mux)
 	mgmtServer.Routes(mux)
-	authorizeCompleteURL := os.Getenv("AUTHORIZE_COMPLETE_URL")
-	if authorizeCompleteURL == "" {
-		return errors.New("production requires AUTHORIZE_COMPLETE_URL")
-	}
 	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(webauthnService), bff.DiscoverableUserResolver{}, authorizeCompleteURL)
 	mux.HandleFunc("GET /login", loginHandler.BeginLogin)
 	mux.HandleFunc("POST /login/complete", loginHandler.FinishLogin)
@@ -695,4 +712,60 @@ func envBool(key string) bool {
 	default:
 		return false
 	}
+}
+
+type mgmtAbuseProtection struct {
+	endpoint string
+	limiter  clients.RateLimiter
+}
+
+func newMgmtLimiter(client *redis.Client, endpoint string, limit int, window time.Duration, logger *slog.Logger) mgmtAbuseProtection {
+	return mgmtAbuseProtection{
+		endpoint: endpoint,
+		limiter: clients.NewRedisRateLimiter(client, clients.RateLimiterConfig{
+			KeyPrefix: "ratelimit:mgmt:" + endpoint + ":",
+			Limit:     limit,
+			Window:    window,
+		}, logger),
+	}
+}
+
+func validateProductionURL(name, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid %s: %w", name, err)
+	}
+	if u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+		return fmt.Errorf("invalid %s: production requires an absolute credential-free HTTPS URL", name)
+	}
+	return nil
+}
+
+func validateProductionOrigins(origins []string, rpID string) error {
+	if len(origins) == 0 {
+		return errors.New("production requires WEBAUTHN_RP_ORIGINS")
+	}
+	for _, origin := range origins {
+		if err := validateProductionURL("WEBAUTHN_RP_ORIGINS", origin); err != nil {
+			return err
+		}
+		u, _ := url.Parse(origin)
+		if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("invalid WEBAUTHN_RP_ORIGINS: %q is not an origin", origin)
+		}
+		if u.Hostname() != rpID && !strings.HasSuffix(u.Hostname(), "."+rpID) {
+			return fmt.Errorf("invalid WEBAUTHN_RP_ORIGINS: %q is outside WEBAUTHN_RP_ID %q", origin, rpID)
+		}
+	}
+	return nil
+}
+
+func validateProductionHost(name, host string) error {
+	if host == "" || strings.ContainsAny(host, "/:@?#") || net.ParseIP(host) != nil || !strings.Contains(host, ".") {
+		return fmt.Errorf("invalid %s: production requires a DNS hostname", name)
+	}
+	if strings.TrimSpace(host) != host {
+		return fmt.Errorf("invalid %s: production requires a DNS hostname", name)
+	}
+	return nil
 }
