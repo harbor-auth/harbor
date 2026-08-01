@@ -3,6 +3,7 @@ package oidc
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -249,5 +250,40 @@ func TestConsentDecision_PromptNoneRequiresExistingGrant(t *testing.T) {
 	_, err = ConsentDecision(existingGrant, []string{"openid", "profile"}, "none")
 	if !errors.Is(err, ErrInteractionRequired) {
 		t.Errorf("prompt=none with scope escalation should return ErrInteractionRequired, got %v", err)
+	}
+}
+
+// TestConsentDecision_NeverTreatsPromptAsApproval documents the boundary
+// between policy and user intent. A decision that requires UI interaction must
+// never itself be interpreted as approval or mutate the grant supplied to it.
+func TestConsentDecision_NeverTreatsPromptAsApproval(t *testing.T) {
+	tests := []struct {
+		name   string
+		grant  *ConsentGrant
+		scopes []string
+		prompt string
+	}{
+		{name: "first consent", scopes: []string{"openid", "profile"}},
+		{name: "forced consent", grant: &ConsentGrant{Scopes: []string{"openid", "profile"}}, scopes: []string{"openid", "profile"}, prompt: "consent"},
+		{name: "scope escalation", grant: &ConsentGrant{Scopes: []string{"openid"}}, scopes: []string{"openid", "profile"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := []string(nil)
+			if tt.grant != nil {
+				before = append(before, tt.grant.Scopes...)
+			}
+			decision, err := ConsentDecision(tt.grant, tt.scopes, tt.prompt)
+			if err != nil {
+				t.Fatalf("ConsentDecision: %v", err)
+			}
+			if decision.Skip {
+				t.Fatal("decision requiring explicit consent unexpectedly skipped interaction")
+			}
+			if tt.grant != nil && strings.Join(tt.grant.Scopes, " ") != strings.Join(before, " ") {
+				t.Fatalf("ConsentDecision mutated grant scopes from %v to %v", before, tt.grant.Scopes)
+			}
+		})
 	}
 }

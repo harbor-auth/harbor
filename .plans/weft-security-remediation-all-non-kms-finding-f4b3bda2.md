@@ -29,3 +29,10 @@
 
 The Task 18 pre-work pull/rebase was attempted, but the assigned shared branch
 did not yet exist on `origin`; the required pre-push rebase incorporated Task 1.
+
+## Task 12: explicit consent red tests
+
+1. Extend core authorize tests to pin `prompt=none`, `prompt=consent`, first-consent, and scope-escalation behavior without implicit grant persistence.
+2. Extend the assembled BFF flow tests to require a consent hand-off after authentication, explicit approval/denial, and one-time decision consumption.
+3. Run focused tests to verify the new security tests fail for the current implicit-consent behavior.
+4. Format, commit, rebase on the shared branch, push, and report task completion.

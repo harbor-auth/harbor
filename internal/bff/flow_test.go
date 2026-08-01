@@ -32,10 +32,13 @@ package bff_test
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
 
@@ -101,7 +104,7 @@ func (m *mockResolver) ResolveUser(_ context.Context, _ *http.Request, _ bff.BFF
 // spec (ServerInterface) — it's a BFF-specific route that is manually registered
 // in production (cmd/harbor-mgmt). We replicate that wiring here by adding the
 // route to the mux before passing it to HandlerFromMux.
-func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bff.InMemoryBFFSessionStore) {
+func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bff.InMemoryBFFSessionStore, *oidc.InMemoryConsentStore) {
 	t.Helper()
 
 	clients := oidc.NewInMemoryClientRegistry()
@@ -111,12 +114,14 @@ func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bff.I
 		RedirectURIs:  []string{itRedirectURI},
 		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
 	})
+	consents := oidc.NewInMemoryConsentStore()
 	svc := oidc.NewService(oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    oidc.NewInMemoryAuthCodeStore(),
 		Tokens:   oidc.NewPlaceholderIssuer(),
 		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
+		Consents: consents,
 	})
 
 	store := bff.NewInMemoryBFFSessionStore()
@@ -136,7 +141,7 @@ func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bff.I
 	oidcHandler := openapi.HandlerFromMux(srv, mux)
 
 	loginHandler := bff.NewLoginHandler(store, &mockWebAuthn{userID: itUserID}, &mockResolver{}, "/authorize/complete")
-	return oidcHandler, loginHandler, store
+	return oidcHandler, loginHandler, store, consents
 }
 
 // validITAuthorizeQuery returns a query that passes every /authorize check.
@@ -171,7 +176,7 @@ func locationOf(t *testing.T, rec *httptest.ResponseRecorder) *url.URL {
 // asserting the invariant at each hand-off: session created → cookie set →
 // user_id written → code issued + session consumed + cookie cleared.
 func TestBFFFlow_FullHappyPath(t *testing.T) {
-	oidcHandler, loginHandler, store := newBFFIntegrationEnv(t)
+	oidcHandler, loginHandler, store, _ := newBFFIntegrationEnv(t)
 	ctx := context.Background()
 
 	// --- Stage 1: GET /authorize creates a BFF session and redirects to /login ---
@@ -309,7 +314,7 @@ func TestBFFFlow_FullHappyPath(t *testing.T) {
 // flow before the passkey ceremony has set a user_id renders an error page —
 // never issues a code — and leaves the session intact (not consumed).
 func TestBFFFlow_AuthorizeCompleteBeforeLogin_ErrorPage(t *testing.T) {
-	oidcHandler, _, store := newBFFIntegrationEnv(t)
+	oidcHandler, _, store, _ := newBFFIntegrationEnv(t)
 	ctx := context.Background()
 
 	authReq := httptest.NewRequest(http.MethodGet, "/authorize?"+validITAuthorizeQuery().Encode(), nil)
@@ -342,7 +347,7 @@ func TestBFFFlow_AuthorizeCompleteBeforeLogin_ErrorPage(t *testing.T) {
 // unknown/forged request_id at /authorize/complete renders an error page with
 // no redirect (open-redirect defense, docs/DESIGN.md §11.7).
 func TestBFFFlow_AuthorizeCompleteUnknownRequestID_ErrorPage(t *testing.T) {
-	oidcHandler, _, _ := newBFFIntegrationEnv(t)
+	oidcHandler, _, _, _ := newBFFIntegrationEnv(t)
 
 	req := httptest.NewRequest(http.MethodGet, "/authorize/complete?request_id=does-not-exist", nil)
 	rec := httptest.NewRecorder()
@@ -353,5 +358,147 @@ func TestBFFFlow_AuthorizeCompleteUnknownRequestID_ErrorPage(t *testing.T) {
 	}
 	if loc := rec.Header().Get("Location"); loc != "" {
 		t.Fatalf("unexpected Location %q — an unknown session must not redirect", loc)
+	}
+}
+
+// TestBFFFlow_ExplicitConsentDecisionIsOneTime pins the security boundary that
+// is missing from the assembled BFF flow: successful authentication hands off
+// to consent, and only a one-time approve decision may create a grant and code.
+// A denial creates neither, and replaying either decision is rejected.
+func TestBFFFlow_ExplicitConsentDecisionIsOneTime(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		decision  string
+		wantCode  bool
+		wantGrant bool
+		wantErr   string
+	}{
+		{name: "approval", decision: "approve", wantCode: true, wantGrant: true},
+		{name: "denial", decision: "deny", wantErr: "access_denied"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			handler, _, store, consents := newBFFIntegrationEnv(t)
+			requestID := "explicit-consent-" + tc.decision
+			browserNonce := []byte("browser-bound-consent-nonce-" + tc.decision)
+			record := bff.BFFSessionRecord{
+				RequestID:           requestID,
+				State:               itState,
+				ClientID:            itClientID,
+				RedirectURI:         itRedirectURI,
+				Scope:               "openid profile",
+				Nonce:               "oidc-nonce",
+				CodeChallenge:       itPKCEChallenge,
+				CodeChallengeMethod: "S256",
+				UserID:              itUserID,
+				BrowserNonceHash:    bff.HashNonce(browserNonce),
+				ExpiresAt:           time.Now().Add(time.Minute),
+			}
+			if err := store.Create(context.Background(), record); err != nil {
+				t.Fatalf("create authenticated session: %v", err)
+			}
+
+			resumeReq := httptest.NewRequest(http.MethodGet, "/authorize/complete?request_id="+requestID, nil)
+			resumeReq.AddCookie(&http.Cookie{Name: bff.NonceCookieName, Value: base64.RawURLEncoding.EncodeToString(browserNonce)})
+			resumeRec := httptest.NewRecorder()
+			handler.ServeHTTP(resumeRec, resumeReq)
+			consentLoc := locationOf(t, resumeRec)
+			if consentLoc.Path != "/consent" {
+				t.Fatalf("authenticated completion redirected to %q, want /consent", consentLoc.Path)
+			}
+			if _, found, err := consents.Get(context.Background(), itUserID, itClientID); err != nil {
+				t.Fatalf("get consent before decision: %v", err)
+			} else if found {
+				t.Fatal("grant persisted before explicit consent decision")
+			}
+
+			form := url.Values{"request_id": {requestID}, "decision": {tc.decision}}
+			decisionReq := httptest.NewRequest(http.MethodPost, "/consent/complete", strings.NewReader(form.Encode()))
+			decisionReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			decisionReq.AddCookie(&http.Cookie{Name: bff.NonceCookieName, Value: base64.RawURLEncoding.EncodeToString(browserNonce)})
+			decisionRec := httptest.NewRecorder()
+			handler.ServeHTTP(decisionRec, decisionReq)
+			rpLoc := locationOf(t, decisionRec)
+			if got := rpLoc.Query().Get("code") != ""; got != tc.wantCode {
+				t.Fatalf("code present = %v, want %v", got, tc.wantCode)
+			}
+			if got := rpLoc.Query().Get("error"); got != tc.wantErr {
+				t.Fatalf("error = %q, want %q", got, tc.wantErr)
+			}
+			_, found, err := consents.Get(context.Background(), itUserID, itClientID)
+			if err != nil {
+				t.Fatalf("get consent after decision: %v", err)
+			}
+			if found != tc.wantGrant {
+				t.Fatalf("grant present = %v, want %v", found, tc.wantGrant)
+			}
+
+			replayRec := httptest.NewRecorder()
+			handler.ServeHTTP(replayRec, decisionReq.Clone(context.Background()))
+			if replayRec.Code != http.StatusBadRequest {
+				t.Fatalf("replayed decision status = %d, want 400", replayRec.Code)
+			}
+			if loc := replayRec.Header().Get("Location"); loc != "" {
+				t.Fatalf("replayed decision redirected to %q", loc)
+			}
+		})
+	}
+}
+
+// TestBFFFlow_PromptSemanticsSurviveLogin proves the BFF continuation retains
+// the OIDC prompt value instead of dropping it while authentication happens.
+func TestBFFFlow_PromptSemanticsSurviveLogin(t *testing.T) {
+	tests := []struct {
+		name        string
+		prompt      string
+		seedConsent bool
+		wantError   string
+		wantPath    string
+	}{
+		{name: "prompt none without grant", prompt: "none", wantError: "interaction_required", wantPath: "/callback"},
+		{name: "prompt consent with covering grant", prompt: "consent", seedConsent: true, wantPath: "/consent"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			handler, _, store, consents := newBFFIntegrationEnv(t)
+			if tc.seedConsent {
+				if _, err := consents.Upsert(context.Background(), itUserID, itClientID, []string{"openid", "profile"}); err != nil {
+					t.Fatalf("seed consent: %v", err)
+				}
+			}
+			q := validITAuthorizeQuery()
+			q.Set("prompt", tc.prompt)
+			authReq := httptest.NewRequest(http.MethodGet, "/authorize?"+q.Encode(), nil)
+			authRec := httptest.NewRecorder()
+			handler.ServeHTTP(authRec, authReq)
+			requestID := locationOf(t, authRec).Query().Get("request_id")
+			if requestID == "" {
+				t.Fatal("authorize did not create a BFF request")
+			}
+			if err := store.SetUser(context.Background(), requestID, itUserID); err != nil {
+				t.Fatalf("authenticate session: %v", err)
+			}
+			var nonceCookie *http.Cookie
+			for _, cookie := range authRec.Result().Cookies() {
+				if cookie.Name == bff.NonceCookieName {
+					nonceCookie = cookie
+				}
+			}
+			if nonceCookie == nil {
+				t.Fatal("authorize did not set nonce cookie")
+			}
+
+			resumeReq := httptest.NewRequest(http.MethodGet, "/authorize/complete?request_id="+requestID, nil)
+			resumeReq.AddCookie(nonceCookie)
+			resumeRec := httptest.NewRecorder()
+			handler.ServeHTTP(resumeRec, resumeReq)
+			loc := locationOf(t, resumeRec)
+			if loc.Path != tc.wantPath {
+				t.Fatalf("completion path = %q, want %q", loc.Path, tc.wantPath)
+			}
+			if got := loc.Query().Get("error"); got != tc.wantError {
+				t.Fatalf("completion error = %q, want %q", got, tc.wantError)
+			}
+		})
 	}
 }

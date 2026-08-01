@@ -215,3 +215,68 @@ func TestAuthorize_ConsentPromptNone_ScopeEscalation_InteractionRequired(t *test
 		t.Errorf("error code = %q, want interaction_required", err.Code)
 	}
 }
+
+// TestAuthorize_FirstConsentRequiresExplicitApproval is a red security test for
+// the live consent ceremony. Authentication is not consent: resolving an
+// authenticated user must not mint a code or persist a grant until a separate,
+// explicit approval decision is consumed.
+func TestAuthorize_FirstConsentRequiresExplicitApproval(t *testing.T) {
+	consents := NewInMemoryConsentStore()
+	svc := testServiceWithConsent(consents)
+
+	result, err := svc.Authorize(context.Background(), validAuthorizeReq())
+	if err == nil {
+		t.Fatalf("Authorize() result = %+v, want interaction_required pending explicit approval", result)
+	}
+	if err.Code != "interaction_required" {
+		t.Fatalf("Authorize() error code = %q, want interaction_required", err.Code)
+	}
+	if _, found, getErr := consents.Get(context.Background(), "user-456", "demo-client"); getErr != nil {
+		t.Fatalf("Get consent: %v", getErr)
+	} else if found {
+		t.Fatal("consent grant persisted before explicit user approval")
+	}
+}
+
+// TestAuthorize_ScopeEscalationRequiresExplicitApproval proves an existing
+// grant cannot be silently widened merely because the user authenticated.
+func TestAuthorize_ScopeEscalationRequiresExplicitApproval(t *testing.T) {
+	consents := NewInMemoryConsentStore()
+	if _, err := consents.Upsert(context.Background(), "user-456", "demo-client", []string{"openid"}); err != nil {
+		t.Fatalf("seed consent: %v", err)
+	}
+	svc := testServiceWithConsent(consents)
+
+	result, err := svc.Authorize(context.Background(), validAuthorizeReq())
+	if err == nil {
+		t.Fatalf("Authorize() result = %+v, want interaction_required for scope escalation", result)
+	}
+	grant, found, getErr := consents.Get(context.Background(), "user-456", "demo-client")
+	if getErr != nil || !found {
+		t.Fatalf("Get existing consent: found=%v err=%v", found, getErr)
+	}
+	if strings.Join(grant.Scopes, " ") != "openid" {
+		t.Fatalf("grant scopes = %v, want unchanged [openid] before approval", grant.Scopes)
+	}
+}
+
+// TestAuthorize_PromptConsentAlwaysRequiresExplicitApproval pins OIDC
+// prompt=consent: even a covering grant must show and consume a fresh consent
+// decision rather than immediately issuing another code.
+func TestAuthorize_PromptConsentAlwaysRequiresExplicitApproval(t *testing.T) {
+	consents := NewInMemoryConsentStore()
+	if _, err := consents.Upsert(context.Background(), "user-456", "demo-client", []string{"openid", "profile"}); err != nil {
+		t.Fatalf("seed consent: %v", err)
+	}
+	svc := testServiceWithConsent(consents)
+	req := validAuthorizeReq()
+	req.Prompt = "consent"
+
+	result, err := svc.Authorize(context.Background(), req)
+	if err == nil {
+		t.Fatalf("Authorize(prompt=consent) result = %+v, want interaction_required pending explicit approval", result)
+	}
+	if err.Code != "interaction_required" {
+		t.Fatalf("Authorize(prompt=consent) code = %q, want interaction_required", err.Code)
+	}
+}
