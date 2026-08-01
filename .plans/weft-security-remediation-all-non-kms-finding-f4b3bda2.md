@@ -108,3 +108,10 @@ Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3
 4. Run the focused suites and confirm the new cases fail for missing shared
    policy behavior without changing production code.
 5. Format, commit, rebase on the shared branch, push, and report completion.
+
+## Task 3: harbor-mgmt production graph tests
+
+1. Capture the production startup dependency contract at the `cmd/harbor-mgmt` boundary.
+2. Assert the live production assembly contains durable PostgreSQL/Redis-backed stores, a real WebAuthn handler, and no reachable scaffold or duplicate enrollment route.
+3. Assert production dynamic registration fails closed without an initial access token while explicitly opted-in development registration may remain open.
+4. Run the focused tests and confirm they fail for the missing Task 4 production wiring, then format, commit, rebase, and push.

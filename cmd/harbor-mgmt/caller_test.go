@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -96,5 +98,19 @@ func TestBffCallerAdapter_SpoofedHeader_WithSession(t *testing.T) {
 	if rec.Code == http.StatusUnauthorized {
 		t.Errorf("SECURITY: status = 401; valid session for %q must not be overridden by spoofed header %q — session identity must win",
 			sessionUser, spoofedUser)
+	}
+}
+
+// TestProductionRoutesExposeOneEnrollmentFrontDoor guards the composition
+// root's route ownership. mgmtapi owns POST /enroll; cmd/harbor-mgmt must not
+// also expose the legacy POST /users/enroll handler, which bypasses the
+// distributed enrollment-session handoff used by the WebAuthn handler.
+func TestProductionRoutesExposeOneEnrollmentFrontDoor(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	if strings.Contains(string(source), `HandleFunc("POST /users/enroll"`) {
+		t.Fatal("legacy POST /users/enroll route bypasses the canonical distributed enrollment flow")
 	}
 }
