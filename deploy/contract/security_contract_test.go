@@ -28,7 +28,8 @@ func TestRawSecurityContract(t *testing.T) {
 func TestHelmSecurityContract(t *testing.T) {
 	path := os.Getenv("HELM_RENDERED")
 	if path == "" {
-		t.Skip("HELM_RENDERED is set by the Helm render CI job")
+		assertHelmSourceSecurityContract(t)
+		return
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -47,6 +48,26 @@ func TestHelmSecurityContract(t *testing.T) {
 	}
 	assertWorkloadContract(t, "helm", objects)
 	assertEnvNameParity(t, loadFiles(t, filepath.Join("..", "k8s", "*.yaml")), objects)
+}
+
+func assertHelmSourceSecurityContract(t *testing.T) {
+	t.Helper()
+	values, err := os.ReadFile(filepath.Join("..", "helm", "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count := bytes.Count(values, []byte(`digest: "sha256:`)); count < 3 {
+		t.Fatalf("Helm defaults contain %d immutable workload digests, want at least 3", count)
+	}
+	for _, template := range []string{"deployment-hot.yaml", "deployment-mgmt.yaml", "job-migrate.yaml"} {
+		data, readErr := os.ReadFile(filepath.Join("..", "helm", "templates", template))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !bytes.Contains(data, []byte(`required "`)) || !bytes.Contains(data, []byte(`image.digest`)) {
+			t.Errorf("%s does not fail closed when its immutable image digest is absent", template)
+		}
+	}
 }
 
 func TestHarborImagesRequireKeylessSignatures(t *testing.T) {

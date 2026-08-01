@@ -558,7 +558,7 @@ func (r *userIDSessionResolverSvc) Resolve(_ context.Context, _ Client, _ string
 	return r.subject, r.userID, true, nil
 }
 
-func TestService_ExplicitApprovalUpsertsConsent(t *testing.T) {
+func TestService_Authorize_UpsertsConsentOnApproval(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 	consents := NewInMemoryConsentStore()
@@ -610,7 +610,7 @@ func TestService_ExplicitApprovalUpsertsConsent(t *testing.T) {
 	}
 }
 
-func TestService_ExplicitApprovalScopeEscalationPersistsMergedScopes(t *testing.T) {
+func TestService_Authorize_ScopeEscalation_PersistsMergedScopes(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(Client{
 		ID:            "demo-client",
@@ -671,7 +671,7 @@ func TestService_ExplicitApprovalScopeEscalationPersistsMergedScopes(t *testing.
 	}
 }
 
-func TestService_ApproveConsentUpsertError(t *testing.T) {
+func TestService_Authorize_ConsentUpsertError(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 

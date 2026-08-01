@@ -218,9 +218,10 @@ func TestValidateClientCredentialsEmptyRegistry(t *testing.T) {
 	}
 }
 
-// TestValidateClientCredentialsSecretRequired verifies Basic authentication
-// rejects missing and incorrect secrets with the same result.
-func TestValidateClientCredentialsSecretRequired(t *testing.T) {
+// TestValidateClientCredentialsSecretIgnored retains the historical regression
+// identifier while proving the former insecure behavior is no longer possible:
+// Basic authentication rejects missing and incorrect secrets with the same result.
+func TestValidateClientCredentialsSecretIgnored(t *testing.T) {
 	registry := &mockClientRegistry{
 		clients: map[string]oidc.Client{
 			"demo-client": {ID: "demo-client", TokenEndpointAuthMethod: oidc.ClientAuthSecretBasic, SecretHash: testSecretHash("correct-secret")},

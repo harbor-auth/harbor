@@ -270,7 +270,7 @@ func (r codeFamilyRevoker) RevokeCodeFamily(ctx context.Context, code oidc.AuthC
 
 func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redisClient *redis.Client, deps bffDeps, runtimeCfg crypto.RuntimeConfig, logger *slog.Logger) (oidcapi.Config, hotGraph, error) {
 	if runtimeCfg.Mode == crypto.RuntimeDevelopment {
-		return buildDevHotGraph(issuer, logger)
+		return buildDevHotGraph(issuer, runtimeCfg, logger)
 	}
 	if pool == nil || redisClient == nil {
 		return oidcapi.Config{}, hotGraph{}, errors.New("production harbor-hot requires PostgreSQL and Redis")
@@ -316,12 +316,19 @@ func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redis
 	return oidcapi.Config{Issuer: issuer, Service: svc, Signers: signers, Rotator: rotator, RevokedJTIStore: revokedStore, RevocationFilter: filter, RevocationPublisher: redisRevocationPublisher{redisClient}, RevokedJTIChecker: revokedJTIChecker{revokedStore}, LogoutVerifier: verifier, Grants: grants, Clients: registry, SessionRevoker: sessionStore}, hotGraph{postgres: true, redis: true, externalKMS: true, clientRegistry: true, authCodes: true, grants: true, sessions: true, revocations: true, outboxWorker: true, jwtVerifier: true, logoutVerifier: true, sessionRevoker: true}, nil
 }
 
-func buildDevHotGraph(issuer string, logger *slog.Logger) (oidcapi.Config, hotGraph, error) {
+func buildDevHotGraph(issuer string, runtimeCfg crypto.RuntimeConfig, logger *slog.Logger) (oidcapi.Config, hotGraph, error) {
+	if runtimeCfg.Mode != crypto.RuntimeDevelopment || runtimeCfg.DevKeySecret == "" {
+		return oidcapi.Config{}, hotGraph{}, errors.New("development graph requires explicit development crypto configuration")
+	}
+	signer, err := crypto.NewLocalSigner()
+	if err != nil {
+		return oidcapi.Config{}, hotGraph{}, fmt.Errorf("build development signer: %w", err)
+	}
 	registry := oidc.NewInMemoryClientRegistry()
 	registry.Put(oidc.Client{ID: "demo-client", SectorID: "localhost", RedirectURIs: []string{"http://localhost/callback", "http://localhost:3000/callback", "http://localhost:8081/callback"}, ScopesAllowed: []string{"openid", "profile", "email", "offline_access"}})
 	grants := oidc.NewInMemoryGrantStore()
-	svc := oidc.NewService(oidc.ServiceConfig{Issuer: issuer, Clients: registry, Codes: oidc.NewInMemoryAuthCodeStore(), Tokens: oidc.NewPlaceholderIssuer(), Sessions: oidc.NewStubSessionResolver("demo-user-ppid"), Grants: grants, Logger: logger})
-	return oidcapi.Config{Issuer: issuer, Service: svc, Grants: grants, Clients: registry, SessionRevoker: noopSessionRevoker{}}, hotGraph{}, nil
+	svc := oidc.NewService(oidc.ServiceConfig{Issuer: issuer, Clients: registry, Codes: oidc.NewInMemoryAuthCodeStore(), Tokens: oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}), Sessions: oidc.NewStubSessionResolver("demo-user-ppid"), Grants: grants, Logger: logger})
+	return oidcapi.Config{Issuer: issuer, Service: svc, Signers: []crypto.Signer{signer}, Grants: grants, Clients: registry, SessionRevoker: noopSessionRevoker{}}, hotGraph{}, nil
 }
 
 func buildExternalKeyProvider(ctx context.Context, kmsConfig crypto.KMSConfig) (crypto.KeyProvider, error) {

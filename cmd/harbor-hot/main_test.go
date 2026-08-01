@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/harbor-auth/harbor/internal/crypto"
 )
 
 func TestBFFConfigValidate(t *testing.T) {
@@ -383,13 +385,19 @@ func TestProductionLiveGraphContainsNoScaffoldConstructors(t *testing.T) {
 
 func TestDevelopmentGraphRegistersE2ERedirectURI(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	config, _, err := buildDevHotGraph("http://localhost:8080", logger)
+	config, _, err := buildDevHotGraph("http://localhost:8080", crypto.RuntimeConfig{
+		Mode:         crypto.RuntimeDevelopment,
+		DevKeySecret: "test-only-development-secret",
+	}, logger)
 	if err != nil {
 		t.Fatalf("build development graph: %v", err)
 	}
 	client, found := config.Clients.Lookup(context.Background(), "demo-client")
 	if !found {
 		t.Fatal("development demo client not registered")
+	}
+	if len(config.Signers) != 1 {
+		t.Fatalf("development graph signers = %d, want 1 for JWT/JWKS parity", len(config.Signers))
 	}
 	for _, redirectURI := range client.RedirectURIs {
 		if redirectURI == "http://localhost:3000/callback" {
