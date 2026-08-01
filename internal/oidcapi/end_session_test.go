@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/harbor-auth/harbor/internal/crypto"
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
 	"github.com/harbor-auth/harbor/internal/oidc"
 )
@@ -307,6 +308,36 @@ func TestGetEndSessionAcceptsExpiredToken(t *testing.T) {
 	assertRedirect(t, rec, esLogoutURI)
 	if len(revoker.calls) != 1 {
 		t.Fatalf("revoke calls = %d, want 1 (expired tokens should be accepted)", len(revoker.calls))
+	}
+}
+
+func TestGetEndSessionRejectsAccessTokenHint(t *testing.T) {
+	signer, err := crypto.NewLocalSigner()
+	if err != nil {
+		t.Fatalf("NewLocalSigner: %v", err)
+	}
+	issuer := oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer})
+	tokens, err := issuer.Issue(context.Background(), oidc.IssueParams{
+		Issuer: esIssuer, Subject: esPPID, ClientID: esClientID, Scope: "openid",
+	})
+	if err != nil {
+		t.Fatalf("Issue: %v", err)
+	}
+	verifier, err := oidc.NewJWTVerifier(oidc.JWTVerifierConfig{Signer: signer, ExpectedIssuer: esIssuer})
+	if err != nil {
+		t.Fatalf("NewJWTVerifier: %v", err)
+	}
+	revoker := &fakeSessionRevoker{}
+	s := newEndSessionServer(t, verifier, revoker)
+
+	rec := doGetEndSession(s, openapi.GetEndSessionParams{
+		IdTokenHint:           tokens.AccessToken,
+		PostLogoutRedirectUri: esStrPtr(esLogoutURI),
+	})
+
+	assertRedirect(t, rec, esLoggedOutURL)
+	if len(revoker.calls) != 0 {
+		t.Fatalf("revoke calls = %d, want 0 for access_token used as id_token_hint", len(revoker.calls))
 	}
 }
 

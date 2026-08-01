@@ -95,3 +95,16 @@ Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3
    to the canonical grant contract, removing the two-step session cascade.
 4. Run focused race tests and the repository validation suite.
 5. Rebase the shared branch, commit, push, and report task completion.
+
+## Task 8: shared JWT policy red tests
+
+1. Define a table-driven verifier contract for issuer, audience-bearing access
+   tokens, expiry/issued-at/JTI/scope claims, JOSE type/algorithm/kid, key
+   rotation overlap, and durable revocation failures.
+2. Exercise the same contract at userinfo and introspection, including explicit
+   ID-token rejection at userinfo and inactive introspection responses.
+3. Pin logout to genuine ID-token hints while retaining the specified expired
+   ID-token behavior and client audience binding.
+4. Run the focused suites and confirm the new cases fail for missing shared
+   policy behavior without changing production code.
+5. Format, commit, rebase on the shared branch, push, and report completion.

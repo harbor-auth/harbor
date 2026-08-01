@@ -424,3 +424,22 @@ func TestPostIntrospect_CrossClient_ReturnsInactive(t *testing.T) {
 		t.Fatal("expected active=false for cross-client introspection")
 	}
 }
+
+func TestPostIntrospect_IDToken_ReturnsInactive(t *testing.T) {
+	ts := newIntrospectServer(t)
+	idToken := mintIDToken(t, ts)
+	form := url.Values{"token": {idToken}}
+
+	res := postIntrospect(t, ts, form, basicAuthHeader(testClientID, "secret"))
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", res.StatusCode)
+	}
+	var body openapi.IntrospectResponse
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Active {
+		t.Fatal("expected active=false when introspecting an ID token as an access token")
+	}
+}

@@ -15,6 +15,92 @@ import (
 	"github.com/harbor-auth/harbor/internal/crypto"
 )
 
+func signPolicyToken(t *testing.T, signer crypto.Signer, header map[string]any, claims map[string]any) string {
+	t.Helper()
+	headerJSON, err := json.Marshal(header)
+	if err != nil {
+		t.Fatalf("marshal header: %v", err)
+	}
+	claimsJSON, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatalf("marshal claims: %v", err)
+	}
+	input := base64.RawURLEncoding.EncodeToString(headerJSON) + "." + base64.RawURLEncoding.EncodeToString(claimsJSON)
+	sig, err := signer.Sign([]byte(input))
+	if err != nil {
+		t.Fatalf("sign token: %v", err)
+	}
+	return input + "." + base64.RawURLEncoding.EncodeToString(sig)
+}
+
+func validAccessPolicyClaims() map[string]any {
+	return map[string]any{
+		"iss":   testIssueParams().Issuer,
+		"sub":   testIssueParams().Subject,
+		"aud":   testIssueParams().ClientID,
+		"exp":   fixedNow().Add(time.Minute).Unix(),
+		"iat":   fixedNow().Add(-time.Minute).Unix(),
+		"jti":   "policy-jti",
+		"scope": "openid profile",
+	}
+}
+
+func TestJWTVerifierAccessTokenPolicyMatrix(t *testing.T) {
+	verifier, signer := newTestVerifier(t, func(cfg *JWTVerifierConfig) {
+		cfg.ExpectedIssuer = testIssueParams().Issuer
+	})
+
+	tests := []struct {
+		name   string
+		alg    string
+		typ    string
+		kid    string
+		mutate func(map[string]any)
+	}{
+		{name: "missing issuer", typ: "at+JWT", mutate: func(c map[string]any) { delete(c, "iss") }},
+		{name: "missing audience", typ: "at+JWT", mutate: func(c map[string]any) { delete(c, "aud") }},
+		{name: "missing expiry", typ: "at+JWT", mutate: func(c map[string]any) { delete(c, "exp") }},
+		{name: "future issued-at", typ: "at+JWT", mutate: func(c map[string]any) { c["iat"] = fixedNow().Add(time.Minute).Unix() }},
+		{name: "missing issued-at", typ: "at+JWT", mutate: func(c map[string]any) { delete(c, "iat") }},
+		{name: "missing jti", typ: "at+JWT", mutate: func(c map[string]any) { delete(c, "jti") }},
+		{name: "missing scope", typ: "at+JWT", mutate: func(c map[string]any) { delete(c, "scope") }},
+		{name: "id token type", typ: "JWT"},
+		{name: "wrong algorithm", alg: "RS256", typ: "at+JWT"},
+		{name: "unknown kid", typ: "at+JWT", kid: "retired-or-forged-key"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			claims := validAccessPolicyClaims()
+			if tc.mutate != nil {
+				tc.mutate(claims)
+			}
+			kid := tc.kid
+			if kid == "" {
+				kid = signer.KeyID()
+			}
+			alg := tc.alg
+			if alg == "" {
+				alg = "ES256"
+			}
+			token := signPolicyToken(t, signer, map[string]any{"alg": alg, "typ": tc.typ, "kid": kid}, claims)
+			if _, err := verifier.VerifyAccessToken(context.Background(), token); !errors.Is(err, ErrTokenInvalid) && !errors.Is(err, ErrTokenExpired) && !errors.Is(err, ErrIssuerMismatch) {
+				t.Fatalf("VerifyAccessToken accepted token violating %s policy", tc.name)
+			}
+		})
+	}
+}
+
+func TestJWTVerifierRejectsRevokedAccessToken(t *testing.T) {
+	filter := NewInMemoryRevocationFilter()
+	filter.Add("policy-jti")
+	verifier, signer := newTestVerifier(t, func(cfg *JWTVerifierConfig) { cfg.Filter = filter })
+	token := signPolicyToken(t, signer, map[string]any{"alg": "ES256", "typ": "at+JWT", "kid": signer.KeyID()}, validAccessPolicyClaims())
+	if _, err := verifier.VerifyAccessToken(context.Background(), token); !errors.Is(err, ErrTokenRevoked) {
+		t.Fatalf("VerifyAccessToken revoked token: got %v, want ErrTokenRevoked", err)
+	}
+}
+
 // newTestVerifier creates a JWTVerifier with a test signer for unit tests.
 func newTestVerifier(t *testing.T, opts ...func(*JWTVerifierConfig)) (*JWTVerifier, crypto.Signer) {
 	t.Helper()
