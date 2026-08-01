@@ -249,7 +249,9 @@ migrate:
   enabled: true
   image:
     repository: harbor-migrate
-    # digest: ""   # optional: "@sha256:..." to pin the image immutably
+    # Fail-closed placeholder: replace with the digest produced and signed by
+    # the release workflow. A nonexistent digest cannot run mutable code.
+    digest: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
   # DATABASE_URL source. Empty ⇒ reuse harbor-hot's Secret (both binaries share
   # one database). Set to reference a different Secret exposing a DATABASE_URL
   # key (must be a superuser/owner DSN able to run DDL).
