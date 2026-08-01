@@ -1,5 +1,15 @@
 # Security remediation: all non-KMS findings
 
+## Task 5: startup runtime and KMS contracts
+
+1. Add focused configuration tests for strict runtime-mode parsing, production
+   KMS requirements, and explicitly configured development-only local crypto.
+2. Centralize the runtime and key-provider configuration contract in
+   `internal/crypto` and remove implicit development key material.
+3. Make harbor-hot and harbor-mgmt select their startup graph from the shared
+   mode contract and consume the same production KMS key map.
+4. Run focused tests and repository validation, then rebase, commit, and push.
+
 ## Task 1: failing harbor-hot production graph tests
 
 1. Capture the production startup contract for PostgreSQL, Redis, external KMS, and every durable OIDC dependency.

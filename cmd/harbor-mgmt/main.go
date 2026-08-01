@@ -53,12 +53,16 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	var err error
-	if envBool("HARBOR_DEV_MODE") {
+	runtimeCfg, err := crypto.LoadRuntimeConfigFromEnv()
+	if err != nil {
+		logger.Error("invalid runtime crypto configuration", "error", err)
+		os.Exit(1)
+	}
+	if runtimeCfg.Mode == crypto.RuntimeDevelopment {
 		logger.Warn("HARBOR_DEV_MODE enabled — using development scaffolds")
-		err = runDevelopment(ctx, logger)
+		err = runDevelopment(ctx, logger, runtimeCfg)
 	} else {
-		err = runProduction(ctx, logger)
+		err = runProduction(ctx, logger, runtimeCfg)
 	}
 	if err != nil && ctx.Err() == nil {
 		logger.Error("harbor-mgmt exited", "error", err)
@@ -68,7 +72,7 @@ func main() {
 
 // runProduction is the fail-closed composition root. Every stateful dependency
 // served from this graph is shared by all replicas.
-func runProduction(ctx context.Context, logger *slog.Logger) error {
+func runProduction(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.RuntimeConfig) error {
 	pool, err := clients.ConnectDB(ctx, logger)
 	if err != nil {
 		return fmt.Errorf("connect database: %w", err)
@@ -87,7 +91,7 @@ func runProduction(ctx context.Context, logger *slog.Logger) error {
 	}
 	defer func() { _ = redisClient.Close() }()
 
-	kekResolver, err := crypto.NewKEKResolverFromEnv()
+	kekResolver, err := crypto.NewEnvKEKResolver(runtimeCfg.KMS)
 	if err != nil {
 		return fmt.Errorf("configure KMS key map: %w", err)
 	}
@@ -164,7 +168,7 @@ func runProduction(ctx context.Context, logger *slog.Logger) error {
 	return httpserver.Run(ctx, ":"+getenv("PORT", "8081"), handler, logger)
 }
 
-func runDevelopment(ctx context.Context, logger *slog.Logger) error {
+func runDevelopment(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.RuntimeConfig) error {
 	// Development retains the legacy explicit cleanup calls; cancellation is
 	// owned by main's signal context.
 	stop := func() {}
@@ -281,29 +285,10 @@ func runDevelopment(ctx context.Context, logger *slog.Logger) error {
 		os.Exit(1)
 	}
 
-	// Key provider for enrollment. Production wiring replaces localKeyProvider
-	// with an HSM-backed KeyProvider (docs/DESIGN.md §7.3).
-	kmsSecret := getenv("HARBOR_KMS_SECRET", "")
-	if kmsSecret == "" {
-		// When a real DB is wired, enrollment writes user DEKs sealed under this
-		// KMS secret. Falling back to a hardcoded dev key against a real DB would
-		// let anyone with the source re-derive every enrolled user's pairwise
-		// secret, so it is fatal (mirrors the harbor-hot KEK_SECRET guard).
-		if pool != nil {
-			logger.Error("HARBOR_KMS_SECRET must be set when DATABASE_URL is configured — refusing to enroll with a dev key against a real DB")
-			stop()
-			pool.Close()
-			if redisClient != nil {
-				if err := redisClient.Close(); err != nil {
-					logger.Warn("redis close error on exit", "error", err)
-				}
-			}
-			os.Exit(1)
-		}
-		logger.Warn("HARBOR_KMS_SECRET not set — using insecure dev default; NEVER use in production")
-		kmsSecret = "harbor-dev-kms-secret-DO-NOT-USE-IN-PROD"
-	}
-	kp, err := crypto.NewLocalKeyProvider(kmsSecret)
+	// Local crypto is available only in the explicitly selected development
+	// graph and requires caller-supplied key material. Production uses the same
+	// regional KMS map as harbor-hot (docs/DESIGN.md §7.3).
+	kp, err := crypto.NewLocalKeyProvider(runtimeCfg.DevKeySecret)
 	if err != nil {
 		logger.Error("failed to create key provider", "error", err)
 		// os.Exit skips deferred functions, so release resources explicitly.

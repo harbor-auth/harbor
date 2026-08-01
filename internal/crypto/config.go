@@ -7,6 +7,65 @@ import (
 	"strings"
 )
 
+// RuntimeMode selects the only two supported startup graphs. Production is
+// the secure default; development must be explicitly opted into.
+type RuntimeMode string
+
+const (
+	RuntimeProduction  RuntimeMode = "production"
+	RuntimeDevelopment RuntimeMode = "development"
+
+	DevModeEnvVar      = "HARBOR_DEV_MODE"
+	DevKeySecretEnvVar = "HARBOR_KMS_SECRET"
+)
+
+// RuntimeConfig is the shared crypto startup contract used by every Harbor
+// binary that seals user DEKs or signing keys. Exactly one of KMS and
+// DevKeySecret is populated.
+type RuntimeConfig struct {
+	Mode         RuntimeMode
+	KMS          KMSConfig
+	DevKeySecret string
+}
+
+// LoadRuntimeConfigFromEnv loads the fail-closed runtime and crypto contract.
+// An unset HARBOR_DEV_MODE means production. Local crypto is reachable only
+// after an explicit development opt-in and never alongside production KMS.
+func LoadRuntimeConfigFromEnv() (RuntimeConfig, error) {
+	mode, err := parseRuntimeMode(os.Getenv(DevModeEnvVar))
+	if err != nil {
+		return RuntimeConfig{}, err
+	}
+	if mode == RuntimeDevelopment {
+		secret := os.Getenv(DevKeySecretEnvVar)
+		if secret == "" {
+			return RuntimeConfig{}, fmt.Errorf("crypto: development requires %s", DevKeySecretEnvVar)
+		}
+		return RuntimeConfig{Mode: mode, DevKeySecret: secret}, nil
+	}
+	if os.Getenv(DevKeySecretEnvVar) != "" {
+		return RuntimeConfig{}, fmt.Errorf("crypto: %s is development-only; production requires %s", DevKeySecretEnvVar, KMSKeyMapEnvVar)
+	}
+	kms, err := LoadKMSConfigFromEnv()
+	if err != nil {
+		return RuntimeConfig{}, err
+	}
+	return RuntimeConfig{Mode: mode, KMS: kms}, nil
+}
+
+func parseRuntimeMode(value string) (RuntimeMode, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "":
+		return RuntimeProduction, nil
+	case "1", "true", "yes", "on":
+		return RuntimeDevelopment, nil
+	case "0", "false", "no", "off":
+		return RuntimeProduction, nil
+	default:
+		return "", fmt.Errorf("crypto: invalid %s value %q", DevModeEnvVar, value)
+	}
+}
+
 // KMSConfig holds configuration for KMS-based key encryption.
 type KMSConfig struct {
 	// KeyMap maps region names to KMS key ARNs or aliases.

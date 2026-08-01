@@ -66,6 +66,10 @@ func main() {
 // run builds the server and serves until ctx is cancelled. It is split out from
 // main so the exit path has a single error sink and stays testable.
 func run(ctx context.Context, logger *slog.Logger) error {
+	runtimeCfg, err := crypto.LoadRuntimeConfigFromEnv()
+	if err != nil {
+		return fmt.Errorf("load runtime crypto configuration: %w", err)
+	}
 	// Load and validate the BFF session dependencies up front so a
 	// misconfiguration (malformed LOGIN_URL, non-positive TTL) fails fast at
 	// startup rather than surfacing later when /authorize needs them.
@@ -145,7 +149,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// secret, and derives a per-RP PPID while recording consent. This closes the
 	// auth bypass (audit blocker 1.1): /authorize can no longer mint tokens for a
 	// fixed demo user.
-	apiCfg, graph, err := buildHotGraph(ctx, issuer, pool, redisClient, deps, logger)
+	apiCfg, graph, err := buildHotGraph(ctx, issuer, pool, redisClient, deps, runtimeCfg, logger)
 	if err != nil {
 		return err
 	}
@@ -256,15 +260,15 @@ func (r codeFamilyRevoker) RevokeCodeFamily(ctx context.Context, code oidc.AuthC
 	return r.sessions.RevokeSessionsByUserClient(ctx, code.UserID, code.ClientID)
 }
 
-func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redisClient *redis.Client, deps bffDeps, logger *slog.Logger) (oidcapi.Config, hotGraph, error) {
-	if envBool("HARBOR_DEV_MODE") {
+func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redisClient *redis.Client, deps bffDeps, runtimeCfg crypto.RuntimeConfig, logger *slog.Logger) (oidcapi.Config, hotGraph, error) {
+	if runtimeCfg.Mode == crypto.RuntimeDevelopment {
 		return buildDevHotGraph(issuer, logger)
 	}
 	if pool == nil || redisClient == nil {
 		return oidcapi.Config{}, hotGraph{}, errors.New("production harbor-hot requires PostgreSQL and Redis")
 	}
 
-	keyProvider, err := buildExternalKeyProvider(ctx)
+	keyProvider, err := buildExternalKeyProvider(ctx, runtimeCfg.KMS)
 	if err != nil {
 		return oidcapi.Config{}, hotGraph{}, err
 	}
@@ -312,8 +316,8 @@ func buildDevHotGraph(issuer string, logger *slog.Logger) (oidcapi.Config, hotGr
 	return oidcapi.Config{Issuer: issuer, Service: svc, Grants: grants, Clients: registry, SessionRevoker: noopSessionRevoker{}}, hotGraph{}, nil
 }
 
-func buildExternalKeyProvider(ctx context.Context) (crypto.KeyProvider, error) {
-	resolver, err := crypto.NewKEKResolverFromEnv()
+func buildExternalKeyProvider(ctx context.Context, kmsConfig crypto.KMSConfig) (crypto.KeyProvider, error) {
+	resolver, err := crypto.NewEnvKEKResolver(kmsConfig)
 	if err != nil {
 		return nil, fmt.Errorf("external KMS configuration required: %w", err)
 	}
@@ -330,11 +334,17 @@ func buildExternalKeyProvider(ctx context.Context) (crypto.KeyProvider, error) {
 // signer set, and the key rotator that drives POST /admin/keys/rotate
 // (docs/DESIGN.md §7.3, §3.5).
 //
-// It fails closed: when a real DB is wired, KEK_SECRET MUST be set (mirrors the
-// harbor-mgmt HARBOR_KMS_SECRET guard) — otherwise signing keys would be sealed
-// under a derivable dev key.
+// It fails closed unless the shared production KMS key map is configured;
+// signing keys are never sealed under the development local-key provider.
 func buildSigningStack(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) (oidc.TokenIssuer, []crypto.Signer, *crypto.KeyRotator, error) {
-	kp, err := buildExternalKeyProvider(ctx)
+	runtimeCfg, err := crypto.LoadRuntimeConfigFromEnv()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if runtimeCfg.Mode != crypto.RuntimeProduction {
+		return nil, nil, nil, errors.New("signing stack requires production KMS configuration")
+	}
+	kp, err := buildExternalKeyProvider(ctx, runtimeCfg.KMS)
 	if err != nil {
 		return nil, nil, nil, err
 	}

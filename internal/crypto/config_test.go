@@ -259,3 +259,57 @@ func TestEnvKEKResolverDefensiveCopy(t *testing.T) {
 		t.Error("expected error for eu-west-1 (defensive copy failed)")
 	}
 }
+
+func TestLoadRuntimeConfigFromEnv(t *testing.T) {
+	tests := []struct {
+		name      string
+		devMode   string
+		keyMap    string
+		devSecret string
+		wantMode  RuntimeMode
+		wantErr   bool
+	}{
+		{name: "production by default requires KMS", keyMap: "EU=alias/harbor-eu", wantMode: RuntimeProduction},
+		{name: "production without KMS fails closed", wantErr: true},
+		{name: "explicit development uses supplied local secret", devMode: "true", devSecret: "development-secret", wantMode: RuntimeDevelopment},
+		{name: "development without local secret fails closed", devMode: "1", wantErr: true},
+		{name: "invalid mode is rejected", devMode: "sometimes", keyMap: "EU=alias/harbor-eu", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(DevModeEnvVar, tt.devMode)
+			t.Setenv(KMSKeyMapEnvVar, tt.keyMap)
+			t.Setenv(DevKeySecretEnvVar, tt.devSecret)
+			cfg, err := LoadRuntimeConfigFromEnv()
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadRuntimeConfigFromEnv: %v", err)
+			}
+			if cfg.Mode != tt.wantMode {
+				t.Fatalf("Mode = %q, want %q", cfg.Mode, tt.wantMode)
+			}
+			if cfg.Mode == RuntimeProduction && cfg.KMS.KeyMap["EU"] != "alias/harbor-eu" {
+				t.Fatalf("production KMS config = %#v", cfg.KMS.KeyMap)
+			}
+			if cfg.Mode == RuntimeDevelopment && cfg.DevKeySecret != tt.devSecret {
+				t.Fatal("development key secret was not preserved")
+			}
+		})
+	}
+}
+
+func TestLoadRuntimeConfigRejectsLocalCryptoInProduction(t *testing.T) {
+	t.Setenv(DevModeEnvVar, "false")
+	t.Setenv(KMSKeyMapEnvVar, "EU=alias/harbor-eu")
+	t.Setenv(DevKeySecretEnvVar, "must-not-be-reachable")
+
+	if _, err := LoadRuntimeConfigFromEnv(); err == nil {
+		t.Fatal("production accepted development local-key configuration")
+	}
+}
