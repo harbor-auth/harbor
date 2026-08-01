@@ -136,6 +136,8 @@ func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bff.I
 	// This mirrors the production wiring in cmd/harbor-mgmt.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /authorize/complete", srv.GetAuthorizeComplete)
+	mux.HandleFunc("GET /consent", srv.GetConsent)
+	mux.HandleFunc("POST /consent/complete", srv.PostConsentComplete)
 
 	// Now let the generated code register the spec-defined routes on the same mux.
 	oidcHandler := openapi.HandlerFromMux(srv, mux)
@@ -271,7 +273,7 @@ func TestBFFFlow_FullHappyPath(t *testing.T) {
 		t.Fatalf("session.UserID = %q, want %q after passkey auth", sess.UserID, itUserID)
 	}
 
-	// --- Stage 4: GET /authorize/complete reads user_id and issues a code ---
+	// --- Stage 4: authenticated completion hands off to explicit consent ---
 	resumeReq := httptest.NewRequest(http.MethodGet, "/authorize/complete?request_id="+requestID, nil)
 	resumeReq.AddCookie(&http.Cookie{Name: bff.CookieName, Value: requestID})
 	// Propagate the nonce cookie — GetAuthorizeComplete enforces the nonce gate
@@ -283,7 +285,22 @@ func TestBFFFlow_FullHappyPath(t *testing.T) {
 	if resumeRec.Code != http.StatusFound {
 		t.Fatalf("/authorize/complete status = %d, want 302", resumeRec.Code)
 	}
-	rpLoc := locationOf(t, resumeRec)
+	consentLoc := locationOf(t, resumeRec)
+	if consentLoc.Path != "/consent" {
+		t.Fatalf("/authorize/complete redirected to %q, want /consent", consentLoc.Path)
+	}
+
+	// --- Stage 5: explicit approval consumes the session and issues a code ---
+	form := url.Values{"request_id": {requestID}, "decision": {"approve"}}
+	approveReq := httptest.NewRequest(http.MethodPost, "/consent/complete", strings.NewReader(form.Encode()))
+	approveReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	approveReq.AddCookie(authNonceCookie)
+	approveRec := httptest.NewRecorder()
+	oidcHandler.ServeHTTP(approveRec, approveReq)
+	if approveRec.Code != http.StatusFound {
+		t.Fatalf("/consent/complete status = %d, want 302", approveRec.Code)
+	}
+	rpLoc := locationOf(t, approveRec)
 	rpBase := rpLoc.Scheme + "://" + rpLoc.Host + rpLoc.Path
 	if rpBase != itRedirectURI {
 		t.Fatalf("/authorize/complete redirected to %q, want %q", rpBase, itRedirectURI)
@@ -300,7 +317,7 @@ func TestBFFFlow_FullHappyPath(t *testing.T) {
 	}
 	// BFF cookie must be cleared.
 	var cleared bool
-	for _, c := range resumeRec.Result().Cookies() {
+	for _, c := range approveRec.Result().Cookies() {
 		if c.Name == bff.CookieName && c.MaxAge < 0 {
 			cleared = true
 		}

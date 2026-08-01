@@ -76,3 +76,11 @@ Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3
 2. Make outbox delivery claim-safe and acknowledgement failures observable, drain durable work immediately on worker startup, and make refresh rotation a database compare-and-swap.
 3. Verify durable JTI propagation and shared logout/theft behavior with the focused clients, OIDC, and OIDC API suites, including race coverage.
 4. Run repository validation, commit, rebase the shared branch, and push.
+
+## Task 13: explicit one-time BFF consent approval
+
+1. Preserve OIDC prompt state in the nonce-bound BFF authorization session.
+2. Hand authenticated requests requiring interaction to an explicit approve or deny form.
+3. Atomically consume the pending session before applying a decision; persist consent only on approval.
+4. Keep prompt=none, first-consent, scope-escalation, denial, and replay behavior fail-closed.
+5. Run focused and repository checks, rebase, commit, and push.

@@ -1,6 +1,7 @@
 package oidcapi
 
 import (
+	"html"
 	"net/http"
 	"net/url"
 	"time"
@@ -21,6 +22,7 @@ import (
 // already-validated redirect_uri.
 func (s *Server) GetAuthorize(w http.ResponseWriter, r *http.Request, params openapi.GetAuthorizeParams) {
 	req := authorizeRequestFromParams(params)
+	req.Prompt = r.URL.Query().Get("prompt")
 
 	// BFF flow: validate, create BFF session, redirect to login
 	if s.bffSessions != nil {
@@ -87,6 +89,7 @@ func (s *Server) authorizeWithBFFSession(w http.ResponseWriter, r *http.Request,
 		Nonce:               validated.Nonce,
 		CodeChallenge:       validated.CodeChallenge,
 		CodeChallengeMethod: validated.CodeChallengeMethod,
+		Prompt:              validated.Prompt,
 		BrowserNonceHash:    bff.HashNonce(nonce),
 		// UserID is empty until passkey ceremony completes
 		ExpiresAt: time.Now().Add(s.bffSessionTTL),
@@ -270,6 +273,91 @@ func (s *Server) GetAuthorizeComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	consentRequired, consentErr := s.svc.ConsentRequired(r.Context(), session.UserID, session.ClientID, session.Scope, session.Prompt)
+	if consentErr != nil {
+		redirectAuthorizeError(w, r, session, consentErr)
+		return
+	}
+	if consentRequired {
+		if err := s.bffSessions.SetConsentPending(r.Context(), requestID); err != nil {
+			writeAuthorizeErrorPage(w)
+			return
+		}
+		q := url.Values{"request_id": {requestID}}
+		redirectWithQuery(w, r, "/consent", q)
+		return
+	}
+
+	session, err = s.bffSessions.Consume(r.Context(), requestID)
+	if err != nil {
+		writeAuthorizeErrorPage(w)
+		return
+	}
+	s.issueAuthorization(w, r, session)
+}
+
+// GetConsent renders the explicit consent choice. Client and scope values are
+// intentionally not interpolated into HTML; the decision is bound to the
+// server-side session identified by request_id.
+func (s *Server) GetConsent(w http.ResponseWriter, r *http.Request) {
+	requestID := r.URL.Query().Get("request_id")
+	if requestID == "" {
+		writeAuthorizeErrorPage(w)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(`<!doctype html><html><body><h1>Approve access?</h1><form method="post" action="/consent/complete"><input type="hidden" name="request_id" value="` + html.EscapeString(requestID) + `"><button name="decision" value="approve">Approve</button><button name="decision" value="deny">Deny</button></form></body></html>`))
+}
+
+// PostConsentComplete atomically consumes one explicit consent decision.
+func (s *Server) PostConsentComplete(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeAuthorizeErrorPage(w)
+		return
+	}
+	requestID := r.FormValue("request_id")
+	session, err := s.bffSessions.Get(r.Context(), requestID)
+	if err != nil || !session.ConsentPending || !validSessionNonce(r, session) {
+		writeAuthorizeErrorPage(w)
+		return
+	}
+	session, err = s.bffSessions.Consume(r.Context(), requestID)
+	if err != nil || !session.ConsentPending {
+		writeAuthorizeErrorPage(w)
+		return
+	}
+	if r.FormValue("decision") == "deny" {
+		redirectAuthorizeError(w, r, session, &oidc.AuthorizeError{Code: oidc.ErrCodeAccessDenied, Description: "the user denied consent", Channel: oidc.ChannelRedirect})
+		return
+	}
+	if r.FormValue("decision") != "approve" {
+		writeAuthorizeErrorPage(w)
+		return
+	}
+	if aerr := s.svc.ApproveConsent(r.Context(), session.UserID, session.ClientID, session.Scope); aerr != nil {
+		redirectAuthorizeError(w, r, session, aerr)
+		return
+	}
+	s.issueAuthorization(w, r, session)
+}
+
+func validSessionNonce(r *http.Request, session bff.BFFSessionRecord) bool {
+	if len(session.BrowserNonceHash) == 0 {
+		return false
+	}
+	nonce, err := bff.ReadBFFNonceCookie(r)
+	return err == nil && bff.NonceMatches(nonce, session.BrowserNonceHash)
+}
+
+func redirectAuthorizeError(w http.ResponseWriter, r *http.Request, session bff.BFFSessionRecord, aerr *oidc.AuthorizeError) {
+	q := url.Values{"error": {aerr.Code}, "error_description": {aerr.Description}}
+	if session.State != "" {
+		q.Set("state", session.State)
+	}
+	redirectWithQuery(w, r, session.RedirectURI, q)
+}
+
+func (s *Server) issueAuthorization(w http.ResponseWriter, r *http.Request, session bff.BFFSessionRecord) {
 	// Inject the authenticated user_id into the context so the PPIDSessionResolver
 	// (via BFFAuthSource) can read it. This is the critical link that connects the
 	// BFF session's authenticated identity to the OIDC session resolver — without
@@ -308,8 +396,6 @@ func (s *Server) GetAuthorizeComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	outcome = telemetry.OutcomeSuccess
-
 	// Best-effort audit emission: auth.login marks a successful passkey
 	// authentication + code issuance (BFF flow). RecordAsync is non-blocking
 	// and detaches from the request context, so it never stalls the redirect.
@@ -317,9 +403,6 @@ func (s *Server) GetAuthorizeComplete(w http.ResponseWriter, r *http.Request) {
 		cid := session.ClientID
 		s.auditRecorder.RecordAsync(r.Context(), session.UserID, identity.EventAuthLogin, &cid, nil)
 	}
-
-	// Delete BFF session (one-time use)
-	_ = s.bffSessions.Delete(r.Context(), requestID) //nolint:errcheck // best-effort: session expires via TTL anyway
 
 	// Clear BFF cookies (session binding + browser nonce), one-time use.
 	bff.ClearBFFCookie(w)

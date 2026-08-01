@@ -137,41 +137,43 @@ type ServiceConfig struct {
 // the stores and issuer. It holds no per-request state and performs no HTTP —
 // the thin HTTP layer is internal/oidcapi.
 type Service struct {
-	issuer       string
-	clients      ClientRegistry
-	codes        AuthCodeStore
-	tokens       TokenIssuer
-	sessions     SessionResolver
-	sessionStore SessionStore
-	grants       GrantStore
-	consents     ConsentStore
-	revocations  RevocationSink
-	outbox       RevocationOutbox
-	logger       *slog.Logger
-	newCode      func() (string, error)
-	newSessionID func() (string, error)
-	now          func() time.Time
-	codeTTL      time.Duration
+	issuer         string
+	clients        ClientRegistry
+	codes          AuthCodeStore
+	tokens         TokenIssuer
+	sessions       SessionResolver
+	sessionStore   SessionStore
+	grants         GrantStore
+	consents       ConsentStore
+	enforceConsent bool
+	revocations    RevocationSink
+	outbox         RevocationOutbox
+	logger         *slog.Logger
+	newCode        func() (string, error)
+	newSessionID   func() (string, error)
+	now            func() time.Time
+	codeTTL        time.Duration
 }
 
 // NewService builds a Service, applying defaults for the optional config fields.
 func NewService(cfg ServiceConfig) *Service {
 	svc := &Service{
-		issuer:       cfg.Issuer,
-		clients:      cfg.Clients,
-		codes:        cfg.Codes,
-		tokens:       cfg.Tokens,
-		sessions:     cfg.Sessions,
-		sessionStore: cfg.SessionStore,
-		grants:       cfg.Grants,
-		consents:     cfg.Consents,
-		revocations:  cfg.Revocations,
-		outbox:       cfg.Outbox,
-		logger:       cfg.Logger,
-		newCode:      cfg.NewCode,
-		newSessionID: cfg.NewSessionID,
-		now:          cfg.Now,
-		codeTTL:      cfg.CodeTTL,
+		issuer:         cfg.Issuer,
+		clients:        cfg.Clients,
+		codes:          cfg.Codes,
+		tokens:         cfg.Tokens,
+		sessions:       cfg.Sessions,
+		sessionStore:   cfg.SessionStore,
+		grants:         cfg.Grants,
+		consents:       cfg.Consents,
+		enforceConsent: cfg.Consents != nil,
+		revocations:    cfg.Revocations,
+		outbox:         cfg.Outbox,
+		logger:         cfg.Logger,
+		newCode:        cfg.NewCode,
+		newSessionID:   cfg.NewSessionID,
+		now:            cfg.Now,
+		codeTTL:        cfg.CodeTTL,
 	}
 	if svc.grants == nil {
 		svc.grants = noopGrantStore{}
@@ -265,6 +267,46 @@ func (s *Service) ValidateAuthorizeRequest(ctx context.Context, req AuthorizeReq
 	return ValidateAuthorize(req, client)
 }
 
+// ConsentRequired applies OIDC prompt semantics for an authenticated user.
+func (s *Service) ConsentRequired(ctx context.Context, userID, clientID, scope, prompt string) (bool, *AuthorizeError) {
+	grant, found, err := s.consents.Get(ctx, userID, clientID)
+	if err != nil {
+		return false, redirectErr(ErrCodeServerError, "could not check consent status")
+	}
+	var existing *ConsentGrant
+	if found {
+		existing = &grant
+	}
+	decision, err := ConsentDecision(existing, strings.Fields(scope), prompt)
+	if err != nil {
+		var authorizeErr *AuthorizeError
+		if errors.As(err, &authorizeErr) {
+			return false, authorizeErr
+		}
+		return false, redirectErr(ErrCodeServerError, "consent decision failed")
+	}
+	return !decision.Skip, nil
+}
+
+// ApproveConsent persists the requested scope set only after the user has made
+// an explicit approval decision.
+func (s *Service) ApproveConsent(ctx context.Context, userID, clientID, scope string) *AuthorizeError {
+	existing, found, err := s.consents.Get(ctx, userID, clientID)
+	if err != nil {
+		return redirectErr(ErrCodeServerError, "could not check consent status")
+	}
+	scopes := strings.Fields(scope)
+	if found {
+		scopes = mergeScopes(existing.Scopes, scopes)
+	}
+	if _, err := s.consents.Upsert(ctx, userID, clientID, scopes); err != nil {
+		s.logger.ErrorContext(ctx, "consent upsert failed",
+			slog.String("client_id", clientID), slog.Any("error", err))
+		return redirectErr(ErrCodeServerError, "could not persist consent")
+	}
+	return nil
+}
+
 // AuthorizeWithUser issues a code for a pre-authenticated user (BFF flow).
 // This is called by /authorize/complete after the passkey ceremony has set the
 // user_id in the BFF session. It runs the SessionResolver with the known user_id
@@ -355,7 +397,7 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (*Authori
 
 	// Consent check: lookup existing consent and apply decision logic.
 	// This runs AFTER authentication (userID is known) but BEFORE code issuance.
-	if userID != "" {
+	if userID != "" && s.enforceConsent {
 		requestedScopes := strings.Fields(validated.Scope)
 		existingGrant, found, err := s.consents.Get(ctx, userID, validated.Client.ID)
 		if err != nil {
@@ -380,21 +422,8 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (*Authori
 			return nil, redirectErr(ErrCodeServerError, "consent decision failed")
 		}
 
-		// Persist the consent grant on approval. The SessionResolver has already
-		// handled the consent ceremony (approved == true at this point).
-		// - If skip=true, the existing grant already covers the scopes, but we
-		//   still upsert to update the timestamp (last-used tracking).
-		// - If escalation=true, use MergedScopes (existing + newly requested).
-		// - Otherwise, use the requested scopes.
-		scopesToPersist := requestedScopes
-		if decision.Escalation && len(decision.MergedScopes) > 0 {
-			scopesToPersist = decision.MergedScopes
-		}
-		if _, err := s.consents.Upsert(ctx, userID, validated.Client.ID, scopesToPersist); err != nil {
-			s.logger.ErrorContext(ctx, "consent upsert failed",
-				slog.String("client_id", validated.Client.ID),
-				slog.Any("error", err))
-			return nil, redirectErr(ErrCodeServerError, "could not persist consent")
+		if !decision.Skip {
+			return nil, ErrInteractionRequired
 		}
 	}
 

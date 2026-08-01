@@ -247,6 +247,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	//   /logged-out         — browser-facing post-logout landing page
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /authorize/complete", srv.GetAuthorizeComplete)
+	mux.HandleFunc("GET /consent", srv.GetConsent)
+	mux.HandleFunc("POST /consent/complete", srv.PostConsentComplete)
 	mux.HandleFunc("GET /logged-out", srv.GetLoggedOut)
 
 	// Build the handler chain (outermost first):

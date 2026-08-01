@@ -187,6 +187,17 @@ end
 return 1
 `)
 
+var setConsentPendingScript = redis.NewScript(`
+local data = redis.call('GET', KEYS[1])
+if not data then return 0 end
+local ttl = redis.call('TTL', KEYS[1])
+if ttl <= 0 then return 0 end
+local record = cjson.decode(data)
+record.ConsentPending = true
+redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
+return 1
+`)
+
 // SetUser implements BFFSessionStore. It atomically updates the UserID field of
 // an existing session using a Lua script to preserve the remaining TTL.
 func (s *RedisBFFSessionStore) SetUser(ctx context.Context, requestID string, userID string) error {
@@ -265,6 +276,35 @@ func (s *RedisBFFSessionStore) SetAuthMethod(ctx context.Context, requestID stri
 		return ErrBFFSessionNotFound
 	}
 	return nil
+}
+
+func (s *RedisBFFSessionStore) SetConsentPending(ctx context.Context, requestID string) error {
+	result, err := setConsentPendingScript.Run(ctx, s.client, []string{sessionKey(requestID)}).Int()
+	if err != nil {
+		return fmt.Errorf("redis set-consent-pending script: %w", err)
+	}
+	if result == 0 {
+		return ErrBFFSessionNotFound
+	}
+	return nil
+}
+
+func (s *RedisBFFSessionStore) Consume(ctx context.Context, requestID string) (BFFSessionRecord, error) {
+	data, err := s.client.GetDel(ctx, sessionKey(requestID)).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return BFFSessionRecord{}, ErrBFFSessionNotFound
+	}
+	if err != nil {
+		return BFFSessionRecord{}, fmt.Errorf("redis GETDEL: %w", err)
+	}
+	var record BFFSessionRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return BFFSessionRecord{}, fmt.Errorf("unmarshal consumed bff session: %w", err)
+	}
+	if time.Now().After(record.ExpiresAt) {
+		return BFFSessionRecord{}, ErrBFFSessionExpired
+	}
+	return record, nil
 }
 
 // Delete implements BFFSessionStore. It removes the session record. This is a
