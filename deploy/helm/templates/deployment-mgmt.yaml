@@ -1,3 +1,4 @@
+{{- $digest := required "mgmt.image.digest must pin a signed sha256 image" .Values.mgmt.image.digest -}}
 # Deployment: harbor-mgmt — the cold-path management binary (passkey ceremonies,
 # user enrollment, dashboard/BFF, consent/audit). NOT internet-facing: reached
 # only via the cluster-internal Service and locked down by NetworkPolicy.
@@ -31,9 +32,8 @@ spec:
         # mesh warms up. See linkerd.io/2/features/proxy-injection.
         config.linkerd.io/proxy-await: enabled
         # PostgreSQL (5432) is a server-speaks-first protocol that Linkerd
-        # cannot proxy cleanly here; connect to it directly (unmeshed TCP).
-        # mTLS still covers hot↔mgmt and ingress↔mgmt edges. (6379 listed for
-        # parity with harbor-hot; harbor-mgmt does not use Redis.)
+        # cannot proxy cleanly here; connect to them directly (unmeshed TCP).
+        # mTLS still covers hot↔mgmt and ingress↔mgmt edges.
         config.linkerd.io/skip-outbound-ports: "5432,6379"
     spec:
       # Dedicated SA with no auto-mounted API token (harbor-mgmt never calls the
@@ -62,9 +62,8 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.mgmt.port }}
-          # No REDIS_URL here: harbor-mgmt does not use the auth-code store.
-          # Config (incl. WEBAUTHN_RP_*) then secrets (DATABASE_URL/
-          # HARBOR_KEK_SECRET).
+          # Config (including regional KMS/WebAuthn settings), then secrets
+          # (DATABASE_URL/REDIS_URL).
           envFrom:
             - configMapRef:
                 name: {{ include "harbor.fullname" . }}-mgmt-config

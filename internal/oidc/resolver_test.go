@@ -3,6 +3,7 @@ package oidc
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -228,6 +229,34 @@ func TestPPIDSessionResolverSubNotRawUserID(t *testing.T) {
 	}
 	if sub == userID {
 		t.Fatal("subject (PPID) must never equal the raw user_id")
+	}
+}
+
+func TestPPIDSessionResolverScopeEscalationUpdatesCanonicalGrant(t *testing.T) {
+	const userID = "00000000-0000-0000-0000-000000000001"
+	r, grants := newTestResolver(t, userID, resolverTestSecret())
+	client := resolverTestClient("rp-a", "rp-a.example.com")
+
+	if _, _, _, err := r.Resolve(context.Background(), client, "openid"); err != nil {
+		t.Fatalf("first Resolve: %v", err)
+	}
+	before, found, err := grants.FindGrant(context.Background(), userID, client.ID)
+	if err != nil || !found {
+		t.Fatalf("FindGrant before escalation: found=%v err=%v", found, err)
+	}
+
+	if _, _, _, err := r.Resolve(context.Background(), client, "openid profile"); err != nil {
+		t.Fatalf("scope escalation Resolve: %v", err)
+	}
+	after, found, err := grants.FindGrant(context.Background(), userID, client.ID)
+	if err != nil || !found {
+		t.Fatalf("FindGrant after escalation: found=%v err=%v", found, err)
+	}
+	if after.ID != before.ID {
+		t.Fatalf("scope escalation replaced canonical grant: id=%q, want %q", after.ID, before.ID)
+	}
+	if got, want := strings.Join(after.Scopes, " "), "openid profile"; got != want {
+		t.Fatalf("scopes = %q, want %q", got, want)
 	}
 }
 

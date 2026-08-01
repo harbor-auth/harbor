@@ -8,12 +8,14 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"net"
 	"strings"
 	"testing"
 
 	"github.com/emersion/go-msgauth/dkim"
 	"github.com/emersion/go-msgauth/dmarc"
+	"github.com/emersion/go-smtp"
 	"github.com/mileusna/spf"
 )
 
@@ -471,6 +473,39 @@ func TestShouldReject(t *testing.T) {
 				t.Errorf("ShouldReject() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestEnforcedSessionWithoutAuthenticatorFailsClosed covers the request-time
+// backstop for a misassembled production graph. Even if startup validation is
+// accidentally bypassed, EnforceAuth must never combine with a nil
+// Authenticator to accept and discard an inbound message as successful.
+func TestEnforcedSessionWithoutAuthenticatorFailsClosed(t *testing.T) {
+	backend := NewBackend(MTAConfig{
+		Domain:        "relay.eu.harbor.id",
+		EnforceAuth:   true,
+		Authenticator: nil,
+	})
+	session := &Session{
+		backend: backend,
+		recipients: []*recipientInfo{{
+			address: &Address{},
+		}},
+	}
+
+	err := session.Data(strings.NewReader("From: sender@example.com\r\n\r\nmessage"))
+	if err == nil {
+		t.Fatal("Data() accepted mail with enforcement enabled but no authenticator")
+	}
+	var smtpErr *smtp.SMTPError
+	if !errors.As(err, &smtpErr) {
+		t.Fatalf("Data() error = %T, want *smtp.SMTPError", err)
+	}
+	if smtpErr.Code != 451 {
+		t.Errorf("Data() SMTP code = %d, want 451 configuration failure", smtpErr.Code)
+	}
+	if !strings.Contains(strings.ToLower(smtpErr.Message), "authentication") {
+		t.Errorf("Data() error %q does not identify authentication failure", smtpErr.Message)
 	}
 }
 

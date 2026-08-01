@@ -120,6 +120,22 @@ func (f *fakeSessionQuerier) RevokeSession(_ context.Context, id pgtype.UUID) er
 	return nil
 }
 
+func (f *fakeSessionQuerier) RevokeSessionIfActive(_ context.Context, id pgtype.UUID) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	row, ok := f.byID[id.String()]
+	if !ok || isRevoked(row) || !row.ExpiresAt.Valid || !time.Now().Before(row.ExpiresAt.Time) {
+		return 0, nil
+	}
+	var revokedAt pgtype.Timestamptz
+	if err := revokedAt.Scan(time.Now()); err != nil {
+		return 0, err
+	}
+	row.RevokedAt = revokedAt
+	f.byID[id.String()] = row
+	return 1, nil
+}
+
 func (f *fakeSessionQuerier) RevokeSessionsByUser(_ context.Context, userID pgtype.UUID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -436,6 +452,9 @@ func (e *errSessionQuerier) ListSessionsByUser(context.Context, pgtype.UUID) ([]
 }
 func (e *errSessionQuerier) RevokeSession(context.Context, pgtype.UUID) error {
 	panic("unexpected RevokeSession")
+}
+func (e *errSessionQuerier) RevokeSessionIfActive(context.Context, pgtype.UUID) (int64, error) {
+	panic("unexpected RevokeSessionIfActive")
 }
 func (e *errSessionQuerier) RevokeSessionsByUser(context.Context, pgtype.UUID) error {
 	panic("unexpected RevokeSessionsByUser")

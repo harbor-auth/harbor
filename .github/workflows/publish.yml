@@ -3,9 +3,10 @@
 # On every push to main that touches Go/Docker sources, this builds the two
 # runtime binaries into images and pushes them to GHCR under
 # ghcr.io/harbor-auth/harbor/{harbor-hot,harbor-mgmt}, tagged with both the
-# immutable 12-char commit SHA and the moving `latest` tag.
+# immutable 12-char commit SHA and the moving `latest` tag. Each pushed image
+# is keyless-signed at its canonical digest with GitHub's OIDC identity.
 #
-# It then pins deploy/argocd/values-prod.yaml's global.image.tag to that SHA and
+# It then pins deploy/argocd/values-prod.yaml's per-component image digests and
 # commits the change back to main with [skip ci]. ArgoCD watches the repo, sees
 # the values change, and runs `helm upgrade` — so a push to main deploys itself
 # without any imperative kubectl/helm step. The [skip ci] marker (plus the paths
@@ -32,6 +33,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
   packages: write
 
 env:
@@ -60,7 +62,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+
       - name: Build & push harbor-hot
+        id: build-hot
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -74,6 +80,7 @@ jobs:
           cache-to: type=gha,scope=harbor-hot,mode=max
 
       - name: Build & push harbor-mgmt
+        id: build-mgmt
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -91,6 +98,7 @@ jobs:
       # tagged with the same immutable SHA so schema and binaries deploy in
       # lockstep.
       - name: Build & push harbor-migrate
+        id: build-migrate
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -103,27 +111,46 @@ jobs:
           cache-from: type=gha,scope=harbor-migrate
           cache-to: type=gha,scope=harbor-migrate,mode=max
 
-      # Pin the just-built immutable SHA into the ArgoCD prod values file. yq
-      # (mikefarah) is preinstalled on ubuntu-latest; env(SHA) reads the env var
-      # so the value isn't shell-interpolated into the expression.
-      - name: Pin image tag in values-prod.yaml
+      # Sign immutable references, never tags. With no key configured Cosign
+      # exchanges GitHub's OIDC token for a short-lived Fulcio certificate and
+      # records each signature in Rekor's transparency log.
+      - name: Keyless-sign published images
         env:
-          SHA: ${{ steps.sha.outputs.short }}
-        run: yq -i '.global.image.tag = env(SHA)' deploy/argocd/values-prod.yaml
+          HOT_DIGEST: ${{ steps.build-hot.outputs.digest }}
+          MGMT_DIGEST: ${{ steps.build-mgmt.outputs.digest }}
+          MIGRATE_DIGEST: ${{ steps.build-migrate.outputs.digest }}
+        run: |
+          cosign sign --yes "${REGISTRY}/harbor-hot@${HOT_DIGEST}"
+          cosign sign --yes "${REGISTRY}/harbor-mgmt@${MGMT_DIGEST}"
+          cosign sign --yes "${REGISTRY}/harbor-migrate@${MIGRATE_DIGEST}"
 
-      # Commit the pinned tag back to main for ArgoCD. [skip ci] + the paths
-      # filter (which excludes deploy/argocd/**) keep this from looping.
-      - name: Commit pinned tag
+      # Pin the exact signed manifests into the ArgoCD prod values file. yq
+      # (mikefarah) is preinstalled on ubuntu-latest; env() keeps values out of
+      # the expression and updates all components in one operation.
+      - name: Pin signed image digests in values-prod.yaml
         env:
-          SHA: ${{ steps.sha.outputs.short }}
+          HOT_DIGEST: ${{ steps.build-hot.outputs.digest }}
+          MGMT_DIGEST: ${{ steps.build-mgmt.outputs.digest }}
+          MIGRATE_DIGEST: ${{ steps.build-migrate.outputs.digest }}
+        run: |
+          yq -i '
+            .hot.image.digest = env(HOT_DIGEST) |
+            .mgmt.image.digest = env(MGMT_DIGEST) |
+            .migrate.image.digest = env(MIGRATE_DIGEST) |
+            del(.global.image.tag)
+          ' deploy/argocd/values-prod.yaml
+
+      # Commit the pinned digests back to main for ArgoCD. [skip ci] + the paths
+      # filter (which excludes deploy/argocd/**) keep this from looping.
+      - name: Commit pinned digests
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add deploy/argocd/values-prod.yaml
           if git diff --staged --quiet; then
-            echo "Image tag already pinned to ${SHA}; nothing to commit."
+            echo "Image digests already pinned; nothing to commit."
           else
-            git commit -m "chore(deploy): pin image tag to ${SHA} [skip ci]"
+            git commit -m "chore(deploy): pin signed image digests [skip ci]"
             git pull --rebase origin main
             git push
           fi

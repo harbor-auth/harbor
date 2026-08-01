@@ -2,19 +2,22 @@
 # (ns31170412 / auth.harborauth.com), consumed by the ArgoCD Application
 # in this directory.
 #
-# global.image.tag is pinned automatically by .github/workflows/publish.yml on
-# every push to main. Do not edit it manually — CI overwrites it with the
-# immutable commit SHA of the images it just built.
+# Per-component image digests are pinned automatically by
+# .github/workflows/publish.yml on every relevant push to main. Do not edit
+# them manually — CI overwrites them with the signed image manifests it built.
+# The all-zero bootstrap digests deliberately resolve to no image; production
+# remains fail-closed until the first successful signed publish replaces them.
 
 global:
   image:
     registry: ghcr.io/harbor-auth/harbor
-    tag: 4edd2988c6f7
     pullPolicy: IfNotPresent
 # Single-region dev/prod: binds the issuer / RP-origin hosts to a region so the
 # fail-closed region middleware resolves them instead of 400-rejecting.
 region: EU
 hot:
+  image:
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
   # Single node — one replica. HPA/PDB are meaningless here and are disabled.
   replicaCount: 1
   issuer: https://auth.harborauth.com
@@ -30,6 +33,8 @@ hot:
   secrets:
     existingSecret: harbor-hot-secrets
 mgmt:
+  image:
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
   replicaCount: 1
   webauthn:
     rpId: auth.harborauth.com
@@ -62,6 +67,9 @@ ingress:
 # migrate:
 #   secrets:
 #     existingSecret: harbor-hot-secrets   # default; explicit override not needed
+migrate:
+  image:
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
 # The harbor namespace already exists (created by the initial install); ArgoCD
 # manages resources inside it but must not try to re-create it.
 namespace:

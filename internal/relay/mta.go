@@ -355,8 +355,21 @@ func (s *Session) Data(r io.Reader) error {
 		return s.handleReply(context.Background(), r)
 	}
 
-	// Fast path: when no authenticator is configured, read and discard the body
-	// without retaining any content (§7.5.6).
+	// Enforcement without an authenticator is a misassembled production graph.
+	// Refuse DATA even if startup validation was bypassed; accepting here would
+	// silently turn a missing security dependency into an authentication bypass.
+	if s.backend.enforceAuth && s.backend.auth == nil {
+		s.backend.logger.Error("relay: authentication enforcement configured without authenticator")
+		return &smtp.SMTPError{
+			Code:         451,
+			EnhancedCode: smtp.EnhancedCode{4, 7, 0},
+			Message:      "temporary authentication failure, please retry",
+		}
+	}
+
+	// Development/test fast path: when authentication is not enforced and no
+	// authenticator is configured, read and discard the body without retaining
+	// any content (§7.5.6).
 	if s.backend.auth == nil {
 		if _, err := io.Copy(io.Discard, r); err != nil {
 			s.backend.logger.Error("relay: failed to read message body",

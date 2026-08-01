@@ -465,6 +465,26 @@ func TestRateLimitMiddleware_FailOpenOnError(t *testing.T) {
 	}
 }
 
+func TestRateLimitMiddleware_TokenFailsClosedOnBackendError(t *testing.T) {
+	stub := &stubLimiter{err: errors.New("redis down")}
+	nextCalled := false
+	h := RateLimitMiddleware(RateLimitConfig{
+		Limiter:  stub,
+		Endpoint: telemetry.EndpointToken,
+		Window:   time.Minute,
+	})(okNext(&nextCalled))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, rateLimitReq("client-x", ""))
+
+	if nextCalled {
+		t.Fatal("token request reached the handler while the shared rate limiter was unavailable")
+	}
+	if rec.Code != http.StatusServiceUnavailable && rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("token limiter outage status = %d, want fail-closed 503 or bounded-local 429", rec.Code)
+	}
+}
+
 // TestRateLimitMiddleware_DeniedEmitsRateLimitedMetric verifies a 429 increments
 // the aggregate harbor_oidc_rate_limited_total counter for the endpoint.
 func TestRateLimitMiddleware_DeniedEmitsRateLimitedMetric(t *testing.T) {

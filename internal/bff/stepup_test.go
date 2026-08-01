@@ -148,6 +148,45 @@ func TestStepUpGate_DeniesUnknownSession(t *testing.T) {
 	}
 }
 
+func TestStepUpGate_VerificationIsBoundToOneSession(t *testing.T) {
+	now := time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
+	store := NewInMemoryBFFSessionStore()
+	store.now = fixedNow(now)
+	for _, id := range []string{"session-a", "session-b"} {
+		if err := store.Create(context.Background(), BFFSessionRecord{
+			RequestID: id, UserID: "user-1", ExpiresAt: now.Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("Create(%s): %v", id, err)
+		}
+	}
+	if err := RecordTOTPStepUp(context.Background(), store, "session-a", now); err != nil {
+		t.Fatalf("RecordTOTPStepUp: %v", err)
+	}
+	gate := NewStepUpGate(store, DefaultStepUpTTL)
+	gate.now = fixedNow(now)
+
+	if reached, _ := serveStepUp(gate, "session-a"); !reached {
+		t.Fatal("the verified session must pass")
+	}
+	if reached, rec := serveStepUp(gate, "session-b"); reached || rec.Code != http.StatusForbidden {
+		t.Fatalf("sibling session reached=%v status=%d, want false/403", reached, rec.Code)
+	}
+}
+
+type failingStepUpStore struct{ BFFSessionStore }
+
+func (failingStepUpStore) Get(context.Context, string) (BFFSessionRecord, error) {
+	return BFFSessionRecord{}, errors.New("redis unavailable")
+}
+
+func TestStepUpGate_RedisOutageFailsClosed(t *testing.T) {
+	gate := NewStepUpGate(failingStepUpStore{}, DefaultStepUpTTL)
+	reached, rec := serveStepUp(gate, "session-a")
+	if reached || rec.Code != http.StatusForbidden {
+		t.Fatalf("Redis outage reached=%v status=%d, want false/403", reached, rec.Code)
+	}
+}
+
 // TestStepUpGate_BoundaryIsExclusive proves a verification exactly at the TTL
 // boundary is treated as stale (the window is now-verified < ttl, strict).
 func TestStepUpGate_BoundaryIsExclusive(t *testing.T) {

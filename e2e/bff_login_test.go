@@ -65,7 +65,7 @@ type bffFlowResult struct {
 func TestBFFPasskeyLoginToTokenFlow(t *testing.T) {
 	res1, ok := runBFFPasskeyFlow(t)
 	if !ok {
-		t.Skip("BFF passkey login flow not exercisable on this stack — skipping")
+		unavailable(t, "BFF passkey login flow not exercisable on this stack")
 	}
 
 	// The sub claim must be a PPID: present, opaque, distinct from the raw
@@ -83,7 +83,7 @@ func TestBFFPasskeyLoginToTokenFlow(t *testing.T) {
 	// A second, independent user must receive a DISTINCT PPID.
 	res2, ok := runBFFPasskeyFlow(t)
 	if !ok {
-		t.Skip("second BFF passkey flow not exercisable — skipping distinct-PPID assertion")
+		unavailable(t, "second BFF passkey flow not exercisable")
 	}
 	if res2.sub == "" {
 		t.Fatal("second token sub (PPID) is empty")
@@ -136,10 +136,10 @@ type bffNonceFlowState struct {
 func TestBFFNonceClearedAfterAuthorizeComplete(t *testing.T) {
 	_, state, ok := runBFFPasskeyFlowDetailed(t)
 	if !ok {
-		t.Skip("BFF passkey login flow not exercisable on this stack — skipping")
+		unavailable(t, "BFF passkey login flow not exercisable on this stack")
 	}
 	if state.nonceValue == "" {
-		t.Skip("__Host-harbor-bff-nonce not set by /authorize — BFF nonce mode not active on this stack — skipping")
+		unavailable(t, "__Host-harbor-bff-nonce not set by /authorize — BFF nonce mode unavailable")
 	}
 	if !state.nonceClearedInComplete {
 		t.Error("__Host-harbor-bff-nonce cookie was NOT cleared by /authorize/complete — nonce must be single-use (fix-bff-session-binding)")
@@ -155,10 +155,10 @@ func TestBFFNonceClearedAfterAuthorizeComplete(t *testing.T) {
 func TestBFFNonceNotInResponseBodies(t *testing.T) {
 	_, state, ok := runBFFPasskeyFlowDetailed(t)
 	if !ok {
-		t.Skip("BFF passkey login flow not exercisable on this stack — skipping")
+		unavailable(t, "BFF passkey login flow not exercisable on this stack")
 	}
 	if state.nonceValue == "" {
-		t.Skip("__Host-harbor-bff-nonce not set by /authorize — cannot assert nonce absence from bodies — skipping")
+		unavailable(t, "__Host-harbor-bff-nonce not set by /authorize — cannot assert nonce absence")
 	}
 	for i, body := range state.responseBodies {
 		if strings.Contains(body, state.nonceValue) {

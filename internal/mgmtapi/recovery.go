@@ -28,7 +28,7 @@ const recoveryCeremonyTTL = 10 * time.Minute
 // RecoveryScopedSessionCookieName carries the scoped enrollment-only session
 // token established by a successful POST /recovery/complete. The user may ONLY
 // enroll a fresh passkey with this session until recovery_required is cleared.
-const RecoveryScopedSessionCookieName = "harbor_recovery_session"
+const RecoveryScopedSessionCookieName = "__Host-harbor-bff"
 
 // ErrRecoveryCeremonyNotFound is returned when a recovery ceremony request id
 // is unknown or has expired.
@@ -255,6 +255,10 @@ type recoveryCodesResponse struct {
 //   - 503 Service Unavailable recovery not wired
 //   - 500 Internal Server Error generation or persistence failure
 func (s *Server) PostRecoveryCodes(w http.ResponseWriter, r *http.Request) {
+	if s.abuseGate != nil && !s.abuseGate.Check(r.Context(), "recovery", r.RemoteAddr) {
+		s.writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
+		return
+	}
 	var userID string
 	if s.callerSource != nil {
 		userID = s.callerSource.CallerID(r.Context())
@@ -333,6 +337,9 @@ type recoveryBeginResponse struct {
 //   - 503 Service Unavailable recovery not wired
 //   - 500 Internal Server Error ceremony persistence failure
 func (s *Server) PostRecoveryBegin(w http.ResponseWriter, r *http.Request) {
+	if s.rejectAbuse(w, r, "recovery") {
+		return
+	}
 	if s.recoveryCeremonies == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "recovery service not configured")
 		return
@@ -423,6 +430,9 @@ type recoveryCompleteResponse struct {
 //   - 503 Service Unavailable recovery not wired
 //   - 500 Internal Server Error scoped-session or ceremony failure
 func (s *Server) PostRecoveryComplete(w http.ResponseWriter, r *http.Request) {
+	if s.rejectAbuse(w, r, "recovery") {
+		return
+	}
 	if s.recoveryCeremonies == nil || s.recoveryVerifier == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "recovery service not configured")
 		return
@@ -506,6 +516,19 @@ func (s *Server) PostRecoveryComplete(w http.ResponseWriter, r *http.Request) {
 		}
 		http.SetCookie(w, &http.Cookie{
 			Name:     RecoveryScopedSessionCookieName,
+			Value:    token,
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteStrictMode,
+			MaxAge:   int(recoveryCeremonyTTL.Seconds()),
+		})
+		// The same opaque token also selects the enrollment handoff consumed by
+		// WebAuthn register/begin and register/finish. Keeping this separate from
+		// the BFF cookie makes each package's cookie contract explicit while the
+		// issuer binds both records to the same recovered user.
+		http.SetCookie(w, &http.Cookie{
+			Name:     EnrollmentSessionCookieName,
 			Value:    token,
 			Path:     "/",
 			HttpOnly: true,

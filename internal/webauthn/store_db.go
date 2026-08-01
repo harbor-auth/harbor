@@ -20,7 +20,7 @@ type dbStoreQuerier interface {
 	ListCredentialsByUser(ctx context.Context, userID pgtype.UUID) ([]db.Credential, error)
 	CreateCredential(ctx context.Context, arg db.CreateCredentialParams) (db.Credential, error)
 	GetCredentialByWebAuthnCredID(ctx context.Context, webauthnCredID []byte) (db.Credential, error)
-	UpdateCredentialSignCount(ctx context.Context, arg db.UpdateCredentialSignCountParams) error
+	UpdateCredentialSignCount(ctx context.Context, arg db.UpdateCredentialSignCountParams) (int64, error)
 	SetRecoveryComplete(ctx context.Context, id pgtype.UUID) error
 }
 
@@ -185,13 +185,26 @@ func (s *DBStore) UpdateCredential(ctx context.Context, userID []byte, cred gowe
 	}
 	old := uint32(row.SignCount)
 	newCount := cred.Authenticator.SignCount
+	// Authenticators without counter support report zero for every assertion.
+	// That zero-to-zero case is valid and must not be confused with a guarded
+	// update losing a race to another replica.
+	if old == 0 && newCount == 0 {
+		return nil
+	}
 	if old != 0 && newCount <= old {
 		return ErrSignCountRegression
 	}
-	return s.q.UpdateCredentialSignCount(ctx, db.UpdateCredentialSignCountParams{
+	rowsAffected, err := s.q.UpdateCredentialSignCount(ctx, db.UpdateCredentialSignCountParams{
 		ID:        row.ID,
 		SignCount: int64(newCount),
 	})
+	if err != nil {
+		return err
+	}
+	if rowsAffected != 1 {
+		return ErrSignCountRegression
+	}
+	return nil
 }
 
 // SetRecoveryComplete implements Store: clears the user's recovery_required

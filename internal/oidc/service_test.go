@@ -306,9 +306,11 @@ func (s consumeErrAuthCodeStore) Consume(_ context.Context, _ string) (ConsumeRe
 
 func TestService_Token_ConsumeError(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
+	registry := NewInMemoryClientRegistry()
+	registry.Put(testClient())
 	svc := NewService(ServiceConfig{
 		Issuer:  "https://eu.harbor.id",
-		Clients: NewInMemoryClientRegistry(),
+		Clients: registry,
 		Codes: consumeErrAuthCodeStore{
 			code:       validAuthCode(now),
 			consumeErr: errors.New("consume transaction failed"),
@@ -357,10 +359,12 @@ func TestService_Token_IssueError(t *testing.T) {
 	if err := codes.Save(context.Background(), validAuthCode(now)); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
+	registry := NewInMemoryClientRegistry()
+	registry.Put(testClient())
 
 	svc := NewService(ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
-		Clients:  NewInMemoryClientRegistry(),
+		Clients:  registry,
 		Codes:    codes,
 		Tokens:   errTokenIssuer{issueErr: errors.New("signing key unavailable")},
 		Sessions: NewStubSessionResolver("demo-subject-ppid"),
@@ -579,8 +583,10 @@ func TestService_Authorize_UpsertsConsentOnApproval(t *testing.T) {
 		t.Fatal("expected no consent before Authorize")
 	}
 
-	// Authorize should create consent
 	req := validAuthorizeReq()
+	if aerr := svc.ApproveConsent(context.Background(), "user-456", "demo-client", req.Scope); aerr != nil {
+		t.Fatalf("ApproveConsent = %v, want success", aerr)
+	}
 	result, aerr := svc.Authorize(context.Background(), req)
 	if aerr != nil {
 		t.Fatalf("Authorize = %v, want success", aerr)
@@ -632,6 +638,9 @@ func TestService_Authorize_ScopeEscalation_PersistsMergedScopes(t *testing.T) {
 	// Request more scopes than previously granted (escalation)
 	req := validAuthorizeReq()
 	req.Scope = "openid profile email"
+	if aerr := svc.ApproveConsent(context.Background(), "user-456", "demo-client", req.Scope); aerr != nil {
+		t.Fatalf("ApproveConsent = %v, want success", aerr)
+	}
 
 	result, aerr := svc.Authorize(context.Background(), req)
 	if aerr != nil {
@@ -684,7 +693,7 @@ func TestService_Authorize_ConsentUpsertError(t *testing.T) {
 		Now:      func() time.Time { return time.Unix(1_700_000_000, 0) },
 	})
 
-	_, aerr := svc.Authorize(context.Background(), validAuthorizeReq())
+	aerr := svc.ApproveConsent(context.Background(), "user-456", "demo-client", validAuthorizeReq().Scope)
 	if aerr == nil {
 		t.Fatal("expected error for consent upsert failure")
 	}

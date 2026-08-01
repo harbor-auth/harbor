@@ -221,6 +221,41 @@ func (q *Queries) RevokeGrant(ctx context.Context, id pgtype.UUID) error {
 	return err
 }
 
+const revokeGrantAndSessions = `-- name: RevokeGrantAndSessions :one
+WITH revoked_grant AS (
+    UPDATE grants AS canonical
+    SET revoked_at = now()
+    WHERE canonical.id = $1
+      AND canonical.revoked_at IS NULL
+    RETURNING canonical.id, canonical.revoked_at
+), revoked_sessions AS (
+    UPDATE sessions
+    SET revoked_at = revoked_grant.revoked_at
+    FROM revoked_grant
+    WHERE sessions.grant_id = revoked_grant.id
+      AND sessions.revoked_at IS NULL
+    RETURNING sessions.id
+)
+SELECT EXISTS (SELECT 1 FROM revoked_grant) AS grant_revoked,
+       count(*)::bigint AS sessions_revoked
+FROM revoked_sessions
+`
+
+type RevokeGrantAndSessionsRow struct {
+	GrantRevoked    bool  `json:"grant_revoked"`
+	SessionsRevoked int64 `json:"sessions_revoked"`
+}
+
+// RevokeGrantAndSessions is one PostgreSQL statement, so the grant and every
+// refresh session bound to it are revoked atomically on a single connection.
+// The shared timestamp also gives callers an unambiguous audit boundary.
+func (q *Queries) RevokeGrantAndSessions(ctx context.Context, id pgtype.UUID) (RevokeGrantAndSessionsRow, error) {
+	row := q.db.QueryRow(ctx, revokeGrantAndSessions, id)
+	var i RevokeGrantAndSessionsRow
+	err := row.Scan(&i.GrantRevoked, &i.SessionsRevoked)
+	return i, err
+}
+
 const revokeGrantsByClient = `-- name: RevokeGrantsByClient :exec
 UPDATE grants
 SET revoked_at = now()
@@ -233,4 +268,38 @@ WHERE client_id = $1
 func (q *Queries) RevokeGrantsByClient(ctx context.Context, clientID string) error {
 	_, err := q.db.Exec(ctx, revokeGrantsByClient, clientID)
 	return err
+}
+
+const updateGrantScopes = `-- name: UpdateGrantScopes :one
+UPDATE grants
+SET scopes = $3
+WHERE user_id = $1
+  AND client_id = $2
+  AND revoked_at IS NULL
+RETURNING id, region, user_id, client_id, pairwise_sub, scopes, created_at, revoked_at
+`
+
+type UpdateGrantScopesParams struct {
+	UserID   pgtype.UUID `json:"user_id"`
+	ClientID string      `json:"client_id"`
+	Scopes   []string    `json:"scopes"`
+}
+
+// UpdateGrantScopes records an approved scope set on the canonical grant. It
+// deliberately cannot create a grant because region and pairwise_sub must come
+// from the PPID grant flow, not from consent input.
+func (q *Queries) UpdateGrantScopes(ctx context.Context, arg UpdateGrantScopesParams) (Grant, error) {
+	row := q.db.QueryRow(ctx, updateGrantScopes, arg.UserID, arg.ClientID, arg.Scopes)
+	var i Grant
+	err := row.Scan(
+		&i.ID,
+		&i.Region,
+		&i.UserID,
+		&i.ClientID,
+		&i.PairwiseSub,
+		&i.Scopes,
+		&i.CreatedAt,
+		&i.RevokedAt,
+	)
+	return i, err
 }

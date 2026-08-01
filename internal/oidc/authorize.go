@@ -36,6 +36,7 @@ type ValidatedAuthorize struct {
 	Nonce               string
 	CodeChallenge       string
 	CodeChallengeMethod string
+	Prompt              string
 }
 
 // ValidateAuthorize validates an /authorize request against the resolved client
@@ -97,6 +98,7 @@ func ValidateAuthorize(req AuthorizeRequest, client *Client) (*ValidatedAuthoriz
 		Nonce:               req.Nonce,
 		CodeChallenge:       req.CodeChallenge,
 		CodeChallengeMethod: req.CodeChallengeMethod,
+		Prompt:              req.Prompt,
 	}, nil
 }
 

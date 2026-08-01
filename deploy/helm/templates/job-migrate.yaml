@@ -1,4 +1,5 @@
 {{- if .Values.migrate.enabled }}
+{{- $digest := required "migrate.image.digest must pin a signed sha256 image" .Values.migrate.image.digest -}}
 # Job: harbor-migrate — applies pending DB schema migrations before the app
 # pods start, so harbor-hot / harbor-mgmt never boot against a stale schema.
 #
@@ -63,7 +64,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: migrate
-          image: {{ include "harbor.migrate.image" . }}
+          image: {{ include "harbor.migrate.image" . | quote }}
           imagePullPolicy: {{ .Values.global.image.pullPolicy }}
           # $(DATABASE_URL) is substituted by the kubelet before exec, so the
           # resolved DSN appears in the process arg list. The risk is low — the

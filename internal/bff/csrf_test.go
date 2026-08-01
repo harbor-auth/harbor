@@ -128,7 +128,7 @@ func newFullTestDashHandler(t *testing.T) *http.ServeMux {
 	const userID = "test-user"
 
 	consentStore := &fakeDashConsentStore{
-		grants: map[string][]oidc.ConsentGrant{
+		grants: map[string][]oidc.Grant{
 			userID: {{ID: "grant-1", UserID: userID, ClientID: "app-1"}},
 		},
 	}

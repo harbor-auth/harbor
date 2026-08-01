@@ -24,9 +24,8 @@ func (s *Server) PostIntrospect(w http.ResponseWriter, r *http.Request) {
 	outcome := telemetry.OutcomeError
 	defer func() { recordRequest(telemetry.EndpointIntrospect, outcome, start) }()
 
-	// Step 1: Authenticate the caller via Basic auth or admin Bearer token.
+	// Step 1: Authenticate the caller via its registered confidential method.
 	var clientID string
-	var isAdmin bool
 
 	if creds, ok := parseBasicAuth(r); ok {
 		// Validate client credentials against the registry.
@@ -35,12 +34,12 @@ func (s *Server) PostIntrospect(w http.ResponseWriter, r *http.Request) {
 			writeIntrospectUnauthorized(w, "introspection not configured")
 			return
 		}
-		// Use the service's client registry for validation.
-		// Note: The service doesn't expose its registry directly, so we validate
-		// by checking if the client_id exists. For now, any registered client
-		// can introspect tokens (secret validation is a TODO for confidential clients).
+		if _, valid := s.svc.AuthenticateClient(r.Context(), creds.ClientID, oidc.ClientAuthSecretBasic, creds.ClientSecret); !valid {
+			recordError(telemetry.EndpointIntrospect, "invalid_client")
+			writeIntrospectUnauthorized(w, "client authentication failed")
+			return
+		}
 		clientID = creds.ClientID
-		// TODO(introspect): validate secret when confidential clients are supported
 	} else {
 		// No Basic auth — check for admin Bearer token.
 		// TODO(introspect): wire admin token validation.
@@ -68,7 +67,7 @@ func (s *Server) PostIntrospect(w http.ResponseWriter, r *http.Request) {
 		Token:         token,
 		TokenTypeHint: tokenTypeHint,
 		ClientID:      clientID,
-		IsAdmin:       isAdmin,
+		IsAdmin:       false,
 	}
 
 	// Step 4: Call the Introspector.

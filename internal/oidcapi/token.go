@@ -35,13 +35,35 @@ func (s *Server) PostToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	clientID := r.PostFormValue("client_id")
+	clientSecret := r.PostFormValue("client_secret")
+	authMethod := oidc.ClientAuthNone
+	creds, basic := parseBasicAuth(r)
+	if r.Header.Get("Authorization") != "" && !basic {
+		writeOAuthError(w, &oidc.TokenError{Code: oidc.ErrCodeInvalidClient, Description: "client authentication failed", Status: http.StatusUnauthorized})
+		return
+	}
+	if basic {
+		if (clientID != "" && clientID != creds.ClientID) || clientSecret != "" {
+			writeOAuthError(w, &oidc.TokenError{Code: oidc.ErrCodeInvalidRequest, Description: "conflicting client credentials", Status: http.StatusBadRequest})
+			return
+		}
+		clientID = creds.ClientID
+		clientSecret = creds.ClientSecret
+		authMethod = oidc.ClientAuthSecretBasic
+	} else if clientSecret != "" {
+		authMethod = oidc.ClientAuthSecretPost
+	}
+
 	req := oidc.TokenRequest{
-		GrantType:    r.PostFormValue("grant_type"),
-		Code:         r.PostFormValue("code"),
-		RedirectURI:  r.PostFormValue("redirect_uri"),
-		ClientID:     r.PostFormValue("client_id"),
-		CodeVerifier: r.PostFormValue("code_verifier"),
-		RefreshToken: r.PostFormValue("refresh_token"),
+		GrantType:        r.PostFormValue("grant_type"),
+		Code:             r.PostFormValue("code"),
+		RedirectURI:      r.PostFormValue("redirect_uri"),
+		ClientID:         clientID,
+		ClientSecret:     clientSecret,
+		ClientAuthMethod: authMethod,
+		CodeVerifier:     r.PostFormValue("code_verifier"),
+		RefreshToken:     r.PostFormValue("refresh_token"),
 		// NOTE: RFC 6749 §6 allows a client to request a narrower scope on a
 		// refresh_token grant via the `scope` form parameter. Harbor currently
 		// does not parse this field — TokenRequest has no Scope field — so any

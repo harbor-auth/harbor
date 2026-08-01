@@ -1017,9 +1017,11 @@ func TestChaos_Token_SignalCodeReuse_ConsumePathEmptyClientID(t *testing.T) {
 
 	sink := NewRecordingRevocationSink()
 	var logBuf bytes.Buffer
+	registry := NewInMemoryClientRegistry()
+	registry.Put(Client{ID: clientID})
 	svc := NewService(ServiceConfig{
 		Issuer:      "https://chaos.harbor.example",
-		Clients:     NewInMemoryClientRegistry(),
+		Clients:     registry,
 		Codes:       &chaosConsumePathCodeStore{peekCode: peekCode, reuseCode: reuseCode},
 		Tokens:      NewPlaceholderIssuer(),
 		Sessions:    NewStubSessionResolver("ppid-chaos"),

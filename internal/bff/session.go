@@ -66,6 +66,13 @@ type BFFSessionRecord struct {
 	// CodeChallengeMethod is the PKCE code_challenge_method (always S256).
 	CodeChallengeMethod string
 
+	// Prompt preserves the OIDC prompt parameter across browser authentication.
+	Prompt string
+
+	// ConsentPending proves that authentication completed and this request is
+	// waiting for an explicit, one-time consent decision.
+	ConsentPending bool
+
 	// UserID is the authenticated user's internal UUID, populated by
 	// FinishAssertion after a successful passkey ceremony. Empty until the
 	// user authenticates.
@@ -144,6 +151,14 @@ type BFFSessionStore interface {
 	// ceremony. This is used to emit the correct ACR/AMR claims in the issued
 	// tokens. Returns ErrBFFSessionNotFound if the session does not exist.
 	SetAuthMethod(ctx context.Context, requestID string, method oidc.AuthMethod) error
+
+	// SetConsentPending marks an authenticated authorization session as awaiting
+	// an explicit consent decision.
+	SetConsentPending(ctx context.Context, requestID string) error
+
+	// Consume atomically removes and returns a session. It is the one-time gate
+	// for consent decisions and authorization-code issuance.
+	Consume(ctx context.Context, requestID string) (BFFSessionRecord, error)
 
 	// Delete removes the session record. This is called after the auth code is
 	// issued (one-time use). A no-op if the session does not exist.
@@ -253,6 +268,25 @@ func (s *InMemoryBFFSessionStore) SetMFAVerified(_ context.Context, requestID st
 	return nil
 }
 
+// RecordTOTPStepUp atomically verifies ownership and records both the step-up
+// timestamp and authentication method on one session.
+func (s *InMemoryBFFSessionStore) RecordTOTPStepUp(_ context.Context, requestID, userID string, verifiedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.sessions[requestID]
+	if !ok || record.UserID != userID {
+		return ErrBFFSessionNotFound
+	}
+	if s.now().After(record.ExpiresAt) {
+		delete(s.sessions, requestID)
+		return ErrBFFSessionExpired
+	}
+	record.MFAVerifiedAt = verifiedAt
+	record.AuthMethod = oidc.AuthMethodTOTP
+	s.sessions[requestID] = record
+	return nil
+}
+
 // SetAuthMethod implements BFFSessionStore.
 func (s *InMemoryBFFSessionStore) SetAuthMethod(_ context.Context, requestID string, method oidc.AuthMethod) error {
 	s.mu.Lock()
@@ -268,6 +302,36 @@ func (s *InMemoryBFFSessionStore) SetAuthMethod(_ context.Context, requestID str
 	record.AuthMethod = method
 	s.sessions[requestID] = record
 	return nil
+}
+
+func (s *InMemoryBFFSessionStore) SetConsentPending(_ context.Context, requestID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.sessions[requestID]
+	if !ok {
+		return ErrBFFSessionNotFound
+	}
+	if s.now().After(record.ExpiresAt) {
+		delete(s.sessions, requestID)
+		return ErrBFFSessionExpired
+	}
+	record.ConsentPending = true
+	s.sessions[requestID] = record
+	return nil
+}
+
+func (s *InMemoryBFFSessionStore) Consume(_ context.Context, requestID string) (BFFSessionRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.sessions[requestID]
+	if !ok {
+		return BFFSessionRecord{}, ErrBFFSessionNotFound
+	}
+	delete(s.sessions, requestID)
+	if s.now().After(record.ExpiresAt) {
+		return BFFSessionRecord{}, ErrBFFSessionExpired
+	}
+	return record, nil
 }
 
 // Delete implements BFFSessionStore.

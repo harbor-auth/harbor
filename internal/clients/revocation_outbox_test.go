@@ -3,6 +3,8 @@ package clients
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -444,6 +446,123 @@ func TestComputeNextAttempt_ExponentialBackoff(t *testing.T) {
 		if !got.Equal(want) {
 			t.Errorf("computeNextAttempt(now, %d) = %v, want %v", tt.retryCount, got, want)
 		}
+	}
+}
+
+// concurrentOutboxQuerier models the atomic lease performed by the generated
+// FetchPendingRevocations query: both replicas race to claim the same row, but
+// only the winner receives it for delivery.
+type concurrentOutboxQuerier struct {
+	row          db.RevocationOutbox
+	fetchBarrier sync.WaitGroup
+	mu           sync.Mutex
+	claimed      bool
+	delivered    bool
+}
+
+func newConcurrentOutboxQuerier(row db.RevocationOutbox) *concurrentOutboxQuerier {
+	q := &concurrentOutboxQuerier{row: row}
+	q.fetchBarrier.Add(2)
+	return q
+}
+
+func (q *concurrentOutboxQuerier) EnqueueRevocation(context.Context, db.EnqueueRevocationParams) (db.RevocationOutbox, error) {
+	return db.RevocationOutbox{}, nil
+}
+
+func (q *concurrentOutboxQuerier) FetchPendingRevocations(context.Context, int32) ([]db.RevocationOutbox, error) {
+	q.fetchBarrier.Done()
+	q.fetchBarrier.Wait()
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.claimed || q.delivered {
+		return nil, nil
+	}
+	q.claimed = true
+	return []db.RevocationOutbox{q.row}, nil
+}
+
+func (q *concurrentOutboxQuerier) MarkRevocationDelivered(context.Context, pgtype.UUID) error {
+	q.mu.Lock()
+	q.delivered = true
+	q.mu.Unlock()
+	return nil
+}
+
+func (q *concurrentOutboxQuerier) IncrementRevocationRetry(context.Context, db.IncrementRevocationRetryParams) error {
+	return nil
+}
+
+func (q *concurrentOutboxQuerier) MarkRevocationFailed(context.Context, pgtype.UUID) error {
+	return nil
+}
+
+type countingSessionStore struct {
+	mockSessionStore
+	revocations atomic.Int32
+}
+
+func (s *countingSessionStore) RevokeSessionsByUserClient(context.Context, string, string) error {
+	s.revocations.Add(1)
+	return nil
+}
+
+func TestDeliverPending_ConcurrentReplicasClaimEntryOnce(t *testing.T) {
+	now := time.Now()
+	q := newConcurrentOutboxQuerier(db.RevocationOutbox{
+		ID:            mustParseUUID(t, "660e8400-e29b-41d4-a716-446655440001"),
+		Reason:        "refresh_reuse",
+		UserID:        mustParseUUID(t, "550e8400-e29b-41d4-a716-446655440000"),
+		ClientID:      "test-client",
+		Status:        "pending",
+		NextAttemptAt: pgtype.Timestamptz{Time: now, Valid: true},
+		CreatedAt:     pgtype.Timestamptz{Time: now, Valid: true},
+	})
+	sink := &countingSessionStore{}
+	replicaA := NewDBRevocationOutbox(q, nil).WithNow(func() time.Time { return now })
+	replicaB := NewDBRevocationOutbox(q, nil).WithNow(func() time.Time { return now })
+
+	var workers sync.WaitGroup
+	workers.Add(2)
+	for _, replica := range []*DBRevocationOutbox{replicaA, replicaB} {
+		go func(outbox *DBRevocationOutbox) {
+			defer workers.Done()
+			if err := outbox.DeliverPending(context.Background(), sink); err != nil {
+				t.Errorf("DeliverPending: %v", err)
+			}
+		}(replica)
+	}
+	workers.Wait()
+
+	if got := sink.revocations.Load(); got != 1 {
+		t.Fatalf("concurrent replicas delivered one pending row %d times, want exactly once", got)
+	}
+}
+
+func TestDeliverPending_AcknowledgementFailureIsReturned(t *testing.T) {
+	now := time.Now()
+	q := &mockOutboxQuerier{
+		fetchPendingFunc: func(context.Context, int32) ([]db.RevocationOutbox, error) {
+			return []db.RevocationOutbox{{
+				ID:            mustParseUUID(t, "660e8400-e29b-41d4-a716-446655440001"),
+				Reason:        "refresh_reuse",
+				UserID:        mustParseUUID(t, "550e8400-e29b-41d4-a716-446655440000"),
+				ClientID:      "test-client",
+				Status:        "pending",
+				NextAttemptAt: pgtype.Timestamptz{Time: now, Valid: true},
+				CreatedAt:     pgtype.Timestamptz{Time: now, Valid: true},
+			}}, nil
+		},
+		markDeliveredFunc: func(context.Context, pgtype.UUID) error {
+			return errors.New("database acknowledgement failed")
+		},
+	}
+
+	err := NewDBRevocationOutbox(q, nil).
+		WithNow(func() time.Time { return now }).
+		DeliverPending(context.Background(), &mockSessionStore{})
+	if err == nil {
+		t.Fatal("DeliverPending returned success before the delivered acknowledgement persisted")
 	}
 }
 

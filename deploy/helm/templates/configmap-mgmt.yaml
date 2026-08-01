@@ -11,6 +11,8 @@ data:
   # REGION binds this instance's RP origin host to a region so the fail-closed
   # region middleware resolves it (harbor-mgmt refuses to boot otherwise).
   REGION: {{ .Values.region | default "EU" | quote }}
+  HARBOR_DEV_MODE: "false"
+  KMS_KEY_MAP: {{ required "kmsKeyMap is required in production" .Values.kmsKeyMap | quote }}
   # WebAuthn Relying Party config. Env var names MUST match what harbor-mgmt
   # reads (cmd/harbor-mgmt/main.go): WEBAUTHN_RP_ID, WEBAUTHN_RP_DISPLAY_NAME,
   # and WEBAUTHN_RP_ORIGINS (plural, comma-separated).

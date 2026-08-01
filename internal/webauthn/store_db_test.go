@@ -15,9 +15,11 @@ import (
 
 // fakeStoreQuerier is an in-memory implementation of dbStoreQuerier for tests.
 type fakeStoreQuerier struct {
-	users            map[pgtype.UUID]db.User
-	credentials      []db.Credential
-	recoveryComplete map[pgtype.UUID]bool
+	users               map[pgtype.UUID]db.User
+	credentials         []db.Credential
+	recoveryComplete    map[pgtype.UUID]bool
+	beforeCounterUpdate func()
+	counterUpdateCalls  int
 }
 
 func newFakeStoreQuerier() *fakeStoreQuerier {
@@ -69,14 +71,25 @@ func (f *fakeStoreQuerier) GetCredentialByWebAuthnCredID(_ context.Context, cred
 	return db.Credential{}, errors.New("not found")
 }
 
-func (f *fakeStoreQuerier) UpdateCredentialSignCount(_ context.Context, arg db.UpdateCredentialSignCountParams) error {
+func (f *fakeStoreQuerier) UpdateCredentialSignCount(_ context.Context, arg db.UpdateCredentialSignCountParams) (int64, error) {
+	f.counterUpdateCalls++
+	if f.beforeCounterUpdate != nil {
+		hook := f.beforeCounterUpdate
+		f.beforeCounterUpdate = nil
+		hook()
+	}
 	for i, c := range f.credentials {
 		if c.ID == arg.ID {
-			f.credentials[i].SignCount = arg.SignCount
-			return nil
+			// Mirror the guarded SQL update: a stale writer affects zero rows and
+			// the :execrows sqlc method exposes that result to the store.
+			if c.SignCount < arg.SignCount {
+				f.credentials[i].SignCount = arg.SignCount
+				return 1, nil
+			}
+			return 0, nil
 		}
 	}
-	return errors.New("not found")
+	return 0, errors.New("not found")
 }
 
 func (f *fakeStoreQuerier) SetRecoveryComplete(_ context.Context, id pgtype.UUID) error {
@@ -264,5 +277,47 @@ func TestDBStore_UpdateCredential_SignCountRegression(t *testing.T) {
 	cred.Authenticator.SignCount = 5
 	if err := s.UpdateCredential(context.Background(), uidBytes(uid), cred); !errors.Is(err, ErrSignCountRegression) {
 		t.Fatalf("err = %v, want ErrSignCountRegression", err)
+	}
+}
+
+// A preflight read cannot protect the counter: another replica can advance it
+// before this replica executes its guarded UPDATE. The zero-row result is a
+// clone/replay signal and must not be reported as a successful login.
+func TestDBStore_UpdateCredential_ConcurrentNoOpIsRegression(t *testing.T) {
+	s, q, uid := newFakeDBStore(t)
+	cred := gowebauthn.Credential{ID: []byte("cred-concurrent"), PublicKey: []byte("pk")}
+	cred.Authenticator.SignCount = 7
+	if err := s.AddCredential(context.Background(), uidBytes(uid), cred); err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+
+	q.beforeCounterUpdate = func() {
+		// A concurrent assertion using the same observed counter wins first.
+		q.credentials[0].SignCount = 8
+	}
+	cred.Authenticator.SignCount = 8
+	if err := s.UpdateCredential(context.Background(), uidBytes(uid), cred); !errors.Is(err, ErrSignCountRegression) {
+		t.Fatalf("concurrent guarded no-op: err = %v, want ErrSignCountRegression", err)
+	}
+	if got := q.credentials[0].SignCount; got != 8 {
+		t.Fatalf("sign_count = %d, want concurrent winner's 8", got)
+	}
+}
+
+// WebAuthn authenticators that do not implement a signature counter always
+// return zero. Zero-to-zero is valid and should not execute a guarded SQL
+// update whose zero-row result is otherwise treated as a clone signal.
+func TestDBStore_UpdateCredential_ZeroCounterSkipsUpdate(t *testing.T) {
+	s, q, uid := newFakeDBStore(t)
+	cred := gowebauthn.Credential{ID: []byte("cred-zero-counter"), PublicKey: []byte("pk")}
+	if err := s.AddCredential(context.Background(), uidBytes(uid), cred); err != nil {
+		t.Fatalf("AddCredential: %v", err)
+	}
+
+	if err := s.UpdateCredential(context.Background(), uidBytes(uid), cred); err != nil {
+		t.Fatalf("zero-counter authenticator: %v", err)
+	}
+	if q.counterUpdateCalls != 0 {
+		t.Fatalf("guarded update calls = %d, want 0 for unsupported counter", q.counterUpdateCalls)
 	}
 }

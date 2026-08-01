@@ -64,6 +64,7 @@ type Server struct {
 	// introspector handles RFC 7662 token introspection. May be nil if
 	// introspection is not configured (no signers).
 	introspector *oidc.Introspector
+	jwtVerifier  *oidc.JWTVerifier
 
 	// RP-Initiated Logout (end_session) dependencies (OIDC RP-Initiated Logout
 	// 1.0). All four may be nil (e.g. discovery-only tests), in which case
@@ -167,12 +168,18 @@ func New(cfg Config) *Server {
 	}
 	// Build the Introspector if signers are configured.
 	var introspector *oidc.Introspector
+	var jwtVerifier *oidc.JWTVerifier
 	if len(cfg.Signers) > 0 {
-		introspector = oidc.NewIntrospector(oidc.IntrospectConfig{
-			Signers:        cfg.Signers,
-			Filter:         cfg.RevocationFilter,
-			RevokedChecker: cfg.RevokedJTIChecker,
-		})
+		var verifierErr error
+		jwtVerifier, verifierErr = oidc.NewJWTVerifier(oidc.JWTVerifierConfig{Signers: cfg.Signers,
+			Filter: cfg.RevocationFilter, RevokedChecker: cfg.RevokedJTIChecker, ExpectedIssuer: cfg.Issuer})
+		if verifierErr == nil {
+			introspector = oidc.NewIntrospector(oidc.IntrospectConfig{Verifier: jwtVerifier})
+		}
+	}
+	logoutVerifier := cfg.LogoutVerifier
+	if logoutVerifier == nil {
+		logoutVerifier = jwtVerifier
 	}
 
 	return &Server{
@@ -189,7 +196,8 @@ func New(cfg Config) *Server {
 		publisher:      cfg.RevocationPublisher,
 		revChannel:     channel,
 		introspector:   introspector,
-		logoutVerifier: cfg.LogoutVerifier,
+		jwtVerifier:    jwtVerifier,
+		logoutVerifier: logoutVerifier,
 		grants:         cfg.Grants,
 		clients:        cfg.Clients,
 		sessionRevoker: cfg.SessionRevoker,

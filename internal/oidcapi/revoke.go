@@ -46,6 +46,11 @@ func (s *Server) PostRevoke(w http.ResponseWriter, r *http.Request) {
 		writeRevokeUnauthorized(w, "revocation not configured")
 		return
 	}
+	if _, valid := s.svc.AuthenticateClient(r.Context(), creds.ClientID, oidc.ClientAuthSecretBasic, creds.ClientSecret); !valid {
+		recordError(telemetry.EndpointRevoke, "invalid_client")
+		writeRevokeUnauthorized(w, "client authentication failed")
+		return
+	}
 
 	// Step 3: Parse the form body.
 	// Cap the body before parsing to prevent memory exhaustion (docs/DESIGN.md §6.5).
@@ -141,13 +146,12 @@ func (s *Server) revokeAccessToken(r *http.Request, token, clientID string) stri
 	}
 
 	// Use introspector to validate and extract token claims.
-	// We pass an empty client ID and IsAdmin=true to bypass cross-client
-	// checks — the revocation endpoint already validated client auth.
+	// Apply the authenticated client's audience requirement through the shared
+	// verifier; a client must never revoke another client's access token.
 	req := oidc.IntrospectRequest{
 		Token:         token,
 		TokenTypeHint: "access_token",
-		ClientID:      "", // bypass cross-client check
-		IsAdmin:       true,
+		ClientID:      clientID,
 	}
 	resp := s.introspector.Introspect(r.Context(), req)
 

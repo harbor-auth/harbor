@@ -1,0 +1,122 @@
+package main
+
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"strings"
+	"testing"
+)
+
+func productionAssembly(t *testing.T) string {
+	t.Helper()
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", source, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	for _, declaration := range file.Decls {
+		fn, ok := declaration.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "runProduction" {
+			continue
+		}
+		start := fset.Position(fn.Body.Pos()).Offset
+		end := fset.Position(fn.Body.End()).Offset
+		return string(source[start:end])
+	}
+	t.Fatal("production startup must be isolated in runProduction so its object graph can be audited")
+	return ""
+}
+
+// TestProductionLiveGraphRequiresDurableDependencies is a source-level guard
+// around the composition root. Unit tests for each store are not sufficient:
+// the shipped binary must actually put the durable implementations in its live
+// HTTP graph. The production assembly is deliberately isolated in runProduction
+// so dev/test scaffolds can remain available without becoming reachable in a
+// production process.
+func TestProductionLiveGraphRequiresDurableDependencies(t *testing.T) {
+	productionAssembly := productionAssembly(t)
+
+	for _, required := range []string{
+		"clients.ConnectDB",
+		"clients.ConnectRedis",
+		"mgmtapi.NewRedisEnrollmentSessionStore",
+		"webauthn.NewRedisSessionStore",
+		"webauthn.NewDBStore",
+		"webauthn.NewHandler",
+		"WithEnrollmentSessions",
+		"clients.NewDBUserPersister",
+		"clients.NewDBGrantStore",
+		"clients.NewDBSessionStoreWithPool",
+		"clients.NewDBClientRegistrationStore",
+		"clients.NewDBRecoveryStore",
+		"mfa.NewDBStore",
+		"WithClientRegistration",
+		"WithRecovery",
+		"WithScopedSessionIssuer",
+		"WithMFA",
+		"WithInitialAccessToken",
+	} {
+		if !strings.Contains(productionAssembly, required) {
+			t.Errorf("production harbor-mgmt graph does not wire %q", required)
+		}
+	}
+}
+
+// TestProductionLiveGraphContainsNoScaffolds prevents a future refactor from
+// satisfying readiness checks while retaining an insecure fallback in the
+// handler that is actually served.
+func TestProductionLiveGraphContainsNoScaffolds(t *testing.T) {
+	productionAssembly := productionAssembly(t)
+
+	for _, forbidden := range []string{
+		"noopUserPersister",
+		"NewInMemoryBFFSessionStore",
+		"NewInMemoryStore",
+		"NewInMemorySessionStore",
+		"NewInMemoryEnrollmentSessionStore",
+		"webauthn.RegisterRoutes",
+		`HandleFunc("POST /users/enroll"`,
+	} {
+		if strings.Contains(productionAssembly, forbidden) {
+			t.Errorf("production harbor-mgmt graph still references scaffold or legacy route %q", forbidden)
+		}
+	}
+}
+
+func TestProductionStartupValidatesOriginsHostsAndRegistrationURL(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	assembly := string(source)
+	for _, required := range []string{
+		"validateProductionURL(\"AUTHORIZE_COMPLETE_URL\"",
+		"validateProductionOrigins",
+		"validateProductionHost(\"WEBAUTHN_RP_ID\"",
+		"validateProductionURL(\"REGISTRATION_BASE_URL\"",
+	} {
+		if !strings.Contains(assembly, required) {
+			t.Errorf("production harbor-mgmt startup does not enforce %q", required)
+		}
+	}
+}
+
+func TestProductionGraphWiresOutageAwareAbuseProtection(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	assembly := string(source)
+	for _, endpoint := range []string{"mfa", "recovery", "enrollment", "registration"} {
+		marker := "WithProductionAbuseProtection(" + endpoint
+		if !strings.Contains(assembly, marker) {
+			t.Errorf("production graph lacks outage-aware abuse protection for %s endpoints (want %q)", endpoint, marker)
+		}
+	}
+}

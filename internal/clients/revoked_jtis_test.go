@@ -6,10 +6,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/harbor-auth/harbor/internal/gen/db"
+	"github.com/harbor-auth/harbor/internal/oidc"
 )
 
 // fakeRevokedJTIQuerier is an in-memory revokedJTIQuerier fake for unit tests.
@@ -369,5 +372,82 @@ func TestRowToRevokedJTI_InvalidTimestamps(t *testing.T) {
 	}
 	if !result.ExpiresAt.IsZero() {
 		t.Error("ExpiresAt should be zero for invalid timestamp")
+	}
+}
+
+func TestEmergencyRevocation_PersistsThenPropagatesAcrossReplicasAndRestart(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mr := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = redisClient.Close() }) //nolint:errcheck // test cleanup
+
+	filterA := oidc.NewInMemoryRevocationFilter()
+	filterB := oidc.NewInMemoryRevocationFilter()
+	subscribers := []*RevocationSubscriber{
+		NewRevocationSubscriber(RevocationSubscriberConfig{Client: redisClient, Filter: filterA}),
+		NewRevocationSubscriber(RevocationSubscriberConfig{Client: redisClient, Filter: filterB}),
+	}
+	errCh := make(chan error, len(subscribers))
+	for _, subscriber := range subscribers {
+		go func(sub *RevocationSubscriber) { errCh <- sub.Run(ctx) }(subscriber)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		counts, err := redisClient.PubSubNumSub(ctx, DefaultRevocationChannel).Result()
+		if err == nil && counts[DefaultRevocationChannel] == int64(len(subscribers)) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("replica subscribers did not become ready")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	q := newFakeRevokedJTIQuerier()
+	store := NewDBRevokedJTIStore(q)
+	expiresAt := time.Now().Add(15 * time.Minute)
+	if _, err := store.Insert(ctx, "emergency-jti", "emergency_kill", expiresAt); err != nil {
+		t.Fatalf("persist emergency revocation: %v", err)
+	}
+	if err := redisClient.Publish(ctx, DefaultRevocationChannel, "emergency-jti").Err(); err != nil {
+		t.Fatalf("publish emergency revocation: %v", err)
+	}
+
+	deadline = time.Now().Add(time.Second)
+	for !filterA.MightContain("emergency-jti") || !filterB.MightContain("emergency-jti") {
+		if time.Now().After(deadline) {
+			t.Fatal("emergency revocation did not propagate to every live replica")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// A restarted replica has missed the ephemeral pub/sub message. It must
+	// recover the revocation from the durable source of truth before serving.
+	restartedFilter := oidc.NewInMemoryRevocationFilter()
+	active, err := store.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("list active revocations on restart: %v", err)
+	}
+	jtis := make([]string, 0, len(active))
+	for _, row := range active {
+		jtis = append(jtis, row.JTI)
+	}
+	restartedFilter.Rehydrate(jtis)
+	if !restartedFilter.MightContain("emergency-jti") {
+		t.Fatal("restarted replica acknowledged readiness without persisted revocation")
+	}
+
+	cancel()
+	for range subscribers {
+		select {
+		case err := <-errCh:
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Fatalf("subscriber shutdown: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("subscriber did not shut down")
+		}
 	}
 }

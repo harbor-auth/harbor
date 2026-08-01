@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/harbor-auth/harbor/internal/bff"
 	"github.com/harbor-auth/harbor/internal/mgmtapi"
 )
@@ -96,5 +100,58 @@ func TestBffCallerAdapter_SpoofedHeader_WithSession(t *testing.T) {
 	if rec.Code == http.StatusUnauthorized {
 		t.Errorf("SECURITY: status = 401; valid session for %q must not be overridden by spoofed header %q — session identity must win",
 			sessionUser, spoofedUser)
+	}
+}
+
+func TestBffCallerAdapter_EnrollmentOnlySessionCannotCallManagementAPI(t *testing.T) {
+	ctx := bff.ContextWithUserID(context.Background(), "recovering-user")
+	ctx = bff.ContextWithSessionScope(ctx, bff.SessionScopeEnrollmentOnly)
+	if got := (bffCallerAdapter{}).CallerID(ctx); got != "" {
+		t.Fatalf("CallerID(enrollment-only session) = %q, want empty", got)
+	}
+}
+
+func TestRecoverySessionIssuerBindsBFFAndEnrollmentRecords(t *testing.T) {
+	ctx := context.Background()
+	bffSessions := bff.NewInMemoryBFFSessionStore()
+	enrollmentSessions := mgmtapi.NewInMemoryEnrollmentSessionStore()
+	issuer := &recoverySessionIssuer{
+		bffSessions:        bffSessions,
+		enrollmentSessions: enrollmentSessions,
+	}
+
+	const userID = "550e8400-e29b-41d4-a716-446655440000"
+	token, err := issuer.IssueEnrollmentSession(ctx, userID)
+	if err != nil {
+		t.Fatalf("IssueEnrollmentSession: %v", err)
+	}
+	record, err := bffSessions.Get(ctx, token)
+	if err != nil {
+		t.Fatalf("BFF session Get: %v", err)
+	}
+	if record.UserID != userID || !record.RecoveryRequired || record.SessionScope != bff.SessionScopeEnrollmentOnly {
+		t.Fatalf("BFF session = %+v, want enrollment-only recovery session for %q", record, userID)
+	}
+	handle, err := enrollmentSessions.UserHandle(ctx, token)
+	if err != nil {
+		t.Fatalf("enrollment session UserHandle: %v", err)
+	}
+	wantHandle := uuid.MustParse(userID)
+	if !bytes.Equal(handle, wantHandle[:]) {
+		t.Fatalf("user handle = %x, want UUID bytes %x", handle, wantHandle[:])
+	}
+}
+
+// TestProductionRoutesExposeOneEnrollmentFrontDoor guards the composition
+// root's route ownership. mgmtapi owns POST /enroll; cmd/harbor-mgmt must not
+// also expose the legacy POST /users/enroll handler, which bypasses the
+// distributed enrollment-session handoff used by the WebAuthn handler.
+func TestProductionRoutesExposeOneEnrollmentFrontDoor(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	if strings.Contains(string(source), `HandleFunc("POST /users/enroll"`) {
+		t.Fatal("legacy POST /users/enroll route bypasses the canonical distributed enrollment flow")
 	}
 }

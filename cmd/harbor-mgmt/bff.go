@@ -5,12 +5,43 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"strings"
+	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
 
 	"github.com/harbor-auth/harbor/internal/bff"
 	"github.com/harbor-auth/harbor/internal/webauthn"
 )
+
+type bffMFASessionStamper struct{ store bff.BFFSessionStore }
+
+func (s bffMFASessionStamper) StampMFAStepUp(ctx context.Context, userID string, verifiedAt time.Time) error {
+	requestID := bff.SessionIDFromContext(ctx)
+	if requestID == "" {
+		return errors.New("missing authenticated BFF session")
+	}
+	record, err := s.store.Get(ctx, requestID)
+	if err != nil || record.UserID != userID {
+		return errors.New("authenticated BFF session does not match MFA user")
+	}
+	return bff.RecordTOTPStepUp(ctx, s.store, requestID, verifiedAt)
+}
+
+func requireSensitiveManagementStepUp(gate *bff.StepUpGate, next http.Handler) http.Handler {
+	protected := []string{"/consent-grants", "/audit-events", "/relay-addresses", "/byo-domains", "/recovery/factors", "/mfa/factors", "/compliance/"}
+	guarded := gate.Require(next)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, prefix := range protected {
+			if strings.HasPrefix(r.URL.Path, prefix) {
+				guarded.ServeHTTP(w, r)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 // bffWebAuthnAdapter bridges bff.WebAuthnService to *webauthn.Service.
 //

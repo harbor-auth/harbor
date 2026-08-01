@@ -1,0 +1,32 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-harbor-images
+  annotations:
+    policies.kyverno.io/title: Verify Harbor Release Images
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: critical
+spec:
+  validationFailureAction: Enforce
+  background: true
+  webhookTimeoutSeconds: 15
+  failurePolicy: Fail
+  rules:
+    - name: verify-keyless-release-signature
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [harbor]
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/harbor-auth/harbor/*"
+          required: true
+          requiredDigest: true
+          verifyDigest: true
+          mutateDigest: false
+          attestors:
+            - entries:
+                - keyless:
+                    issuer: "https://token.actions.githubusercontent.com"
+                    subject: "https://github.com/harbor-auth/harbor/.github/workflows/publish.yml@refs/heads/main"

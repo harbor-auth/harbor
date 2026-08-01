@@ -175,12 +175,12 @@ func (m *mockClientRegistry) Lookup(_ context.Context, clientID string) (oidc.Cl
 func TestValidateClientCredentialsValid(t *testing.T) {
 	registry := &mockClientRegistry{
 		clients: map[string]oidc.Client{
-			"demo-client":  {ID: "demo-client", SectorID: "example.com"},
-			"other-client": {ID: "other-client", SectorID: "other.com"},
+			"demo-client":  {ID: "demo-client", SectorID: "example.com", TokenEndpointAuthMethod: oidc.ClientAuthSecretBasic, SecretHash: testSecretHash("secret")},
+			"other-client": {ID: "other-client", SectorID: "other.com", TokenEndpointAuthMethod: oidc.ClientAuthSecretBasic, SecretHash: testSecretHash("secret")},
 		},
 	}
 
-	client, ok := validateClientCredentials(context.Background(), registry, "demo-client", "any-secret")
+	client, ok := validateClientCredentials(context.Background(), registry, "demo-client", "secret")
 	if !ok {
 		t.Fatal("expected validateClientCredentials to succeed for known client")
 	}
@@ -218,23 +218,22 @@ func TestValidateClientCredentialsEmptyRegistry(t *testing.T) {
 	}
 }
 
-// TestValidateClientCredentialsSecretIgnored verifies the secret is currently
-// ignored (public client model). This test documents current behavior and will
-// need updating when confidential client support is added.
+// TestValidateClientCredentialsSecretIgnored retains the historical regression
+// identifier while proving the former insecure behavior is no longer possible:
+// Basic authentication rejects missing and incorrect secrets with the same result.
 func TestValidateClientCredentialsSecretIgnored(t *testing.T) {
 	registry := &mockClientRegistry{
 		clients: map[string]oidc.Client{
-			"demo-client": {ID: "demo-client"},
+			"demo-client": {ID: "demo-client", TokenEndpointAuthMethod: oidc.ClientAuthSecretBasic, SecretHash: testSecretHash("correct-secret")},
 		},
 	}
 
-	// All these should succeed since secret is currently unused
-	secrets := []string{"", "wrong-secret", "correct-secret", "any-value"}
+	secrets := []string{"", "wrong-secret", "any-value"}
 	for _, secret := range secrets {
 		t.Run("secret="+secret, func(t *testing.T) {
 			_, ok := validateClientCredentials(context.Background(), registry, "demo-client", secret)
-			if !ok {
-				t.Fatalf("expected validateClientCredentials to succeed regardless of secret %q", secret)
+			if ok {
+				t.Fatalf("expected validateClientCredentials to reject secret %q", secret)
 			}
 		})
 	}
@@ -246,9 +245,11 @@ func TestValidateClientCredentialsReturnsFullClient(t *testing.T) {
 	registry := &mockClientRegistry{
 		clients: map[string]oidc.Client{
 			"full-client": {
-				ID:            "full-client",
-				SectorID:      "sector.example.com",
-				ScopesAllowed: []string{"openid", "profile", "email"},
+				ID:                      "full-client",
+				SectorID:                "sector.example.com",
+				ScopesAllowed:           []string{"openid", "profile", "email"},
+				TokenEndpointAuthMethod: oidc.ClientAuthSecretBasic,
+				SecretHash:              testSecretHash("secret"),
 			},
 		},
 	}

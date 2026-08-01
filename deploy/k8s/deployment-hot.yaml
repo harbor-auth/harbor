@@ -55,16 +55,15 @@ spec:
               app.kubernetes.io/name: harbor-hot
       containers:
         - name: harbor-hot
-          # SCAFFOLD: pin to an immutable digest (…@sha256:…) before production.
-          # ':latest' defeats rollbacks and lets a re-pull silently change the
-          # running binary.
-          image: ghcr.io/harbor-auth/harbor/harbor-hot:latest
+          # Fail-closed placeholder. Replace with the signed release digest;
+          # this nonexistent digest cannot silently select a mutable image.
+          image: ghcr.io/harbor-auth/harbor/harbor-hot@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 8080
           # Non-secret config first, then secrets (DATABASE_URL/REDIS_URL/
-          # KEK_SECRET), then KMS credentials (AWS_ACCESS_KEY_ID/
+          # ADMIN_API_TOKEN), then KMS credentials (AWS_ACCESS_KEY_ID/
           # AWS_SECRET_ACCESS_KEY). envFrom keeps sources cleanly separated.
           envFrom:
             - configMapRef:

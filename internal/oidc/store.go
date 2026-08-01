@@ -10,11 +10,13 @@ import (
 // §10) the flow needs. It is passed BY VALUE into the pure validators so they
 // stay free of I/O.
 type Client struct {
-	ID            string
-	SectorID      string // groups redirect URIs for PPID derivation (DESIGN §3.2)
-	RedirectURIs  []string
-	LogoutURIs    []string // registered post_logout_redirect_uri values (OIDC RP-Initiated Logout)
-	ScopesAllowed []string
+	ID                      string
+	SectorID                string // groups redirect URIs for PPID derivation (DESIGN §3.2)
+	RedirectURIs            []string
+	LogoutURIs              []string // registered post_logout_redirect_uri values (OIDC RP-Initiated Logout)
+	ScopesAllowed           []string
+	TokenEndpointAuthMethod string
+	SecretHash              []byte
 }
 
 // HasRedirectURI reports whether uri EXACTLY matches a registered redirect URI

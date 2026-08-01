@@ -1,10 +1,15 @@
 package main
 
 import (
+	"context"
 	"io"
 	"log/slog"
+	"os"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/harbor-auth/harbor/internal/crypto"
 )
 
 func TestBFFConfigValidate(t *testing.T) {
@@ -95,6 +100,31 @@ func TestBFFConfigValidate(t *testing.T) {
 				t.Errorf("validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestProductionBFFConfigRejectsInsecureLoginURL(t *testing.T) {
+	t.Setenv("HARBOR_DEV_MODE", "")
+	cfg := bffConfig{LoginURL: "http://login.example.com/login", SessionTTL: 5 * time.Minute}
+	if err := cfg.validate(); err == nil {
+		t.Fatal("production accepted an HTTP LOGIN_URL; browser authentication redirects must use HTTPS")
+	}
+}
+
+func TestProductionStartupValidatesAbuseAndExternalURLs(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	assembly := string(source)
+	for _, required := range []string{
+		"RATE_LIMIT_DISABLED is not allowed in production",
+		"validateProductionURL(\"ISSUER\"",
+		"validateProductionURL(\"LOGIN_URL\"",
+	} {
+		if !strings.Contains(assembly, required) {
+			t.Errorf("production harbor-hot startup does not enforce %q", required)
+		}
 	}
 }
 
@@ -290,4 +320,89 @@ func TestLoadAdminToken(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProductionReadinessRequiresCompleteDurableGraph(t *testing.T) {
+	t.Setenv("HARBOR_DEV_MODE", "")
+	t.Setenv("REDIS_URL", "")
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	err := validateProductionReadiness(bffConfig{}, bffDeps{}, logger)
+	if err == nil {
+		t.Fatal("validateProductionReadiness() accepted an empty production graph")
+	}
+
+	// Keep this list at the object-graph boundary. A configured URL alone is
+	// not proof that the live service received the durable implementation.
+	for _, dependency := range []string{
+		"PostgreSQL",
+		"Redis",
+		"external KMS",
+		"durable client registry",
+		"durable authorization code store",
+		"durable grant store",
+		"durable session store",
+		"durable revocation store",
+		"revocation outbox worker",
+		"JWT verifier",
+		"logout verifier",
+		"session revoker",
+	} {
+		if !strings.Contains(err.Error(), dependency) {
+			t.Errorf("startup error %q does not identify missing %s", err, dependency)
+		}
+	}
+}
+
+func TestProductionLiveGraphContainsNoScaffoldConstructors(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	start := strings.Index(string(source), "func run(")
+	end := strings.Index(string(source), "// noopSessionRevoker")
+	if start < 0 || end <= start {
+		t.Fatal("could not isolate run production assembly")
+	}
+	productionAssembly := string(source[start:end])
+
+	// These constructors and concrete no-op values make insecure behavior
+	// reachable from run's live HTTP handler. Explicitly isolated dev/test
+	// helpers may continue to exist, but run must not assemble them.
+	for _, forbidden := range []string{
+		"oidc.NewPlaceholderIssuer()",
+		"oidc.NewInMemoryClientRegistry()",
+		"oidc.NewInMemoryAuthCodeStore()",
+		"oidc.NewInMemoryGrantStore()",
+		"noopSessionRevoker{}",
+		`ID:            "demo-client"`,
+	} {
+		if strings.Contains(productionAssembly, forbidden) {
+			t.Errorf("live harbor-hot graph still references forbidden scaffold %q", forbidden)
+		}
+	}
+}
+
+func TestDevelopmentGraphRegistersE2ERedirectURI(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	config, _, err := buildDevHotGraph("http://localhost:8080", crypto.RuntimeConfig{
+		Mode:         crypto.RuntimeDevelopment,
+		DevKeySecret: "test-only-development-secret",
+	}, logger)
+	if err != nil {
+		t.Fatalf("build development graph: %v", err)
+	}
+	client, found := config.Clients.Lookup(context.Background(), "demo-client")
+	if !found {
+		t.Fatal("development demo client not registered")
+	}
+	if len(config.Signers) != 1 {
+		t.Fatalf("development graph signers = %d, want 1 for JWT/JWKS parity", len(config.Signers))
+	}
+	for _, redirectURI := range client.RedirectURIs {
+		if redirectURI == "http://localhost:3000/callback" {
+			return
+		}
+	}
+	t.Fatalf("development demo client redirects = %v, missing e2e callback", client.RedirectURIs)
 }

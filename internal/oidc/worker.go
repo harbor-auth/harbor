@@ -80,6 +80,11 @@ func (w *RevocationWorker) Run(ctx context.Context) {
 	ticker := time.NewTicker(w.tickInterval)
 	defer ticker.Stop()
 
+	// Drain durable work before waiting for the first interval. This closes the
+	// restart window where a theft signal remains pending merely because the
+	// previous worker exited just after its last poll.
+	w.tick(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():

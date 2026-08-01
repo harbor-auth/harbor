@@ -97,14 +97,13 @@ if not data then
     return 0
 end
 
+local ttl = redis.call('TTL', KEYS[1])
+if ttl <= 0 then
+    return 0
+end
 local record = cjson.decode(data)
 record.UserID = ARGV[1]
-local ttl = redis.call('TTL', KEYS[1])
-if ttl > 0 then
-    redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
-else
-    redis.call('SET', KEYS[1], cjson.encode(record))
-end
+redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
 return 1
 `)
 
@@ -124,16 +123,15 @@ if not data then
     return 0
 end
 
+local ttl = redis.call('TTL', KEYS[1])
+if ttl <= 0 then
+    return 0
+end
 local record = cjson.decode(data)
 record.UserID = ARGV[1]
 record.RecoveryRequired = (ARGV[2] == "true")
 record.SessionScope = ARGV[3]
-local ttl = redis.call('TTL', KEYS[1])
-if ttl > 0 then
-    redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
-else
-    redis.call('SET', KEYS[1], cjson.encode(record))
-end
+redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
 return 1
 `)
 
@@ -151,14 +149,13 @@ if not data then
     return 0
 end
 
+local ttl = redis.call('TTL', KEYS[1])
+if ttl <= 0 then
+    return 0
+end
 local record = cjson.decode(data)
 record.AuthMethod = ARGV[1]
-local ttl = redis.call('TTL', KEYS[1])
-if ttl > 0 then
-    redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
-else
-    redis.call('SET', KEYS[1], cjson.encode(record))
-end
+redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
 return 1
 `)
 
@@ -176,14 +173,37 @@ if not data then
     return 0
 end
 
+local ttl = redis.call('TTL', KEYS[1])
+if ttl <= 0 then
+    return 0
+end
 local record = cjson.decode(data)
 record.MFAVerifiedAt = ARGV[1]
+redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
+return 1
+`)
+
+var recordTOTPStepUpScript = redis.NewScript(`
+local data = redis.call('GET', KEYS[1])
+if not data then return 0 end
 local ttl = redis.call('TTL', KEYS[1])
-if ttl > 0 then
-    redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
-else
-    redis.call('SET', KEYS[1], cjson.encode(record))
-end
+if ttl <= 0 then return 0 end
+local record = cjson.decode(data)
+if record.UserID ~= ARGV[1] then return 0 end
+record.MFAVerifiedAt = ARGV[2]
+record.AuthMethod = ARGV[3]
+redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
+return 1
+`)
+
+var setConsentPendingScript = redis.NewScript(`
+local data = redis.call('GET', KEYS[1])
+if not data then return 0 end
+local ttl = redis.call('TTL', KEYS[1])
+if ttl <= 0 then return 0 end
+local record = cjson.decode(data)
+record.ConsentPending = true
+redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
 return 1
 `)
 
@@ -249,6 +269,21 @@ func (s *RedisBFFSessionStore) SetMFAVerified(ctx context.Context, requestID str
 	return nil
 }
 
+// RecordTOTPStepUp performs the ownership check and both step-up mutations in
+// one Redis script, preventing partial claims or cross-session stamping.
+func (s *RedisBFFSessionStore) RecordTOTPStepUp(ctx context.Context, requestID, userID string, verifiedAt time.Time) error {
+	result, err := recordTOTPStepUpScript.Run(ctx, s.client,
+		[]string{sessionKey(requestID)}, userID,
+		verifiedAt.UTC().Format(time.RFC3339Nano), string(oidc.AuthMethodTOTP)).Int()
+	if err != nil {
+		return fmt.Errorf("redis record TOTP step-up: %w", err)
+	}
+	if result == 0 {
+		return ErrBFFSessionNotFound
+	}
+	return nil
+}
+
 // SetAuthMethod implements BFFSessionStore. It atomically records the
 // authentication method used during the login ceremony, preserving the
 // remaining TTL.
@@ -265,6 +300,35 @@ func (s *RedisBFFSessionStore) SetAuthMethod(ctx context.Context, requestID stri
 		return ErrBFFSessionNotFound
 	}
 	return nil
+}
+
+func (s *RedisBFFSessionStore) SetConsentPending(ctx context.Context, requestID string) error {
+	result, err := setConsentPendingScript.Run(ctx, s.client, []string{sessionKey(requestID)}).Int()
+	if err != nil {
+		return fmt.Errorf("redis set-consent-pending script: %w", err)
+	}
+	if result == 0 {
+		return ErrBFFSessionNotFound
+	}
+	return nil
+}
+
+func (s *RedisBFFSessionStore) Consume(ctx context.Context, requestID string) (BFFSessionRecord, error) {
+	data, err := s.client.GetDel(ctx, sessionKey(requestID)).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return BFFSessionRecord{}, ErrBFFSessionNotFound
+	}
+	if err != nil {
+		return BFFSessionRecord{}, fmt.Errorf("redis GETDEL: %w", err)
+	}
+	var record BFFSessionRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return BFFSessionRecord{}, fmt.Errorf("unmarshal consumed bff session: %w", err)
+	}
+	if time.Now().After(record.ExpiresAt) {
+		return BFFSessionRecord{}, ErrBFFSessionExpired
+	}
+	return record, nil
 }
 
 // Delete implements BFFSessionStore. It removes the session record. This is a

@@ -49,6 +49,10 @@ type Server struct {
 	// endpoint returns 401 and persists nothing (RFC 7591 §1.2, §3). Nil disables
 	// the gate (open registration). The token is stored HASHED, never plaintext.
 	initialAccessTokenHash []byte
+	// registrationAuthorizationRequired makes an absent initial-access token
+	// fail closed. Production enables this unconditionally; development may
+	// deliberately leave registration open.
+	registrationAuthorizationRequired bool
 	// consents provides access to consent grants for the authenticated user.
 	// May be nil in dev-scaffold mode; GetConsentGrants then returns 503.
 	consents ConsentStore
@@ -108,7 +112,9 @@ type Server struct {
 	// activation, step-up verification, recovery-code redemption, and factor
 	// management). Nil puts those routes into a 503 state.
 	mfa MFAService
-
+	// mfaSessionStamper binds successful verification to the authenticated BFF
+	// browser session. Nil makes verification fail closed.
+	mfaSessionStamper MFASessionStamper
 	// compliance, when non-nil, backs the POST /compliance/export and POST
 	// /compliance/erase endpoints. Nil puts those routes into a 503 state.
 	compliance *ComplianceDeps
@@ -117,6 +123,9 @@ type Server struct {
 	// session context for every user-scoped endpoint. Injected by
 	// WithCallerSource; a nil source causes user-scoped endpoints to return 401.
 	callerSource CallerSource
+	// abuseGate is configured only by the production composition root. It uses
+	// shared Redis limiters and denies on missing/unavailable backend state.
+	abuseGate *productionAbuseGate
 
 	logger *slog.Logger
 }
@@ -167,6 +176,13 @@ func (s *Server) WithInitialAccessToken(token string) *Server {
 	if token != "" {
 		s.initialAccessTokenHash = HashSecret(token)
 	}
+	return s
+}
+
+// RequireRegistrationAuthorization prevents anonymous dynamic registration
+// even when an operator forgot to configure an initial-access token.
+func (s *Server) RequireRegistrationAuthorization() *Server {
+	s.registrationAuthorizationRequired = true
 	return s
 }
 
@@ -282,6 +298,11 @@ func (s *Server) WithRecoveryRateLimiter(limiter RecoveryRateLimiter) *Server {
 // s for chaining.
 func (s *Server) WithMFA(service MFAService) *Server {
 	s.mfa = service
+	return s
+}
+
+func (s *Server) WithMFASessionStamper(stamper MFASessionStamper) *Server {
+	s.mfaSessionStamper = stamper
 	return s
 }
 

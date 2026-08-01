@@ -60,6 +60,12 @@ func mgmtBaseURL() string {
 	return defaultMgmtBaseURL
 }
 
+// mgmtReplicaBURL is an independently addressed harbor-mgmt replica used to
+// prove enrollment ceremonies do not rely on load-balancer stickiness.
+func mgmtReplicaBURL() string {
+	return strings.TrimRight(envOr("HARBOR_MGMT_E2E_REPLICA_B_URL", ""), "/")
+}
+
 // enrollRegion is the region new users are enrolled into.
 func enrollRegion() string { return envOr("HARBOR_E2E_REGION", defaultEnrollRegn) }
 
@@ -74,11 +80,11 @@ func openDB(t *testing.T) *pgx.Conn {
 	t.Helper()
 	url := envOr("HARBOR_E2E_DATABASE_URL", "")
 	if url == "" {
-		t.Skip("HARBOR_E2E_DATABASE_URL not set — skipping enrollment DB e2e")
+		unavailable(t, "HARBOR_E2E_DATABASE_URL not set — enrollment DB e2e unavailable")
 	}
 	conn, err := pgx.Connect(context.Background(), url)
 	if err != nil {
-		t.Skipf("cannot connect to HARBOR_E2E_DATABASE_URL: %v — skipping", err)
+		unavailable(t, "cannot connect to HARBOR_E2E_DATABASE_URL: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := conn.Close(context.Background()); err != nil {
@@ -111,7 +117,7 @@ func enroll(t *testing.T, client *http.Client) (userID, region string) {
 	}
 	resp, err := client.Post(mgmtBaseURL()+enrollPath, "application/json", strings.NewReader(string(body)))
 	if err != nil {
-		t.Skipf("harbor-mgmt unreachable at %s: %v — skipping enrollment e2e", mgmtBaseURL(), err)
+		unavailable(t, "harbor-mgmt unreachable at %s: %v", mgmtBaseURL(), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
@@ -120,7 +126,7 @@ func enroll(t *testing.T, client *http.Client) (userID, region string) {
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if resp.StatusCode == http.StatusServiceUnavailable {
-			t.Skipf("POST /enroll = 503 (enrollment not wired: set DATABASE_URL + HARBOR_KEK_SECRET) — skipping")
+			unavailable(t, "POST /enroll = 503 (enrollment not wired: set DATABASE_URL + development test key provider)")
 		}
 		t.Fatalf("POST /enroll = %d, want 2xx\n%s", resp.StatusCode, raw)
 	}
@@ -368,6 +374,63 @@ func registerPasskey(t *testing.T, client *http.Client) bool {
 	t.Helper()
 	ok, _, _ := registerPasskeyWithKey(t, client)
 	return ok
+}
+
+// TestEnrollmentCeremonyCrossReplicaRedisOnly starts registration on one
+// harbor-mgmt replica and finishes it on another. The test is opt-in because it
+// requires two independently addressed replicas sharing Redis and Postgres.
+func TestEnrollmentCeremonyCrossReplicaRedisOnly(t *testing.T) {
+	replicaB := mgmtReplicaBURL()
+	if replicaB == "" {
+		unavailable(t, "HARBOR_MGMT_E2E_REPLICA_B_URL not set — cross-replica enrollment unavailable")
+	}
+	client := jarClient(t)
+	enroll(t, client)
+
+	beginResp, err := client.Post(mgmtBaseURL()+registerBeginPath, "application/json", nil)
+	if err != nil {
+		t.Fatalf("register/begin on replica A: %v", err)
+	}
+	beginBody, readErr := io.ReadAll(beginResp.Body)
+	_ = beginResp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read register/begin response: %v", readErr)
+	}
+	if beginResp.StatusCode != http.StatusOK {
+		t.Fatalf("register/begin on replica A = %d, want 200\n%s", beginResp.StatusCode, beginBody)
+	}
+
+	var opts struct {
+		PublicKey struct {
+			Challenge string `json:"challenge"`
+			RP        struct {
+				ID string `json:"id"`
+			} `json:"rp"`
+		} `json:"publicKey"`
+	}
+	if err := json.Unmarshal(beginBody, &opts); err != nil {
+		t.Fatalf("decode register/begin response: %v", err)
+	}
+	rpID := opts.PublicKey.RP.ID
+	if rpID == "" {
+		rpID = "localhost"
+	}
+	attestation, _, _, err := makeAttestation(rpID, opts.PublicKey.Challenge)
+	if err != nil {
+		t.Fatalf("build attestation: %v", err)
+	}
+	finishResp, err := client.Post(replicaB+registerFinishPath, "application/json", strings.NewReader(attestation))
+	if err != nil {
+		t.Fatalf("register/finish on replica B: %v", err)
+	}
+	defer func() { _ = finishResp.Body.Close() }()
+	finishBody, err := io.ReadAll(finishResp.Body)
+	if err != nil {
+		t.Fatalf("read register/finish response: %v", err)
+	}
+	if finishResp.StatusCode < 200 || finishResp.StatusCode >= 300 {
+		t.Fatalf("register/finish on replica B = %d, want 2xx; ceremony state must be Redis-backed\n%s", finishResp.StatusCode, finishBody)
+	}
 }
 
 // registerPasskeyWithKey is like registerPasskey but returns the ES256 private

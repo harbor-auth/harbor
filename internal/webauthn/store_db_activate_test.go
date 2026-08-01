@@ -49,8 +49,8 @@ func (f *activateFakeQuerier) GetCredentialByWebAuthnCredID(_ context.Context, _
 	return db.Credential{}, nil
 }
 
-func (f *activateFakeQuerier) UpdateCredentialSignCount(_ context.Context, _ db.UpdateCredentialSignCountParams) error {
-	return nil
+func (f *activateFakeQuerier) UpdateCredentialSignCount(_ context.Context, _ db.UpdateCredentialSignCountParams) (int64, error) {
+	return 1, nil
 }
 
 func (f *activateFakeQuerier) SetUserStatus(_ context.Context, arg db.SetUserStatusParams) error {

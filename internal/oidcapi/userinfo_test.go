@@ -13,6 +13,10 @@ func mintAccessToken(t *testing.T, ts *httptest.Server) string {
 	t.Helper()
 	code := mintCode(t, ts)
 	res := postToken(t, ts, validTokenForm(code))
+	if res.StatusCode == http.StatusUnauthorized {
+		_ = res.Body.Close()
+		res = postTokenWithBasic(t, ts, validTokenForm(code), testClientID, testClientSecret)
+	}
 	defer func() { _ = res.Body.Close() }()
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("token status = %d, want 200", res.StatusCode)
@@ -27,6 +31,30 @@ func mintAccessToken(t *testing.T, ts *httptest.Server) string {
 		t.Fatal("no access token issued")
 	}
 	return body.AccessToken
+}
+
+func mintIDToken(t *testing.T, ts *httptest.Server) string {
+	t.Helper()
+	code := mintCode(t, ts)
+	res := postToken(t, ts, validTokenForm(code))
+	if res.StatusCode == http.StatusUnauthorized {
+		_ = res.Body.Close()
+		res = postTokenWithBasic(t, ts, validTokenForm(code), testClientID, testClientSecret)
+	}
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("token status = %d, want 200", res.StatusCode)
+	}
+	var body struct {
+		IDToken string `json:"id_token"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatalf("decode token response: %v", err)
+	}
+	if body.IDToken == "" {
+		t.Fatal("no ID token issued")
+	}
+	return body.IDToken
 }
 
 // getUserInfo issues GET /userinfo with an optional Bearer token.
@@ -97,6 +125,20 @@ func TestUserInfo_InvalidToken_Unauthorized(t *testing.T) {
 
 	if res.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", res.StatusCode)
+	}
+	if errCode := decodeOAuthErrorCode(t, res); errCode != "invalid_token" {
+		t.Fatalf("error = %q, want invalid_token", errCode)
+	}
+}
+
+func TestUserInfo_IDTokenRejected(t *testing.T) {
+	ts := newFlowServer(t)
+	idToken := mintIDToken(t, ts)
+
+	res := getUserInfo(t, ts, idToken)
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 when an ID token is presented to userinfo", res.StatusCode)
 	}
 	if errCode := decodeOAuthErrorCode(t, res); errCode != "invalid_token" {
 		t.Fatalf("error = %q, want invalid_token", errCode)

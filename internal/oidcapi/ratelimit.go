@@ -51,6 +51,11 @@ type RateLimitConfig struct {
 	// the attacker-controlled region (bypass); under-counting buckets on a proxy
 	// IP (over-limit). Count only proxies you control that append to the header.
 	TrustedProxyHops int
+	// FailClosedOnError rejects the request when the shared limiter is
+	// unavailable. Production composition roots enable this for every sensitive
+	// endpoint; Token is always fail-closed because issuing credentials without
+	// an abuse control is unsafe in every deployment mode.
+	FailClosedOnError bool
 }
 
 // RateLimitMiddleware returns net/http middleware that rate-limits a single
@@ -62,10 +67,9 @@ type RateLimitConfig struct {
 //     (RFC 6749 §2.3.1); anonymous requests bucket by source IP.
 //   - Over-limit → 429 Too Many Requests with a Retry-After header (clamped to
 //     [0, Window]) and the standard rate_limited error envelope.
-//   - Backend error (e.g. Redis down) → FAIL OPEN: the request is allowed, a
-//     warning is logged, and the rate_limiter_unavailable metric is emitted.
-//     Blocking real users during a cache outage would be worse than briefly
-//     degrading abuse defenses.
+//   - Backend error (e.g. Redis down) → production-sensitive endpoints fail
+//     closed with 503; explicitly lower-risk callers may choose fail-open. Both
+//     modes log and emit the rate_limiter_unavailable metric.
 //
 // The rate-limit key is NEVER logged or used as a metric label — it carries
 // client_id or IP (PII). Only aggregate endpoint/region dimensions are emitted.
@@ -96,14 +100,19 @@ func RateLimitMiddleware(cfg RateLimitConfig) func(http.Handler) http.Handler {
 			reg, _ := region.Resolve(r.Host) //nolint:errcheck // best-effort metric dimension; empty region is accepted
 
 			if err != nil {
-				// Fail open: allow the request. Log with PII-free aggregate fields
-				// only — never the key (client_id / IP).
-				logger.Warn("rate limiter unavailable, failing open",
+				failClosed := cfg.FailClosedOnError || cfg.Endpoint == telemetry.EndpointToken
+				logger.Warn("rate limiter unavailable",
 					slog.String("event", "rate_limiter_unavailable"),
 					slog.String("endpoint", string(cfg.Endpoint)),
 					slog.String("component", "oidcapi"),
+					slog.Bool("fail_closed", failClosed),
 				)
 				recordRateLimiterUnavailable(cfg.Endpoint, reg)
+				if failClosed {
+					w.Header().Set("Retry-After", "1")
+					writeError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "request throttling is temporarily unavailable")
+					return
+				}
 				next.ServeHTTP(w, r)
 				return
 			}

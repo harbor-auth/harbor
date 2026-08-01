@@ -13,12 +13,11 @@ import (
 	"github.com/harbor-auth/harbor/internal/telemetry"
 )
 
-// DashboardConsentStore is the narrow consent interface the dashboard needs.
-// Reuses the mgmtapi definition (satisfied by clients.DBConsentStore).
+// DashboardConsentStore is the narrow canonical-grant interface the dashboard
+// needs. It is satisfied by clients.DBGrantStore.
 type DashboardConsentStore interface {
-	List(ctx context.Context, userID string) ([]oidc.ConsentGrant, error)
-	Get(ctx context.Context, userID, clientID string) (oidc.ConsentGrant, bool, error)
-	Revoke(ctx context.Context, id string) error
+	ListGrantsByUser(ctx context.Context, userID string) ([]oidc.Grant, error)
+	RevokeGrantAndSessions(ctx context.Context, id string) (bool, error)
 }
 
 // DashboardSessionStore is the narrow session interface the dashboard needs
@@ -133,7 +132,7 @@ func (h *DashboardHandler) Routes(mux *http.ServeMux) {
 
 // dashboardAppsData is the template data for the Connected Apps view.
 type dashboardAppsData struct {
-	Grants []oidc.ConsentGrant
+	Grants []oidc.Grant
 }
 
 // dashboardActivityData is the template data for the Activity view.
@@ -188,7 +187,7 @@ func (h *DashboardHandler) GetConnectedApps(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	grants, err := h.consents.List(r.Context(), userID)
+	grants, err := h.consents.ListGrantsByUser(r.Context(), userID)
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "bff: dashboard: list consent grants failed",
 			"error", err)
@@ -221,9 +220,9 @@ func (h *DashboardHandler) PostRevokeApp(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Derive the clientID from the caller's grant list so we can (a) confirm
-	// ownership and (b) obtain the clientID needed for session cascade.
-	grants, err := h.consents.List(r.Context(), userID)
+	// Confirm ownership from the caller-scoped canonical grant list before
+	// passing the opaque grant ID to the atomic disconnect operation.
+	grants, err := h.consents.ListGrantsByUser(r.Context(), userID)
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "bff: dashboard: list grants for revoke failed", "error", err)
 		http.Error(w, "failed to revoke app", http.StatusInternalServerError)
@@ -242,23 +241,14 @@ func (h *DashboardHandler) PostRevokeApp(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Revoke the consent grant.
-	if err := h.consents.Revoke(r.Context(), grantID); err != nil {
+	// Revoke the canonical grant and its bound sessions in one database
+	// statement. This makes concurrent dashboard/API disconnects idempotent and
+	// prevents a refresh from slipping between two separate mutations.
+	if _, err := h.consents.RevokeGrantAndSessions(r.Context(), grantID); err != nil {
 		h.logger.ErrorContext(r.Context(), "bff: dashboard: consent revoke failed",
 			"error", err)
 		http.Error(w, "failed to revoke app", http.StatusInternalServerError)
 		return
-	}
-
-	// Cascade: revoke all sessions for (user, client) — matching the mgmtapi
-	// consent-revoke cascade pattern. Fails closed (INVARIANT §3).
-	if h.sessions != nil {
-		if err := h.sessions.RevokeSessionsByUserClient(r.Context(), userID, targetClientID); err != nil {
-			h.logger.ErrorContext(r.Context(), "bff: dashboard: session user-client cascade failed",
-				"error", err)
-			http.Error(w, "failed to revoke app sessions", http.StatusInternalServerError)
-			return
-		}
 	}
 
 	h.appRevokes.Inc(telemetry.Outcome(telemetry.OutcomeSuccess))

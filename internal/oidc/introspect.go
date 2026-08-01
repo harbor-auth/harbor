@@ -2,10 +2,6 @@ package oidc
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"encoding/json"
-	"errors"
-	"strings"
 	"time"
 
 	"github.com/harbor-auth/harbor/internal/crypto"
@@ -102,6 +98,10 @@ func InactiveIntrospectResponse() IntrospectResponse {
 
 // IntrospectConfig holds the dependencies for token introspection.
 type IntrospectConfig struct {
+	// Verifier is the shared JWT verifier used by all token consumers. When
+	// supplied, the remaining verification fields are ignored.
+	Verifier *JWTVerifier
+
 	// Signers are the signing keys used to verify access token signatures.
 	// The first is the active signer; additional entries support rotation
 	// overlap (§7.3).
@@ -115,30 +115,35 @@ type IntrospectConfig struct {
 	// If nil, filter hits are treated as confirmed revocations (fail-closed).
 	RevokedChecker RevokedJTIChecker
 
+	// ExpectedIssuer pins accepted tokens to this regional issuer.
+	ExpectedIssuer string
+
 	// Now overrides the clock for deterministic tests. Defaults to time.Now.
 	Now func() time.Time
 }
 
 // Introspector handles RFC 7662 token introspection.
 type Introspector struct {
-	signers        []crypto.Signer
-	filter         RevocationFilter
-	revokedChecker RevokedJTIChecker
-	now            func() time.Time
+	verifier *JWTVerifier
 }
 
 // NewIntrospector creates an Introspector with the given configuration.
 func NewIntrospector(cfg IntrospectConfig) *Introspector {
+	if cfg.Verifier != nil {
+		return &Introspector{verifier: cfg.Verifier}
+	}
 	now := cfg.Now
 	if now == nil {
 		now = time.Now
 	}
-	return &Introspector{
-		signers:        cfg.Signers,
-		filter:         cfg.Filter,
-		revokedChecker: cfg.RevokedChecker,
-		now:            now,
+	verifier, err := NewJWTVerifier(JWTVerifierConfig{Signers: cfg.Signers, Filter: cfg.Filter,
+		RevokedChecker: cfg.RevokedChecker, ExpectedIssuer: cfg.ExpectedIssuer, Now: now})
+	if err != nil {
+		// Introspection has an enumeration-resistant inactive response. Retain an
+		// empty verifier so a bad configured key fails closed instead of panicking.
+		verifier, _ = NewJWTVerifier(JWTVerifierConfig{Now: now}) //nolint:errcheck // empty configuration is valid by construction
 	}
+	return &Introspector{verifier: verifier}
 }
 
 // Introspect validates an access token and returns its active status and
@@ -155,114 +160,28 @@ func NewIntrospector(cfg IntrospectConfig) *Introspector {
 //
 //harbor:invariant INV-INTROSPECT-ENUMERATION-RESISTANCE
 func (i *Introspector) Introspect(ctx context.Context, req IntrospectRequest) IntrospectResponse {
-	// Step 1: Parse the JWT
-	header, payload, sig, err := parseCompactJWT(req.Token)
+	var requirements []AccessTokenRequirements
+	if !req.IsAdmin {
+		requirements = append(requirements, AccessTokenRequirements{ExpectedAudience: req.ClientID})
+	}
+	claims, err := i.verifier.VerifyAccessToken(ctx, req.Token, requirements...)
 	if err != nil {
 		return InactiveIntrospectResponse()
-	}
-
-	// Verify header algorithm
-	var h jwtHeader
-	if err := json.Unmarshal(header, &h); err != nil {
-		return InactiveIntrospectResponse()
-	}
-	if h.Alg != "ES256" {
-		return InactiveIntrospectResponse()
-	}
-
-	// Step 2: Verify signature against known signers (match on kid)
-	pubKey, err := i.publicKeyByKID(h.Kid)
-	if err != nil {
-		return InactiveIntrospectResponse()
-	}
-
-	parts := strings.Split(req.Token, ".")
-	if len(parts) != 3 {
-		return InactiveIntrospectResponse()
-	}
-	signingInput := parts[0] + "." + parts[1]
-	if !verifyES256Signature(pubKey, []byte(signingInput), sig) {
-		return InactiveIntrospectResponse()
-	}
-
-	// Parse claims
-	var claims struct {
-		Issuer   string `json:"iss"`
-		Subject  string `json:"sub"`
-		Audience string `json:"aud"`
-		Expiry   int64  `json:"exp"`
-		IssuedAt int64  `json:"iat"`
-		JTI      string `json:"jti"`
-		Scope    string `json:"scope"`
-	}
-	if err := json.Unmarshal(payload, &claims); err != nil {
-		return InactiveIntrospectResponse()
-	}
-
-	// Step 3: Check expiry
-	if i.now().After(time.Unix(claims.Expiry, 0)) {
-		return InactiveIntrospectResponse()
-	}
-
-	// Step 4 & 5: Check bloom filter for JTI (emergency revocation)
-	if i.filter != nil && claims.JTI != "" {
-		if i.filter.MightContain(claims.JTI) {
-			// Bloom filter hit - confirm via DB introspection
-			revoked, err := i.confirmRevocation(ctx, claims.JTI)
-			if err != nil {
-				// DB error - fail closed (treat as revoked for safety)
-				return InactiveIntrospectResponse()
-			}
-			if revoked {
-				return InactiveIntrospectResponse()
-			}
-			// False positive - continue validation
-		}
 	}
 
 	// Step 6: Cross-client isolation — aud must match caller's client_id
 	// unless the caller is an admin (IsAdmin=true).
-	if !req.IsAdmin && claims.Audience != req.ClientID {
-		return InactiveIntrospectResponse()
-	}
-
 	// All checks passed — token is active
 	return IntrospectResponse{
 		Active:    true,
 		Sub:       claims.Subject,
 		Scope:     claims.Scope,
-		ClientID:  claims.Audience, // aud == client_id for Harbor tokens
-		Exp:       claims.Expiry,
-		Iat:       claims.IssuedAt,
+		ClientID:  claims.Audience,
+		Exp:       claims.Expiry.Unix(),
+		Iat:       claims.IssuedAt.Unix(),
 		Iss:       claims.Issuer,
 		Aud:       claims.Audience,
 		Jti:       claims.JTI,
 		TokenType: "Bearer",
 	}
-}
-
-// publicKeyByKID returns the ECDSA public key for the given key ID.
-func (i *Introspector) publicKeyByKID(kid string) (*ecdsa.PublicKey, error) {
-	for _, signer := range i.signers {
-		jwk := signer.PublicJWK()
-		if jwk.Kid != kid {
-			continue
-		}
-		pub, err := jwk.ToPublicKey()
-		if err != nil {
-			return nil, err
-		}
-		return pub, nil
-	}
-	return nil, errors.New("key not found")
-}
-
-// confirmRevocation checks with the DB whether a JTI is actually revoked.
-// Returns true if confirmed revoked, false if not found (false positive).
-func (i *Introspector) confirmRevocation(ctx context.Context, jti string) (bool, error) {
-	if i.revokedChecker == nil {
-		// No DB checker configured - fail closed (treat filter hit as revoked)
-		return true, nil
-	}
-	return i.revokedChecker.IsRevoked(ctx, jti)
 }

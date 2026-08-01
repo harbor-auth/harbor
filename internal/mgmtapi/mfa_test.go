@@ -91,8 +91,13 @@ func (f *fakeMFAService) Disable(_ context.Context, userID string) error {
 
 // newMFAServer builds a Server with the given MFA service wired in.
 func newMFAServer(svc MFAService) *Server {
-	return New(nil, nil).WithMFA(svc)
+	return New(nil, nil).WithMFA(svc).
+		WithMFASessionStamper(fakeMFASessionStamper{})
 }
+
+type fakeMFASessionStamper struct{}
+
+func (fakeMFASessionStamper) StampMFAStepUp(context.Context, string, time.Time) error { return nil }
 
 // mfaRequest builds an MFA request. Authentication is wired on the server via
 // WithCallerSource; the userID parameter is retained for call-site readability
@@ -256,6 +261,24 @@ func TestPostMFAVerify_Success(t *testing.T) {
 	}
 	if !svc.verified || svc.gotCode != "123456" {
 		t.Errorf("Verify not called correctly: %+v", svc)
+	}
+}
+
+// TestPostMFAVerify_FailsClosedWithoutSessionStamper is the regression test
+// for session-bound step-up. Validating a TOTP code is not sufficient by
+// itself: the handler must atomically stamp the authenticated BFF session that
+// presented it. Until a session stamper is wired, success would create a
+// misleading 200 response while no sensitive route can safely observe the
+// step-up, so production must fail closed.
+func TestPostMFAVerify_FailsClosedWithoutSessionStamper(t *testing.T) {
+	svc := &fakeMFAService{}
+	s := New(nil, nil).WithMFA(svc).WithCallerSource(fakeCallerSource{userID: "user-1"})
+	rec := httptest.NewRecorder()
+
+	s.PostMFAVerify(rec, mfaRequest(http.MethodPost, "/mfa/verify", `{"code":"123456"}`, "user-1"))
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 when BFF session stamping is not wired", rec.Code)
 	}
 }
 

@@ -289,6 +289,45 @@ func TestRedisRateLimiter_RedisError(t *testing.T) {
 	}
 }
 
+// TestRedisRateLimiter_MFADimensionsSharedAcrossReplicas proves MFA abuse
+// counters use the shared Redis state for every required dimension. Two
+// independent limiter objects model two harbor-mgmt replicas.
+func TestRedisRateLimiter_MFADimensionsSharedAcrossReplicas(t *testing.T) {
+	mr := miniredis.RunT(t)
+	clientA := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	clientB := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = clientA.Close(); _ = clientB.Close() }) //nolint:errcheck // test cleanup
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cfg := RateLimiterConfig{KeyPrefix: "mfa:", Limit: 2, Window: time.Minute}
+	replicaA := NewRedisRateLimiter(clientA, cfg, logger)
+	replicaB := NewRedisRateLimiter(clientB, cfg, logger)
+
+	for _, dimension := range []string{"user:user-1", "session:session-1", "ip:203.0.113.7"} {
+		if allowed, _, err := replicaA.Allow(context.Background(), dimension); err != nil || !allowed {
+			t.Fatalf("first %s attempt allowed=%v err=%v", dimension, allowed, err)
+		}
+		if allowed, _, err := replicaB.Allow(context.Background(), dimension); err != nil || !allowed {
+			t.Fatalf("second %s attempt allowed=%v err=%v", dimension, allowed, err)
+		}
+		if allowed, _, err := replicaA.Allow(context.Background(), dimension); err != nil || allowed {
+			t.Fatalf("shared %s limit allowed=%v err=%v, want denied", dimension, allowed, err)
+		}
+	}
+}
+
+func TestRedisRateLimiter_MFAOutageNeverAllows(t *testing.T) {
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() }) //nolint:errcheck // test cleanup
+	limiter := NewRedisRateLimiter(client, RateLimiterConfig{KeyPrefix: "mfa:", Limit: 2, Window: time.Minute}, slog.Default())
+	mr.Close()
+
+	allowed, _, err := limiter.Allow(context.Background(), "session:session-1")
+	if err == nil || allowed {
+		t.Fatalf("Redis outage allowed=%v err=%v, want false and error for fail-closed caller", allowed, err)
+	}
+}
+
 // TestRedisRateLimiter_DefaultConfig verifies that default values are applied
 // when config fields are zero/empty.
 func TestRedisRateLimiter_DefaultConfig(t *testing.T) {

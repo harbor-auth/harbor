@@ -127,15 +127,15 @@ type recordingConsentStore struct {
 	lastListUserID string
 }
 
-func (r *recordingConsentStore) Get(_ context.Context, _, _ string) (oidc.ConsentGrant, bool, error) {
-	return oidc.ConsentGrant{}, false, nil
+func (r *recordingConsentStore) FindGrant(_ context.Context, _, _ string) (oidc.Grant, bool, error) {
+	return oidc.Grant{}, false, nil
 }
 
-func (r *recordingConsentStore) List(_ context.Context, userID string) ([]oidc.ConsentGrant, error) {
+func (r *recordingConsentStore) ListGrantsByUser(_ context.Context, userID string) ([]oidc.Grant, error) {
 	r.lastListUserID = userID
 	return nil, nil
 }
 
-func (r *recordingConsentStore) Revoke(_ context.Context, _ string) error {
-	return nil
+func (r *recordingConsentStore) RevokeGrantAndSessions(_ context.Context, _ string) (bool, error) {
+	return false, nil
 }

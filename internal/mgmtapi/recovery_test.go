@@ -319,14 +319,17 @@ func TestPostRecoveryComplete_Success(t *testing.T) {
 		t.Errorf("verifier not called correctly: %+v", verifier)
 	}
 	// Scoped session cookie must be set.
-	var found bool
+	var foundBFF, foundEnrollment bool
 	for _, c := range rec.Result().Cookies() {
 		if c.Name == RecoveryScopedSessionCookieName && c.Value == "scoped-token" {
-			found = true
+			foundBFF = true
+		}
+		if c.Name == EnrollmentSessionCookieName && c.Value == "scoped-token" {
+			foundEnrollment = true
 		}
 	}
-	if !found {
-		t.Error("expected scoped session cookie to be set")
+	if !foundBFF || !foundEnrollment {
+		t.Errorf("recovery cookies: BFF=%t enrollment=%t, want both", foundBFF, foundEnrollment)
 	}
 }
 

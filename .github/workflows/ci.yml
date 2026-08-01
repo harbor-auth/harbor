@@ -161,6 +161,11 @@ jobs:
           helm template harbor deploy/helm/ ${{ matrix.helm-args }} > rendered.yaml
           ruby -e 'require "yaml"; YAML.load_stream(File.read(ARGV.fetch(0)))' rendered.yaml
 
+      - name: Assert Helm and raw deployment security contracts
+        env:
+          HELM_RENDERED: ${{ github.workspace }}/rendered.yaml
+        run: go test ./deploy/contract
+
   # e2e — Foundation F8: the composed OIDC harness run on every PR.
   # Runs `make e2e` (docker-compose + `go test -tags=e2e ./e2e/...`) in the
   # pinned toolchain, exercising authorize→token→JWKS + the §11.7 negatives

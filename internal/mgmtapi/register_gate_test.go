@@ -50,6 +50,21 @@ func TestPostRegisterGateDisabledAllowsAnonymous(t *testing.T) {
 	}
 }
 
+func TestPostRegisterProductionRequiresAuthorization(t *testing.T) {
+	fake := &fakeClientReg{}
+	s := New(nil, nil).
+		WithClientRegistration(fake, testRegBaseURL).
+		RequireRegistrationAuthorization()
+
+	rec := doRegisterWithAuth(t, s, gateTestBody, "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401; production registration must fail closed when no initial access token or authenticated admin is present; body=%s", rec.Code, rec.Body.String())
+	}
+	if fake.called {
+		t.Fatal("Create must not be called for anonymous production registration")
+	}
+}
+
 func TestPostRegisterGateValidToken(t *testing.T) {
 	fake := &fakeClientReg{}
 	s := newGatedRegServer(fake, gateTestToken)

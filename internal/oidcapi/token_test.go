@@ -1,12 +1,17 @@
 package oidcapi
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/harbor-auth/harbor/internal/crypto"
+	"github.com/harbor-auth/harbor/internal/gen/openapi"
+	"github.com/harbor-auth/harbor/internal/oidc"
 )
 
 // mintCode runs the /authorize happy path and returns the freshly-issued code.
@@ -43,6 +48,51 @@ func postToken(t *testing.T, ts *httptest.Server, form url.Values) *http.Respons
 		t.Fatalf("POST /token: %v", err)
 	}
 	return res
+}
+
+func postTokenWithBasic(t *testing.T, ts *httptest.Server, form url.Values, clientID, secret string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/token", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", basicAuthHeader(clientID, secret))
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /token: %v", err)
+	}
+	return res
+}
+
+func newClientAuthFlowServer(t *testing.T, method, secret string) *httptest.Server {
+	t.Helper()
+	clients := oidc.NewInMemoryClientRegistry()
+	client := oidc.Client{
+		ID:                      testClientID,
+		SectorID:                "localhost",
+		RedirectURIs:            []string{testRedirectURI},
+		ScopesAllowed:           []string{"openid", "profile"},
+		TokenEndpointAuthMethod: method,
+	}
+	if secret != "" {
+		hash := sha256.Sum256([]byte(secret))
+		client.SecretHash = hash[:]
+	}
+	clients.Put(client)
+	signer, err := crypto.NewLocalSigner()
+	if err != nil {
+		t.Fatalf("NewLocalSigner: %v", err)
+	}
+	svc := oidc.NewService(oidc.ServiceConfig{
+		Issuer: "https://eu.harbor.id", Clients: clients,
+		Codes: oidc.NewInMemoryAuthCodeStore(), Tokens: oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
+		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
+	})
+	srv := New(Config{Issuer: "https://eu.harbor.id", Service: svc, Signers: []crypto.Signer{signer}})
+	ts := httptest.NewServer(openapi.HandlerFromMux(srv, http.NewServeMux()))
+	t.Cleanup(ts.Close)
+	return ts
 }
 
 // assertNoStore fails unless the response forbids caching (docs/DESIGN.md §11.7,
@@ -163,5 +213,73 @@ func TestToken_PKCEMismatch_InvalidGrant(t *testing.T) {
 	assertNoStore(t, res)
 	if errCode := decodeOAuthErrorCode(t, res); errCode != "invalid_grant" {
 		t.Fatalf("error = %q, want invalid_grant", errCode)
+	}
+}
+
+func TestToken_ClientAuthenticationMatchesRegisteredMethod(t *testing.T) {
+	const secret = "high-entropy-client-secret"
+	for _, tc := range []struct {
+		name        string
+		registered  string
+		basic       bool
+		basicSecret string
+		formSecret  string
+		wantStatus  int
+	}{
+		{name: "public none", registered: "none", wantStatus: http.StatusOK},
+		{name: "basic correct", registered: "client_secret_basic", basic: true, wantStatus: http.StatusOK},
+		{name: "basic wrong secret", registered: "client_secret_basic", basic: true, basicSecret: "wrong-secret", wantStatus: http.StatusUnauthorized},
+		{name: "post correct", registered: "client_secret_post", formSecret: secret, wantStatus: http.StatusOK},
+		{name: "basic client rejects post", registered: "client_secret_basic", formSecret: secret, wantStatus: http.StatusUnauthorized},
+		{name: "post client rejects basic", registered: "client_secret_post", basic: true, wantStatus: http.StatusUnauthorized},
+		{name: "confidential missing secret", registered: "client_secret_basic", wantStatus: http.StatusUnauthorized},
+		{name: "unsupported registered method", registered: "private_key_jwt", basic: true, wantStatus: http.StatusUnauthorized},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newClientAuthFlowServer(t, tc.registered, secret)
+			code := mintCode(t, ts)
+			form := validTokenForm(code)
+			if tc.formSecret != "" {
+				form.Set("client_secret", tc.formSecret)
+			}
+			var res *http.Response
+			if tc.basic {
+				presented := tc.basicSecret
+				if presented == "" {
+					presented = secret
+				}
+				res = postTokenWithBasic(t, ts, form, testClientID, presented)
+			} else {
+				res = postToken(t, ts, form)
+			}
+			defer func() { _ = res.Body.Close() }()
+			if res.StatusCode != tc.wantStatus {
+				t.Fatalf("status = %d, want %d", res.StatusCode, tc.wantStatus)
+			}
+			if tc.wantStatus == http.StatusUnauthorized {
+				assertNoStore(t, res)
+				if got := decodeOAuthErrorCode(t, res); got != "invalid_client" {
+					t.Fatalf("error = %q, want invalid_client", got)
+				}
+			}
+		})
+	}
+}
+
+func TestToken_BasicAndPostCredentialsConflict(t *testing.T) {
+	const secret = "high-entropy-client-secret"
+	ts := newClientAuthFlowServer(t, "client_secret_basic", secret)
+	code := mintCode(t, ts)
+	form := validTokenForm(code)
+	form.Set("client_id", "different-client")
+	form.Set("client_secret", secret)
+
+	res := postTokenWithBasic(t, ts, form, testClientID, secret)
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", res.StatusCode)
+	}
+	if got := decodeOAuthErrorCode(t, res); got != "invalid_request" {
+		t.Fatalf("error = %q, want invalid_request", got)
 	}
 }

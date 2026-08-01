@@ -107,10 +107,12 @@ func TestService_Token_ReuseRevokesCodeFamily(t *testing.T) {
 		t.Fatalf("Save: %v", err)
 	}
 	revocations := NewRecordingRevocationSink()
+	registry := NewInMemoryClientRegistry()
+	registry.Put(testClient())
 
 	svc := NewService(ServiceConfig{
 		Issuer:      "https://eu.harbor.id",
-		Clients:     NewInMemoryClientRegistry(),
+		Clients:     registry,
 		Codes:       codes,
 		Tokens:      NewPlaceholderIssuer(),
 		Sessions:    NewStubSessionResolver("demo-subject-ppid"),

@@ -10,15 +10,20 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
-	"net/http"
+	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
+
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	awskms "github.com/aws/aws-sdk-go-v2/service/kms"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/harbor-auth/harbor/internal/bff"
 	"github.com/harbor-auth/harbor/internal/clients"
@@ -49,6 +54,145 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	runtimeCfg, err := crypto.LoadRuntimeConfigFromEnv()
+	if err != nil {
+		logger.Error("invalid runtime crypto configuration", "error", err)
+		os.Exit(1)
+	}
+	if runtimeCfg.Mode == crypto.RuntimeDevelopment {
+		logger.Warn("HARBOR_DEV_MODE enabled — using development scaffolds")
+		err = runDevelopment(ctx, logger, runtimeCfg)
+	} else {
+		err = runProduction(ctx, logger, runtimeCfg)
+	}
+	if err != nil && ctx.Err() == nil {
+		logger.Error("harbor-mgmt exited", "error", err)
+		os.Exit(1)
+	}
+}
+
+// runProduction is the fail-closed composition root. Every stateful dependency
+// served from this graph is shared by all replicas.
+func runProduction(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.RuntimeConfig) error {
+	if envBool("RATE_LIMIT_DISABLED") {
+		return errors.New("RATE_LIMIT_DISABLED is not allowed in production")
+	}
+	authorizeCompleteURL := os.Getenv("AUTHORIZE_COMPLETE_URL")
+	if err := validateProductionURL("AUTHORIZE_COMPLETE_URL", authorizeCompleteURL); err != nil {
+		return err
+	}
+	registrationBaseURL := os.Getenv("REGISTRATION_BASE_URL")
+	if err := validateProductionURL("REGISTRATION_BASE_URL", registrationBaseURL); err != nil {
+		return err
+	}
+	rpID := os.Getenv("WEBAUTHN_RP_ID")
+	if err := validateProductionHost("WEBAUTHN_RP_ID", rpID); err != nil {
+		return err
+	}
+	rpOrigins := splitAndTrim(os.Getenv("WEBAUTHN_RP_ORIGINS"))
+	if err := validateProductionOrigins(rpOrigins, rpID); err != nil {
+		return err
+	}
+	pool, err := clients.ConnectDB(ctx, logger)
+	if err != nil {
+		return fmt.Errorf("connect database: %w", err)
+	}
+	if pool == nil {
+		return errors.New("production requires DATABASE_URL")
+	}
+	defer pool.Close()
+
+	redisClient, err := clients.ConnectRedis(ctx, logger)
+	if err != nil {
+		return fmt.Errorf("connect redis: %w", err)
+	}
+	if redisClient == nil {
+		return errors.New("production requires REDIS_URL")
+	}
+	defer func() {
+		if closeErr := redisClient.Close(); closeErr != nil {
+			logger.Warn("redis close error", "error", closeErr)
+		}
+	}()
+
+	kekResolver, err := crypto.NewEnvKEKResolver(runtimeCfg.KMS)
+	if err != nil {
+		return fmt.Errorf("configure KMS key map: %w", err)
+	}
+	awsConfig, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("load KMS client configuration: %w", err)
+	}
+	kp := crypto.NewKMSKeyProvider(crypto.NewAWSKMSClient(awskms.NewFromConfig(awsConfig)), kekResolver)
+
+	q := db.New(pool)
+	bffStore := bff.NewRedisBFFSessionStore(redisClient, bffSessionTTL)
+	enrollmentSessions := mgmtapi.NewRedisEnrollmentSessionStore(redisClient)
+	credentialStore := webauthn.NewDBStore(q).WithPool(pool)
+	ceremonySessions := webauthn.NewRedisSessionStore(redisClient, bffSessionTTL)
+	webauthnService, err := webauthn.NewService(webauthn.Config{
+		RPID: rpID, RPDisplayName: getenv("WEBAUTHN_RP_DISPLAY_NAME", "Harbor"), RPOrigins: rpOrigins,
+	}, credentialStore, ceremonySessions)
+	if err != nil {
+		return fmt.Errorf("configure webauthn: %w", err)
+	}
+
+	persister := clients.NewDBUserPersister(q)
+	enroller := identity.NewEnroller(kp, crypto.NewCipher(), persister)
+	grantStore := clients.NewDBGrantStore(q)
+	sessionStore := clients.NewDBSessionStoreWithPool(q, pool)
+	registrationStore := clients.NewDBClientRegistrationStore(q)
+	recoveryStore := clients.NewDBRecoveryStore(q, q)
+	recoveryManager := identity.NewRecoveryManager()
+	recoveryService := identity.NewRecoveryService(recoveryStore)
+	recoveryCeremonies := mgmtapi.NewRedisRecoveryCeremonyStore(redisClient)
+	mfaService, err := mfa.NewService(mfa.ServiceConfig{
+		Store: mfa.NewDBStore(q), Cipher: crypto.NewCipher(), Keys: clients.NewDBMFAKeyResolver(q, kp),
+	})
+	if err != nil {
+		return fmt.Errorf("configure MFA: %w", err)
+	}
+
+	initialAccessToken := os.Getenv("INITIAL_ACCESS_TOKEN")
+	if initialAccessToken == "" {
+		return errors.New("production dynamic registration requires INITIAL_ACCESS_TOKEN")
+	}
+	mgmtServer := mgmtapi.New(enroller, logger).
+		WithEnrollmentSessions(enrollmentSessions).
+		WithCallerSource(bffCallerAdapter{}).
+		WithConsentStore(grantStore).
+		WithSessionRevoker(sessionStore).
+		WithClientRegistration(registrationStore, registrationBaseURL).
+		WithInitialAccessToken(initialAccessToken).
+		RequireRegistrationAuthorization().
+		WithRecovery(recoveryManager, recoveryStore, recoveryService, recoveryCeremonies).
+		WithScopedSessionIssuer(&recoverySessionIssuer{bffSessions: bffStore, enrollmentSessions: enrollmentSessions}).
+		WithMFA(mfaService).
+		WithMFASessionStamper(bffMFASessionStamper{store: bffStore})
+	mfaAbuseProtection := newMgmtLimiter(redisClient, "mfa", 30, time.Minute, logger)
+	recoveryAbuseProtection := newMgmtLimiter(redisClient, "recovery", 20, time.Minute, logger)
+	enrollmentAbuseProtection := newMgmtLimiter(redisClient, "enroll", 10, time.Minute, logger)
+	registrationAbuseProtection := newMgmtLimiter(redisClient, "register", 10, time.Minute, logger)
+	mgmtServer.WithProductionAbuseProtection(mfaAbuseProtection.endpoint, mfaAbuseProtection.limiter)
+	mgmtServer.WithProductionAbuseProtection(recoveryAbuseProtection.endpoint, recoveryAbuseProtection.limiter)
+	mgmtServer.WithProductionAbuseProtection(enrollmentAbuseProtection.endpoint, enrollmentAbuseProtection.limiter)
+	mgmtServer.WithProductionAbuseProtection(registrationAbuseProtection.endpoint, registrationAbuseProtection.limiter)
+
+	mux := httpserver.NewHealthMux()
+	webauthn.NewHandler(webauthnService).WithEnrollmentSessions(enrollmentSessions).RegisterRoutes(mux)
+	mgmtServer.Routes(mux)
+	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(webauthnService), bff.DiscoverableUserResolver{}, authorizeCompleteURL)
+	mux.HandleFunc("GET /login", loginHandler.BeginLogin)
+	mux.HandleFunc("POST /login/complete", loginHandler.FinishLogin)
+	handler := bff.Middleware(bffStore)(requireSensitiveManagementStepUp(bff.NewStepUpGate(bffStore, bff.DefaultStepUpTTL), mux))
+	handler = mgmtapi.RegionMiddleware(telemetry.New(logger))(handler)
+	return httpserver.Run(ctx, ":"+getenv("PORT", "8081"), handler, logger)
+}
+
+func runDevelopment(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.RuntimeConfig) error {
+	// Development retains the legacy explicit cleanup calls; cancellation is
+	// owned by main's signal context.
+	stop := func() {}
 
 	// DB-backed stores plug in when DATABASE_URL is configured; otherwise we run
 	// on in-memory dev scaffolds (docs/DESIGN.md §10).
@@ -137,6 +281,12 @@ func main() {
 		logger.Warn("REDIS_URL not set — using in-memory WebAuthn session store (dev only; not shared across replicas)")
 		sessions = webauthn.NewInMemorySessionStore()
 	}
+	var enrollmentSessions mgmtapi.EnrollmentSessionStore
+	if redisClient != nil {
+		enrollmentSessions = mgmtapi.NewRedisEnrollmentSessionStore(redisClient)
+	} else {
+		enrollmentSessions = mgmtapi.NewInMemoryEnrollmentSessionStore()
+	}
 
 	svc, err := webauthn.NewService(webauthn.Config{
 		RPID:          rpID,
@@ -162,29 +312,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Key provider for enrollment. Production wiring replaces localKeyProvider
-	// with an HSM-backed KeyProvider (docs/DESIGN.md §7.3).
-	kmsSecret := getenv("HARBOR_KMS_SECRET", "")
-	if kmsSecret == "" {
-		// When a real DB is wired, enrollment writes user DEKs sealed under this
-		// KMS secret. Falling back to a hardcoded dev key against a real DB would
-		// let anyone with the source re-derive every enrolled user's pairwise
-		// secret, so it is fatal (mirrors the harbor-hot KEK_SECRET guard).
-		if pool != nil {
-			logger.Error("HARBOR_KMS_SECRET must be set when DATABASE_URL is configured — refusing to enroll with a dev key against a real DB")
-			stop()
-			pool.Close()
-			if redisClient != nil {
-				if err := redisClient.Close(); err != nil {
-					logger.Warn("redis close error on exit", "error", err)
-				}
-			}
-			os.Exit(1)
-		}
-		logger.Warn("HARBOR_KMS_SECRET not set — using insecure dev default; NEVER use in production")
-		kmsSecret = "harbor-dev-kms-secret-DO-NOT-USE-IN-PROD"
-	}
-	kp, err := crypto.NewLocalKeyProvider(kmsSecret)
+	// Local crypto is available only in the explicitly selected development
+	// graph and requires caller-supplied key material. Production uses the same
+	// regional KMS map as harbor-hot (docs/DESIGN.md §7.3).
+	kp, err := crypto.NewLocalKeyProvider(runtimeCfg.DevKeySecret)
 	if err != nil {
 		logger.Error("failed to create key provider", "error", err)
 		// os.Exit skips deferred functions, so release resources explicitly.
@@ -216,7 +347,7 @@ func main() {
 	var sessionRevoker mgmtapi.SessionRevoker
 	if pool != nil {
 		q := db.New(pool)
-		consentStore = clients.NewDBConsentStore(q)
+		consentStore = clients.NewDBGrantStore(q)
 		sessionRevoker = clients.NewDBSessionStore(q)
 	}
 
@@ -285,12 +416,14 @@ func main() {
 	}
 
 	mgmtServer := mgmtapi.New(enroller, logger).
+		WithEnrollmentSessions(enrollmentSessions).
 		WithCallerSource(bffCallerAdapter{}).
 		WithConsentStore(consentStore).
 		WithSessionRevoker(sessionRevoker).
 		WithMFA(mfaService).
 		WithCompliance(complianceDeps).
 		WithAuditTrail(auditTrailDeps)
+	mgmtServer.WithMFASessionStamper(bffMFASessionStamper{store: bffStore})
 
 	// Relay store for /relay-addresses endpoints. Only wire when DATABASE_URL is
 	// configured; otherwise the relay endpoints stay in a 503 Service Unavailable
@@ -337,7 +470,7 @@ func main() {
 	var dashRelayStore bff.DashboardRelayStore
 	if pool != nil {
 		q := db.New(pool)
-		dashConsentStore = clients.NewDBConsentStore(q)
+		dashConsentStore = clients.NewDBGrantStore(q)
 		dashSessionStore = clients.NewDBSessionStore(q)
 		dashCredStore = clients.NewDBDashboardCredentialStore(q)
 		if rawRelayStore != nil {
@@ -355,12 +488,9 @@ func main() {
 	)
 
 	mux := httpserver.NewHealthMux()
-	// Passkey ceremony endpoints. userIDFromRequest returns 501 until the BFF
-	// session middleware lands (docs/DESIGN.md §9) — production-safe default.
-	webauthn.RegisterRoutes(mux, svc)
+	webauthn.NewHandler(svc).WithEnrollmentSessions(enrollmentSessions).RegisterRoutes(mux)
 	mgmtServer.Routes(mux)
 	dashHandler.Routes(mux)
-	mux.HandleFunc("POST /users/enroll", enrollHandler(enroller, logger))
 
 	// BFF login endpoints (docs/plans/bff-session-middleware.md §11.2 step 2).
 	// /login initiates the passkey assertion bound to a BFF session; /login/complete
@@ -399,7 +529,7 @@ func main() {
 	// authenticated user from the BFF session context (via bff.UserIDFromContext).
 	// The middleware is non-rejecting: it only populates context when a valid
 	// authenticated session cookie is present.
-	handler := bff.Middleware(bffStore)(mux)
+	handler := bff.Middleware(bffStore)(requireSensitiveManagementStepUp(bff.NewStepUpGate(bffStore, bff.DefaultStepUpTTL), mux))
 
 	// Bind this instance's public RP origin host to its REGION (same rationale as
 	// harbor-hot): the region middleware fail-closed rejects any Host it cannot
@@ -470,31 +600,7 @@ func main() {
 		}
 		os.Exit(1)
 	}
-}
-
-// enrollHandler returns a handler for POST /users/enroll. It reads a JSON body
-// with a `region` field, calls the Enroller, and returns the new user ID.
-func enrollHandler(e *identity.Enroller, logger *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Region string `json:"region"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Region == "" {
-			writeErrorJSON(w, http.StatusBadRequest, "invalid_request", "region is required")
-			return
-		}
-		res, err := e.Enroll(r.Context(), req.Region)
-		if err != nil {
-			if errors.Is(err, region.ErrUnknownRegion) {
-				writeErrorJSON(w, http.StatusBadRequest, "invalid_region", "unknown region")
-				return
-			}
-			logger.Error("enrollment failed", "error", err)
-			writeErrorJSON(w, http.StatusInternalServerError, "enrollment_failed", "enrollment failed")
-			return
-		}
-		writeJSON(w, http.StatusCreated, res)
-	}
+	return nil
 }
 
 // noopUserPersister drops enrollments. Replace with a sqlc-backed
@@ -540,23 +646,6 @@ func (a *dashboardRelayAdapter) Deactivate(ctx context.Context, addressID string
 	return a.store.Deactivate(ctx, addressID)
 }
 
-// --- JSON helpers -----------------------------------------------------------
-
-type jsonError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func writeErrorJSON(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, jsonError{Code: code, Message: message})
-}
-
 // --- env helpers ------------------------------------------------------------
 
 func getenv(key, fallback string) string {
@@ -576,4 +665,72 @@ func splitAndTrim(raw string) []string {
 		}
 	}
 	return out
+}
+
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+type mgmtAbuseProtection struct {
+	endpoint string
+	limiter  clients.RateLimiter
+}
+
+func newMgmtLimiter(client *redis.Client, endpoint string, limit int, window time.Duration, logger *slog.Logger) mgmtAbuseProtection {
+	return mgmtAbuseProtection{
+		endpoint: endpoint,
+		limiter: clients.NewRedisRateLimiter(client, clients.RateLimiterConfig{
+			KeyPrefix: "ratelimit:mgmt:" + endpoint + ":",
+			Limit:     limit,
+			Window:    window,
+		}, logger),
+	}
+}
+
+func validateProductionURL(name, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid %s: %w", name, err)
+	}
+	if u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+		return fmt.Errorf("invalid %s: production requires an absolute credential-free HTTPS URL", name)
+	}
+	return nil
+}
+
+func validateProductionOrigins(origins []string, rpID string) error {
+	if len(origins) == 0 {
+		return errors.New("production requires WEBAUTHN_RP_ORIGINS")
+	}
+	for _, origin := range origins {
+		if err := validateProductionURL("WEBAUTHN_RP_ORIGINS", origin); err != nil {
+			return err
+		}
+		u, err := url.Parse(origin)
+		if err != nil {
+			return fmt.Errorf("invalid WEBAUTHN_RP_ORIGINS: %w", err)
+		}
+		if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("invalid WEBAUTHN_RP_ORIGINS: %q is not an origin", origin)
+		}
+		if u.Hostname() != rpID && !strings.HasSuffix(u.Hostname(), "."+rpID) {
+			return fmt.Errorf("invalid WEBAUTHN_RP_ORIGINS: %q is outside WEBAUTHN_RP_ID %q", origin, rpID)
+		}
+	}
+	return nil
+}
+
+func validateProductionHost(name, host string) error {
+	if host == "" || strings.ContainsAny(host, "/:@?#") || net.ParseIP(host) != nil || !strings.Contains(host, ".") {
+		return fmt.Errorf("invalid %s: production requires a DNS hostname", name)
+	}
+	if strings.TrimSpace(host) != host {
+		return fmt.Errorf("invalid %s: production requires a DNS hostname", name)
+	}
+	return nil
 }

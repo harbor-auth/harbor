@@ -2,10 +2,9 @@ package bff
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
-
-	"github.com/harbor-auth/harbor/internal/oidc"
 )
 
 // DefaultStepUpTTL is how long a step-up (MFA) verification stays valid before
@@ -45,6 +44,15 @@ func NewStepUpGate(store BFFSessionStore, ttl time.Duration) *StepUpGate {
 // never discloses which check failed (docs/DESIGN.md §6.5).
 func (g *StepUpGate) Require(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if g == nil || g.store == nil {
+			if g == nil {
+				w.Header().Set("WWW-Authenticate", `MFA realm="harbor", error="step_up_required"`)
+				http.Error(w, "step-up MFA verification required", http.StatusForbidden)
+				return
+			}
+			g.deny(w)
+			return
+		}
 		requestID := ReadBFFCookie(r)
 		if requestID == "" {
 			g.deny(w)
@@ -70,23 +78,32 @@ func (g *StepUpGate) verified(session BFFSessionRecord) bool {
 	if session.MFAVerifiedAt.IsZero() {
 		return false
 	}
-	return g.now().Sub(session.MFAVerifiedAt) < g.ttl
+	age := g.now().Sub(session.MFAVerifiedAt)
+	return age >= 0 && age < g.ttl
 }
 
-// RecordTOTPStepUp records a successful TOTP step-up in the BFF session in two
-// steps: SetMFAVerified (stamps the gate TTL window) then SetAuthMethod (upgrades
-// the ACR/AMR to webauthn+totp). Both writes are required for the step-up to be
-// reflected in the issued tokens; if SetAuthMethod fails the session retains the
-// MFA stamp but reverts to WebAuthn-only ACR/AMR (fail-closed on claims).
-//
-// This is the intended call site for the deferred BFF TOTP step-up HTTP handler.
-// Until that handler is wired, this helper documents the contract and provides a
-// testable unit for the ACR/AMR integration tests.
+type atomicTOTPStepUpStore interface {
+	RecordTOTPStepUp(ctx context.Context, requestID, userID string, verifiedAt time.Time) error
+}
+
+// RecordTOTPStepUp records a successful TOTP step-up as one ownership-checked
+// store mutation. Stores without this atomic capability fail closed.
 func RecordTOTPStepUp(ctx context.Context, store BFFSessionStore, requestID string, verifiedAt time.Time) error {
-	if err := store.SetMFAVerified(ctx, requestID, verifiedAt); err != nil {
+	session, err := store.Get(ctx, requestID)
+	if err != nil || session.UserID == "" {
+		if err != nil {
+			return err
+		}
+		return ErrBFFSessionNotFound
+	}
+	atomicStore, ok := store.(atomicTOTPStepUpStore)
+	if !ok {
+		return errors.New("bff: session store does not support atomic step-up")
+	}
+	if err := atomicStore.RecordTOTPStepUp(ctx, requestID, session.UserID, verifiedAt); err != nil {
 		return err
 	}
-	return store.SetAuthMethod(ctx, requestID, oidc.AuthMethodTOTP)
+	return nil
 }
 
 // deny writes the uniform step-up-required response. The distinct error code

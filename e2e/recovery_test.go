@@ -53,6 +53,7 @@ const (
 	// a successful POST /recovery/complete. It must ONLY permit enrolling a fresh
 	// passkey until recovery_required is cleared.
 	recoveryScopedSessionCookie = "harbor_recovery_session"
+	mfaVerifyPath               = "/mfa/verify"
 )
 
 // generateRecoveryCodes calls POST /recovery/codes and returns the plaintext
@@ -69,7 +70,7 @@ func generateRecoveryCodes(t *testing.T, client *http.Client) []string {
 	if client.Jar != nil {
 		u, err := url.Parse(mgmtBaseURL())
 		if err == nil && len(client.Jar.Cookies(u)) == 0 {
-			t.Skip("no BFF session cookie in jar — cookie-based auth not wired on this stack; skipping")
+			unavailable(t, "no BFF session cookie in jar — cookie-based auth not wired")
 		}
 	}
 
@@ -91,10 +92,10 @@ func generateRecoveryCodes(t *testing.T, client *http.Client) []string {
 		t.Fatalf("read /recovery/codes response: %v", err)
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
-		t.Skip("POST /recovery/codes = 401 (BFF session cookie not accepted) — skipping")
+		unavailable(t, "POST /recovery/codes = 401 (BFF session cookie not accepted)")
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
-		t.Skip("POST /recovery/codes = 503 (recovery not wired) — skipping")
+		unavailable(t, "POST /recovery/codes = 503 (recovery not wired)")
 	}
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("POST /recovery/codes = %d, want 201\n%s", resp.StatusCode, raw)
@@ -135,7 +136,7 @@ func beginRecovery(t *testing.T, client *http.Client, userID string) string {
 		t.Fatalf("read /recovery/begin response: %v", err)
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
-		t.Skip("POST /recovery/begin = 503 (recovery not wired) — skipping")
+		unavailable(t, "POST /recovery/begin = 503 (recovery not wired)")
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST /recovery/begin = %d, want 200\n%s", resp.StatusCode, raw)
@@ -168,7 +169,7 @@ func completeRecovery(t *testing.T, client *http.Client, requestID, code string)
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		_ = resp.Body.Close()
-		t.Skip("POST /recovery/complete = 503 (recovery not wired) — skipping")
+		unavailable(t, "POST /recovery/complete = 503 (recovery not wired)")
 	}
 	return resp
 }
@@ -357,6 +358,20 @@ func TestRecoveryScopedSessionDeniesNonEnrollment(t *testing.T) {
 		t.Skip("no scoped-session cookie set — scoped sessions not wired on this stack; skipping")
 	}
 
+	// Enrollment is the one operation the recovery-scoped session must permit.
+	enrollResp, err := recoverClient.Post(mgmtBaseURL()+registerBeginPath, "application/json", nil)
+	if err != nil {
+		t.Fatalf("register/begin with recovery session: %v", err)
+	}
+	defer func() { _ = enrollResp.Body.Close() }()
+	if enrollResp.StatusCode != http.StatusOK {
+		raw, readErr := io.ReadAll(enrollResp.Body)
+		if readErr != nil {
+			t.Fatalf("read register/begin response: %v", readErr)
+		}
+		t.Errorf("recovery-scoped session register/begin = %d, want 200\n%s", enrollResp.StatusCode, raw)
+	}
+
 	// recoverClient now carries ONLY the scoped recovery cookie. A
 	// non-enrollment authenticated surface must NOT be authorized by it:
 	// GET /recovery/factors is gated on real authentication, so the scoped
@@ -383,5 +398,47 @@ func TestRecoveryScopedSessionDeniesNonEnrollment(t *testing.T) {
 		if factorsResp.StatusCode >= 200 && factorsResp.StatusCode < 300 {
 			t.Errorf("scoped recovery session got 2xx (%d) on a non-enrollment surface — scope too broad", factorsResp.StatusCode)
 		}
+	}
+}
+
+// TestMFAStepUpIsBoundToBrowserSession exercises the cross-session security
+// property at the HTTP boundary: completing MFA in one cookie jar must not
+// authorize an independent browser session for a sensitive management route.
+func TestMFAStepUpIsBoundToBrowserSession(t *testing.T) {
+	verifiedClient := jarClient(t)
+	_, _ = enroll(t, verifiedClient)
+	siblingClient := jarClient(t)
+	_, _ = enroll(t, siblingClient)
+
+	req, err := http.NewRequest(http.MethodPost, mgmtBaseURL()+mfaVerifyPath, strings.NewReader(`{"code":"123456"}`))
+	if err != nil {
+		t.Fatalf("build MFA verify request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := verifiedClient.Do(req)
+	if err != nil {
+		t.Skipf("POST /mfa/verify unreachable: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusBadRequest {
+		t.Skipf("MFA factor/session wiring unavailable (status %d)", resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Skipf("test TOTP is not configured on this stack (status %d)", resp.StatusCode)
+	}
+
+	// The independent session must still be challenged. The
+	// factors route is a representative sensitive management surface.
+	factorsReq, err := http.NewRequest(http.MethodGet, mgmtBaseURL()+recoveryFactorsPath, nil)
+	if err != nil {
+		t.Fatalf("build sensitive request: %v", err)
+	}
+	factorsResp, err := siblingClient.Do(factorsReq)
+	if err != nil {
+		t.Skipf("sensitive route unreachable: %v", err)
+	}
+	defer func() { _ = factorsResp.Body.Close() }()
+	if factorsResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("sibling session status = %d, want 403 step_up_required", factorsResp.StatusCode)
 	}
 }

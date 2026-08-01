@@ -20,8 +20,9 @@
 //	RELAY_DKIM_SELECTOR      — DKIM selector for ARC sealing (optional).
 //	RELAY_DKIM_PRIVATE_KEY   — PEM-encoded RSA private key for ARC sealing
 //	                           (optional; ARC sealing is skipped when unset).
-//	RELAY_ENFORCE_AUTH       — "true" to reject mail that fails SPF/DKIM/DMARC;
-//	                           otherwise results are evaluated but only logged.
+//	RELAY_ENFORCE_AUTH       — must be "true" outside explicit development;
+//	                           development may set false for monitoring only.
+//	HARBOR_DEV_MODE          — explicitly enables development/test scaffolds.
 //	DATABASE_URL             — regional Postgres DSN (REQUIRED: the mapping
 //	                           lookup lives here).
 //	HARBOR_KMS_SECRET        — regional KEK sealing per-user DEKs (REQUIRED).
@@ -145,7 +146,10 @@ func run(logger *slog.Logger) error {
 		mappingResolver = resolver
 	}
 
-	enforceAuth, err := parseEnforceAuth(os.Getenv("RELAY_ENFORCE_AUTH"))
+	enforceAuth, err := resolveRelayAuthEnforcement(
+		envBool("HARBOR_DEV_MODE"),
+		os.Getenv("RELAY_ENFORCE_AUTH"),
+	)
 	if err != nil {
 		return err
 	}
@@ -266,5 +270,29 @@ func parseEnforceAuth(raw string) (bool, error) {
 		return false, nil
 	default:
 		return false, fmt.Errorf("invalid RELAY_ENFORCE_AUTH %q: use true/false (also accepted: yes/no, on/off, 1/0)", raw)
+	}
+}
+
+// resolveRelayAuthEnforcement keeps monitoring-only authentication behind the
+// explicit development/test mode. Production must opt in to enforcement so a
+// missing or disabled security control stops startup instead of accepting mail.
+func resolveRelayAuthEnforcement(devMode bool, raw string) (bool, error) {
+	enforce, err := parseEnforceAuth(raw)
+	if err != nil {
+		return false, err
+	}
+	if !devMode && !enforce {
+		return false, errors.New("RELAY_ENFORCE_AUTH must be true outside HARBOR_DEV_MODE")
+	}
+	return enforce, nil
+}
+
+// envBool reports whether key is explicitly set to a truthy value.
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
 }
