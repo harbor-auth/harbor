@@ -1,7 +1,23 @@
-# Add failing harbor-hot production graph tests
+# Security remediation: all non-KMS findings
+
+## Task 1: failing harbor-hot production graph tests
 
 1. Capture the production startup contract for PostgreSQL, Redis, external KMS, and every durable OIDC dependency.
 2. Add a live-graph source guard proving production assembly cannot instantiate demo, placeholder, local-crypto, in-memory, stub, or no-op implementations.
 3. Add a signing bootstrap regression test rejecting a local key provider in production.
 4. Run the focused package test and confirm the new tests fail for the intended missing production wiring.
 5. Commit, rebase on the shared branch, and push the red-test task for the implementation task to satisfy.
+
+## Task 18: session-bound MFA and lockout tests
+
+1. Add handler tests that require MFA identity and the step-up stamp to be tied
+   to the authenticated BFF session, with missing session state failing closed.
+2. Extend step-up gate coverage for session isolation and store outages.
+3. Add shared-Redis tests for per-user, per-session, and per-IP limits across
+   limiter instances, including outage behavior.
+4. Add an end-to-end assertion that MFA step-up applies only to the browser
+   session that completed verification.
+5. Run the focused tests and record the expected pre-implementation failure.
+
+The Task 18 pre-work pull/rebase was attempted, but the assigned shared branch
+did not yet exist on `origin`; the required pre-push rebase incorporated Task 1.

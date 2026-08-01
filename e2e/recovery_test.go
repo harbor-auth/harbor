@@ -53,6 +53,7 @@ const (
 	// a successful POST /recovery/complete. It must ONLY permit enrolling a fresh
 	// passkey until recovery_required is cleared.
 	recoveryScopedSessionCookie = "harbor_recovery_session"
+	mfaVerifyPath               = "/mfa/verify"
 )
 
 // generateRecoveryCodes calls POST /recovery/codes and returns the plaintext
@@ -383,5 +384,47 @@ func TestRecoveryScopedSessionDeniesNonEnrollment(t *testing.T) {
 		if factorsResp.StatusCode >= 200 && factorsResp.StatusCode < 300 {
 			t.Errorf("scoped recovery session got 2xx (%d) on a non-enrollment surface — scope too broad", factorsResp.StatusCode)
 		}
+	}
+}
+
+// TestMFAStepUpIsBoundToBrowserSession exercises the cross-session security
+// property at the HTTP boundary: completing MFA in one cookie jar must not
+// authorize an independent browser session for a sensitive management route.
+func TestMFAStepUpIsBoundToBrowserSession(t *testing.T) {
+	verifiedClient := jarClient(t)
+	_, _ = enroll(t, verifiedClient)
+	siblingClient := jarClient(t)
+	_, _ = enroll(t, siblingClient)
+
+	req, err := http.NewRequest(http.MethodPost, mgmtBaseURL()+mfaVerifyPath, strings.NewReader(`{"code":"123456"}`))
+	if err != nil {
+		t.Fatalf("build MFA verify request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := verifiedClient.Do(req)
+	if err != nil {
+		t.Skipf("POST /mfa/verify unreachable: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusBadRequest {
+		t.Skipf("MFA factor/session wiring unavailable (status %d)", resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Skipf("test TOTP is not configured on this stack (status %d)", resp.StatusCode)
+	}
+
+	// The independent session must still be challenged. The
+	// factors route is a representative sensitive management surface.
+	factorsReq, err := http.NewRequest(http.MethodGet, mgmtBaseURL()+recoveryFactorsPath, nil)
+	if err != nil {
+		t.Fatalf("build sensitive request: %v", err)
+	}
+	factorsResp, err := siblingClient.Do(factorsReq)
+	if err != nil {
+		t.Skipf("sensitive route unreachable: %v", err)
+	}
+	defer func() { _ = factorsResp.Body.Close() }()
+	if factorsResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("sibling session status = %d, want 403 step_up_required", factorsResp.StatusCode)
 	}
 }
