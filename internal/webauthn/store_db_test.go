@@ -71,7 +71,7 @@ func (f *fakeStoreQuerier) GetCredentialByWebAuthnCredID(_ context.Context, cred
 	return db.Credential{}, errors.New("not found")
 }
 
-func (f *fakeStoreQuerier) UpdateCredentialSignCount(_ context.Context, arg db.UpdateCredentialSignCountParams) error {
+func (f *fakeStoreQuerier) UpdateCredentialSignCount(_ context.Context, arg db.UpdateCredentialSignCountParams) (int64, error) {
 	f.counterUpdateCalls++
 	if f.beforeCounterUpdate != nil {
 		hook := f.beforeCounterUpdate
@@ -80,15 +80,16 @@ func (f *fakeStoreQuerier) UpdateCredentialSignCount(_ context.Context, arg db.U
 	}
 	for i, c := range f.credentials {
 		if c.ID == arg.ID {
-			// Mirror the guarded SQL update: a stale writer affects zero rows but
-			// the current :exec sqlc method discards that result.
+			// Mirror the guarded SQL update: a stale writer affects zero rows and
+			// the :execrows sqlc method exposes that result to the store.
 			if c.SignCount < arg.SignCount {
 				f.credentials[i].SignCount = arg.SignCount
+				return 1, nil
 			}
-			return nil
+			return 0, nil
 		}
 	}
-	return errors.New("not found")
+	return 0, errors.New("not found")
 }
 
 func (f *fakeStoreQuerier) SetRecoveryComplete(_ context.Context, id pgtype.UUID) error {

@@ -163,7 +163,7 @@ func (q *Queries) ListCredentialsByUser(ctx context.Context, userID pgtype.UUID)
 	return items, nil
 }
 
-const updateCredentialSignCount = `-- name: UpdateCredentialSignCount :exec
+const updateCredentialSignCount = `-- name: UpdateCredentialSignCount :execrows
 UPDATE credentials
 SET sign_count = $2
 WHERE id = $1
@@ -180,7 +180,10 @@ type UpdateCredentialSignCountParams struct {
 // cloned authenticator (DESIGN §3.1). The `sign_count < $2` guard makes the
 // update strictly increasing: an equal or regressed counter is a clone signal
 // and is a no-op here (the caller treats zero rows affected as a failure).
-func (q *Queries) UpdateCredentialSignCount(ctx context.Context, arg UpdateCredentialSignCountParams) error {
-	_, err := q.db.Exec(ctx, updateCredentialSignCount, arg.ID, arg.SignCount)
-	return err
+func (q *Queries) UpdateCredentialSignCount(ctx context.Context, arg UpdateCredentialSignCountParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateCredentialSignCount, arg.ID, arg.SignCount)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

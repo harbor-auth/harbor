@@ -34,7 +34,7 @@ RETURNING *;
 -- cloned authenticator (DESIGN §3.1). The `sign_count < $2` guard makes the
 -- update strictly increasing: an equal or regressed counter is a clone signal
 -- and is a no-op here (the caller treats zero rows affected as a failure).
--- name: UpdateCredentialSignCount :exec
+-- name: UpdateCredentialSignCount :execrows
 UPDATE credentials
 SET sign_count = $2
 WHERE id = $1

@@ -42,6 +42,7 @@ did not yet exist on `origin`; the required pre-push rebase incorporated Task 1.
 1. Model the guarded credential counter update in the DB-store fake, including a hook that simulates another replica winning between the read and update.
 2. Add DB-store tests for stale concurrent updates, guarded no-ops, and authenticators that do not implement a signature counter (zero to zero).
 3. Run the focused WebAuthn tests and confirm the new security assertions fail for the expected reason, then commit, rebase, and push the test-only change.
+
 ## Task 10: multi-replica revocation lifecycle tests
 
 1. Inspect the revocation worker, durable outbox, revoked-JTI store/pub-sub, refresh reuse, and logout lifecycle seams.
@@ -50,3 +51,11 @@ did not yet exist on `origin`; the required pre-push rebase incorporated Task 1.
 4. Format, commit, rebase the shared branch if it exists, and push the test-only change.
 
 Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3bda2` did not exist when the task started, so the checkout was initially based on `origin/main` (`8f308f8`). The required pre-push rebase incorporated the other published test tasks.
+
+## Task 23: reject no-op and regressing WebAuthn counter updates
+
+1. Change the guarded sign-count query to expose its affected-row count and regenerate sqlc output.
+2. Treat a zero-row guarded update as a counter regression while preserving the valid zero-to-zero authenticator exception.
+3. Ensure the store regression sentinel is recognizable as the service clone signal and update narrow test fakes for the generated interface.
+4. Run focused WebAuthn tests, formatting, build/vet, the full Go suite, agent checks, and generation drift checks.
+5. Commit, rebase on the shared branch, push, store the result in Hippo, and complete the Weft task.

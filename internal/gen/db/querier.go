@@ -290,7 +290,7 @@ type Querier interface {
 	// cloned authenticator (DESIGN §3.1). The `sign_count < $2` guard makes the
 	// update strictly increasing: an equal or regressed counter is a clone signal
 	// and is a no-op here (the caller treats zero rows affected as a failure).
-	UpdateCredentialSignCount(ctx context.Context, arg UpdateCredentialSignCountParams) error
+	UpdateCredentialSignCount(ctx context.Context, arg UpdateCredentialSignCountParams) (int64, error)
 	// UpdateRegisteredClient updates a dynamically-registered client's metadata
 	// (RFC 7592 PUT). Only fields that can be updated post-registration are
 	// included; client_id, sector_id, and created_at are immutable.

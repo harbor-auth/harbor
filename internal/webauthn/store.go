@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -18,7 +19,7 @@ var (
 	// ErrSignCountRegression is returned when a credential update would move the
 	// signature counter backwards (or not forward) — a clone signal that must
 	// never be persisted (docs/DESIGN.md §3.1).
-	ErrSignCountRegression = errors.New("webauthn: signature counter regression")
+	ErrSignCountRegression = fmt.Errorf("%w: signature counter regression", ErrClonedAuthenticator)
 )
 
 // Store persists users and their passkey credentials. In production this is
