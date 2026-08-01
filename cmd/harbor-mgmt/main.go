@@ -216,7 +216,7 @@ func main() {
 	var sessionRevoker mgmtapi.SessionRevoker
 	if pool != nil {
 		q := db.New(pool)
-		consentStore = clients.NewDBConsentStore(q)
+		consentStore = clients.NewDBGrantStore(q)
 		sessionRevoker = clients.NewDBSessionStore(q)
 	}
 
@@ -337,7 +337,7 @@ func main() {
 	var dashRelayStore bff.DashboardRelayStore
 	if pool != nil {
 		q := db.New(pool)
-		dashConsentStore = clients.NewDBConsentStore(q)
+		dashConsentStore = clients.NewDBGrantStore(q)
 		dashSessionStore = clients.NewDBSessionStore(q)
 		dashCredStore = clients.NewDBDashboardCredentialStore(q)
 		if rawRelayStore != nil {

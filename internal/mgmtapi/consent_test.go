@@ -14,31 +14,31 @@ import (
 
 // fakeConsentStore implements ConsentStore for testing.
 type fakeConsentStore struct {
-	grants    []oidc.ConsentGrant
+	grants    []oidc.Grant
 	listErr   error
 	getErr    error
 	revokeErr error
 	revokedID string // records the ID passed to the last successful Revoke call
 }
 
-func (f *fakeConsentStore) Get(_ context.Context, userID, clientID string) (oidc.ConsentGrant, bool, error) {
+func (f *fakeConsentStore) FindGrant(_ context.Context, userID, clientID string) (oidc.Grant, bool, error) {
 	if f.getErr != nil {
-		return oidc.ConsentGrant{}, false, f.getErr
+		return oidc.Grant{}, false, f.getErr
 	}
 	for _, g := range f.grants {
 		if g.UserID == userID && g.ClientID == clientID && g.RevokedAt == nil {
 			return g, true, nil
 		}
 	}
-	return oidc.ConsentGrant{}, false, nil
+	return oidc.Grant{}, false, nil
 }
 
-func (f *fakeConsentStore) List(_ context.Context, userID string) ([]oidc.ConsentGrant, error) {
+func (f *fakeConsentStore) ListGrantsByUser(_ context.Context, userID string) ([]oidc.Grant, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
 	// Filter by userID to simulate real behavior
-	var result []oidc.ConsentGrant
+	var result []oidc.Grant
 	for _, g := range f.grants {
 		if g.UserID == userID {
 			result = append(result, g)
@@ -47,12 +47,12 @@ func (f *fakeConsentStore) List(_ context.Context, userID string) ([]oidc.Consen
 	return result, nil
 }
 
-func (f *fakeConsentStore) Revoke(_ context.Context, id string) error {
+func (f *fakeConsentStore) RevokeGrantAndSessions(_ context.Context, id string) (bool, error) {
 	if f.revokeErr != nil {
-		return f.revokeErr
+		return false, f.revokeErr
 	}
 	f.revokedID = id
-	return nil
+	return true, nil
 }
 
 // fakeSessionRevoker implements SessionRevoker for testing.
@@ -73,20 +73,20 @@ func (f *fakeSessionRevoker) RevokeSessionsByUserClient(_ context.Context, userI
 func TestGetConsentGrants_Success(t *testing.T) {
 	grantedAt := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
 	store := &fakeConsentStore{
-		grants: []oidc.ConsentGrant{
+		grants: []oidc.Grant{
 			{
 				ID:        "grant-001",
 				UserID:    "user-123",
 				ClientID:  "client-a",
 				Scopes:    []string{"openid", "profile"},
-				GrantedAt: grantedAt,
+				CreatedAt: grantedAt,
 			},
 			{
 				ID:        "grant-002",
 				UserID:    "user-123",
 				ClientID:  "client-b",
 				Scopes:    []string{"openid", "email"},
-				GrantedAt: grantedAt.Add(time.Hour),
+				CreatedAt: grantedAt.Add(time.Hour),
 			},
 		},
 	}
@@ -222,20 +222,20 @@ func TestGetConsentGrants_StoreError(t *testing.T) {
 func TestGetConsentGrants_OnlyReturnsOwnGrants(t *testing.T) {
 	grantedAt := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
 	store := &fakeConsentStore{
-		grants: []oidc.ConsentGrant{
+		grants: []oidc.Grant{
 			{
 				ID:        "grant-001",
 				UserID:    "user-123",
 				ClientID:  "client-a",
 				Scopes:    []string{"openid"},
-				GrantedAt: grantedAt,
+				CreatedAt: grantedAt,
 			},
 			{
 				ID:        "grant-002",
 				UserID:    "other-user", // Different user
 				ClientID:  "client-b",
 				Scopes:    []string{"openid"},
-				GrantedAt: grantedAt,
+				CreatedAt: grantedAt,
 			},
 		},
 	}
@@ -270,13 +270,13 @@ func TestGetConsentGrants_OnlyReturnsOwnGrants(t *testing.T) {
 func TestDeleteConsentGrant_Success(t *testing.T) {
 	grantedAt := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
 	store := &fakeConsentStore{
-		grants: []oidc.ConsentGrant{
+		grants: []oidc.Grant{
 			{
 				ID:        "grant-001",
 				UserID:    "user-123",
 				ClientID:  "client-a",
 				Scopes:    []string{"openid"},
-				GrantedAt: grantedAt,
+				CreatedAt: grantedAt,
 			},
 		},
 	}
@@ -297,18 +297,15 @@ func TestDeleteConsentGrant_Success(t *testing.T) {
 	if store.revokedID != "grant-001" {
 		t.Errorf("revoked grant ID = %q, want %q", store.revokedID, "grant-001")
 	}
-	// Cascade must fire with the correct (user, client) pair.
-	if !revoker.called {
-		t.Error("session revoker was not called")
-	}
-	if revoker.calledUserID != "user-123" || revoker.calledClient != "client-a" {
-		t.Errorf("cascade called with (%q, %q), want (user-123, client-a)",
-			revoker.calledUserID, revoker.calledClient)
+	// The legacy two-step revoker must not run; the canonical store mutation
+	// includes bound sessions atomically.
+	if revoker.called {
+		t.Fatal("separate session revoker called during atomic disconnect")
 	}
 }
 
 func TestDeleteConsentGrant_Idempotent_NoGrant(t *testing.T) {
-	// No matching grant exists; deletion should still succeed and cascade.
+	// No matching canonical grant exists; deletion remains idempotent.
 	store := &fakeConsentStore{grants: nil}
 	revoker := &fakeSessionRevoker{}
 
@@ -327,22 +324,21 @@ func TestDeleteConsentGrant_Idempotent_NoGrant(t *testing.T) {
 	if store.revokedID != "" {
 		t.Errorf("revoke should not be called when no grant exists, got ID %q", store.revokedID)
 	}
-	// Cascade still runs so any lingering sessions are torn down.
-	if !revoker.called {
-		t.Error("session revoker should still be called for idempotent cleanup")
+	if revoker.called {
+		t.Fatal("separate session revoker called for missing canonical grant")
 	}
 }
 
 func TestDeleteConsentGrant_OnlyOwnGrant(t *testing.T) {
 	grantedAt := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
 	store := &fakeConsentStore{
-		grants: []oidc.ConsentGrant{
+		grants: []oidc.Grant{
 			{
 				ID:        "grant-other",
 				UserID:    "other-user",
 				ClientID:  "client-a",
 				Scopes:    []string{"openid"},
-				GrantedAt: grantedAt,
+				CreatedAt: grantedAt,
 			},
 		},
 	}
@@ -421,13 +417,13 @@ func TestDeleteConsentGrant_GetError(t *testing.T) {
 func TestDeleteConsentGrant_RevokeError(t *testing.T) {
 	grantedAt := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
 	store := &fakeConsentStore{
-		grants: []oidc.ConsentGrant{
+		grants: []oidc.Grant{
 			{
 				ID:        "grant-001",
 				UserID:    "user-123",
 				ClientID:  "client-a",
 				Scopes:    []string{"openid"},
-				GrantedAt: grantedAt,
+				CreatedAt: grantedAt,
 			},
 		},
 		revokeErr: errors.New("revoke failed"),
@@ -450,17 +446,18 @@ func TestDeleteConsentGrant_RevokeError(t *testing.T) {
 func TestDeleteConsentGrant_CascadeError(t *testing.T) {
 	grantedAt := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
 	store := &fakeConsentStore{
-		grants: []oidc.ConsentGrant{
+		grants: []oidc.Grant{
 			{
 				ID:        "grant-001",
 				UserID:    "user-123",
 				ClientID:  "client-a",
 				Scopes:    []string{"openid"},
-				GrantedAt: grantedAt,
+				CreatedAt: grantedAt,
 			},
 		},
 	}
-	revoker := &fakeSessionRevoker{err: errors.New("cascade failed")}
+	store.revokeErr = errors.New("atomic disconnect failed")
+	revoker := &fakeSessionRevoker{}
 
 	srv := New(nil, nil).WithConsentStore(store).WithSessionRevoker(revoker).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
@@ -486,20 +483,20 @@ func TestDeleteConsentGrant_CascadeError(t *testing.T) {
 func TestSecurity_CrossUserGrantLeakage_List(t *testing.T) {
 	grantedAt := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
 	store := &fakeConsentStore{
-		grants: []oidc.ConsentGrant{
+		grants: []oidc.Grant{
 			{
 				ID:        "grant-userA",
 				UserID:    "user-A",
 				ClientID:  "client-shared",
 				Scopes:    []string{"openid", "profile"},
-				GrantedAt: grantedAt,
+				CreatedAt: grantedAt,
 			},
 			{
 				ID:        "grant-userB",
 				UserID:    "user-B",
 				ClientID:  "client-shared",
 				Scopes:    []string{"openid", "email"},
-				GrantedAt: grantedAt,
+				CreatedAt: grantedAt,
 			},
 		},
 	}
@@ -537,13 +534,13 @@ func TestSecurity_CrossUserGrantLeakage_List(t *testing.T) {
 func TestSecurity_CrossUserGrantLeakage_Revoke(t *testing.T) {
 	grantedAt := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
 	store := &fakeConsentStore{
-		grants: []oidc.ConsentGrant{
+		grants: []oidc.Grant{
 			{
 				ID:        "grant-userB",
 				UserID:    "user-B",
 				ClientID:  "client-shared",
 				Scopes:    []string{"openid"},
-				GrantedAt: grantedAt,
+				CreatedAt: grantedAt,
 			},
 		},
 	}

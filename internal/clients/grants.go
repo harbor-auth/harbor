@@ -22,6 +22,8 @@ type grantQuerier interface {
 	CreateGrant(ctx context.Context, arg db.CreateGrantParams) (db.Grant, error)
 	RevokeGrant(ctx context.Context, id pgtype.UUID) error
 	ListGrantsByUser(ctx context.Context, userID pgtype.UUID) ([]db.Grant, error)
+	UpdateGrantScopes(ctx context.Context, arg db.UpdateGrantScopesParams) (db.Grant, error)
+	RevokeGrantAndSessions(ctx context.Context, id pgtype.UUID) (db.RevokeGrantAndSessionsRow, error)
 }
 
 // DBGrantStore is a sqlc-backed oidc.GrantStore. It persists consent grants in
@@ -111,6 +113,32 @@ func (s *DBGrantStore) RevokeGrant(ctx context.Context, id string) error {
 		return fmt.Errorf("clients: RevokeGrant: %w", err)
 	}
 	return nil
+}
+
+// UpdateGrantScopes updates an active canonical grant without changing its ID.
+func (s *DBGrantStore) UpdateGrantScopes(ctx context.Context, userID, clientID string, scopes []string) (oidc.Grant, error) {
+	uUID, err := parseUUID(userID)
+	if err != nil {
+		return oidc.Grant{}, fmt.Errorf("clients: UpdateGrantScopes: invalid userID: %w", err)
+	}
+	row, err := s.q.UpdateGrantScopes(ctx, db.UpdateGrantScopesParams{UserID: uUID, ClientID: clientID, Scopes: scopes})
+	if err != nil {
+		return oidc.Grant{}, fmt.Errorf("clients: UpdateGrantScopes: %w", err)
+	}
+	return rowToGrant(row), nil
+}
+
+// RevokeGrantAndSessions atomically revokes a grant and its bound sessions.
+func (s *DBGrantStore) RevokeGrantAndSessions(ctx context.Context, id string) (bool, error) {
+	gUID, err := parseUUID(id)
+	if err != nil {
+		return false, fmt.Errorf("clients: RevokeGrantAndSessions: invalid id: %w", err)
+	}
+	result, err := s.q.RevokeGrantAndSessions(ctx, gUID)
+	if err != nil {
+		return false, fmt.Errorf("clients: RevokeGrantAndSessions: %w", err)
+	}
+	return result.GrantRevoked, nil
 }
 
 // ListGrantsByUser implements oidc.GrantStore.

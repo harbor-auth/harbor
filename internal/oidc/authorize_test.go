@@ -122,6 +122,24 @@ func testServiceWithConsent(consents ConsentStore) *Service {
 	})
 }
 
+func TestConsentRequiredReadsCanonicalGrant(t *testing.T) {
+	const userID = "00000000-0000-0000-0000-000000000456"
+	legacy := NewInMemoryConsentStore()
+	svc := testServiceWithConsent(legacy)
+	canonical := NewInMemoryGrantStore()
+	if _, err := canonical.CreateGrant(context.Background(), NewGrant{
+		Region: "eu", UserID: userID, ClientID: "demo-client", PairwiseSub: "ppid", Scopes: []string{"openid"},
+	}); err != nil {
+		t.Fatalf("CreateGrant: %v", err)
+	}
+	svc.grants = canonical
+
+	required, aerr := svc.ConsentRequired(context.Background(), userID, "demo-client", "openid", "")
+	if aerr != nil || required {
+		t.Fatalf("ConsentRequired = (%v, %v), want canonical covering grant", required, aerr)
+	}
+}
+
 // userIDSessionResolver returns a fixed subject and userID for consent testing.
 type userIDSessionResolver struct {
 	subject string

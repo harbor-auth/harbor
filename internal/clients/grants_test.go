@@ -73,6 +73,31 @@ func (f *fakeGrantQuerier) RevokeGrant(_ context.Context, id pgtype.UUID) error 
 	return nil
 }
 
+func (f *fakeGrantQuerier) UpdateGrantScopes(_ context.Context, arg db.UpdateGrantScopesParams) (db.Grant, error) {
+	if f.dbErr != nil {
+		return db.Grant{}, f.dbErr
+	}
+	for _, g := range f.rows {
+		if g.UserID == arg.UserID && g.ClientID == arg.ClientID && !g.RevokedAt.Valid {
+			g.Scopes = append([]string(nil), arg.Scopes...)
+			return *g, nil
+		}
+	}
+	return db.Grant{}, pgx.ErrNoRows
+}
+
+func (f *fakeGrantQuerier) RevokeGrantAndSessions(_ context.Context, id pgtype.UUID) (db.RevokeGrantAndSessionsRow, error) {
+	if f.dbErr != nil {
+		return db.RevokeGrantAndSessionsRow{}, f.dbErr
+	}
+	row, ok := f.rows[uuidToString(id)]
+	if !ok || row.RevokedAt.Valid {
+		return db.RevokeGrantAndSessionsRow{}, nil
+	}
+	row.RevokedAt = pgtype.Timestamptz{Time: time.Now(), Valid: true}
+	return db.RevokeGrantAndSessionsRow{GrantRevoked: true}, nil
+}
+
 func (f *fakeGrantQuerier) ListGrantsByUser(_ context.Context, userID pgtype.UUID) ([]db.Grant, error) {
 	if f.dbErr != nil {
 		return nil, f.dbErr
@@ -176,6 +201,41 @@ func TestDBGrantStoreCreateAndFind(t *testing.T) {
 	}
 	if g.PairwiseSub != "ppid-xyz" {
 		t.Errorf("PairwiseSub: got %q", g.PairwiseSub)
+	}
+}
+
+func TestDBGrantStoreUpdatesScopesWithoutReplacingGrant(t *testing.T) {
+	q := newFakeGrantQuerier()
+	s := NewDBGrantStore(q)
+	ctx := context.Background()
+	created, err := s.CreateGrant(ctx, oidc.NewGrant{Region: "eu-1", UserID: testUserID, ClientID: "rp-scope", PairwiseSub: "ppid", Scopes: []string{"openid"}})
+	if err != nil {
+		t.Fatalf("CreateGrant: %v", err)
+	}
+	updated, err := s.UpdateGrantScopes(ctx, testUserID, "rp-scope", []string{"openid", "profile"})
+	if err != nil {
+		t.Fatalf("UpdateGrantScopes: %v", err)
+	}
+	if updated.ID != created.ID {
+		t.Fatalf("grant ID changed: got %q want %q", updated.ID, created.ID)
+	}
+}
+
+func TestDBGrantStoreDisconnectIsSingleWinner(t *testing.T) {
+	q := newFakeGrantQuerier()
+	s := NewDBGrantStore(q)
+	ctx := context.Background()
+	created, err := s.CreateGrant(ctx, oidc.NewGrant{Region: "eu-1", UserID: testUserID, ClientID: "rp-race", PairwiseSub: "ppid", Scopes: []string{"openid"}})
+	if err != nil {
+		t.Fatalf("CreateGrant: %v", err)
+	}
+	first, err := s.RevokeGrantAndSessions(ctx, created.ID)
+	if err != nil || !first {
+		t.Fatalf("first disconnect: won=%v err=%v", first, err)
+	}
+	second, err := s.RevokeGrantAndSessions(ctx, created.ID)
+	if err != nil || second {
+		t.Fatalf("racing disconnect: won=%v err=%v, want idempotent loss", second, err)
 	}
 }
 

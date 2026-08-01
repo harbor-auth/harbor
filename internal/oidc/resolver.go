@@ -156,21 +156,13 @@ func (r *PPIDSessionResolver) Resolve(ctx context.Context, client Client, scope 
 		// (e.g. offline_access on re-consent), upgrade the grant to the union.
 		// The PairwiseSub is preserved — PPID must be stable across
 		// re-authorizations for the same (user, client) pair (§3.2.3).
-		// We revoke-then-create rather than update-in-place because GrantStore
-		// has no UpdateScopes method, and the DB has no ON CONFLICT clause on
-		// (user_id, client_id) — an explicit revoke keeps byPair/DB consistent.
 		requested := strings.Fields(scope)
 		if hasNewScopes(requested, grant.Scopes) {
-			if err := r.grants.RevokeGrant(ctx, grant.ID); err != nil {
-				return "", "", false, err
+			updater, ok := r.grants.(GrantScopeUpdater)
+			if !ok {
+				return "", "", false, fmt.Errorf("session: grant store cannot update canonical scopes")
 			}
-			if _, err := r.grants.CreateGrant(ctx, NewGrant{
-				Region:      grant.Region,
-				UserID:      userID,
-				ClientID:    client.ID,
-				PairwiseSub: grant.PairwiseSub,
-				Scopes:      unionScopes(grant.Scopes, requested),
-			}); err != nil {
+			if _, err := updater.UpdateGrantScopes(ctx, userID, client.ID, unionScopes(grant.Scopes, requested)); err != nil {
 				return "", "", false, err
 			}
 		}

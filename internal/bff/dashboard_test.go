@@ -17,22 +17,18 @@ import (
 
 type fakeDashConsentStore struct {
 	listCalledWith   []string
-	grants           map[string][]oidc.ConsentGrant
+	grants           map[string][]oidc.Grant
 	revokeCalledWith []string
 }
 
-func (f *fakeDashConsentStore) List(_ context.Context, userID string) ([]oidc.ConsentGrant, error) {
+func (f *fakeDashConsentStore) ListGrantsByUser(_ context.Context, userID string) ([]oidc.Grant, error) {
 	f.listCalledWith = append(f.listCalledWith, userID)
 	return f.grants[userID], nil
 }
 
-func (f *fakeDashConsentStore) Get(_ context.Context, _, _ string) (oidc.ConsentGrant, bool, error) {
-	return oidc.ConsentGrant{}, false, nil
-}
-
-func (f *fakeDashConsentStore) Revoke(_ context.Context, id string) error {
+func (f *fakeDashConsentStore) RevokeGrantAndSessions(_ context.Context, id string) (bool, error) {
 	f.revokeCalledWith = append(f.revokeCalledWith, id)
-	return nil
+	return true, nil
 }
 
 type fakeDashSessionStore struct {
@@ -94,9 +90,9 @@ func authedCtxRequest(method, path, userID string) *http.Request {
 // contains user A's data but never user B's data.
 func TestDashboard_OwnDataOnly(t *testing.T) {
 	consentStore := &fakeDashConsentStore{
-		grants: map[string][]oidc.ConsentGrant{
-			"user-a": {{ID: "grant-a", UserID: "user-a", ClientID: "app-a", GrantedAt: time.Now()}},
-			"user-b": {{ID: "grant-b", UserID: "user-b", ClientID: "app-b", GrantedAt: time.Now()}},
+		grants: map[string][]oidc.Grant{
+			"user-a": {{ID: "grant-a", UserID: "user-a", ClientID: "app-a", CreatedAt: time.Now()}},
+			"user-b": {{ID: "grant-b", UserID: "user-b", ClientID: "app-b", CreatedAt: time.Now()}},
 		},
 	}
 	sessionStore := &fakeDashSessionStore{sessions: map[string][]oidc.RefreshSession{}}
@@ -127,15 +123,14 @@ func TestDashboard_OwnDataOnly(t *testing.T) {
 	}
 }
 
-// TestDashboard_RevokeCascade verifies that PostRevokeApp calls both
-// DashboardConsentStore.Revoke and DashboardSessionStore.RevokeSessionsByUserClient
-// for the correct (user, client) pair — the cascade must not be skipped.
+// TestDashboard_RevokeCascade verifies that PostRevokeApp uses the canonical
+// store's atomic grant/session disconnect operation.
 func TestDashboard_RevokeCascade(t *testing.T) {
 	const grantID = "grant-xyz"
 	const clientID = "rp-xyz"
 
 	consentStore := &fakeDashConsentStore{
-		grants: map[string][]oidc.ConsentGrant{
+		grants: map[string][]oidc.Grant{
 			"user-a": {{ID: grantID, UserID: "user-a", ClientID: clientID}},
 		},
 	}
@@ -159,16 +154,9 @@ func TestDashboard_RevokeCascade(t *testing.T) {
 		t.Errorf("Revoke called with %v, want [%s]", consentStore.revokeCalledWith, grantID)
 	}
 
-	// Session cascade fired exactly once with the correct (user, client).
-	if len(sessionStore.revokeUserClientCalls) != 1 {
-		t.Fatalf("RevokeSessionsByUserClient called %d times, want 1", len(sessionStore.revokeUserClientCalls))
-	}
-	call := sessionStore.revokeUserClientCalls[0]
-	if call.userID != "user-a" {
-		t.Errorf("cascade userID = %q, want user-a", call.userID)
-	}
-	if call.clientID != clientID {
-		t.Errorf("cascade clientID = %q, want %s", call.clientID, clientID)
+	// A separate session mutation would reopen the disconnect race.
+	if len(sessionStore.revokeUserClientCalls) != 0 {
+		t.Fatalf("separate RevokeSessionsByUserClient calls = %d, want 0", len(sessionStore.revokeUserClientCalls))
 	}
 }
 
@@ -176,7 +164,7 @@ func TestDashboard_RevokeCascade(t *testing.T) {
 // and renders the "relay not available" view rather than a 503 error when the
 // relay store is nil (soft dependency — INVARIANT §4).
 func TestDashboard_RelayAbsentGraceful(t *testing.T) {
-	consentStore := &fakeDashConsentStore{grants: map[string][]oidc.ConsentGrant{}}
+	consentStore := &fakeDashConsentStore{grants: map[string][]oidc.Grant{}}
 	sessionStore := &fakeDashSessionStore{sessions: map[string][]oidc.RefreshSession{}}
 	credStore := &fakeDashCredStore{}
 	// relay = nil → graceful absence.
@@ -202,13 +190,13 @@ func TestDashboard_RelayAbsentGraceful(t *testing.T) {
 func TestDashboard_XSSEscaping(t *testing.T) {
 	const xssPayload = "<script>alert('xss')</script>"
 	consentStore := &fakeDashConsentStore{
-		grants: map[string][]oidc.ConsentGrant{
+		grants: map[string][]oidc.Grant{
 			"user-xss": {
 				{
 					ID:        "grant-xss",
 					UserID:    "user-xss",
 					ClientID:  xssPayload,
-					GrantedAt: time.Now(),
+					CreatedAt: time.Now(),
 				},
 			},
 		},

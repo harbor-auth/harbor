@@ -61,6 +61,20 @@ type GrantStore interface {
 	ListGrantsByUser(ctx context.Context, userID string) ([]Grant, error)
 }
 
+// GrantScopeUpdater updates an already-established canonical grant in place.
+// Scope approval must not revoke and recreate the grant because refresh
+// sessions are bound to its stable ID.
+type GrantScopeUpdater interface {
+	UpdateGrantScopes(ctx context.Context, userID, clientID string, scopes []string) (Grant, error)
+}
+
+// GrantDisconnector atomically revokes a canonical grant and every refresh
+// session bound to it. The boolean reports whether an active grant was won by
+// this caller, making concurrent disconnect requests idempotent.
+type GrantDisconnector interface {
+	RevokeGrantAndSessions(ctx context.Context, id string) (bool, error)
+}
+
 // noopGrantStore is a GrantStore that records nothing. Used as the default in
 // ServiceConfig when no persistent store is wired (e.g. dev/test scaffolds that
 // auto-approve consent without persisting it).
@@ -187,6 +201,35 @@ func (s *InMemoryGrantStore) RevokeGrant(_ context.Context, id string) error {
 	now := time.Now()
 	g.RevokedAt = &now
 	return nil
+}
+
+// UpdateGrantScopes implements GrantScopeUpdater.
+func (s *InMemoryGrantStore) UpdateGrantScopes(_ context.Context, userID, clientID string, scopes []string) (Grant, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g, ok := s.byPair[userID+":"+clientID]
+	if !ok || g.RevokedAt != nil {
+		return Grant{}, fmt.Errorf("oidc: active grant not found")
+	}
+	g.Scopes = append([]string(nil), scopes...)
+	out := *g
+	out.Scopes = append([]string(nil), g.Scopes...)
+	return out, nil
+}
+
+// RevokeGrantAndSessions implements GrantDisconnector. The in-memory grant
+// store has no independent session collection; InMemorySessionStore owns the
+// corresponding dev/test atomic implementation when assembled flows need it.
+func (s *InMemoryGrantStore) RevokeGrantAndSessions(_ context.Context, id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g, ok := s.byID[id]
+	if !ok || g.RevokedAt != nil {
+		return false, nil
+	}
+	now := time.Now()
+	g.RevokedAt = &now
+	return true, nil
 }
 
 // ListGrantsByUser implements GrantStore. Returns only active (non-revoked) grants.

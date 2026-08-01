@@ -269,7 +269,7 @@ func (s *Service) ValidateAuthorizeRequest(ctx context.Context, req AuthorizeReq
 
 // ConsentRequired applies OIDC prompt semantics for an authenticated user.
 func (s *Service) ConsentRequired(ctx context.Context, userID, clientID, scope, prompt string) (bool, *AuthorizeError) {
-	grant, found, err := s.consents.Get(ctx, userID, clientID)
+	grant, found, err := s.findConsentGrant(ctx, userID, clientID)
 	if err != nil {
 		return false, redirectErr(ErrCodeServerError, "could not check consent status")
 	}
@@ -291,7 +291,7 @@ func (s *Service) ConsentRequired(ctx context.Context, userID, clientID, scope, 
 // ApproveConsent persists the requested scope set only after the user has made
 // an explicit approval decision.
 func (s *Service) ApproveConsent(ctx context.Context, userID, clientID, scope string) *AuthorizeError {
-	existing, found, err := s.consents.Get(ctx, userID, clientID)
+	existing, found, err := s.findConsentGrant(ctx, userID, clientID)
 	if err != nil {
 		return redirectErr(ErrCodeServerError, "could not check consent status")
 	}
@@ -299,12 +299,42 @@ func (s *Service) ApproveConsent(ctx context.Context, userID, clientID, scope st
 	if found {
 		scopes = mergeScopes(existing.Scopes, scopes)
 	}
+	if _, canonical := s.grants.(noopGrantStore); !canonical {
+		// On first approval the resolver creates the canonical grant after PPID
+		// derivation. Existing grants are updated in place so session grant_ids
+		// remain stable across scope escalation.
+		if !found {
+			return nil
+		}
+		updater, ok := s.grants.(GrantScopeUpdater)
+		if !ok {
+			return redirectErr(ErrCodeServerError, "canonical grant store cannot update scopes")
+		}
+		if _, err := updater.UpdateGrantScopes(ctx, userID, clientID, scopes); err != nil {
+			return redirectErr(ErrCodeServerError, "could not persist consent")
+		}
+		return nil
+	}
 	if _, err := s.consents.Upsert(ctx, userID, clientID, scopes); err != nil {
 		s.logger.ErrorContext(ctx, "consent upsert failed",
 			slog.String("client_id", clientID), slog.Any("error", err))
 		return redirectErr(ErrCodeServerError, "could not persist consent")
 	}
 	return nil
+}
+
+// findConsentGrant makes the canonical grants ledger authoritative whenever a
+// real GrantStore is wired. The legacy ConsentStore fallback remains only for
+// isolated pre-ledger tests and dev scaffolds.
+func (s *Service) findConsentGrant(ctx context.Context, userID, clientID string) (ConsentGrant, bool, error) {
+	if _, noop := s.grants.(noopGrantStore); !noop {
+		grant, found, err := s.grants.FindGrant(ctx, userID, clientID)
+		if err != nil || !found {
+			return ConsentGrant{}, found, err
+		}
+		return ConsentGrant{ID: grant.ID, UserID: grant.UserID, ClientID: grant.ClientID, Scopes: grant.Scopes, GrantedAt: grant.CreatedAt, RevokedAt: grant.RevokedAt}, true, nil
+	}
+	return s.consents.Get(ctx, userID, clientID)
 }
 
 // AuthorizeWithUser issues a code for a pre-authenticated user (BFF flow).
@@ -399,7 +429,7 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (*Authori
 	// This runs AFTER authentication (userID is known) but BEFORE code issuance.
 	if userID != "" && s.enforceConsent {
 		requestedScopes := strings.Fields(validated.Scope)
-		existingGrant, found, err := s.consents.Get(ctx, userID, validated.Client.ID)
+		existingGrant, found, err := s.findConsentGrant(ctx, userID, validated.Client.ID)
 		if err != nil {
 			s.logger.ErrorContext(ctx, "consent lookup failed",
 				slog.String("client_id", validated.Client.ID),

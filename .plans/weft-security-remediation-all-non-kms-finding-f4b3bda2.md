@@ -84,3 +84,14 @@ Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3
 3. Atomically consume the pending session before applying a decision; persist consent only on approval.
 4. Keep prompt=none, first-consent, scope-escalation, denial, and replay behavior fail-closed.
 5. Run focused and repository checks, rebase, commit, and push.
+
+## Task 15: canonical grants across authorization and disconnect
+
+1. Add regression tests proving approved scope escalation updates the existing
+   canonical grant instead of revoking and recreating it.
+2. Expose canonical grant listing and an atomic grant-plus-session revocation
+   operation from both database and in-memory stores.
+3. Move management and dashboard connected-app reads and disconnect mutations
+   to the canonical grant contract, removing the two-step session cascade.
+4. Run focused race tests and the repository validation suite.
+5. Rebase the shared branch, commit, push, and report task completion.

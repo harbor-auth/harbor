@@ -23,13 +23,14 @@ type ConsentAuditRecorder interface {
 // oidc.ConsentStore. Depending on the interface keeps the HTTP layer
 // unit-testable with a fake.
 type ConsentStore interface {
-	// Get returns the active grant for a (userID, clientID) pair. found=false
+	// FindGrant returns the active grant for a (userID, clientID) pair. found=false
 	// means the user has no active grant for that client.
-	Get(ctx context.Context, userID, clientID string) (oidc.ConsentGrant, bool, error)
-	// List returns all active grants for a user (newest first).
-	List(ctx context.Context, userID string) ([]oidc.ConsentGrant, error)
-	// Revoke soft-deletes a grant by its UUID string ID (idempotent).
-	Revoke(ctx context.Context, id string) error
+	FindGrant(ctx context.Context, userID, clientID string) (oidc.Grant, bool, error)
+	// ListGrantsByUser returns all active grants for a user (newest first).
+	ListGrantsByUser(ctx context.Context, userID string) ([]oidc.Grant, error)
+	// RevokeGrantAndSessions atomically disconnects an app and reports whether
+	// this request won the active-grant race.
+	RevokeGrantAndSessions(ctx context.Context, id string) (bool, error)
 }
 
 // SessionRevoker cascades consent revocation to active refresh-token sessions.
@@ -73,7 +74,7 @@ func (s *Server) GetConsentGrants(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	grants, err := s.consents.List(r.Context(), userID)
+	grants, err := s.consents.ListGrantsByUser(r.Context(), userID)
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "mgmtapi: consent list failed",
 			"error", err)
@@ -90,7 +91,7 @@ func (s *Server) GetConsentGrants(w http.ResponseWriter, r *http.Request) {
 			ID:        g.ID,
 			ClientID:  g.ClientID,
 			Scopes:    g.Scopes,
-			GrantedAt: g.GrantedAt.Format(time.RFC3339),
+			GrantedAt: g.CreatedAt.Format(time.RFC3339),
 		}
 	}
 
@@ -130,7 +131,7 @@ func (s *Server) DeleteConsentGrant(w http.ResponseWriter, r *http.Request) {
 	// Look up the grant scoped to this user so we (a) confirm ownership and
 	// (b) obtain the grant ID needed to revoke. A missing grant is not an
 	// error — revocation is idempotent.
-	grant, found, err := s.consents.Get(r.Context(), userID, clientID)
+	grant, found, err := s.consents.FindGrant(r.Context(), userID, clientID)
 	if err != nil {
 		s.logger.ErrorContext(r.Context(), "mgmtapi: consent lookup failed",
 			"error", err)
@@ -140,7 +141,8 @@ func (s *Server) DeleteConsentGrant(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if found {
-		if err := s.consents.Revoke(r.Context(), grant.ID); err != nil {
+		revoked, err := s.consents.RevokeGrantAndSessions(r.Context(), grant.ID)
+		if err != nil {
 			s.logger.ErrorContext(r.Context(), "mgmtapi: consent revoke failed",
 				"error", err)
 			recordError(telemetry.EndpointConsent, "server_error")
@@ -151,23 +153,9 @@ func (s *Server) DeleteConsentGrant(w http.ResponseWriter, r *http.Request) {
 		// Best-effort audit emission: consent.revoked records the user
 		// disconnecting an RP. Emitted only when an active grant was found and
 		// revoked. RecordAsync is non-blocking and never fails the request.
-		if s.consentAudit != nil {
+		if revoked && s.consentAudit != nil {
 			cid := clientID
 			s.consentAudit.RecordAsync(r.Context(), userID, identity.EventConsentRevoked, &cid, nil)
-		}
-	}
-
-	// Cascade to active sessions for this (user, client) pair, reusing the
-	// existing revocation stack. Runs even when no grant existed so any lingering
-	// sessions are still torn down (idempotent). A nil revoker skips the cascade
-	// (dev-scaffold mode without a session store).
-	if s.sessionRevoker != nil {
-		if err := s.sessionRevoker.RevokeSessionsByUserClient(r.Context(), userID, clientID); err != nil {
-			s.logger.ErrorContext(r.Context(), "mgmtapi: session cascade revoke failed",
-				"error", err)
-			recordError(telemetry.EndpointConsent, "server_error")
-			s.writeError(w, http.StatusInternalServerError, "server_error", "failed to revoke consent grant")
-			return
 		}
 	}
 
