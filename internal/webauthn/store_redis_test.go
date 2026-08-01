@@ -71,8 +71,8 @@ func TestRedisSessionStore_CrossReplicaCeremony(t *testing.T) {
 	clientA := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	clientB := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() {
-		_ = clientA.Close()
-		_ = clientB.Close()
+		_ = clientA.Close() //nolint:errcheck // test cleanup
+		_ = clientB.Close() //nolint:errcheck // test cleanup
 	})
 	replicaA := NewRedisSessionStore(clientA, 5*time.Minute)
 	replicaB := NewRedisSessionStore(clientB, 5*time.Minute)

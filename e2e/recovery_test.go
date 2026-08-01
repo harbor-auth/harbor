@@ -70,7 +70,7 @@ func generateRecoveryCodes(t *testing.T, client *http.Client) []string {
 	if client.Jar != nil {
 		u, err := url.Parse(mgmtBaseURL())
 		if err == nil && len(client.Jar.Cookies(u)) == 0 {
-			t.Skip("no BFF session cookie in jar — cookie-based auth not wired on this stack; skipping")
+			unavailable(t, "no BFF session cookie in jar — cookie-based auth not wired")
 		}
 	}
 
@@ -92,10 +92,10 @@ func generateRecoveryCodes(t *testing.T, client *http.Client) []string {
 		t.Fatalf("read /recovery/codes response: %v", err)
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
-		t.Skip("POST /recovery/codes = 401 (BFF session cookie not accepted) — skipping")
+		unavailable(t, "POST /recovery/codes = 401 (BFF session cookie not accepted)")
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
-		t.Skip("POST /recovery/codes = 503 (recovery not wired) — skipping")
+		unavailable(t, "POST /recovery/codes = 503 (recovery not wired)")
 	}
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("POST /recovery/codes = %d, want 201\n%s", resp.StatusCode, raw)
@@ -136,7 +136,7 @@ func beginRecovery(t *testing.T, client *http.Client, userID string) string {
 		t.Fatalf("read /recovery/begin response: %v", err)
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
-		t.Skip("POST /recovery/begin = 503 (recovery not wired) — skipping")
+		unavailable(t, "POST /recovery/begin = 503 (recovery not wired)")
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("POST /recovery/begin = %d, want 200\n%s", resp.StatusCode, raw)
@@ -169,7 +169,7 @@ func completeRecovery(t *testing.T, client *http.Client, requestID, code string)
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		_ = resp.Body.Close()
-		t.Skip("POST /recovery/complete = 503 (recovery not wired) — skipping")
+		unavailable(t, "POST /recovery/complete = 503 (recovery not wired)")
 	}
 	return resp
 }
@@ -365,7 +365,10 @@ func TestRecoveryScopedSessionDeniesNonEnrollment(t *testing.T) {
 	}
 	defer func() { _ = enrollResp.Body.Close() }()
 	if enrollResp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(enrollResp.Body)
+		raw, readErr := io.ReadAll(enrollResp.Body)
+		if readErr != nil {
+			t.Fatalf("read register/begin response: %v", readErr)
+		}
 		t.Errorf("recovery-scoped session register/begin = %d, want 200\n%s", enrollResp.StatusCode, raw)
 	}
 

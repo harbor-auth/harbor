@@ -296,7 +296,7 @@ func TestRedisRateLimiter_MFADimensionsSharedAcrossReplicas(t *testing.T) {
 	mr := miniredis.RunT(t)
 	clientA := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	clientB := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = clientA.Close(); _ = clientB.Close() })
+	t.Cleanup(func() { _ = clientA.Close(); _ = clientB.Close() }) //nolint:errcheck // test cleanup
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := RateLimiterConfig{KeyPrefix: "mfa:", Limit: 2, Window: time.Minute}
 	replicaA := NewRedisRateLimiter(clientA, cfg, logger)
@@ -318,7 +318,7 @@ func TestRedisRateLimiter_MFADimensionsSharedAcrossReplicas(t *testing.T) {
 func TestRedisRateLimiter_MFAOutageNeverAllows(t *testing.T) {
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = client.Close() }) //nolint:errcheck // test cleanup
 	limiter := NewRedisRateLimiter(client, RateLimiterConfig{KeyPrefix: "mfa:", Limit: 2, Window: time.Minute}, slog.Default())
 	mr.Close()
 

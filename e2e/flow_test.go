@@ -55,6 +55,46 @@ func baseURL() string {
 	return defaultBaseURL
 }
 
+// hotReplicaBURL returns the independently addressed second harbor-hot replica.
+// Cross-replica runs set HARBOR_E2E_REPLICA_B_URL; ordinary single-process
+// smoke runs intentionally fall back to replica A.
+func hotReplicaBURL() string {
+	if v := os.Getenv("HARBOR_E2E_REPLICA_B_URL"); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return baseURL()
+}
+
+// crossReplicaRequired identifies the release-gate profile. In this profile a
+// missing durable dependency or replica endpoint is a failure, never a skip.
+func crossReplicaRequired() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("HARBOR_E2E_CROSS_REPLICA")))
+	return v == "1" || v == "true" || v == "yes"
+}
+
+func unavailable(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if crossReplicaRequired() {
+		t.Fatalf(format, args...)
+	}
+	t.Skipf(format, args...)
+}
+
+func TestCrossReplicaSecurityEnvironment(t *testing.T) {
+	if !crossReplicaRequired() {
+		t.Skip("HARBOR_E2E_CROSS_REPLICA not enabled")
+	}
+	for _, name := range []string{
+		"HARBOR_E2E_REPLICA_B_URL",
+		"HARBOR_MGMT_E2E_REPLICA_B_URL",
+		"HARBOR_E2E_DATABASE_URL",
+	} {
+		if strings.TrimSpace(os.Getenv(name)) == "" {
+			t.Errorf("%s must be set for the cross-replica security gate", name)
+		}
+	}
+}
+
 // noRedirectClient captures 3xx responses instead of following them, so we can
 // inspect the Location header (critical for the redirect_uri invariant).
 func noRedirectClient() *http.Client {
@@ -145,12 +185,16 @@ func authorizeWithScope(t *testing.T, redirectURI, challenge, state, scope strin
 
 // postRefreshToken exchanges a refresh token at POST /token.
 func postRefreshToken(t *testing.T, refreshToken string) *http.Response {
+	return postRefreshTokenAt(t, baseURL(), refreshToken)
+}
+
+func postRefreshTokenAt(t *testing.T, endpoint, refreshToken string) *http.Response {
 	t.Helper()
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 	form.Set("client_id", demoClientID)
-	resp, err := http.Post(baseURL()+tokenPath, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	resp, err := http.Post(endpoint+tokenPath, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
 	if err != nil {
 		t.Fatalf("POST %s (refresh_token): %v", tokenPath, err)
 	}
@@ -353,7 +397,10 @@ func TestAuthorizeTokenRefreshFlow(t *testing.T) {
 	}
 
 	// Step 3: rotate — present the refresh_token to get new tokens.
-	refreshResp := postRefreshToken(t, tok1.RefreshToken)
+	// Rotate on replica B and replay on replica A. With a second endpoint this
+	// proves the refresh-family CAS and theft/reuse signal are shared rather than
+	// process-local; a normal smoke run aliases B to A.
+	refreshResp := postRefreshTokenAt(t, hotReplicaBURL(), tok1.RefreshToken)
 	defer refreshResp.Body.Close()
 	if refreshResp.StatusCode != http.StatusOK {
 		body, readErr := io.ReadAll(refreshResp.Body)

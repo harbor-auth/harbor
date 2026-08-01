@@ -90,8 +90,8 @@ func TestRedisEnrollmentSessionStore_CrossReplica(t *testing.T) {
 	clientA := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	clientB := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() {
-		_ = clientA.Close()
-		_ = clientB.Close()
+		_ = clientA.Close() //nolint:errcheck // test cleanup
+		_ = clientB.Close() //nolint:errcheck // test cleanup
 	})
 
 	replicaA := NewRedisEnrollmentSessionStore(clientA)
@@ -123,7 +123,7 @@ func TestRedisEnrollmentSessionStore_CrossReplica(t *testing.T) {
 func TestRedisEnrollmentSessionStore_ExpiresFailClosed(t *testing.T) {
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = client.Close() }) //nolint:errcheck // test cleanup
 	store := NewRedisEnrollmentSessionStore(client)
 
 	if err := store.Save(context.Background(), "expired", []byte("user")); err != nil {

@@ -10,12 +10,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -111,7 +109,11 @@ func runProduction(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.R
 	if redisClient == nil {
 		return errors.New("production requires REDIS_URL")
 	}
-	defer func() { _ = redisClient.Close() }()
+	defer func() {
+		if closeErr := redisClient.Close(); closeErr != nil {
+			logger.Warn("redis close error", "error", closeErr)
+		}
+	}()
 
 	kekResolver, err := crypto.NewEnvKEKResolver(runtimeCfg.KMS)
 	if err != nil {
@@ -601,31 +603,6 @@ func runDevelopment(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.
 	return nil
 }
 
-// enrollHandler returns a handler for POST /users/enroll. It reads a JSON body
-// with a `region` field, calls the Enroller, and returns the new user ID.
-func enrollHandler(e *identity.Enroller, logger *slog.Logger) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			Region string `json:"region"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Region == "" {
-			writeErrorJSON(w, http.StatusBadRequest, "invalid_request", "region is required")
-			return
-		}
-		res, err := e.Enroll(r.Context(), req.Region)
-		if err != nil {
-			if errors.Is(err, region.ErrUnknownRegion) {
-				writeErrorJSON(w, http.StatusBadRequest, "invalid_region", "unknown region")
-				return
-			}
-			logger.Error("enrollment failed", "error", err)
-			writeErrorJSON(w, http.StatusInternalServerError, "enrollment_failed", "enrollment failed")
-			return
-		}
-		writeJSON(w, http.StatusCreated, res)
-	}
-}
-
 // noopUserPersister drops enrollments. Replace with a sqlc-backed
 // implementation once DATABASE_URL is wired (docs/plans/user-enrollment.md).
 type noopUserPersister struct {
@@ -667,23 +644,6 @@ func (a *dashboardRelayAdapter) ListByUser(ctx context.Context, userID string) (
 
 func (a *dashboardRelayAdapter) Deactivate(ctx context.Context, addressID string) error {
 	return a.store.Deactivate(ctx, addressID)
-}
-
-// --- JSON helpers -----------------------------------------------------------
-
-type jsonError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}
-
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func writeErrorJSON(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, jsonError{Code: code, Message: message})
 }
 
 // --- env helpers ------------------------------------------------------------
@@ -751,7 +711,10 @@ func validateProductionOrigins(origins []string, rpID string) error {
 		if err := validateProductionURL("WEBAUTHN_RP_ORIGINS", origin); err != nil {
 			return err
 		}
-		u, _ := url.Parse(origin)
+		u, err := url.Parse(origin)
+		if err != nil {
+			return fmt.Errorf("invalid WEBAUTHN_RP_ORIGINS: %w", err)
+		}
 		if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
 			return fmt.Errorf("invalid WEBAUTHN_RP_ORIGINS: %q is not an origin", origin)
 		}

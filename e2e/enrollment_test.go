@@ -80,11 +80,11 @@ func openDB(t *testing.T) *pgx.Conn {
 	t.Helper()
 	url := envOr("HARBOR_E2E_DATABASE_URL", "")
 	if url == "" {
-		t.Skip("HARBOR_E2E_DATABASE_URL not set — skipping enrollment DB e2e")
+		unavailable(t, "HARBOR_E2E_DATABASE_URL not set — enrollment DB e2e unavailable")
 	}
 	conn, err := pgx.Connect(context.Background(), url)
 	if err != nil {
-		t.Skipf("cannot connect to HARBOR_E2E_DATABASE_URL: %v — skipping", err)
+		unavailable(t, "cannot connect to HARBOR_E2E_DATABASE_URL: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := conn.Close(context.Background()); err != nil {
@@ -117,7 +117,7 @@ func enroll(t *testing.T, client *http.Client) (userID, region string) {
 	}
 	resp, err := client.Post(mgmtBaseURL()+enrollPath, "application/json", strings.NewReader(string(body)))
 	if err != nil {
-		t.Skipf("harbor-mgmt unreachable at %s: %v — skipping enrollment e2e", mgmtBaseURL(), err)
+		unavailable(t, "harbor-mgmt unreachable at %s: %v", mgmtBaseURL(), err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
@@ -126,7 +126,7 @@ func enroll(t *testing.T, client *http.Client) (userID, region string) {
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		if resp.StatusCode == http.StatusServiceUnavailable {
-			t.Skipf("POST /enroll = 503 (enrollment not wired: set DATABASE_URL + HARBOR_KEK_SECRET) — skipping")
+			unavailable(t, "POST /enroll = 503 (enrollment not wired: set DATABASE_URL + development test key provider)")
 		}
 		t.Fatalf("POST /enroll = %d, want 2xx\n%s", resp.StatusCode, raw)
 	}
@@ -382,7 +382,7 @@ func registerPasskey(t *testing.T, client *http.Client) bool {
 func TestEnrollmentCeremonyCrossReplicaRedisOnly(t *testing.T) {
 	replicaB := mgmtReplicaBURL()
 	if replicaB == "" {
-		t.Skip("HARBOR_MGMT_E2E_REPLICA_B_URL not set — skipping cross-replica enrollment")
+		unavailable(t, "HARBOR_MGMT_E2E_REPLICA_B_URL not set — cross-replica enrollment unavailable")
 	}
 	client := jarClient(t)
 	enroll(t, client)

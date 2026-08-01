@@ -11,6 +11,17 @@
 4. Render and validate the Helm production output, run repository checks, then
    rebase, commit, and push the shared branch.
 
+## Task 29: assembled cross-replica security integration checks
+
+1. Rebase the shared branch and inventory the assembled OIDC, BFF, enrollment,
+   recovery, MFA, Redis-race, and deployment-contract coverage.
+2. Strengthen the live e2e harness so configured replica endpoints are required
+   to exercise shared state and required security flows cannot silently skip.
+3. Run focused e2e compilation/tests and the raw/Helm rendering contracts.
+4. Run gofmt, build, vet, the full Go suite, agent-check, and generate-check.
+5. Rebase again, commit, push, record the verification result, and complete the
+   Weft task.
+
 ## Task 19: session-bound MFA step-up and abuse controls
 
 1. Run the Task 18 contract tests and inspect BFF session, management handler,

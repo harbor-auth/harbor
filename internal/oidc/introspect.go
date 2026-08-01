@@ -141,7 +141,7 @@ func NewIntrospector(cfg IntrospectConfig) *Introspector {
 	if err != nil {
 		// Introspection has an enumeration-resistant inactive response. Retain an
 		// empty verifier so a bad configured key fails closed instead of panicking.
-		verifier, _ = NewJWTVerifier(JWTVerifierConfig{Now: now})
+		verifier, _ = NewJWTVerifier(JWTVerifierConfig{Now: now}) //nolint:errcheck // empty configuration is valid by construction
 	}
 	return &Introspector{verifier: verifier}
 }

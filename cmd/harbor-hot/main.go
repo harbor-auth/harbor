@@ -336,29 +336,6 @@ func buildExternalKeyProvider(ctx context.Context, kmsConfig crypto.KMSConfig) (
 	return crypto.NewKMSKeyProvider(crypto.NewAWSKMSClient(awskms.NewFromConfig(awsCfg)), resolver), nil
 }
 
-// buildSigningStack wires the real ES256 signing path for harbor-hot: it loads
-// (or, on a cold start, seeds) the live signing keys from the DB, unwraps their
-// private keys under the regional KEK, and returns the JWT issuer, the JWKS
-// signer set, and the key rotator that drives POST /admin/keys/rotate
-// (docs/DESIGN.md §7.3, §3.5).
-//
-// It fails closed unless the shared production KMS key map is configured;
-// signing keys are never sealed under the development local-key provider.
-func buildSigningStack(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) (oidc.TokenIssuer, []crypto.Signer, *crypto.KeyRotator, error) {
-	runtimeCfg, err := crypto.LoadRuntimeConfigFromEnv()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	if runtimeCfg.Mode != crypto.RuntimeProduction {
-		return nil, nil, nil, errors.New("signing stack requires production KMS configuration")
-	}
-	kp, err := buildExternalKeyProvider(ctx, runtimeCfg.KMS)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	return buildSigningStackWithProvider(ctx, pool, kp, logger)
-}
-
 func buildSigningStackWithProvider(ctx context.Context, pool *pgxpool.Pool, kp crypto.KeyProvider, logger *slog.Logger) (oidc.TokenIssuer, []crypto.Signer, *crypto.KeyRotator, error) {
 	reg := envString("REGION", "EU")
 

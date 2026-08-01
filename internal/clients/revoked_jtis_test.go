@@ -380,7 +380,7 @@ func TestEmergencyRevocation_PersistsThenPropagatesAcrossReplicasAndRestart(t *t
 	defer cancel()
 	mr := miniredis.RunT(t)
 	redisClient := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = redisClient.Close() })
+	t.Cleanup(func() { _ = redisClient.Close() }) //nolint:errcheck // test cleanup
 
 	filterA := oidc.NewInMemoryRevocationFilter()
 	filterB := oidc.NewInMemoryRevocationFilter()

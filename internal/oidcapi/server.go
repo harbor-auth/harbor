@@ -170,11 +170,12 @@ func New(cfg Config) *Server {
 	var introspector *oidc.Introspector
 	var jwtVerifier *oidc.JWTVerifier
 	if len(cfg.Signers) > 0 {
-		jwtVerifier, _ = oidc.NewJWTVerifier(oidc.JWTVerifierConfig{Signers: cfg.Signers,
+		var verifierErr error
+		jwtVerifier, verifierErr = oidc.NewJWTVerifier(oidc.JWTVerifierConfig{Signers: cfg.Signers,
 			Filter: cfg.RevocationFilter, RevokedChecker: cfg.RevokedJTIChecker, ExpectedIssuer: cfg.Issuer})
-		introspector = oidc.NewIntrospector(oidc.IntrospectConfig{
-			Verifier: jwtVerifier,
-		})
+		if verifierErr == nil {
+			introspector = oidc.NewIntrospector(oidc.IntrospectConfig{Verifier: jwtVerifier})
+		}
 	}
 	logoutVerifier := cfg.LogoutVerifier
 	if logoutVerifier == nil {
