@@ -4,19 +4,14 @@
 -- /authorize; grant/revoke exposed via harbor-mgmt.
 
 -- name: UpsertConsentGrant :one
--- Inserts a new consent grant or updates an existing active grant's scopes.
--- The partial unique index idx_consent_grants_user_client_active ensures only
--- one active grant per (user, client) pair. On conflict, we update scopes and
--- updated_at to reflect the new consent.
-INSERT INTO consent_grants (
-    user_id, client_id, scopes
-) VALUES (
-    $1, $2, $3
-)
-ON CONFLICT (user_id, client_id) WHERE revoked_at IS NULL
-DO UPDATE SET
-    scopes = EXCLUDED.scopes,
-    updated_at = now()
+-- Compatibility query for the rolling deployment of migration 0018. The
+-- consent_grants name is now an updatable view over grants. Consent may update
+-- an existing canonical grant, but may not invent its region or pairwise_sub.
+UPDATE consent_grants
+SET scopes = $3
+WHERE user_id = $1
+  AND client_id = $2
+  AND revoked_at IS NULL
 RETURNING *;
 
 -- name: GetConsentGrantByUserClient :one

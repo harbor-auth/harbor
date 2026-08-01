@@ -25,6 +25,39 @@ SET revoked_at = now()
 WHERE id = $1
   AND revoked_at IS NULL;
 
+-- UpdateGrantScopes records an approved scope set on the canonical grant. It
+-- deliberately cannot create a grant because region and pairwise_sub must come
+-- from the PPID grant flow, not from consent input.
+-- name: UpdateGrantScopes :one
+UPDATE grants
+SET scopes = $3
+WHERE user_id = $1
+  AND client_id = $2
+  AND revoked_at IS NULL
+RETURNING *;
+
+-- RevokeGrantAndSessions is one PostgreSQL statement, so the grant and every
+-- refresh session bound to it are revoked atomically on a single connection.
+-- The shared timestamp also gives callers an unambiguous audit boundary.
+-- name: RevokeGrantAndSessions :one
+WITH revoked_grant AS (
+    UPDATE grants AS canonical
+    SET revoked_at = now()
+    WHERE canonical.id = $1
+      AND canonical.revoked_at IS NULL
+    RETURNING canonical.id, canonical.revoked_at
+), revoked_sessions AS (
+    UPDATE sessions
+    SET revoked_at = revoked_grant.revoked_at
+    FROM revoked_grant
+    WHERE sessions.grant_id = revoked_grant.id
+      AND sessions.revoked_at IS NULL
+    RETURNING sessions.id
+)
+SELECT EXISTS (SELECT 1 FROM revoked_grant) AS grant_revoked,
+       count(*)::bigint AS sessions_revoked
+FROM revoked_sessions;
+
 -- name: FindGrantByUserClient :one
 SELECT * FROM grants
 WHERE user_id = $1

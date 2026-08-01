@@ -93,15 +93,11 @@ func (q *Queries) RevokeConsentGrant(ctx context.Context, id pgtype.UUID) error 
 
 const upsertConsentGrant = `-- name: UpsertConsentGrant :one
 
-INSERT INTO consent_grants (
-    user_id, client_id, scopes
-) VALUES (
-    $1, $2, $3
-)
-ON CONFLICT (user_id, client_id) WHERE revoked_at IS NULL
-DO UPDATE SET
-    scopes = EXCLUDED.scopes,
-    updated_at = now()
+UPDATE consent_grants
+SET scopes = $3
+WHERE user_id = $1
+  AND client_id = $2
+  AND revoked_at IS NULL
 RETURNING id, user_id, client_id, scopes, granted_at, updated_at, revoked_at
 `
 
@@ -115,10 +111,9 @@ type UpsertConsentGrantParams struct {
 // (DESIGN §1.3): `sqlc generate` (via @codegen) produces typed Go — never
 // hand-write DB types. Tracks per-(user, RP, scope) consent; enforced at
 // /authorize; grant/revoke exposed via harbor-mgmt.
-// Inserts a new consent grant or updates an existing active grant's scopes.
-// The partial unique index idx_consent_grants_user_client_active ensures only
-// one active grant per (user, client) pair. On conflict, we update scopes and
-// updated_at to reflect the new consent.
+// Compatibility query for the rolling deployment of migration 0018. The
+// consent_grants name is now an updatable view over grants. Consent may update
+// an existing canonical grant, but may not invent its region or pairwise_sub.
 func (q *Queries) UpsertConsentGrant(ctx context.Context, arg UpsertConsentGrantParams) (ConsentGrant, error) {
 	row := q.db.QueryRow(ctx, upsertConsentGrant, arg.UserID, arg.ClientID, arg.Scopes)
 	var i ConsentGrant

@@ -260,6 +260,10 @@ type Querier interface {
 	// The partial unique index allows a new grant to be created after revocation.
 	RevokeConsentGrant(ctx context.Context, id pgtype.UUID) error
 	RevokeGrant(ctx context.Context, id pgtype.UUID) error
+	// RevokeGrantAndSessions is one PostgreSQL statement, so the grant and every
+	// refresh session bound to it are revoked atomically on a single connection.
+	// The shared timestamp also gives callers an unambiguous audit boundary.
+	RevokeGrantAndSessions(ctx context.Context, id pgtype.UUID) (RevokeGrantAndSessionsRow, error)
 	// RevokeGrantsByClient revokes all active grants for a specific client. Used
 	// during client deletion (RFC 7592) to clean up user authorizations.
 	RevokeGrantsByClient(ctx context.Context, clientID string) error
@@ -291,6 +295,10 @@ type Querier interface {
 	// update strictly increasing: an equal or regressed counter is a clone signal
 	// and is a no-op here (the caller treats zero rows affected as a failure).
 	UpdateCredentialSignCount(ctx context.Context, arg UpdateCredentialSignCountParams) (int64, error)
+	// UpdateGrantScopes records an approved scope set on the canonical grant. It
+	// deliberately cannot create a grant because region and pairwise_sub must come
+	// from the PPID grant flow, not from consent input.
+	UpdateGrantScopes(ctx context.Context, arg UpdateGrantScopesParams) (Grant, error)
 	// UpdateRegisteredClient updates a dynamically-registered client's metadata
 	// (RFC 7592 PUT). Only fields that can be updated post-registration are
 	// included; client_id, sector_id, and created_at are immutable.
@@ -303,10 +311,9 @@ type Querier interface {
 	// (DESIGN §1.3): `sqlc generate` (via @codegen) produces typed Go — never
 	// hand-write DB types. Tracks per-(user, RP, scope) consent; enforced at
 	// /authorize; grant/revoke exposed via harbor-mgmt.
-	// Inserts a new consent grant or updates an existing active grant's scopes.
-	// The partial unique index idx_consent_grants_user_client_active ensures only
-	// one active grant per (user, client) pair. On conflict, we update scopes and
-	// updated_at to reflect the new consent.
+	// Compatibility query for the rolling deployment of migration 0018. The
+	// consent_grants name is now an updatable view over grants. Consent may update
+	// an existing canonical grant, but may not invent its region or pairwise_sub.
 	UpsertConsentGrant(ctx context.Context, arg UpsertConsentGrantParams) (ConsentGrant, error)
 	// Upserts the recovery attempts record for a user. Used to increment
 	// failed_count or set locked_until after too many failures.

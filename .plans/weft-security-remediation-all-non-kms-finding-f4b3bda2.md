@@ -59,3 +59,13 @@ Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3
 3. Ensure the store regression sentinel is recognizable as the service clone signal and update narrow test fakes for the generated interface.
 4. Run focused WebAuthn tests, formatting, build/vet, the full Go suite, agent checks, and generation drift checks.
 5. Commit, rebase on the shared branch, push, store the result in Hippo, and complete the Weft task.
+
+## Task 14: canonical grants ledger migration
+
+1. Backfill each active legacy consent into its existing canonical grant and
+   fail the migration if a consent has no grant carrying its region and PPID.
+2. Replace the legacy consent table with a compatibility view over `grants` so
+   there is only one authority during the dependent application rollout.
+3. Add canonical scope-update and atomic grant-plus-session revocation queries.
+4. Regenerate sqlc output and run migration/code-generation and Go checks.
+5. Rebase the shared branch, commit, push, and report task completion.
