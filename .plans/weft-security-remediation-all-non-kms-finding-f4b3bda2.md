@@ -115,3 +115,16 @@ Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3
 2. Assert the live production assembly contains durable PostgreSQL/Redis-backed stores, a real WebAuthn handler, and no reachable scaffold or duplicate enrollment route.
 3. Assert production dynamic registration fails closed without an initial access token while explicitly opted-in development registration may remain open.
 4. Run the focused tests and confirm they fail for the missing Task 4 production wiring, then format, commit, rebase, and push.
+
+## Task 6: durable client authentication red tests
+
+1. Pin the OIDC domain contract for public and confidential clients, SHA-256
+   secret hashes, uniform mismatch errors, and unsupported authentication
+   methods.
+2. Add introspection and revocation negatives for missing, wrong, public-client,
+   unknown-client, and cross-client credentials.
+3. Add token endpoint parity tests for `none`, `client_secret_basic`, and
+   `client_secret_post`, including method mismatch and credential conflicts.
+4. Run the focused suites and confirm the new tests fail for the missing shared
+   authenticator without weakening existing assertions.
+5. Rebase the shared branch, commit the test-only contract, and push.

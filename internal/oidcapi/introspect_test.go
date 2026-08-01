@@ -1,6 +1,7 @@
 package oidcapi
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -14,15 +15,32 @@ import (
 	"github.com/harbor-auth/harbor/internal/oidc"
 )
 
+const testClientSecret = "secret"
+
+func testSecretHash(secret string) []byte {
+	sum := sha256.Sum256([]byte(secret))
+	return sum[:]
+}
+
 // newIntrospectServer builds a Server wired with introspection support.
 func newIntrospectServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	clients := oidc.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
-		ID:            testClientID,
-		SectorID:      "localhost",
-		RedirectURIs:  []string{testRedirectURI},
-		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
+		ID:                      testClientID,
+		SectorID:                "localhost",
+		RedirectURIs:            []string{testRedirectURI},
+		ScopesAllowed:           []string{"openid", "profile", "email", "offline_access"},
+		TokenEndpointAuthMethod: "client_secret_basic",
+		SecretHash:              testSecretHash(testClientSecret),
+	})
+	clients.Put(oidc.Client{
+		ID:                      "other-client",
+		SectorID:                "localhost",
+		RedirectURIs:            []string{testRedirectURI},
+		ScopesAllowed:           []string{"openid"},
+		TokenEndpointAuthMethod: "client_secret_basic",
+		SecretHash:              testSecretHash(testClientSecret),
 	})
 	signer, err := crypto.NewLocalSigner()
 	if err != nil {
@@ -160,7 +178,7 @@ func TestPostIntrospect_ValidBasicAuth_Proceeds(t *testing.T) {
 	form := url.Values{}
 	form.Set("token", "unknown-token")
 
-	res := postIntrospect(t, ts, form, basicAuthHeader(testClientID, "any-secret"))
+	res := postIntrospect(t, ts, form, basicAuthHeader(testClientID, testClientSecret))
 	defer func() { _ = res.Body.Close() }()
 
 	// Should proceed past auth — returns 200 with inactive
@@ -174,6 +192,55 @@ func TestPostIntrospect_ValidBasicAuth_Proceeds(t *testing.T) {
 	}
 	if body.Active {
 		t.Fatal("expected active=false for unknown token")
+	}
+}
+
+func TestPostIntrospect_RejectsUnauthenticatedClientCredentials(t *testing.T) {
+	ts := newIntrospectServer(t)
+	form := url.Values{"token": {"unknown-token"}}
+
+	for _, tc := range []struct {
+		name   string
+		client string
+		secret string
+	}{
+		{name: "wrong secret", client: testClientID, secret: "wrong-secret"},
+		{name: "missing secret", client: testClientID},
+		{name: "unknown client", client: "not-registered", secret: testClientSecret},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := postIntrospect(t, ts, form, basicAuthHeader(tc.client, tc.secret))
+			defer func() { _ = res.Body.Close() }()
+			if res.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", res.StatusCode)
+			}
+			if got := decodeOAuthErrorCode(t, res); got != "invalid_client" {
+				t.Fatalf("error = %q, want invalid_client", got)
+			}
+		})
+	}
+}
+
+func TestPostIntrospect_PublicClientCannotAuthenticate(t *testing.T) {
+	clients := oidc.NewInMemoryClientRegistry()
+	clients.Put(oidc.Client{ID: testClientID, TokenEndpointAuthMethod: "none"})
+	signer, err := crypto.NewLocalSigner()
+	if err != nil {
+		t.Fatalf("NewLocalSigner: %v", err)
+	}
+	svc := oidc.NewService(oidc.ServiceConfig{
+		Issuer: "https://eu.harbor.id", Clients: clients,
+		Codes: oidc.NewInMemoryAuthCodeStore(), Tokens: oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
+		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
+	})
+	srv := New(Config{Issuer: "https://eu.harbor.id", Service: svc, Signers: []crypto.Signer{signer}})
+	ts := httptest.NewServer(openapi.HandlerFromMux(srv, http.NewServeMux()))
+	defer ts.Close()
+
+	res := postIntrospect(t, ts, url.Values{"token": {"unknown-token"}}, basicAuthHeader(testClientID, ""))
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 for public client", res.StatusCode)
 	}
 }
 
@@ -408,7 +475,7 @@ func TestPostIntrospect_CrossClient_ReturnsInactive(t *testing.T) {
 	form.Set("token", accessToken)
 
 	// Use a different client_id in Basic auth
-	res := postIntrospect(t, ts, form, basicAuthHeader("other-client", "secret"))
+	res := postIntrospect(t, ts, form, basicAuthHeader("other-client", testClientSecret))
 	defer func() { _ = res.Body.Close() }()
 
 	// Should return 200 with active=false (cross-client isolation)

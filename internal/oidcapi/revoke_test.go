@@ -22,10 +22,20 @@ func newRevokeServer(t *testing.T) (*httptest.Server, *oidc.InMemorySessionStore
 	t.Helper()
 	clients := oidc.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
-		ID:            testClientID,
-		SectorID:      "localhost",
-		RedirectURIs:  []string{testRedirectURI},
-		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
+		ID:                      testClientID,
+		SectorID:                "localhost",
+		RedirectURIs:            []string{testRedirectURI},
+		ScopesAllowed:           []string{"openid", "profile", "email", "offline_access"},
+		TokenEndpointAuthMethod: "client_secret_basic",
+		SecretHash:              testSecretHash(testClientSecret),
+	})
+	clients.Put(oidc.Client{
+		ID:                      "other-client",
+		SectorID:                "localhost",
+		RedirectURIs:            []string{testRedirectURI},
+		ScopesAllowed:           []string{"openid"},
+		TokenEndpointAuthMethod: "client_secret_basic",
+		SecretHash:              testSecretHash("other-secret"),
 	})
 	signer, err := crypto.NewLocalSigner()
 	if err != nil {
@@ -53,6 +63,72 @@ func newRevokeServer(t *testing.T) (*httptest.Server, *oidc.InMemorySessionStore
 	ts := httptest.NewServer(h)
 	t.Cleanup(ts.Close)
 	return ts, sessionStore
+}
+
+func TestPostRevoke_RejectsUnauthenticatedClientCredentials(t *testing.T) {
+	ts, _ := newRevokeServer(t)
+	form := url.Values{"token": {"unknown-token"}}
+	for _, tc := range []struct {
+		name   string
+		client string
+		secret string
+	}{
+		{name: "wrong secret", client: testClientID, secret: "wrong-secret"},
+		{name: "missing secret", client: testClientID},
+		{name: "unknown client", client: "not-registered", secret: testClientSecret},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res := postRevoke(t, ts, form, basicAuthHeader(tc.client, tc.secret))
+			defer func() { _ = res.Body.Close() }()
+			if res.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401", res.StatusCode)
+			}
+			if got := decodeOAuthErrorCode(t, res); got != "invalid_client" {
+				t.Fatalf("error = %q, want invalid_client", got)
+			}
+		})
+	}
+}
+
+func TestPostRevoke_PublicClientCannotAuthenticate(t *testing.T) {
+	clients := oidc.NewInMemoryClientRegistry()
+	clients.Put(oidc.Client{ID: testClientID, TokenEndpointAuthMethod: "none"})
+	svc := oidc.NewService(oidc.ServiceConfig{
+		Issuer: "https://eu.harbor.id", Clients: clients,
+		Codes: oidc.NewInMemoryAuthCodeStore(), Tokens: oidc.NewPlaceholderIssuer(),
+		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
+	})
+	srv := New(Config{Issuer: "https://eu.harbor.id", Service: svc})
+	ts := httptest.NewServer(openapi.HandlerFromMux(srv, http.NewServeMux()))
+	defer ts.Close()
+
+	res := postRevoke(t, ts, url.Values{"token": {"unknown-token"}}, basicAuthHeader(testClientID, ""))
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 for public client", res.StatusCode)
+	}
+}
+
+func TestPostRevoke_CrossClientAccessTokenRemainsActive(t *testing.T) {
+	ts, _ := newRevokeServer(t)
+	accessToken := mintAccessToken(t, ts)
+	form := url.Values{"token": {accessToken}, "token_type_hint": {"access_token"}}
+
+	res := postRevoke(t, ts, form, basicAuthHeader("other-client", "other-secret"))
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("revoke status = %d, want 200", res.StatusCode)
+	}
+
+	check := postIntrospect(t, ts, url.Values{"token": {accessToken}}, basicAuthHeader(testClientID, testClientSecret))
+	defer func() { _ = check.Body.Close() }()
+	var body openapi.IntrospectResponse
+	if err := json.NewDecoder(check.Body).Decode(&body); err != nil {
+		t.Fatalf("decode introspection: %v", err)
+	}
+	if !body.Active {
+		t.Fatal("cross-client revocation must not revoke the token")
+	}
 }
 
 // postRevoke POSTs a form to /revoke with optional auth header.
@@ -300,10 +376,12 @@ func TestPostRevoke_AccessToken_AddsToFilter(t *testing.T) {
 	// Build a server with a filter we can inspect
 	clients := oidc.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
-		ID:            testClientID,
-		SectorID:      "localhost",
-		RedirectURIs:  []string{testRedirectURI},
-		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
+		ID:                      testClientID,
+		SectorID:                "localhost",
+		RedirectURIs:            []string{testRedirectURI},
+		ScopesAllowed:           []string{"openid", "profile", "email", "offline_access"},
+		TokenEndpointAuthMethod: "client_secret_basic",
+		SecretHash:              testSecretHash(testClientSecret),
 	})
 	signer, err := crypto.NewLocalSigner()
 	if err != nil {
@@ -381,10 +459,12 @@ func TestPostRevoke_WrongHintAccessToken_StillRevokesRefreshToken(t *testing.T) 
 	// Build a server with a session store we can verify
 	clients := oidc.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
-		ID:            testClientID,
-		SectorID:      "localhost",
-		RedirectURIs:  []string{testRedirectURI},
-		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
+		ID:                      testClientID,
+		SectorID:                "localhost",
+		RedirectURIs:            []string{testRedirectURI},
+		ScopesAllowed:           []string{"openid", "profile", "email", "offline_access"},
+		TokenEndpointAuthMethod: "client_secret_basic",
+		SecretHash:              testSecretHash(testClientSecret),
 	})
 	signer, err := crypto.NewLocalSigner()
 	if err != nil {
@@ -437,10 +517,12 @@ func TestPostRevoke_WrongHintAccessToken_StillRevokesRefreshToken(t *testing.T) 
 func TestPostRevoke_WrongHintRefreshToken_StillRevokesAccessToken(t *testing.T) {
 	clients := oidc.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
-		ID:            testClientID,
-		SectorID:      "localhost",
-		RedirectURIs:  []string{testRedirectURI},
-		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
+		ID:                      testClientID,
+		SectorID:                "localhost",
+		RedirectURIs:            []string{testRedirectURI},
+		ScopesAllowed:           []string{"openid", "profile", "email", "offline_access"},
+		TokenEndpointAuthMethod: "client_secret_basic",
+		SecretHash:              testSecretHash(testClientSecret),
 	})
 	signer, err := crypto.NewLocalSigner()
 	if err != nil {
@@ -515,16 +597,20 @@ func TestPostRevoke_CrossClient_Returns200WithoutRevoking(t *testing.T) {
 	// Build a server with two clients
 	clients := oidc.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
-		ID:            "client-a",
-		SectorID:      "localhost",
-		RedirectURIs:  []string{testRedirectURI},
-		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
+		ID:                      "client-a",
+		SectorID:                "localhost",
+		RedirectURIs:            []string{testRedirectURI},
+		ScopesAllowed:           []string{"openid", "profile", "email", "offline_access"},
+		TokenEndpointAuthMethod: "client_secret_basic",
+		SecretHash:              testSecretHash("client-a-secret"),
 	})
 	clients.Put(oidc.Client{
-		ID:            "client-b",
-		SectorID:      "localhost",
-		RedirectURIs:  []string{testRedirectURI},
-		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
+		ID:                      "client-b",
+		SectorID:                "localhost",
+		RedirectURIs:            []string{testRedirectURI},
+		ScopesAllowed:           []string{"openid", "profile", "email", "offline_access"},
+		TokenEndpointAuthMethod: "client_secret_basic",
+		SecretHash:              testSecretHash("client-b-secret"),
 	})
 	signer, err := crypto.NewLocalSigner()
 	if err != nil {
@@ -560,7 +646,7 @@ func TestPostRevoke_CrossClient_Returns200WithoutRevoking(t *testing.T) {
 	form.Set("token", refreshToken)
 	form.Set("token_type_hint", "refresh_token")
 
-	res := postRevoke(t, ts, form, basicAuthHeader("client-b", "secret"))
+	res := postRevoke(t, ts, form, basicAuthHeader("client-b", "client-b-secret"))
 	defer func() { _ = res.Body.Close() }()
 
 	// Should return 200 (anti-enumeration)
