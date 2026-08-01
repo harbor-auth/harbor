@@ -152,6 +152,56 @@ func TestLoginHandler_BeginLogin_SessionExpired(t *testing.T) {
 	}
 }
 
+func TestLoginHandler_BeginLogin_MissingBrowserNonceHash(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+	record := BFFSessionRecord{
+		RequestID: "valid-session",
+		ClientID:  "test-client",
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	if err := store.Create(ctx, record); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	var beginLoginCalled bool
+	webauthn := &mockWebAuthnService{
+		beginLoginFunc: func(ctx context.Context, userID []byte) (*protocol.CredentialAssertion, string, error) {
+			beginLoginCalled = true
+			return &protocol.CredentialAssertion{}, "session-key", nil
+		},
+	}
+	handler := NewLoginHandler(store, webauthn, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
+
+	req := httptest.NewRequest(http.MethodGet, "/login?request_id=valid-session", nil)
+	req.AddCookie(&http.Cookie{
+		Name:  NonceCookieName,
+		Value: base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+	})
+	rec := httptest.NewRecorder()
+
+	handler.BeginLogin(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	var resp loginErrorResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Code != "invalid_request" {
+		t.Errorf("code = %q, want %q", resp.Code, "invalid_request")
+	}
+	if beginLoginCalled {
+		t.Error("BeginLogin must not start WebAuthn when BrowserNonceHash is absent")
+	}
+	for _, cookie := range rec.Result().Cookies() {
+		if cookie.Name == CookieName {
+			t.Error("BeginLogin must not set the BFF cookie when BrowserNonceHash is absent")
+		}
+	}
+}
+
 func TestLoginHandler_BeginLogin_UserNotIdentified(t *testing.T) {
 	store := NewInMemoryBFFSessionStore()
 	ctx := context.Background()
@@ -432,6 +482,62 @@ func TestLoginHandler_FinishLogin_InvalidBody(t *testing.T) {
 	}
 	if resp.Code != "invalid_request" {
 		t.Errorf("code = %q, want %q", resp.Code, "invalid_request")
+	}
+}
+
+func TestLoginHandler_FinishLoginWithParsedData_MissingBrowserNonceHash(t *testing.T) {
+	store := NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+	record := BFFSessionRecord{
+		RequestID: "valid-session",
+		ClientID:  "test-client",
+		ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	if err := store.Create(ctx, record); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	var finishLoginCalled bool
+	webauthn := &mockWebAuthnService{
+		finishLoginFunc: func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, error) {
+			finishLoginCalled = true
+			return "authenticated-user-id", nil
+		},
+	}
+	handler := NewLoginHandler(store, webauthn, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
+
+	req := httptest.NewRequest(http.MethodPost, "/login/complete", nil)
+	req.AddCookie(&http.Cookie{Name: CookieName, Value: "valid-session"})
+	req.AddCookie(&http.Cookie{Name: webauthnSessionCookieName, Value: "session-key"})
+	req.AddCookie(&http.Cookie{
+		Name:  NonceCookieName,
+		Value: base64.RawURLEncoding.EncodeToString(make([]byte, 32)),
+	})
+	rec := httptest.NewRecorder()
+
+	handler.FinishLoginWithParsedData(rec, req, &protocol.ParsedCredentialAssertionData{})
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", rec.Code, http.StatusBadRequest)
+	}
+	var resp loginErrorResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Errorf("decode response: %v", err)
+	} else if resp.Code != "invalid_request" {
+		t.Errorf("code = %q, want %q", resp.Code, "invalid_request")
+	}
+	if finishLoginCalled {
+		t.Error("FinishLogin must not finish WebAuthn when BrowserNonceHash is absent")
+	}
+	if location := rec.Header().Get("Location"); location != "" {
+		t.Errorf("Location = %q, want no redirect", location)
+	}
+	unchangedSession, err := store.Get(ctx, "valid-session")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if unchangedSession.UserID != "" {
+		t.Errorf("session.UserID = %q, want empty", unchangedSession.UserID)
 	}
 }
 
