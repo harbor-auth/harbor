@@ -29,6 +29,10 @@ func (bffCallerAdapter) CallerID(ctx context.Context) string {
 	return bff.UserIDFromContext(ctx)
 }
 
+func (bffCallerAdapter) SessionID(ctx context.Context) string {
+	return bff.SessionIDFromContext(ctx)
+}
+
 // recoverySessionIssuer establishes the two server-side records needed after a
 // recovery code is consumed: a scoped BFF session for authorization and an
 // enrollment handoff for the WebAuthn registration ceremony. Both records use

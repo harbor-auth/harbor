@@ -91,8 +91,13 @@ func (f *fakeMFAService) Disable(_ context.Context, userID string) error {
 
 // newMFAServer builds a Server with the given MFA service wired in.
 func newMFAServer(svc MFAService) *Server {
-	return New(nil, nil).WithMFA(svc)
+	return New(nil, nil).WithMFA(svc).
+		WithMFASessionStamper(fakeMFASessionStamper{})
 }
+
+type fakeMFASessionStamper struct{}
+
+func (fakeMFASessionStamper) StampMFAStepUp(context.Context, string, time.Time) error { return nil }
 
 // mfaRequest builds an MFA request. Authentication is wired on the server via
 // WithCallerSource; the userID parameter is retained for call-site readability
@@ -267,7 +272,7 @@ func TestPostMFAVerify_Success(t *testing.T) {
 // step-up, so production must fail closed.
 func TestPostMFAVerify_FailsClosedWithoutSessionStamper(t *testing.T) {
 	svc := &fakeMFAService{}
-	s := newMFAServer(svc).WithCallerSource(fakeCallerSource{userID: "user-1"})
+	s := New(nil, nil).WithMFA(svc).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
 
 	s.PostMFAVerify(rec, mfaRequest(http.MethodPost, "/mfa/verify", `{"code":"123456"}`, "user-1"))

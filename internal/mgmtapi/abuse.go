@@ -2,6 +2,8 @@ package mgmtapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"net"
 	"net/http"
 
@@ -14,7 +16,7 @@ type productionAbuseGate struct {
 	limiters map[string]clients.RateLimiter
 }
 
-func (g *productionAbuseGate) Check(ctx context.Context, endpoint, key string) bool {
+func (g *productionAbuseGate) Check(ctx context.Context, endpoint string, keys ...string) bool {
 	if g == nil {
 		return true
 	}
@@ -22,8 +24,17 @@ func (g *productionAbuseGate) Check(ctx context.Context, endpoint, key string) b
 	if limiter == nil {
 		return false
 	}
-	allowed, _, err := limiter.Allow(ctx, key)
-	return err == nil && allowed
+	for dimension, key := range keys {
+		if key == "" {
+			return false
+		}
+		digest := sha256.Sum256([]byte(key))
+		allowed, _, err := limiter.Allow(ctx, fmt.Sprintf("%d:%x", dimension, digest))
+		if err != nil || !allowed {
+			return false
+		}
+	}
+	return true
 }
 
 // WithProductionAbuseProtection installs a shared limiter for one sensitive

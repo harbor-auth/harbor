@@ -25,6 +25,11 @@ type CallerSource interface {
 	CallerID(ctx context.Context) string
 }
 
+type CallerSessionSource interface {
+	CallerSource
+	SessionID(ctx context.Context) string
+}
+
 // callerID resolves the authenticated caller for a user-scoped endpoint. It
 // reads from s.callerSource (set by the BFF session middleware via the context)
 // and, when the caller is absent, writes the standard 401 envelope and returns

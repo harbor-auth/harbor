@@ -183,6 +183,19 @@ redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
 return 1
 `)
 
+var recordTOTPStepUpScript = redis.NewScript(`
+local data = redis.call('GET', KEYS[1])
+if not data then return 0 end
+local ttl = redis.call('TTL', KEYS[1])
+if ttl <= 0 then return 0 end
+local record = cjson.decode(data)
+if record.UserID ~= ARGV[1] then return 0 end
+record.MFAVerifiedAt = ARGV[2]
+record.AuthMethod = ARGV[3]
+redis.call('SET', KEYS[1], cjson.encode(record), 'EX', ttl)
+return 1
+`)
+
 var setConsentPendingScript = redis.NewScript(`
 local data = redis.call('GET', KEYS[1])
 if not data then return 0 end
@@ -250,6 +263,21 @@ func (s *RedisBFFSessionStore) SetMFAVerified(ctx context.Context, requestID str
 		return fmt.Errorf("redis setmfaverified script: %w", err)
 	}
 
+	if result == 0 {
+		return ErrBFFSessionNotFound
+	}
+	return nil
+}
+
+// RecordTOTPStepUp performs the ownership check and both step-up mutations in
+// one Redis script, preventing partial claims or cross-session stamping.
+func (s *RedisBFFSessionStore) RecordTOTPStepUp(ctx context.Context, requestID, userID string, verifiedAt time.Time) error {
+	result, err := recordTOTPStepUpScript.Run(ctx, s.client,
+		[]string{sessionKey(requestID)}, userID,
+		verifiedAt.UTC().Format(time.RFC3339Nano), string(oidc.AuthMethodTOTP)).Int()
+	if err != nil {
+		return fmt.Errorf("redis record TOTP step-up: %w", err)
+	}
 	if result == 0 {
 		return ErrBFFSessionNotFound
 	}

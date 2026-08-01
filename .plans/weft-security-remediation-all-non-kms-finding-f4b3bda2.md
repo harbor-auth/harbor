@@ -1,5 +1,18 @@
 # Security remediation: all non-KMS findings
 
+## Task 19: session-bound MFA step-up and abuse controls
+
+1. Run the Task 18 contract tests and inspect BFF session, management handler,
+   and production composition-root boundaries.
+2. Carry the authenticated BFF request ID in trusted request context and stamp
+   successful TOTP/recovery step-up on that exact session with one atomic store
+   mutation that also verifies session ownership.
+3. Gate sensitive management routes with the session-backed step-up gate and
+   fail closed when session or gate dependencies are unavailable.
+4. Apply shared Redis-backed MFA attempt controls across user, session, and IP
+   dimensions, including lockout and backend-outage denial.
+5. Run focused tests and repository checks, then rebase, commit, and push.
+
 ## Task 5: startup runtime and KMS contracts
 
 1. Add focused configuration tests for strict runtime-mode parsing, production

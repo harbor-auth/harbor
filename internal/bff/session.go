@@ -268,6 +268,25 @@ func (s *InMemoryBFFSessionStore) SetMFAVerified(_ context.Context, requestID st
 	return nil
 }
 
+// RecordTOTPStepUp atomically verifies ownership and records both the step-up
+// timestamp and authentication method on one session.
+func (s *InMemoryBFFSessionStore) RecordTOTPStepUp(_ context.Context, requestID, userID string, verifiedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.sessions[requestID]
+	if !ok || record.UserID != userID {
+		return ErrBFFSessionNotFound
+	}
+	if s.now().After(record.ExpiresAt) {
+		delete(s.sessions, requestID)
+		return ErrBFFSessionExpired
+	}
+	record.MFAVerifiedAt = verifiedAt
+	record.AuthMethod = oidc.AuthMethodTOTP
+	s.sessions[requestID] = record
+	return nil
+}
+
 // SetAuthMethod implements BFFSessionStore.
 func (s *InMemoryBFFSessionStore) SetAuthMethod(_ context.Context, requestID string, method oidc.AuthMethod) error {
 	s.mu.Lock()

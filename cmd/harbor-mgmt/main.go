@@ -165,7 +165,8 @@ func runProduction(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.R
 		RequireRegistrationAuthorization().
 		WithRecovery(recoveryManager, recoveryStore, recoveryService, recoveryCeremonies).
 		WithScopedSessionIssuer(&recoverySessionIssuer{bffSessions: bffStore, enrollmentSessions: enrollmentSessions}).
-		WithMFA(mfaService)
+		WithMFA(mfaService).
+		WithMFASessionStamper(bffMFASessionStamper{store: bffStore})
 	mfaAbuseProtection := newMgmtLimiter(redisClient, "mfa", 30, time.Minute, logger)
 	recoveryAbuseProtection := newMgmtLimiter(redisClient, "recovery", 20, time.Minute, logger)
 	enrollmentAbuseProtection := newMgmtLimiter(redisClient, "enroll", 10, time.Minute, logger)
@@ -181,7 +182,7 @@ func runProduction(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.R
 	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(webauthnService), bff.DiscoverableUserResolver{}, authorizeCompleteURL)
 	mux.HandleFunc("GET /login", loginHandler.BeginLogin)
 	mux.HandleFunc("POST /login/complete", loginHandler.FinishLogin)
-	handler := bff.Middleware(bffStore)(mux)
+	handler := bff.Middleware(bffStore)(requireSensitiveManagementStepUp(bff.NewStepUpGate(bffStore, bff.DefaultStepUpTTL), mux))
 	handler = mgmtapi.RegionMiddleware(telemetry.New(logger))(handler)
 	return httpserver.Run(ctx, ":"+getenv("PORT", "8081"), handler, logger)
 }
@@ -420,6 +421,7 @@ func runDevelopment(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.
 		WithMFA(mfaService).
 		WithCompliance(complianceDeps).
 		WithAuditTrail(auditTrailDeps)
+	mgmtServer.WithMFASessionStamper(bffMFASessionStamper{store: bffStore})
 
 	// Relay store for /relay-addresses endpoints. Only wire when DATABASE_URL is
 	// configured; otherwise the relay endpoints stay in a 503 Service Unavailable
@@ -525,7 +527,7 @@ func runDevelopment(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.
 	// authenticated user from the BFF session context (via bff.UserIDFromContext).
 	// The middleware is non-rejecting: it only populates context when a valid
 	// authenticated session cookie is present.
-	handler := bff.Middleware(bffStore)(mux)
+	handler := bff.Middleware(bffStore)(requireSensitiveManagementStepUp(bff.NewStepUpGate(bffStore, bff.DefaultStepUpTTL), mux))
 
 	// Bind this instance's public RP origin host to its REGION (same rationale as
 	// harbor-hot): the region middleware fail-closed rejects any Host it cannot

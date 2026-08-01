@@ -33,6 +33,10 @@ type MFAService interface {
 // expectations.
 var _ MFAService = (*mfa.Service)(nil)
 
+type MFASessionStamper interface {
+	StampMFAStepUp(ctx context.Context, userID string, verifiedAt time.Time) error
+}
+
 // mfaCodeRequest is the JSON body for the code-carrying MFA endpoints (activate,
 // verify, verify-recovery).
 type mfaCodeRequest struct {
@@ -74,10 +78,6 @@ type mfaStatusResponse struct {
 // writing a 401 and returning ok=false when absent. Every MFA endpoint is for
 // an already-authenticated user managing their own factors.
 func (s *Server) mfaUserID(w http.ResponseWriter, r *http.Request) (string, bool) {
-	if s.abuseGate != nil && !s.abuseGate.Check(r.Context(), "mfa", abuseSource(r)) {
-		s.writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
-		return "", false
-	}
 	var userID string
 	if s.callerSource != nil {
 		userID = s.callerSource.CallerID(r.Context())
@@ -85,6 +85,13 @@ func (s *Server) mfaUserID(w http.ResponseWriter, r *http.Request) (string, bool
 	if userID == "" {
 		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
 		return "", false
+	}
+	if s.abuseGate != nil {
+		sessionSource, ok := s.callerSource.(CallerSessionSource)
+		if !ok || !s.abuseGate.Check(r.Context(), "mfa", userID, sessionSource.SessionID(r.Context()), abuseSource(r)) {
+			s.writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
+			return "", false
+		}
 	}
 	return userID, true
 }
@@ -194,6 +201,10 @@ func (s *Server) PostMFAVerify(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "MFA is not configured on this instance")
 		return
 	}
+	if s.mfaSessionStamper == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "MFA session binding is unavailable")
+		return
+	}
 	code, ok := s.decodeMFACode(w, r)
 	if !ok {
 		return
@@ -201,6 +212,10 @@ func (s *Server) PostMFAVerify(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.mfa.Verify(r.Context(), userID, code); err != nil {
 		s.writeMFAVerifyError(w, r, err, "failed to verify MFA code")
+		return
+	}
+	if err := s.mfaSessionStamper.StampMFAStepUp(r.Context(), userID, time.Now()); err != nil {
+		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "MFA session binding is unavailable")
 		return
 	}
 	s.writeJSON(w, http.StatusOK, mfaStatusResponse{Status: "verified"})
@@ -224,6 +239,10 @@ func (s *Server) PostMFAVerifyRecovery(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "MFA is not configured on this instance")
 		return
 	}
+	if s.mfaSessionStamper == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "MFA session binding is unavailable")
+		return
+	}
 	code, ok := s.decodeMFACode(w, r)
 	if !ok {
 		return
@@ -231,6 +250,10 @@ func (s *Server) PostMFAVerifyRecovery(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.mfa.VerifyRecoveryCode(r.Context(), userID, code); err != nil {
 		s.writeMFAVerifyError(w, r, err, "failed to verify recovery code")
+		return
+	}
+	if err := s.mfaSessionStamper.StampMFAStepUp(r.Context(), userID, time.Now()); err != nil {
+		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "MFA session binding is unavailable")
 		return
 	}
 	s.writeJSON(w, http.StatusOK, mfaStatusResponse{Status: "verified"})

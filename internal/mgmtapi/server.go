@@ -112,7 +112,9 @@ type Server struct {
 	// activation, step-up verification, recovery-code redemption, and factor
 	// management). Nil puts those routes into a 503 state.
 	mfa MFAService
-
+	// mfaSessionStamper binds successful verification to the authenticated BFF
+	// browser session. Nil makes verification fail closed.
+	mfaSessionStamper MFASessionStamper
 	// compliance, when non-nil, backs the POST /compliance/export and POST
 	// /compliance/erase endpoints. Nil puts those routes into a 503 state.
 	compliance *ComplianceDeps
@@ -296,6 +298,11 @@ func (s *Server) WithRecoveryRateLimiter(limiter RecoveryRateLimiter) *Server {
 // s for chaining.
 func (s *Server) WithMFA(service MFAService) *Server {
 	s.mfa = service
+	return s
+}
+
+func (s *Server) WithMFASessionStamper(stamper MFASessionStamper) *Server {
+	s.mfaSessionStamper = stamper
 	return s
 }
 

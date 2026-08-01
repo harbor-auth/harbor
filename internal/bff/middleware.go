@@ -19,6 +19,16 @@ type sessionScopeKey struct{}
 // recoveryRequiredKey is the context key for the recovery_required flag.
 type recoveryRequiredKey struct{}
 
+type sessionIDKey struct{}
+
+// SessionIDFromContext returns the opaque BFF request/session identifier that
+// Middleware authenticated. It is never populated from request headers or
+// bodies, so handlers can safely bind state changes to this browser session.
+func SessionIDFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(sessionIDKey{}).(string)
+	return v
+}
+
 // ContextWithSessionScope returns a new context carrying the session scope.
 func ContextWithSessionScope(ctx context.Context, scope SessionScope) context.Context {
 	return context.WithValue(ctx, sessionScopeKey{}, scope)
@@ -92,6 +102,7 @@ func Middleware(store BFFSessionStore) func(http.Handler) http.Handler {
 
 			// Inject the authenticated user ID, session scope, and recovery status.
 			ctx := ContextWithUserID(r.Context(), session.UserID)
+			ctx = context.WithValue(ctx, sessionIDKey{}, requestID)
 			ctx = ContextWithSessionScope(ctx, session.SessionScope)
 			ctx = ContextWithRecoveryRequired(ctx, session.RecoveryRequired)
 			next.ServeHTTP(w, r.WithContext(ctx))
