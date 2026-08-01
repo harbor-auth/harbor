@@ -173,8 +173,8 @@ func TestPostExport_Success(t *testing.T) {
 }
 
 // TestPostExport_CallerScoped verifies that Assemble is called with the
-// authenticated user's ID from the X-Harbor-User-ID header — guaranteeing the
-// export is strictly caller-scoped and cannot be directed at another user.
+// authenticated user's ID supplied by fakeCallerSource — guaranteeing the export
+// is strictly caller-scoped and cannot be directed at another user.
 func TestPostExport_CallerScoped(t *testing.T) {
 	bundler := &fakeBundleAssembler{bundle: testBundle("alice")}
 	mux := newComplianceMux(newComplianceDeps(
@@ -197,8 +197,8 @@ func TestPostExport_CallerScoped(t *testing.T) {
 }
 
 // TestSecurity_PostExport_CrossUserIsolation verifies that user B cannot
-// trigger an export for user A. The handler passes the X-Harbor-User-ID header
-// value to the bundler — so user B's request assembles only user B's bundle.
+// trigger an export for user A. The handler passes the authenticated caller
+// context to the bundler, so user B's request assembles only user B's bundle.
 func TestSecurity_PostExport_CrossUserIsolation(t *testing.T) {
 	bundler := &fakeBundleAssembler{bundle: testBundle("user-B")}
 	mux := newComplianceMux(newComplianceDeps(
@@ -317,7 +317,8 @@ func TestPostErase_Success(t *testing.T) {
 }
 
 // TestPostErase_EraseCalledWithAuthenticatedUser verifies the eraser is always
-// called with the X-Harbor-User-ID value — the caller cannot target another user.
+// called with the session-derived caller identity, so the caller cannot target
+// another user.
 func TestPostErase_EraseCalledWithAuthenticatedUser(t *testing.T) {
 	eraser := &fakeAccountEraser{}
 	mux := newComplianceMux(newComplianceDeps(
