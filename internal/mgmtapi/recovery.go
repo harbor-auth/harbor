@@ -28,7 +28,7 @@ const recoveryCeremonyTTL = 10 * time.Minute
 // RecoveryScopedSessionCookieName carries the scoped enrollment-only session
 // token established by a successful POST /recovery/complete. The user may ONLY
 // enroll a fresh passkey with this session until recovery_required is cleared.
-const RecoveryScopedSessionCookieName = "harbor_recovery_session"
+const RecoveryScopedSessionCookieName = "__Host-harbor-bff"
 
 // ErrRecoveryCeremonyNotFound is returned when a recovery ceremony request id
 // is unknown or has expired.
@@ -506,6 +506,19 @@ func (s *Server) PostRecoveryComplete(w http.ResponseWriter, r *http.Request) {
 		}
 		http.SetCookie(w, &http.Cookie{
 			Name:     RecoveryScopedSessionCookieName,
+			Value:    token,
+			Path:     "/",
+			HttpOnly: true,
+			Secure:   true,
+			SameSite: http.SameSiteStrictMode,
+			MaxAge:   int(recoveryCeremonyTTL.Seconds()),
+		})
+		// The same opaque token also selects the enrollment handoff consumed by
+		// WebAuthn register/begin and register/finish. Keeping this separate from
+		// the BFF cookie makes each package's cookie contract explicit while the
+		// issuer binds both records to the same recovered user.
+		http.SetCookie(w, &http.Cookie{
+			Name:     EnrollmentSessionCookieName,
 			Value:    token,
 			Path:     "/",
 			HttpOnly: true,

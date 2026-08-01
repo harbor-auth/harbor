@@ -151,6 +151,7 @@ func runProduction(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.R
 		WithInitialAccessToken(initialAccessToken).
 		RequireRegistrationAuthorization().
 		WithRecovery(recoveryManager, recoveryStore, recoveryService, recoveryCeremonies).
+		WithScopedSessionIssuer(&recoverySessionIssuer{bffSessions: bffStore, enrollmentSessions: enrollmentSessions}).
 		WithMFA(mfaService)
 
 	mux := httpserver.NewHealthMux()
@@ -259,6 +260,12 @@ func runDevelopment(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.
 	} else {
 		logger.Warn("REDIS_URL not set — using in-memory WebAuthn session store (dev only; not shared across replicas)")
 		sessions = webauthn.NewInMemorySessionStore()
+	}
+	var enrollmentSessions mgmtapi.EnrollmentSessionStore
+	if redisClient != nil {
+		enrollmentSessions = mgmtapi.NewRedisEnrollmentSessionStore(redisClient)
+	} else {
+		enrollmentSessions = mgmtapi.NewInMemoryEnrollmentSessionStore()
 	}
 
 	svc, err := webauthn.NewService(webauthn.Config{
@@ -389,6 +396,7 @@ func runDevelopment(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.
 	}
 
 	mgmtServer := mgmtapi.New(enroller, logger).
+		WithEnrollmentSessions(enrollmentSessions).
 		WithCallerSource(bffCallerAdapter{}).
 		WithConsentStore(consentStore).
 		WithSessionRevoker(sessionRevoker).
@@ -459,9 +467,7 @@ func runDevelopment(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.
 	)
 
 	mux := httpserver.NewHealthMux()
-	// Passkey ceremony endpoints. userIDFromRequest returns 501 until the BFF
-	// session middleware lands (docs/DESIGN.md §9) — production-safe default.
-	webauthn.RegisterRoutes(mux, svc)
+	webauthn.NewHandler(svc).WithEnrollmentSessions(enrollmentSessions).RegisterRoutes(mux)
 	mgmtServer.Routes(mux)
 	dashHandler.Routes(mux)
 

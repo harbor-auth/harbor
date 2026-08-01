@@ -58,6 +58,7 @@ func TestProductionLiveGraphRequiresDurableDependencies(t *testing.T) {
 		"mfa.NewDBStore",
 		"WithClientRegistration",
 		"WithRecovery",
+		"WithScopedSessionIssuer",
 		"WithMFA",
 		"WithInitialAccessToken",
 	} {
