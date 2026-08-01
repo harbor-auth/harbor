@@ -63,6 +63,33 @@ func TestRedisSessionStore_SaveAndTakeRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRedisSessionStore_CrossReplicaCeremony proves register/begin and
+// register/finish do not require replica affinity. Each store is a distinct
+// replica-local object; Redis is their only shared state.
+func TestRedisSessionStore_CrossReplicaCeremony(t *testing.T) {
+	mr := miniredis.RunT(t)
+	clientA := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	clientB := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() {
+		_ = clientA.Close()
+		_ = clientB.Close()
+	})
+	replicaA := NewRedisSessionStore(clientA, 5*time.Minute)
+	replicaB := NewRedisSessionStore(clientB, 5*time.Minute)
+	want := gowebauthn.SessionData{Challenge: "begun-on-a", UserID: []byte("user-123")}
+
+	if err := replicaA.Save(context.Background(), "ceremony", want); err != nil {
+		t.Fatalf("replica A Save: %v", err)
+	}
+	got, err := replicaB.Take(context.Background(), "ceremony")
+	if err != nil {
+		t.Fatalf("replica B Take: %v", err)
+	}
+	if got.Challenge != want.Challenge || string(got.UserID) != string(want.UserID) {
+		t.Fatalf("replica B session = %#v, want challenge %q and user %q", got, want.Challenge, want.UserID)
+	}
+}
+
 func TestRedisSessionStore_DoubleTakeReturnsErrSessionNotFound(t *testing.T) {
 	store, _ := newTestRedisSessionStore(t)
 	ctx := context.Background()

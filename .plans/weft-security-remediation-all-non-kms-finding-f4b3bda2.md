@@ -8,6 +8,14 @@
 4. Run the focused package test and confirm the new tests fail for the intended missing production wiring.
 5. Commit, rebase on the shared branch, and push the red-test task for the implementation task to satisfy.
 
+## Task 16: recovery and enrollment scope tests
+
+1. Inspect the BFF recovery-session model, management authorization gates, and WebAuthn Redis stores.
+2. Add focused negative tests proving `recovery_required` is propagated and restricts a session to enrollment operations.
+3. Add cross-replica enrollment tests proving both the enrollment handoff and WebAuthn ceremony state use Redis.
+4. Run the focused tests and confirm they fail for the intended missing production behavior, then run formatting and compile checks.
+5. Rebase the shared branch, commit, push, and report task completion.
+
 ## Task 18: session-bound MFA and lockout tests
 
 1. Add handler tests that require MFA identity and the step-up stamp to be tied

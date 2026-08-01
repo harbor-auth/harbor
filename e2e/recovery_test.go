@@ -358,6 +358,17 @@ func TestRecoveryScopedSessionDeniesNonEnrollment(t *testing.T) {
 		t.Skip("no scoped-session cookie set — scoped sessions not wired on this stack; skipping")
 	}
 
+	// Enrollment is the one operation the recovery-scoped session must permit.
+	enrollResp, err := recoverClient.Post(mgmtBaseURL()+registerBeginPath, "application/json", nil)
+	if err != nil {
+		t.Fatalf("register/begin with recovery session: %v", err)
+	}
+	defer func() { _ = enrollResp.Body.Close() }()
+	if enrollResp.StatusCode != http.StatusOK {
+		raw, _ := io.ReadAll(enrollResp.Body)
+		t.Errorf("recovery-scoped session register/begin = %d, want 200\n%s", enrollResp.StatusCode, raw)
+	}
+
 	// recoverClient now carries ONLY the scoped recovery cookie. A
 	// non-enrollment authenticated surface must NOT be authorized by it:
 	// GET /recovery/factors is gated on real authentication, so the scoped
