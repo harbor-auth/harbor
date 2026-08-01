@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -378,4 +379,22 @@ func TestProductionLiveGraphContainsNoScaffoldConstructors(t *testing.T) {
 			t.Errorf("live harbor-hot graph still references forbidden scaffold %q", forbidden)
 		}
 	}
+}
+
+func TestDevelopmentGraphRegistersE2ERedirectURI(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	config, _, err := buildDevHotGraph("http://localhost:8080", logger)
+	if err != nil {
+		t.Fatalf("build development graph: %v", err)
+	}
+	client, found := config.Clients.Lookup(context.Background(), "demo-client")
+	if !found {
+		t.Fatal("development demo client not registered")
+	}
+	for _, redirectURI := range client.RedirectURIs {
+		if redirectURI == "http://localhost:3000/callback" {
+			return
+		}
+	}
+	t.Fatalf("development demo client redirects = %v, missing e2e callback", client.RedirectURIs)
 }

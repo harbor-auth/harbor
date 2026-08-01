@@ -318,7 +318,7 @@ func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redis
 
 func buildDevHotGraph(issuer string, logger *slog.Logger) (oidcapi.Config, hotGraph, error) {
 	registry := oidc.NewInMemoryClientRegistry()
-	registry.Put(oidc.Client{ID: "demo-client", SectorID: "localhost", RedirectURIs: []string{"http://localhost/callback", "http://localhost:8081/callback"}, ScopesAllowed: []string{"openid", "profile", "email", "offline_access"}})
+	registry.Put(oidc.Client{ID: "demo-client", SectorID: "localhost", RedirectURIs: []string{"http://localhost/callback", "http://localhost:3000/callback", "http://localhost:8081/callback"}, ScopesAllowed: []string{"openid", "profile", "email", "offline_access"}})
 	grants := oidc.NewInMemoryGrantStore()
 	svc := oidc.NewService(oidc.ServiceConfig{Issuer: issuer, Clients: registry, Codes: oidc.NewInMemoryAuthCodeStore(), Tokens: oidc.NewPlaceholderIssuer(), Sessions: oidc.NewStubSessionResolver("demo-user-ppid"), Grants: grants, Logger: logger})
 	return oidcapi.Config{Issuer: issuer, Service: svc, Grants: grants, Clients: registry, SessionRevoker: noopSessionRevoker{}}, hotGraph{}, nil

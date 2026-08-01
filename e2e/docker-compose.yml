@@ -28,10 +28,11 @@ services:
       # and /token instead of 400-rejecting them (region.BindIssuerHost).
       REGION: "EU"
       # Dev mode bypasses the fail-closed startup guard (validateProductionReadiness)
-      # so the flow can run without DATABASE_URL/REDIS_URL/LOGIN_URL. Note: with
-      # the stub resolver removed, DATABASE_URL is still required for the session
-      # resolver — until e2e is upgraded to wire a test DB, this stack is broken.
+      # so the flow can run without DATABASE_URL/REDIS_URL/LOGIN_URL.
       HARBOR_DEV_MODE: "1"
+      # Local crypto is available only with the explicit dev-mode opt-in above.
+      # This deterministic test-only secret is never used by production manifests.
+      HARBOR_KMS_SECRET: "e2e-development-only-key-material"
     ports:
       - "8080:8080"
     volumes:
@@ -69,6 +70,9 @@ services:
       # Dev mode bypasses the fail-closed startup guard so this stack runs
       # without DATABASE_URL/REDIS_URL.
       HARBOR_DEV_MODE: "1"
+      # Local crypto is available only with the explicit dev-mode opt-in above.
+      # This deterministic test-only secret is never used by production manifests.
+      HARBOR_KMS_SECRET: "e2e-development-only-key-material"
       # WebAuthn Relying Party config. Passkeys registered here are asserted on
       # this same origin during the login ceremony.
       WEBAUTHN_RP_ID: "localhost"
