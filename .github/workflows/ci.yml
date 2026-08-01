@@ -144,12 +144,22 @@ jobs:
   # Nix-based checks so a chart syntax error doesn't block the Go test output.
   helm-lint:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - configuration: default
+            helm-args: ""
+          - configuration: relay-enabled
+            helm-args: --set relay.enabled=true
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Lint Helm chart
-        run: helm lint deploy/helm/
+      - name: Lint and render Helm chart (${{ matrix.configuration }})
+        run: |
+          helm lint deploy/helm/ ${{ matrix.helm-args }}
+          helm template harbor deploy/helm/ ${{ matrix.helm-args }} > rendered.yaml
+          ruby -e 'require "yaml"; YAML.load_stream(File.read(ARGV.fetch(0)))' rendered.yaml
 
   # e2e — Foundation F8: the composed OIDC harness run on every PR.
   # Runs `make e2e` (docker-compose + `go test -tags=e2e ./e2e/...`) in the
