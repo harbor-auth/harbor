@@ -36,3 +36,9 @@ did not yet exist on `origin`; the required pre-push rebase incorporated Task 1.
 2. Extend the assembled BFF flow tests to require a consent hand-off after authentication, explicit approval/denial, and one-time decision consumption.
 3. Run focused tests to verify the new security tests fail for the current implicit-consent behavior.
 4. Format, commit, rebase on the shared branch, push, and report task completion.
+
+## Task 22: concurrent WebAuthn sign-count tests
+
+1. Model the guarded credential counter update in the DB-store fake, including a hook that simulates another replica winning between the read and update.
+2. Add DB-store tests for stale concurrent updates, guarded no-ops, and authenticators that do not implement a signature counter (zero to zero).
+3. Run the focused WebAuthn tests and confirm the new security assertions fail for the expected reason, then commit, rebase, and push the test-only change.

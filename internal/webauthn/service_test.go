@@ -156,6 +156,16 @@ func TestService_FinishLogin_MalformedAssertion(t *testing.T) {
 	}
 }
 
+// FinishLogin returns Store.UpdateCredential failures after assertion
+// validation. A guarded update that loses a race is therefore required to be
+// recognizable at the service boundary as the same clone signal emitted by
+// go-webauthn's in-memory CloneWarning check.
+func TestService_ConcurrentSignCountRegressionIsCloneSignal(t *testing.T) {
+	if !errors.Is(ErrSignCountRegression, ErrClonedAuthenticator) {
+		t.Fatalf("ErrSignCountRegression = %v, want service clone signal %v", ErrSignCountRegression, ErrClonedAuthenticator)
+	}
+}
+
 func TestService_FinishRegistration_UnknownUser(t *testing.T) {
 	svc, _ := newTestService(t)
 	_, err := svc.FinishRegistration(context.Background(), []byte("nobody"), "some-key", strings.NewReader("{}"))
