@@ -109,6 +109,18 @@ Pre-work rebase note: `origin/weft/security-remediation-all-non-kms-finding-f4b3
    policy behavior without changing production code.
 5. Format, commit, rebase on the shared branch, push, and report completion.
 
+## Task 9: shared JWT verifier implementation
+
+1. Consolidate JOSE header, rotating-key, issuer, temporal, token-type, claim,
+   scope, audience, and durable revocation checks in `oidc.JWTVerifier`.
+2. Construct one verifier in the OIDC API server and use it for userinfo,
+   introspection, access-token revocation, and logout ID-token hints.
+3. Preserve endpoint-specific behavior: userinfo/revocation require access
+   tokens, introspection applies caller audience isolation, and logout accepts
+   expired genuine ID tokens but rejects access tokens.
+4. Run focused tests, race checks, repository build/vet/test gates, agent and
+   generation checks, then rebase, commit, and push the shared branch.
+
 ## Task 3: harbor-mgmt production graph tests
 
 1. Capture the production startup dependency contract at the `cmd/harbor-mgmt` boundary.

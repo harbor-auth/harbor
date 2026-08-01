@@ -10,9 +10,9 @@ import (
 	"github.com/harbor-auth/harbor/internal/oidc"
 )
 
-// LogoutVerifier verifies an id_token_hint's signature (and issuer) but ignores
-// expiry, so a user may log out with an expired ID token during RP-Initiated
-// Logout (OIDC RP-Initiated Logout 1.0). *oidc.JWTVerifier satisfies this.
+// LogoutVerifier applies the shared ID-token policy (including issuer, JOSE
+// type, rotating kid, required claims, and revocation) but ignores expiry, so a
+// user may log out with an expired ID token during RP-Initiated Logout.
 type LogoutVerifier interface {
 	VerifySignatureOnly(ctx context.Context, token string) (*oidc.VerifiedClaims, error)
 }

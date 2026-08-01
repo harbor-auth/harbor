@@ -141,13 +141,12 @@ func (s *Server) revokeAccessToken(r *http.Request, token, clientID string) stri
 	}
 
 	// Use introspector to validate and extract token claims.
-	// We pass an empty client ID and IsAdmin=true to bypass cross-client
-	// checks — the revocation endpoint already validated client auth.
+	// Apply the authenticated client's audience requirement through the shared
+	// verifier; a client must never revoke another client's access token.
 	req := oidc.IntrospectRequest{
 		Token:         token,
 		TokenTypeHint: "access_token",
-		ClientID:      "", // bypass cross-client check
-		IsAdmin:       true,
+		ClientID:      clientID,
 	}
 	resp := s.introspector.Introspect(r.Context(), req)
 

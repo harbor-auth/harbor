@@ -53,7 +53,7 @@ type RevokedJTIChecker interface {
 // Step 4 adds ~100ns overhead. Step 5 only fires on bloom filter hits
 // (target: 1 in 1,000,000 with default configuration).
 type JWTVerifier struct {
-	pubKey         *ecdsa.PublicKey
+	pubKeys        map[string]*ecdsa.PublicKey
 	filter         RevocationFilter
 	revokedChecker RevokedJTIChecker // nil = skip DB introspection (test mode)
 	expectedIssuer string            // "" = do not enforce issuer coherence
@@ -65,6 +65,11 @@ type JWTVerifierConfig struct {
 	// Signer provides the public key for signature verification.
 	// The JWK is extracted from the signer to get the public key.
 	Signer crypto.Signer
+
+	// Signers contains every currently trusted signing key. It supports the
+	// overlap window during key rotation. Signer is retained for callers that
+	// only have one key; when Signers is non-empty it takes precedence.
+	Signers []crypto.Signer
 
 	// Filter is the in-process bloom filter for revoked JTIs.
 	// If nil, revocation checking is skipped.
@@ -94,19 +99,25 @@ func NewJWTVerifier(cfg JWTVerifierConfig) (*JWTVerifier, error) {
 		now = time.Now
 	}
 
-	// Extract the public key from the signer's JWK
-	var pubKey *ecdsa.PublicKey
-	if cfg.Signer != nil {
-		jwk := cfg.Signer.PublicJWK()
-		var err error
-		pubKey, err = jwk.ToPublicKey()
+	signers := cfg.Signers
+	if len(signers) == 0 && cfg.Signer != nil {
+		signers = []crypto.Signer{cfg.Signer}
+	}
+	pubKeys := make(map[string]*ecdsa.PublicKey, len(signers))
+	for _, signer := range signers {
+		if signer == nil {
+			continue
+		}
+		jwk := signer.PublicJWK()
+		pubKey, err := jwk.ToPublicKey()
 		if err != nil {
 			return nil, fmt.Errorf("jwt verifier: extract public key: %w", err)
 		}
+		pubKeys[jwk.Kid] = pubKey
 	}
 
 	return &JWTVerifier{
-		pubKey:         pubKey,
+		pubKeys:        pubKeys,
 		filter:         cfg.Filter,
 		revokedChecker: cfg.RevokedChecker,
 		expectedIssuer: cfg.ExpectedIssuer,
@@ -125,6 +136,14 @@ type VerifiedClaims struct {
 	Scope    string // access tokens only
 }
 
+// AccessTokenRequirements narrows the shared access-token policy for a
+// particular consumer without allowing that consumer to reimplement JWT
+// parsing or signature validation.
+type AccessTokenRequirements struct {
+	ExpectedAudience string
+	RequiredScopes   []string
+}
+
 // Verify parses, verifies, and checks revocation status of a JWT.
 // Returns the verified claims on success, or an error if:
 //   - The JWT is malformed (ErrTokenInvalid)
@@ -134,6 +153,16 @@ type VerifiedClaims struct {
 //
 //harbor:invariant INV-EMERGENCY-REVOCATION
 func (v *JWTVerifier) Verify(ctx context.Context, token string) (*VerifiedClaims, error) {
+	return v.verify(ctx, token, verificationPolicy{})
+}
+
+type verificationPolicy struct {
+	tokenType    string
+	allowExpired bool
+	requireScope bool
+}
+
+func (v *JWTVerifier) verify(ctx context.Context, token string, policy verificationPolicy) (*VerifiedClaims, error) {
 	// Step 1: Parse the JWT
 	header, payload, sig, err := parseCompactJWT(token)
 	if err != nil {
@@ -148,17 +177,21 @@ func (v *JWTVerifier) Verify(ctx context.Context, token string) (*VerifiedClaims
 	if h.Alg != "ES256" {
 		return nil, fmt.Errorf("%w: unsupported algorithm %s", ErrTokenInvalid, h.Alg)
 	}
+	if h.Kid == "" || (policy.tokenType != "" && h.Typ != policy.tokenType) {
+		return nil, fmt.Errorf("%w: invalid token header", ErrTokenInvalid)
+	}
 
 	// Step 2: Verify signature
-	if v.pubKey == nil {
-		return nil, fmt.Errorf("%w: no public key configured", ErrTokenInvalid)
+	pubKey := v.pubKeys[h.Kid]
+	if pubKey == nil {
+		return nil, fmt.Errorf("%w: unknown signing key", ErrTokenInvalid)
 	}
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return nil, fmt.Errorf("%w: invalid format", ErrTokenInvalid)
 	}
 	signingInput := parts[0] + "." + parts[1]
-	if !verifyES256Signature(v.pubKey, []byte(signingInput), sig) {
+	if !verifyES256Signature(pubKey, []byte(signingInput), sig) {
 		return nil, fmt.Errorf("%w: signature verification failed", ErrTokenInvalid)
 	}
 
@@ -174,12 +207,17 @@ func (v *JWTVerifier) Verify(ctx context.Context, token string) (*VerifiedClaims
 	// cross-region acceptance). This prevents a token minted on eu.harbor.id
 	// from being accepted on the us.harbor.id surface (OpenSpec
 	// regional-data-residency-routing REQ-001, REQ-002).
-	if v.expectedIssuer != "" && claims.Issuer != v.expectedIssuer {
+	if claims.Issuer == "" || (v.expectedIssuer != "" && claims.Issuer != v.expectedIssuer) {
 		return nil, fmt.Errorf("%w: token iss %q != expected %q", ErrIssuerMismatch, claims.Issuer, v.expectedIssuer)
+	}
+	if claims.Subject == "" || claims.Audience == "" || claims.Expiry.Unix() <= 0 ||
+		claims.IssuedAt.Unix() <= 0 || claims.IssuedAt.After(v.now()) || claims.JTI == "" ||
+		(policy.requireScope && strings.TrimSpace(claims.Scope) == "") {
+		return nil, fmt.Errorf("%w: required claim missing or invalid", ErrTokenInvalid)
 	}
 
 	// Step 3: Check expiry
-	if v.now().After(claims.Expiry) {
+	if !policy.allowExpired && v.now().After(claims.Expiry) {
 		return nil, ErrTokenExpired
 	}
 
@@ -242,20 +280,32 @@ func (v *JWTVerifier) confirmRevocation(ctx context.Context, jti string) (bool, 
 
 // VerifyAccessToken is a convenience method that verifies an access token
 // and returns an error if the token is invalid, expired, or revoked.
-func (v *JWTVerifier) VerifyAccessToken(ctx context.Context, token string) (*VerifiedClaims, error) {
-	claims, err := v.Verify(ctx, token)
+func (v *JWTVerifier) VerifyAccessToken(ctx context.Context, token string, requirements ...AccessTokenRequirements) (*VerifiedClaims, error) {
+	claims, err := v.verify(ctx, token, verificationPolicy{tokenType: "at+JWT", requireScope: true})
 	if err != nil {
 		return nil, err
 	}
-	// Access tokens must have a JTI
-	if claims.JTI == "" {
-		return nil, fmt.Errorf("%w: access token missing jti claim", ErrTokenInvalid)
+	if len(requirements) == 0 {
+		return claims, nil
+	}
+	req := requirements[0]
+	if req.ExpectedAudience != "" && claims.Audience != req.ExpectedAudience {
+		return nil, fmt.Errorf("%w: token audience mismatch", ErrTokenInvalid)
+	}
+	tokenScopes := make(map[string]struct{})
+	for _, scope := range strings.Fields(claims.Scope) {
+		tokenScopes[scope] = struct{}{}
+	}
+	for _, required := range req.RequiredScopes {
+		if _, ok := tokenScopes[required]; !ok {
+			return nil, fmt.Errorf("%w: required scope missing", ErrTokenInvalid)
+		}
 	}
 	return claims, nil
 }
 
-// VerifySignatureOnly verifies a JWT's signature and issuer but SKIPS the
-// expiry check. This is used for id_token_hint validation in RP-Initiated
+// VerifySignatureOnly applies the shared ID-token policy but SKIPS the expiry
+// check. This is used for id_token_hint validation in RP-Initiated
 // Logout (OIDC RP-Initiated Logout 1.0) where users may log out with expired
 // tokens — the signature proves the token was genuinely issued by Harbor, and
 // the sub claim identifies the user/client pair for session revocation.
@@ -265,52 +315,10 @@ func (v *JWTVerifier) VerifyAccessToken(ctx context.Context, token string) (*Ver
 //   - The signature is invalid (ErrTokenInvalid)
 //   - The issuer doesn't match (ErrIssuerMismatch)
 //
-// NOTE: This method does NOT check revocation status since id_token_hint
-// validation doesn't need it — we're revoking sessions, not granting access.
+// Revocation is still checked so every token consumer honors an emergency JTI
+// revocation consistently.
 func (v *JWTVerifier) VerifySignatureOnly(ctx context.Context, token string) (*VerifiedClaims, error) {
-	// Step 1: Parse the JWT
-	header, payload, sig, err := parseCompactJWT(token)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrTokenInvalid, err)
-	}
-
-	// Verify header algorithm
-	var h jwtHeader
-	if err := json.Unmarshal(header, &h); err != nil {
-		return nil, fmt.Errorf("%w: invalid header", ErrTokenInvalid)
-	}
-	if h.Alg != "ES256" {
-		return nil, fmt.Errorf("%w: unsupported algorithm %s", ErrTokenInvalid, h.Alg)
-	}
-
-	// Step 2: Verify signature
-	if v.pubKey == nil {
-		return nil, fmt.Errorf("%w: no public key configured", ErrTokenInvalid)
-	}
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return nil, fmt.Errorf("%w: invalid format", ErrTokenInvalid)
-	}
-	signingInput := parts[0] + "." + parts[1]
-	if !verifyES256Signature(v.pubKey, []byte(signingInput), sig) {
-		return nil, fmt.Errorf("%w: signature verification failed", ErrTokenInvalid)
-	}
-
-	// Parse claims
-	claims, err := v.parseClaims(payload)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrTokenInvalid, err)
-	}
-
-	// Step 3: Check issuer coherence (skip expiry check intentionally)
-	if v.expectedIssuer != "" && claims.Issuer != v.expectedIssuer {
-		return nil, fmt.Errorf("%w: token iss %q != expected %q", ErrIssuerMismatch, claims.Issuer, v.expectedIssuer)
-	}
-
-	// NOTE: Expiry check is intentionally skipped — users may log out with
-	// expired tokens, and we only need the signature to prove authenticity.
-
-	return claims, nil
+	return v.verify(ctx, token, verificationPolicy{tokenType: "JWT", allowExpired: true})
 }
 
 // DBRevokedJTIChecker adapts DBRevokedJTIStore to the RevokedJTIChecker interface.
