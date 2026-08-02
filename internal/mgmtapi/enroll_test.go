@@ -91,6 +91,14 @@ func TestPostEnrollMalformedBody(t *testing.T) {
 	}
 }
 
+// TestPostEnrollUnavailable retains the historical missing-enroller regression.
+// The server now fails closed at construction instead of exposing a 503 route.
+func TestPostEnrollUnavailable(t *testing.T) {
+	if _, err := New(nil, NewInMemoryEnrollmentSessionStore(), &fakeClientReg{}, testRegBaseURL, nil); err == nil {
+		t.Fatal("New accepted a nil enroller")
+	}
+}
+
 func TestPostEnrollServerError(t *testing.T) {
 	fe := &fakeEnroller{err: errors.New("db down")}
 	s := newTestServer(fe)

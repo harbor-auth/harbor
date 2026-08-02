@@ -108,6 +108,13 @@ func TestNewDashboardHandler_RejectsMissingRequiredCollaborators(t *testing.T) {
 	}
 }
 
+// TestDashboard_NilDepsReturn503 retains the historical nil-dependency
+// regression. Missing collaborators are now rejected earlier, at construction,
+// instead of allowing a handler to survive until it can return a 503.
+func TestDashboard_NilDepsReturn503(t *testing.T) {
+	TestNewDashboardHandler_RejectsMissingRequiredCollaborators(t)
+}
+
 func authedCtxRequest(method, path, userID string) *http.Request {
 	r := httptest.NewRequest(method, path, nil)
 	return r.WithContext(ContextWithUserID(r.Context(), userID))

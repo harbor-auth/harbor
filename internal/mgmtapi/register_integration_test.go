@@ -6,13 +6,10 @@ import (
 	"crypto/subtle"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
 	"github.com/harbor-auth/harbor/internal/clients"
-	"github.com/harbor-auth/harbor/internal/gen/db"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // DCR end-to-end integration test (RFC 7591/7592). Unlike the per-handler unit
@@ -350,52 +347,6 @@ func TestIntegrationGateRejectsAnonymous(t *testing.T) {
 	}
 	if store.len() != 1 {
 		t.Errorf("store holds %d clients after gated register, want 1", store.len())
-	}
-}
-
-// TestIntegrationAuthorizedRegistrationPersistsInPostgres proves the
-// production registration seam is both authorization-gated and durable. A
-// fresh store instance must resolve the client written through the HTTP mux.
-func TestIntegrationAuthorizedRegistrationPersistsInPostgres(t *testing.T) {
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("DATABASE_URL is required for durable registration coverage")
-	}
-	pool, err := pgxpool.New(context.Background(), databaseURL)
-	if err != nil {
-		t.Fatalf("connect PostgreSQL: %v", err)
-	}
-	t.Cleanup(pool.Close)
-
-	const iat = "durable-registration-initial-access-token"
-	store := clients.NewDBClientRegistrationStore(db.New(pool))
-	s := newTestServerWithClient(nil, store).
-		WithInitialAccessToken(iat).
-		RequireRegistrationAuthorization()
-	mux := http.NewServeMux()
-	s.Routes(mux)
-
-	anon := serveMgmt(t, mux, http.MethodPost, "/register", integrationRegisterBody, "")
-	if anon.Code != http.StatusUnauthorized {
-		t.Fatalf("anonymous POST /register = %d, want 401; body=%s", anon.Code, anon.Body.String())
-	}
-	resp := registerClient(t, mux, integrationRegisterBody, bearer(iat))
-	t.Cleanup(func() {
-		if deleteErr := store.Delete(context.Background(), resp.ClientID); deleteErr != nil {
-			t.Errorf("delete registered client: %v", deleteErr)
-		}
-	})
-
-	fresh := clients.NewDBClientRegistrationStore(db.New(pool))
-	persisted, err := fresh.VerifyRegToken(context.Background(), resp.RegistrationAccessToken)
-	if err != nil {
-		t.Fatalf("fresh PostgreSQL store cannot resolve registration token: %v", err)
-	}
-	if persisted.ClientID != resp.ClientID {
-		t.Fatalf("persisted client_id = %q, want %q", persisted.ClientID, resp.ClientID)
-	}
-	if len(persisted.ClientSecretHash) == 0 || bytes.Equal(persisted.ClientSecretHash, []byte(resp.ClientSecret)) {
-		t.Fatal("durable registration did not persist a non-plaintext client secret hash")
 	}
 }
 

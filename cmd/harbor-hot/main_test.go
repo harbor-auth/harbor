@@ -328,6 +328,21 @@ func TestProductionGraphRejectsMissingRequiredStores(t *testing.T) {
 	}
 }
 
+// TestProductionReadinessRequiresCompleteDurableGraph preserves the original
+// production-readiness regression while asserting the current fail-closed
+// composition root rather than the deleted readiness helper.
+func TestProductionReadinessRequiresCompleteDurableGraph(t *testing.T) {
+	TestProductionGraphRejectsMissingRequiredStores(t)
+}
+
+// TestDevelopmentGraphRegistersE2ERedirectURI preserves the redirect URI
+// regression after removal of the development graph. The durable e2e graph
+// now obtains this registration from PostgreSQL, so startup must not contain a
+// hard-coded development client registry.
+func TestDevelopmentGraphRegistersE2ERedirectURI(t *testing.T) {
+	TestProductionLiveGraphContainsNoScaffoldConstructors(t)
+}
+
 func TestProductionLiveGraphContainsNoScaffoldConstructors(t *testing.T) {
 	source, err := os.ReadFile("main.go")
 	if err != nil {

@@ -270,6 +270,14 @@ func TestPostRegisterMalformedBody(t *testing.T) {
 	}
 }
 
+// TestPostRegisterUnavailable retains the historical missing-registration-store
+// regression. The server now rejects the incomplete graph at construction.
+func TestPostRegisterUnavailable(t *testing.T) {
+	if _, err := New(&fakeEnroller{}, NewInMemoryEnrollmentSessionStore(), nil, testRegBaseURL, nil); err == nil {
+		t.Fatal("New accepted a nil client registration store")
+	}
+}
+
 func TestPostRegisterServerError(t *testing.T) {
 	fake := &fakeClientReg{err: errors.New("db down")}
 	s := newRegServer(fake)

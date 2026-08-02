@@ -50,6 +50,26 @@ func TestNewService_RejectsMissingRequiredCollaborators(t *testing.T) {
 	}
 }
 
+// TestNewService_PanicsWhenSessionStoreWithoutGrantStore retains the original
+// configuration regression. Construction now returns an error rather than
+// panicking, while preserving the same fail-closed invariant.
+func TestNewService_PanicsWhenSessionStoreWithoutGrantStore(t *testing.T) {
+	cfg := ServiceConfig{
+		Issuer:       "https://test",
+		Clients:      NewInMemoryClientRegistry(),
+		Codes:        NewInMemoryAuthCodeStore(),
+		Tokens:       NewPlaceholderIssuer(),
+		Sessions:     NewStubSessionResolver("sub"),
+		SessionStore: NewInMemorySessionStore(),
+		Consents:     NewInMemoryConsentStore(),
+		Revocations:  NewRecordingRevocationSink(),
+		Outbox:       &recordingOutbox{},
+	}
+	if _, err := NewService(cfg); err == nil {
+		t.Fatal("NewService accepted a session store without a grant store")
+	}
+}
+
 // newTestAuthorizeService returns a Service configured for /authorize tests with
 // an in-memory client registry seeded with a demo client.
 func newTestAuthorizeService(t *testing.T) (*Service, *InMemoryClientRegistry) {
