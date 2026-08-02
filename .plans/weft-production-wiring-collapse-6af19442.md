@@ -142,3 +142,16 @@
    and rotating its refresh token on replica B.
 4. Run focused unit/tagged compile tests and the available repository checks,
    then commit, rebase, and push the shared feature branch.
+
+## Task 18: management live graph and enrollment integration coverage
+
+1. Add an integration-tagged observation of the real management composition
+   root against externally containerised PostgreSQL and Redis, asserting the
+   concrete durable implementations before HTTP serving.
+2. Strengthen the enrollment E2E so a full enroll-to-passkey ceremony must
+   complete and persist its credential instead of treating an unwired ceremony
+   as an acceptable skip.
+3. Exercise authorized dynamic registration through the real management mux
+   and PostgreSQL registration store, then verify the record from a fresh store.
+4. Run focused default and tagged tests, repository checks, commit, rebase, and
+   push the shared feature branch.

@@ -238,7 +238,33 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("resolve WebAuthn origin region: %w", err)
 	}
 	handler = mgmtapi.RegionMiddleware(telemetry.New(logger))(handler)
+	if observe, _ := ctx.Value(mgmtGraphObserverKey{}).(func(mgmtGraph)); observe != nil {
+		observe(mgmtGraph{implementations: map[string]string{
+			"bff_sessions":        fmt.Sprintf("%T", bffStore),
+			"enrollment_sessions": fmt.Sprintf("%T", enrollmentSessions),
+			"credentials":         fmt.Sprintf("%T", credentialStore),
+			"ceremony_sessions":   fmt.Sprintf("%T", ceremonySessions),
+			"users":               fmt.Sprintf("%T", persister),
+			"grants":              fmt.Sprintf("%T", grantStore),
+			"sessions":            fmt.Sprintf("%T", sessionStore),
+			"registration":        fmt.Sprintf("%T", registrationStore),
+			"byo_domains":         fmt.Sprintf("%T", byoDomainStore),
+		}})
+	}
 	return httpserver.Run(ctx, ":"+getenv("PORT", "8081"), handler, logger)
+}
+
+type mgmtGraph struct {
+	implementations map[string]string
+}
+
+type mgmtGraphObserverKey struct{}
+
+// runWithGraphObserver invokes the unchanged production composition root with
+// a read-only integration-test observation point. The observer cannot replace
+// dependencies or alter the served handler.
+func runWithGraphObserver(ctx context.Context, logger *slog.Logger, observe func(mgmtGraph)) error {
+	return run(context.WithValue(ctx, mgmtGraphObserverKey{}, observe), logger)
 }
 
 // dashboardRelayAdapter bridges *relay.Store (which returns raw encrypted
