@@ -78,7 +78,7 @@ func TestStartupHasOneDurableGraph(t *testing.T) {
 		t.Fatalf("read main.go: %v", err)
 	}
 	assembly := string(source)
-	for _, forbidden := range []string{"HARBOR_DEV_MODE", "runDevelopment", "RuntimeDevelopment", "noopUserPersister"} {
+	for _, forbidden := range []string{"internal/testsupport", "HARBOR_DEV_MODE", "runDevelopment", "RuntimeDevelopment", "noopUserPersister", "bootstrapManagementGraph"} {
 		if strings.Contains(assembly, forbidden) {
 			t.Errorf("harbor-mgmt still contains development graph marker %q", forbidden)
 		}
@@ -92,7 +92,13 @@ func TestProductionLiveGraphContainsNoScaffolds(t *testing.T) {
 	productionAssembly := productionAssembly(t)
 
 	for _, forbidden := range []string{
+		"internal/testsupport",
+		"HARBOR_DEV_MODE",
+		"runDevelopment",
+		"bootstrapManagementGraph",
 		"noopUserPersister",
+		"NewPlaceholderIssuer",
+		"NewStubSessionResolver",
 		"NewInMemoryBFFSessionStore",
 		"NewInMemoryStore",
 		"NewInMemorySessionStore",

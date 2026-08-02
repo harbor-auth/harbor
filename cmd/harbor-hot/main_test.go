@@ -344,9 +344,11 @@ func TestProductionLiveGraphContainsNoScaffoldConstructors(t *testing.T) {
 	// reachable from run's live HTTP handler. Explicitly isolated dev/test
 	// helpers may continue to exist, but run must not assemble them.
 	for _, forbidden := range []string{
+		"internal/testsupport",
 		"HARBOR_DEV_MODE",
 		"validateProductionReadiness",
 		"buildDevHotGraph",
+		"bootstrapHotGraph",
 		"oidc.NewPlaceholderIssuer()",
 		"oidc.NewInMemoryClientRegistry()",
 		"oidc.NewInMemoryAuthCodeStore()",

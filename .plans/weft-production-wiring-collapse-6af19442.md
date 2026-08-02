@@ -155,3 +155,12 @@
    and PostgreSQL registration store, then verify the record from a fresh store.
 4. Run focused default and tagged tests, repository checks, commit, rebase, and
    push the shared feature branch.
+
+## Task 19: production graph architecture boundaries
+
+1. Add AST-based fitness coverage for both composition roots that rejects
+   testsupport imports and scaffold/development/dead-bootstrap symbols.
+2. Keep the documented revocation-cache and local-crypto exceptions explicit
+   and regression-tested.
+3. Strengthen each binary's source-level graph guard, then run focused and
+   repository validation before committing, rebasing, and pushing.
