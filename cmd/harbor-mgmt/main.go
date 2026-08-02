@@ -194,8 +194,8 @@ func runDevelopment(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.
 	// owned by main's signal context.
 	stop := func() {}
 
-	// DB-backed stores plug in when DATABASE_URL is configured; otherwise we run
-	// on in-memory dev scaffolds (docs/DESIGN.md §10).
+	// Development uses the same durable stores as production. Local environments
+	// provide PostgreSQL and Redis through e2e/docker-compose.yml.
 	pool, err := clients.ConnectDB(ctx, logger)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -210,9 +210,10 @@ func runDevelopment(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.
 		stop()
 		os.Exit(1)
 	}
-	if pool != nil {
-		defer pool.Close()
+	if pool == nil {
+		return errors.New("development requires DATABASE_URL")
 	}
+	defer pool.Close()
 
 	// BFF session store: Redis for multi-replica safety when REDIS_URL is set,
 	// otherwise an in-memory dev scaffold (docs/plans/bff-session-middleware.md).
@@ -236,13 +237,14 @@ func runDevelopment(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.
 		}
 		os.Exit(1) //nolint:gocritic // pool already closed above
 	}
-	if redisClient != nil {
-		defer func() {
-			if err := redisClient.Close(); err != nil {
-				logger.Warn("redis close error", "error", err)
-			}
-		}()
+	if redisClient == nil {
+		return errors.New("development requires REDIS_URL")
 	}
+	defer func() {
+		if err := redisClient.Close(); err != nil {
+			logger.Warn("redis close error", "error", err)
+		}
+	}()
 
 	bffStore := bff.NewRedisBFFSessionStore(redisClient, bffSessionTTL)
 
@@ -255,32 +257,12 @@ func runDevelopment(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.
 	rpDisplayName := getenv("WEBAUTHN_RP_DISPLAY_NAME", "Harbor")
 	rpOrigins := splitAndTrim(getenv("WEBAUTHN_RP_ORIGINS", "http://localhost:"+port))
 
-	// Credential store: DB-backed when DATABASE_URL is configured, in-memory for
-	// dev (see docs/plans/user-enrollment.md). WithPool enables atomic
+	// WithPool enables atomic
 	// first-passkey enrollment (credential insert + pending→active flip in one tx).
-	var store webauthn.Store
-	if pool != nil {
-		store = webauthn.NewDBStore(db.New(pool)).WithPool(pool)
-		logger.Info("webauthn store: using DB-backed store")
-	} else {
-		logger.Warn("DATABASE_URL not set — using in-memory WebAuthn store (dev only; credentials lost on restart)")
-		store = webauthn.NewInMemoryStore()
-	}
-	// WebAuthn session store: Redis for multi-replica safety when REDIS_URL is set,
-	// otherwise an in-memory dev scaffold (docs/plans/webauthn-session-store.md).
-	var sessions webauthn.SessionStore
-	if redisClient != nil {
-		sessions = webauthn.NewRedisSessionStore(redisClient, bffSessionTTL)
-	} else {
-		logger.Warn("REDIS_URL not set — using in-memory WebAuthn session store (dev only; not shared across replicas)")
-		sessions = webauthn.NewInMemorySessionStore()
-	}
-	var enrollmentSessions mgmtapi.EnrollmentSessionStore
-	if redisClient != nil {
-		enrollmentSessions = mgmtapi.NewRedisEnrollmentSessionStore(redisClient)
-	} else {
-		enrollmentSessions = mgmtapi.NewInMemoryEnrollmentSessionStore()
-	}
+	store := webauthn.NewDBStore(db.New(pool)).WithPool(pool)
+	logger.Info("webauthn store: using DB-backed store")
+	sessions := webauthn.NewRedisSessionStore(redisClient, bffSessionTTL)
+	enrollmentSessions := mgmtapi.NewRedisEnrollmentSessionStore(redisClient)
 
 	svc, err := webauthn.NewService(webauthn.Config{
 		RPID:          rpID,

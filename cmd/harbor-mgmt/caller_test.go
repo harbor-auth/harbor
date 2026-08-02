@@ -14,6 +14,7 @@ import (
 	"github.com/harbor-auth/harbor/internal/bff"
 	"github.com/harbor-auth/harbor/internal/mgmtapi"
 	bfftest "github.com/harbor-auth/harbor/internal/testsupport/bff"
+	mgmtapitest "github.com/harbor-auth/harbor/internal/testsupport/mgmtapi"
 )
 
 // TestBffCallerAdapter_SpoofedHeader_NoSession is a cmd-level integration test
@@ -115,7 +116,7 @@ func TestBffCallerAdapter_EnrollmentOnlySessionCannotCallManagementAPI(t *testin
 func TestRecoverySessionIssuerBindsBFFAndEnrollmentRecords(t *testing.T) {
 	ctx := context.Background()
 	bffSessions := bfftest.NewInMemoryBFFSessionStore()
-	enrollmentSessions := mgmtapi.NewInMemoryEnrollmentSessionStore()
+	enrollmentSessions := mgmtapitest.NewInMemoryEnrollmentSessionStore()
 	issuer := &recoverySessionIssuer{
 		bffSessions:        bffSessions,
 		enrollmentSessions: enrollmentSessions,

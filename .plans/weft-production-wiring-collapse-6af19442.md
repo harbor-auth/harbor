@@ -40,3 +40,10 @@
 1. Identify every production and test reference to the in-memory BFF session store and rate limiter.
 2. Move test doubles behind test-only support, update tests to use the appropriate fixtures, and remove production fallbacks so Redis is the sole runtime implementation.
 3. Run focused tests plus build/vet checks, review the diff, commit, rebase, and push the shared feature branch.
+
+## Task 6: relocate WebAuthn and enrollment memory scaffolds
+
+1. Inventory package-local and cross-package consumers of the WebAuthn credential, ceremony, and enrollment-session memory stores.
+2. Move same-package fixtures into `_test.go` files and expose only the enrollment fixture needed by command tests through `internal/testsupport`.
+3. Remove management runtime fallbacks that reference the relocated fixtures, leaving durable DB/Redis implementations as the runtime choices.
+4. Run focused tests plus build/vet checks, review the diff, commit, rebase, and push the shared feature branch.

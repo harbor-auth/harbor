@@ -1,13 +1,131 @@
 package webauthn
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	gowebauthn "github.com/go-webauthn/webauthn/webauthn"
 )
+
+type InMemoryStore struct {
+	mu              sync.RWMutex
+	users           map[string]User
+	recoveryCleared map[string]bool
+}
+
+func NewInMemoryStore() *InMemoryStore {
+	return &InMemoryStore{users: make(map[string]User), recoveryCleared: make(map[string]bool)}
+}
+
+func (s *InMemoryStore) PutUser(user User) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.users[string(user.id)] = user
+}
+
+func (s *InMemoryStore) GetUser(_ context.Context, userID []byte) (User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	user, ok := s.users[string(userID)]
+	if !ok {
+		return User{}, ErrUserNotFound
+	}
+	return user, nil
+}
+
+func (s *InMemoryStore) AddCredential(_ context.Context, userID []byte, cred gowebauthn.Credential) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	user, ok := s.users[string(userID)]
+	if !ok {
+		return ErrUserNotFound
+	}
+	user.credentials = append(user.credentials, cred)
+	s.users[string(userID)] = user
+	return nil
+}
+
+func (s *InMemoryStore) AddCredentialAndActivateUser(ctx context.Context, userID []byte, cred gowebauthn.Credential) error {
+	return s.AddCredential(ctx, userID, cred)
+}
+
+func (s *InMemoryStore) UpdateCredential(_ context.Context, userID []byte, cred gowebauthn.Credential) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	user, ok := s.users[string(userID)]
+	if !ok {
+		return ErrUserNotFound
+	}
+	for i := range user.credentials {
+		if bytes.Equal(user.credentials[i].ID, cred.ID) {
+			old := user.credentials[i].Authenticator.SignCount
+			if old != 0 && cred.Authenticator.SignCount <= old {
+				return ErrSignCountRegression
+			}
+			user.credentials[i] = cred
+			s.users[string(userID)] = user
+			return nil
+		}
+	}
+	return ErrUserNotFound
+}
+
+func (s *InMemoryStore) SetRecoveryComplete(_ context.Context, userID []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.users[string(userID)]; !ok {
+		return ErrUserNotFound
+	}
+	s.recoveryCleared[string(userID)] = true
+	return nil
+}
+
+func (s *InMemoryStore) RecoveryCleared(userID []byte) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.recoveryCleared[string(userID)]
+}
+
+type sessionEntry struct {
+	data    gowebauthn.SessionData
+	expires time.Time
+}
+
+type InMemorySessionStore struct {
+	mu       sync.Mutex
+	sessions map[string]sessionEntry
+	ttl      time.Duration
+	now      func() time.Time
+}
+
+func NewInMemorySessionStore() *InMemorySessionStore {
+	return &InMemorySessionStore{sessions: make(map[string]sessionEntry), ttl: 5 * time.Minute, now: time.Now}
+}
+
+func (s *InMemorySessionStore) Save(_ context.Context, key string, data gowebauthn.SessionData) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessions[key] = sessionEntry{data: data, expires: s.now().Add(s.ttl)}
+	return nil
+}
+
+func (s *InMemorySessionStore) Take(_ context.Context, key string) (gowebauthn.SessionData, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.sessions[key]
+	if !ok {
+		return gowebauthn.SessionData{}, ErrSessionNotFound
+	}
+	delete(s.sessions, key)
+	if s.now().After(entry.expires) {
+		return gowebauthn.SessionData{}, ErrSessionNotFound
+	}
+	return entry.data, nil
+}
 
 func TestInMemoryStore_UserLifecycle(t *testing.T) {
 	ctx := context.Background()

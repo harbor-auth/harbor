@@ -3,12 +3,55 @@ package mgmtapi
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 )
+
+type enrollmentEntry struct {
+	userHandle []byte
+	expires    time.Time
+}
+
+type InMemoryEnrollmentSessionStore struct {
+	mu       sync.Mutex
+	sessions map[string]enrollmentEntry
+	ttl      time.Duration
+	now      func() time.Time
+}
+
+func NewInMemoryEnrollmentSessionStore() *InMemoryEnrollmentSessionStore {
+	return &InMemoryEnrollmentSessionStore{
+		sessions: make(map[string]enrollmentEntry),
+		ttl:      enrollmentSessionTTL,
+		now:      time.Now,
+	}
+}
+
+func (s *InMemoryEnrollmentSessionStore) Save(_ context.Context, key string, userHandle []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h := append([]byte(nil), userHandle...)
+	s.sessions[key] = enrollmentEntry{userHandle: h, expires: s.now().Add(s.ttl)}
+	return nil
+}
+
+func (s *InMemoryEnrollmentSessionStore) UserHandle(_ context.Context, key string) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.sessions[key]
+	if !ok {
+		return nil, ErrEnrollmentSessionNotFound
+	}
+	if s.now().After(entry.expires) {
+		delete(s.sessions, key)
+		return nil, ErrEnrollmentSessionNotFound
+	}
+	return entry.userHandle, nil
+}
 
 func TestEnrollmentSession_SaveAndGet(t *testing.T) {
 	s := NewInMemoryEnrollmentSessionStore()
