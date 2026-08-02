@@ -12,6 +12,30 @@ import (
 	gowebauthn "github.com/go-webauthn/webauthn/webauthn"
 )
 
+func TestNewHandler_RejectsMissingRequiredCollaborators(t *testing.T) {
+	svc, err := NewService(testConfig(), NewInMemoryStore(), NewInMemorySessionStore())
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		service    *Service
+		enrollment EnrollmentSessionStore
+	}{
+		{"service", nil, &fakeEnrollmentSessionStore{}},
+		{"enrollment session store", svc, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := NewHandler(tt.service, tt.enrollment); err == nil {
+				t.Fatalf("NewHandler accepted a nil %s", tt.name)
+			}
+		})
+	}
+}
+
 // testEnrollKey is an arbitrary enrollment session key value; the fake store
 // ignores the key and returns its configured user handle.
 const testEnrollKey = "test-enroll-key"

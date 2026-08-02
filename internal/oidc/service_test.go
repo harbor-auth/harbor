@@ -10,6 +10,46 @@ import (
 	"time"
 )
 
+func TestNewService_RejectsMissingRequiredCollaborators(t *testing.T) {
+	valid := ServiceConfig{
+		Issuer:       "https://eu.harbor.id",
+		Clients:      NewInMemoryClientRegistry(),
+		Codes:        NewInMemoryAuthCodeStore(),
+		Tokens:       NewPlaceholderIssuer(),
+		Sessions:     NewStubSessionResolver("test-subject"),
+		SessionStore: NewInMemorySessionStore(),
+		Grants:       NewInMemoryGrantStore(),
+		Consents:     NewInMemoryConsentStore(),
+		Revocations:  NewRecordingRevocationSink(),
+		Outbox:       &recordingOutbox{},
+	}
+
+	tests := []struct {
+		name   string
+		remove func(*ServiceConfig)
+	}{
+		{"client registry", func(cfg *ServiceConfig) { cfg.Clients = nil }},
+		{"authorization code store", func(cfg *ServiceConfig) { cfg.Codes = nil }},
+		{"token issuer", func(cfg *ServiceConfig) { cfg.Tokens = nil }},
+		{"session resolver", func(cfg *ServiceConfig) { cfg.Sessions = nil }},
+		{"refresh session store", func(cfg *ServiceConfig) { cfg.SessionStore = nil }},
+		{"grant store", func(cfg *ServiceConfig) { cfg.Grants = nil }},
+		{"consent store", func(cfg *ServiceConfig) { cfg.Consents = nil }},
+		{"revocation sink", func(cfg *ServiceConfig) { cfg.Revocations = nil }},
+		{"revocation outbox", func(cfg *ServiceConfig) { cfg.Outbox = nil }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := valid
+			tt.remove(&cfg)
+			if _, err := NewService(cfg); err == nil {
+				t.Fatalf("NewService accepted a nil %s", tt.name)
+			}
+		})
+	}
+}
+
 // newTestAuthorizeService returns a Service configured for /authorize tests with
 // an in-memory client registry seeded with a demo client.
 func newTestAuthorizeService(t *testing.T) (*Service, *InMemoryClientRegistry) {
