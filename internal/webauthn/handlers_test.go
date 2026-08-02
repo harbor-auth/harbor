@@ -141,7 +141,9 @@ func TestHandler_BeginRegistration_UnknownUser(t *testing.T) {
 func TestHandler_UserIDPath_DisabledByDefault(t *testing.T) {
 	svc, _ := newTestService(t)
 	mux := http.NewServeMux()
-	_ = RegisterRoutes(mux, svc, &fakeEnrollmentSessionStore{})
+	if err := RegisterRoutes(mux, svc, &fakeEnrollmentSessionStore{}); err != nil {
+		t.Fatalf("register routes: %v", err)
+	}
 
 	for _, path := range []string{
 		"/webauthn/register/begin",

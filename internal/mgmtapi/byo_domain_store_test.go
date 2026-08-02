@@ -149,7 +149,11 @@ func TestDBBYODomainStorePersistsAcrossInstances(t *testing.T) {
 	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+schema); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _, _ = admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE") }()
+	defer func() {
+		if _, dropErr := admin.Exec(ctx, "DROP SCHEMA "+schema+" CASCADE"); dropErr != nil {
+			t.Errorf("drop test schema: %v", dropErr)
+		}
+	}()
 	config.ConnConfig.RuntimeParams["search_path"] = schema
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {

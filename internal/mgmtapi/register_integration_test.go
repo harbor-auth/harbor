@@ -380,7 +380,11 @@ func TestIntegrationAuthorizedRegistrationPersistsInPostgres(t *testing.T) {
 		t.Fatalf("anonymous POST /register = %d, want 401; body=%s", anon.Code, anon.Body.String())
 	}
 	resp := registerClient(t, mux, integrationRegisterBody, bearer(iat))
-	t.Cleanup(func() { _ = store.Delete(context.Background(), resp.ClientID) })
+	t.Cleanup(func() {
+		if deleteErr := store.Delete(context.Background(), resp.ClientID); deleteErr != nil {
+			t.Errorf("delete registered client: %v", deleteErr)
+		}
+	})
 
 	fresh := clients.NewDBClientRegistrationStore(db.New(pool))
 	persisted, err := fresh.VerifyRegToken(context.Background(), resp.RegistrationAccessToken)

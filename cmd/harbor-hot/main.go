@@ -112,7 +112,11 @@ func runWithGraphObserver(ctx context.Context, logger *slog.Logger, observe func
 	if redisClient == nil {
 		return errors.New("harbor-hot requires Redis")
 	}
-	defer redisClient.Close()
+	defer func() {
+		if closeErr := redisClient.Close(); closeErr != nil {
+			logger.Warn("redis close error", "error", closeErr)
+		}
+	}()
 
 	// Open the required DB pool once and share it across every durable store.
 	pool, err := clients.ConnectDB(ctx, logger)

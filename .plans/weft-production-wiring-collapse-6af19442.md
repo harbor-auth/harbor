@@ -164,3 +164,14 @@
    and regression-tested.
 3. Strengthen each binary's source-level graph guard, then run focused and
    repository validation before committing, rebasing, and pushing.
+
+## Task 20: OpenSpec and release-candidate verification
+
+1. Author and strictly validate the suffixed OpenSpec change artifact paired
+   with the production wiring plan.
+2. Run repository build, vet, unit/integration-default tests, agent checks, and
+   generated-artifact drift checks without weakening failures.
+3. Lint and render Helm configurations and run raw/Helm deployment contract
+   tests, correcting any genuine release-candidate defects.
+4. Record the completed validation matrix in the OpenSpec task ledger, commit,
+   rebase, and push the shared feature branch.
