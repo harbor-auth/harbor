@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/harbor-auth/harbor/internal/bff"
 	"github.com/harbor-auth/harbor/internal/mgmtapi"
+	bfftest "github.com/harbor-auth/harbor/internal/testsupport/bff"
 )
 
 // TestBffCallerAdapter_SpoofedHeader_NoSession is a cmd-level integration test
@@ -32,7 +33,7 @@ import (
 // consulted by any layer — confirming the header-spoofing vulnerability
 // (audit finding C1) is closed at the cmd wiring level.
 func TestBffCallerAdapter_SpoofedHeader_NoSession(t *testing.T) {
-	store := bff.NewInMemoryBFFSessionStore()
+	store := bfftest.NewInMemoryBFFSessionStore()
 
 	// Wire the same way cmd/harbor-mgmt/main.go does (lines ~288, ~377).
 	srv := mgmtapi.New(nil, nil).WithCallerSource(bffCallerAdapter{})
@@ -63,7 +64,7 @@ func TestBffCallerAdapter_SpoofedHeader_NoSession(t *testing.T) {
 // 401 would mean no identity was found (i.e., the spoofed header was silently
 // adopted instead of the session).
 func TestBffCallerAdapter_SpoofedHeader_WithSession(t *testing.T) {
-	store := bff.NewInMemoryBFFSessionStore()
+	store := bfftest.NewInMemoryBFFSessionStore()
 
 	const sessionUser = "user-A"
 	const spoofedUser = "user-B"
@@ -113,7 +114,7 @@ func TestBffCallerAdapter_EnrollmentOnlySessionCannotCallManagementAPI(t *testin
 
 func TestRecoverySessionIssuerBindsBFFAndEnrollmentRecords(t *testing.T) {
 	ctx := context.Background()
-	bffSessions := bff.NewInMemoryBFFSessionStore()
+	bffSessions := bfftest.NewInMemoryBFFSessionStore()
 	enrollmentSessions := mgmtapi.NewInMemoryEnrollmentSessionStore()
 	issuer := &recoverySessionIssuer{
 		bffSessions:        bffSessions,

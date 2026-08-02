@@ -34,3 +34,9 @@
 4. Wire the durable consent store in the hot production graph and propagate
    constructor errors.
 5. Run focused OIDC/API tests plus repository build and vet checks.
+
+## Task 5: relocate BFF and rate-limiter memory scaffolds
+
+1. Identify every production and test reference to the in-memory BFF session store and rate limiter.
+2. Move test doubles behind test-only support, update tests to use the appropriate fixtures, and remove production fallbacks so Redis is the sole runtime implementation.
+3. Run focused tests plus build/vet checks, review the diff, commit, rebase, and push the shared feature branch.

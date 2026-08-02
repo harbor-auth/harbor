@@ -244,13 +244,7 @@ func runDevelopment(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.
 		}()
 	}
 
-	var bffStore bff.BFFSessionStore
-	if redisClient != nil {
-		bffStore = bff.NewRedisBFFSessionStore(redisClient, bffSessionTTL)
-	} else {
-		logger.Warn("REDIS_URL not set — using in-memory BFF session store (dev only; not shared across replicas)")
-		bffStore = bff.NewInMemoryBFFSessionStore()
-	}
+	bffStore := bff.NewRedisBFFSessionStore(redisClient, bffSessionTTL)
 
 	port := getenv("PORT", "8081")
 

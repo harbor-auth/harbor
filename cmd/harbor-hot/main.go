@@ -3,11 +3,8 @@
 // discovery, /healthz) and guards the abuse-sensitive endpoints with per-client
 // rate limiting (docs/plans/rate-limiting.md).
 //
-// Rate-limiter wiring:
-//   - REDIS_URL set   -> RedisRateLimiter (sliding-window, Lua-atomic, shared
-//     across replicas).
-//   - REDIS_URL unset -> in-memory MemoryRateLimiter (single-replica dev/test
-//     fallback). This keeps local runs working without Redis.
+// Rate-limiter wiring uses RedisRateLimiter (sliding-window, Lua-atomic, shared
+// across replicas).
 //   - RATE_LIMIT_DISABLED truthy -> development-only transparent passthrough;
 //     production rejects this setting at startup.
 //
@@ -406,14 +403,9 @@ func buildBFFDepsFromPool(pool *pgxpool.Pool, logger *slog.Logger) (bffDeps, err
 // reads to find the user a login ceremony authenticated. It shares the
 // "bff_session:" Redis namespace with harbor-mgmt's writer so a login completed
 // on the cold path is visible here (docs/plans/bff-session-middleware.md).
-// Redis-backed for multi-replica safety when REDIS_URL is set, otherwise an
-// in-memory dev scaffold (single-replica only; not shared across replicas).
-func newBFFSessionStore(redisClient *redis.Client, ttl time.Duration, logger *slog.Logger) bff.BFFSessionStore {
-	if redisClient != nil {
-		return bff.NewRedisBFFSessionStore(redisClient, ttl)
-	}
-	logger.Warn("REDIS_URL not set — using in-memory BFF session store (dev only; not shared across replicas)")
-	return bff.NewInMemoryBFFSessionStore()
+// Redis-backed for multi-replica safety.
+func newBFFSessionStore(redisClient *redis.Client, ttl time.Duration, _ *slog.Logger) bff.BFFSessionStore {
+	return bff.NewRedisBFFSessionStore(redisClient, ttl)
 }
 
 // newSessionResolver returns the SessionResolver the OIDC /authorize flow uses
@@ -661,22 +653,16 @@ func validateProductionURL(name, raw string) error {
 	return nil
 }
 
-// newLimiter returns the backend limiter for one endpoint: Redis-backed when a
-// client is available (production / multi-replica), otherwise the in-memory
-// fallback for local dev. The Redis key prefix namespaces buckets per endpoint
-// so /token and /authorize never share a limit.
+// newLimiter returns the Redis-backed limiter for one endpoint. The Redis key
+// prefix namespaces buckets per endpoint so /token and /authorize never share
+// a limit.
 func newLimiter(redisClient *redis.Client, spec endpointLimitSpec, limit int, window time.Duration, logger *slog.Logger) clients.RateLimiter {
 	cfg := clients.RateLimiterConfig{
 		KeyPrefix: "ratelimit:" + string(spec.endpoint) + ":",
 		Limit:     limit,
 		Window:    window,
 	}
-	if redisClient != nil {
-		return clients.NewRedisRateLimiter(redisClient, cfg, logger)
-	}
-	logger.Warn("REDIS_URL unset: using in-memory rate limiter (single-replica dev only)",
-		"component", "harbor-hot", "endpoint", string(spec.endpoint))
-	return clients.NewMemoryRateLimiter(cfg)
+	return clients.NewRedisRateLimiter(redisClient, cfg, logger)
 }
 
 // minAdminTokenBytes is the minimum acceptable length for ADMIN_API_TOKEN.

@@ -47,6 +47,7 @@ import (
 	"github.com/harbor-auth/harbor/internal/oidc"
 	"github.com/harbor-auth/harbor/internal/oidcapi"
 
+	bfftest "github.com/harbor-auth/harbor/internal/testsupport/bff"
 	oidctest "github.com/harbor-auth/harbor/internal/testsupport/oidc"
 )
 
@@ -106,7 +107,7 @@ func (m *mockResolver) ResolveUser(_ context.Context, _ *http.Request, _ bff.BFF
 // spec (ServerInterface) — it's a BFF-specific route that is manually registered
 // in production (cmd/harbor-mgmt). We replicate that wiring here by adding the
 // route to the mux before passing it to HandlerFromMux.
-func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bff.InMemoryBFFSessionStore, *oidc.InMemoryConsentStore) {
+func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bfftest.InMemoryBFFSessionStore, *oidc.InMemoryConsentStore) {
 	t.Helper()
 
 	clients := oidctest.NewInMemoryClientRegistry()
@@ -126,7 +127,7 @@ func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bff.I
 		Consents: consents,
 	})
 
-	store := bff.NewInMemoryBFFSessionStore()
+	store := bfftest.NewInMemoryBFFSessionStore()
 	srv := oidcapi.New(oidcapi.Config{
 		Issuer:      "https://eu.harbor.id",
 		Service:     svc,

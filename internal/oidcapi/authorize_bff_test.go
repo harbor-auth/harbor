@@ -17,6 +17,7 @@ import (
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
 	"github.com/harbor-auth/harbor/internal/oidc"
 
+	bfftest "github.com/harbor-auth/harbor/internal/testsupport/bff"
 	oidctest "github.com/harbor-auth/harbor/internal/testsupport/oidc"
 )
 
@@ -30,9 +31,9 @@ const testLoginURL = "https://mgmt.harbor.id/login"
 // redirects the browser to the login UI so the passkey ceremony can run first.
 // Returns the test server plus the session store so a test can assert a session
 // was created.
-func newBFFFlowServer(t *testing.T) (*httptest.Server, *bff.InMemoryBFFSessionStore) {
+func newBFFFlowServer(t *testing.T) (*httptest.Server, *bfftest.InMemoryBFFSessionStore) {
 	t.Helper()
-	store := bff.NewInMemoryBFFSessionStore()
+	store := bfftest.NewInMemoryBFFSessionStore()
 	return newBFFFlowServerWithStore(t, store), store
 }
 
@@ -320,7 +321,7 @@ func getAuthorizeCompleteWithCookie(t *testing.T, ts *httptest.Server, requestID
 // nonce-gate tests target /authorize/complete with a session that would issue a
 // code IF (and only if) the presented browser nonce matches — isolating the
 // nonce check from the UserID check.
-func seedAuthenticatedSession(t *testing.T, store *bff.InMemoryBFFSessionStore, requestID string) []byte {
+func seedAuthenticatedSession(t *testing.T, store *bfftest.InMemoryBFFSessionStore, requestID string) []byte {
 	t.Helper()
 	nonce, err := bff.NewBrowserNonce()
 	if err != nil {
@@ -506,7 +507,7 @@ func TestAuthorizeComplete_ConcurrentRequestsConsumeSessionOnce(t *testing.T) {
 }
 
 func TestAuthorizeComplete_ConsumeFailureFailsClosed(t *testing.T) {
-	base := bff.NewInMemoryBFFSessionStore()
+	base := bfftest.NewInMemoryBFFSessionStore()
 	const requestID = "consume-store-failure"
 	nonce := seedAuthenticatedSession(t, base, requestID)
 	store := consumeErrorBFFStore{BFFSessionStore: base, err: errors.New("redis unavailable")}
