@@ -75,7 +75,11 @@ func newTestDashHandler(t *testing.T, consents DashboardConsentStore, sessions D
 	if err != nil {
 		t.Fatalf("ParseDashboardTemplates: %v", err)
 	}
-	return NewDashboardHandler(consents, sessions, creds, nil, relay, tmpl, nil)
+	h, err := NewDashboardHandler(consents, sessions, creds, nil, relay, tmpl, nil)
+	if err != nil {
+		t.Fatalf("NewDashboardHandler: %v", err)
+	}
+	return h
 }
 
 func TestNewDashboardHandler_RejectsMissingRequiredCollaborators(t *testing.T) {

@@ -17,8 +17,7 @@ const (
 
 // newGatedRegServer returns a registration server gated behind token.
 func newGatedRegServer(store ClientRegistrationStore, token string) *Server {
-	return New(nil, nil).
-		WithClientRegistration(store, testRegBaseURL).
+	return newTestServerWithClient(nil, store).
 		WithInitialAccessToken(token)
 }
 
@@ -52,8 +51,7 @@ func TestPostRegisterGateDisabledAllowsAnonymous(t *testing.T) {
 
 func TestPostRegisterProductionRequiresAuthorization(t *testing.T) {
 	fake := &fakeClientReg{}
-	s := New(nil, nil).
-		WithClientRegistration(fake, testRegBaseURL).
+	s := newTestServerWithClient(nil, fake).
 		RequireRegistrationAuthorization()
 
 	rec := doRegisterWithAuth(t, s, gateTestBody, "")

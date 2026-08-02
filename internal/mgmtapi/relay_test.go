@@ -87,7 +87,7 @@ func TestGetRelayAddresses_Success(t *testing.T) {
 		},
 	}
 
-	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userID.String()}).WithRelayDomain("relay.eu.harbor.id")
+	srv := newTestServer(nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userID.String()}).WithRelayDomain("relay.eu.harbor.id")
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -132,7 +132,7 @@ func TestGetRelayAddresses_Success(t *testing.T) {
 func TestGetRelayAddresses_EmptyList(t *testing.T) {
 	store := &fakeRelayStore{addresses: nil}
 
-	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: "user-with-no-relays"})
+	srv := newTestServer(nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: "user-with-no-relays"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -158,7 +158,7 @@ func TestGetRelayAddresses_EmptyList(t *testing.T) {
 func TestGetRelayAddresses_Unauthorized(t *testing.T) {
 	store := &fakeRelayStore{}
 
-	srv := New(nil, nil).WithRelayStore(store)
+	srv := newTestServer(nil).WithRelayStore(store)
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -184,7 +184,7 @@ func TestGetRelayAddresses_Unauthorized(t *testing.T) {
 
 func TestGetRelayAddresses_ServiceUnavailable(t *testing.T) {
 	// No relay store wired
-	srv := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
+	srv := newTestServer(nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -203,7 +203,7 @@ func TestGetRelayAddresses_StoreError(t *testing.T) {
 		listErr: errors.New("database connection failed"),
 	}
 
-	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: "user-123"})
+	srv := newTestServer(nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -227,7 +227,7 @@ func TestGetRelayAddresses_OnlyReturnsOwnAddresses(t *testing.T) {
 		},
 	}
 
-	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userA.String()})
+	srv := newTestServer(nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userA.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -261,7 +261,7 @@ func TestDeleteRelayAddress_Success(t *testing.T) {
 		addresses: []*relay.Address{addr},
 	}
 
-	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userID.String()})
+	srv := newTestServer(nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userID.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -281,7 +281,7 @@ func TestDeleteRelayAddress_Success(t *testing.T) {
 func TestDeleteRelayAddress_NotFound(t *testing.T) {
 	store := &fakeRelayStore{addresses: nil}
 
-	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: "user-123"})
+	srv := newTestServer(nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -298,7 +298,7 @@ func TestDeleteRelayAddress_NotFound(t *testing.T) {
 func TestDeleteRelayAddress_Unauthorized(t *testing.T) {
 	store := &fakeRelayStore{}
 
-	srv := New(nil, nil).WithRelayStore(store)
+	srv := newTestServer(nil).WithRelayStore(store)
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -315,7 +315,7 @@ func TestDeleteRelayAddress_Unauthorized(t *testing.T) {
 
 func TestDeleteRelayAddress_ServiceUnavailable(t *testing.T) {
 	// No relay store wired
-	srv := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
+	srv := newTestServer(nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -338,7 +338,7 @@ func TestDeleteRelayAddress_DeactivateError(t *testing.T) {
 		deactivateErr: errors.New("deactivate failed"),
 	}
 
-	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userID.String()})
+	srv := newTestServer(nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userID.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -368,7 +368,7 @@ func TestSecurity_CrossUserRelayDeactivation(t *testing.T) {
 		},
 	}
 
-	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userA.String()})
+	srv := newTestServer(nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userA.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -400,7 +400,7 @@ func TestSecurity_CrossUserRelayLeakage_List(t *testing.T) {
 		},
 	}
 
-	srv := New(nil, nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userA.String()})
+	srv := newTestServer(nil).WithRelayStore(store).WithCallerSource(fakeCallerSource{userID: userA.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -518,7 +518,7 @@ func TestPostBYODomain_Success(t *testing.T) {
 	userID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
 	store := newFakeBYODomainStore()
 
-	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userID.String()})
+	srv := newTestServer(nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userID.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -560,7 +560,7 @@ func TestPostBYODomain_Success(t *testing.T) {
 
 func TestPostBYODomain_Unauthorized(t *testing.T) {
 	store := newFakeBYODomainStore()
-	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id")
+	srv := newTestServer(nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id")
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -580,7 +580,7 @@ func TestPostBYODomain_InvalidDomain(t *testing.T) {
 	userID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
 	store := newFakeBYODomainStore()
 
-	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userID.String()})
+	srv := newTestServer(nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userID.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -599,7 +599,7 @@ func TestPostBYODomain_InvalidDomain(t *testing.T) {
 func TestPostBYODomain_ServiceUnavailable(t *testing.T) {
 	userID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
 	// No BYO-domain store configured
-	srv := New(nil, nil).WithCallerSource(fakeCallerSource{userID: userID.String()})
+	srv := newTestServer(nil).WithCallerSource(fakeCallerSource{userID: userID.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -631,7 +631,7 @@ func TestGetBYODomains_Success(t *testing.T) {
 	}
 	store.domains["mail.example.com"] = domain
 
-	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userID.String()})
+	srv := newTestServer(nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userID.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -675,7 +675,7 @@ func TestDeleteBYODomain_Success(t *testing.T) {
 	}
 	store.domains["mail.example.com"] = domain
 
-	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userID.String()})
+	srv := newTestServer(nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userID.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -697,7 +697,7 @@ func TestDeleteBYODomain_NotFound(t *testing.T) {
 	userID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
 	store := newFakeBYODomainStore()
 
-	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userID.String()})
+	srv := newTestServer(nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userID.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -730,7 +730,7 @@ func TestSecurity_CrossUserBYODomainAccess(t *testing.T) {
 		ExpiresAt:      time.Now().Add(72 * time.Hour),
 	}
 
-	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userA.String()})
+	srv := newTestServer(nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userA.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -778,7 +778,7 @@ func TestSecurity_CrossUserBYODomainList(t *testing.T) {
 		ExpiresAt: time.Now().Add(72 * time.Hour),
 	}
 
-	srv := New(nil, nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userA.String()})
+	srv := newTestServer(nil).WithBYODomainStore(store, nil, "mta-eu.harbor.id", "relay.eu.harbor.id").WithCallerSource(fakeCallerSource{userID: userA.String()})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 

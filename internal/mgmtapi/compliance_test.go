@@ -69,7 +69,7 @@ func newComplianceDeps(bundler BundleAssembler, eraser AccountEraser, users Comp
 // the authenticated caller via a fakeCallerSource; an empty userID leaves the
 // server without a caller source so user-scoped endpoints return 401.
 func newComplianceMux(deps *ComplianceDeps, userID string) *http.ServeMux {
-	srv := New(nil, nil)
+	srv := newTestServer(nil)
 	srv.compliance = deps
 	if userID != "" {
 		srv = srv.WithCallerSource(fakeCallerSource{userID: userID})
@@ -120,7 +120,7 @@ func TestPostExport_Unauthorized(t *testing.T) {
 
 func TestPostExport_ServiceUnavailable(t *testing.T) {
 	// nil compliance → 503.
-	srv := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
+	srv := newTestServer(nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -272,7 +272,7 @@ func TestPostErase_Unauthorized(t *testing.T) {
 
 func TestPostErase_ServiceUnavailable(t *testing.T) {
 	// nil compliance → 503.
-	srv := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
+	srv := newTestServer(nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 

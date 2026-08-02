@@ -36,8 +36,9 @@ func doEnroll(t *testing.T, s *Server, body string) *httptest.ResponseRecorder {
 }
 
 func TestPostEnrollSuccess(t *testing.T) {
-	fe := &fakeEnroller{result: identity.EnrollResult{UserID: "user-123", Region: "EU"}}
-	s := New(fe, nil)
+	const userID = "550e8400-e29b-41d4-a716-446655440000"
+	fe := &fakeEnroller{result: identity.EnrollResult{UserID: userID, Region: "EU"}}
+	s := newTestServer(fe)
 
 	rec := doEnroll(t, s, `{"region":"EU"}`)
 
@@ -48,8 +49,8 @@ func TestPostEnrollSuccess(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if resp.UserID != "user-123" {
-		t.Errorf("user_id = %q, want user-123", resp.UserID)
+	if resp.UserID != userID {
+		t.Errorf("user_id = %q, want %s", resp.UserID, userID)
 	}
 	if resp.Status != statusPending {
 		t.Errorf("status = %q, want %q", resp.Status, statusPending)
@@ -64,7 +65,7 @@ func TestPostEnrollSuccess(t *testing.T) {
 
 func TestPostEnrollInvalidRegion(t *testing.T) {
 	fe := &fakeEnroller{result: identity.EnrollResult{UserID: "x"}}
-	s := New(fe, nil)
+	s := newTestServer(fe)
 
 	rec := doEnroll(t, s, `{"region":"ATLANTIS"}`)
 
@@ -78,7 +79,7 @@ func TestPostEnrollInvalidRegion(t *testing.T) {
 
 func TestPostEnrollMalformedBody(t *testing.T) {
 	fe := &fakeEnroller{}
-	s := New(fe, nil)
+	s := newTestServer(fe)
 
 	rec := doEnroll(t, s, `{not json`)
 
@@ -90,19 +91,9 @@ func TestPostEnrollMalformedBody(t *testing.T) {
 	}
 }
 
-func TestPostEnrollUnavailable(t *testing.T) {
-	s := New(nil, nil) // dev-scaffold mode: no enroller wired
-
-	rec := doEnroll(t, s, `{"region":"EU"}`)
-
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", rec.Code)
-	}
-}
-
 func TestPostEnrollServerError(t *testing.T) {
 	fe := &fakeEnroller{err: errors.New("db down")}
-	s := New(fe, nil)
+	s := newTestServer(fe)
 
 	rec := doEnroll(t, s, `{"region":"EU"}`)
 
@@ -113,8 +104,8 @@ func TestPostEnrollServerError(t *testing.T) {
 
 // TestRoutesRegistersEnroll verifies POST /enroll is wired through the mux.
 func TestRoutesRegistersEnroll(t *testing.T) {
-	fe := &fakeEnroller{result: identity.EnrollResult{UserID: "u1", Region: "EU"}}
-	s := New(fe, nil)
+	fe := &fakeEnroller{result: identity.EnrollResult{UserID: "550e8400-e29b-41d4-a716-446655440001", Region: "EU"}}
+	s := newTestServer(fe)
 
 	mux := http.NewServeMux()
 	s.Routes(mux)

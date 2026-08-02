@@ -47,7 +47,7 @@ func (f *fakeClientReg) Create(_ context.Context, c clients.NewRegisteredClient)
 }
 
 func newRegServer(store ClientRegistrationStore) *Server {
-	return New(nil, nil).WithClientRegistration(store, testRegBaseURL)
+	return newTestServerWithClient(nil, store)
 }
 
 func doRegister(t *testing.T, s *Server, body string) *httptest.ResponseRecorder {
@@ -267,15 +267,6 @@ func TestPostRegisterMalformedBody(t *testing.T) {
 	}
 	if fake.called {
 		t.Error("Create must not be called for a malformed body")
-	}
-}
-
-func TestPostRegisterUnavailable(t *testing.T) {
-	s := New(nil, nil) // no registration store wired
-
-	rec := doRegister(t, s, `{"redirect_uris":["https://rp.example.com/cb"]}`)
-	if rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("status = %d, want 503", rec.Code)
 	}
 }
 

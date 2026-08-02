@@ -54,3 +54,10 @@
 2. Assemble clients, authorization codes, refresh sessions, grants, consents, BFF state, and revocation services exclusively from PostgreSQL and Redis.
 3. Remove the development/demo graph, readiness guard, `HARBOR_DEV_MODE` branches, and obsolete signing bootstrap implementation and tests while retaining local crypto as the documented crypto-only exception.
 4. Update focused startup and graph tests, then run command tests, repository build/vet, and the relevant project checks before committing and rebasing.
+
+## Task 8: require management and WebAuthn constructor dependencies
+
+1. Make management, WebAuthn service/handler, and dashboard constructors reject missing security-critical collaborators.
+2. Preserve explicit optional audit, relay, logging, and product-toggle dependencies.
+3. Migrate composition roots and test fixtures to the error-returning constructors.
+4. Run focused tests, repository build/vet, and project checks before committing, rebasing, and pushing.

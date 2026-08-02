@@ -37,27 +37,27 @@ type Handler struct {
 	enrollmentSessions EnrollmentSessionStore
 }
 
-// NewHandler returns a Handler for the given Service. Attach an enrollment
-// session store with WithEnrollmentSessions so ceremonies can resolve the user
-// handle from the enrollment cookie; without one every ceremony returns 501.
-func NewHandler(svc *Service) *Handler {
-	return &Handler{svc: svc}
+// NewHandler returns a Handler with the enrollment bridge required to resolve
+// ceremony users from the enrollment cookie set by POST /enroll.
+func NewHandler(svc *Service, enrollmentSessions EnrollmentSessionStore) (*Handler, error) {
+	if svc == nil {
+		return nil, errors.New("webauthn: service is required")
+	}
+	if enrollmentSessions == nil {
+		return nil, errors.New("webauthn: enrollment session store is required")
+	}
+	return &Handler{svc: svc, enrollmentSessions: enrollmentSessions}, nil
 }
 
-// WithEnrollmentSessions attaches the enrollment session store so registration
-// ceremonies can read the user handle from the enrollment cookie (set by POST
-// /enroll) instead of requiring the insecure query param. Returns h for chaining.
-func (h *Handler) WithEnrollmentSessions(store EnrollmentSessionStore) *Handler {
-	h.enrollmentSessions = store
-	return h
-}
-
-// RegisterRoutes mounts the four ceremony endpoints on mux using a fresh Handler
-// with no enrollment session store — every ceremony is refused with 501 until
-// WithEnrollmentSessions is attached. Prefer (*Handler).RegisterRoutes when you
-// need to wire enrollment sessions (the production path).
-func RegisterRoutes(mux *http.ServeMux, svc *Service) {
-	NewHandler(svc).RegisterRoutes(mux)
+// RegisterRoutes mounts the four ceremony endpoints using the required service
+// and enrollment-session collaborators.
+func RegisterRoutes(mux *http.ServeMux, svc *Service, enrollmentSessions EnrollmentSessionStore) error {
+	h, err := NewHandler(svc, enrollmentSessions)
+	if err != nil {
+		return err
+	}
+	h.RegisterRoutes(mux)
+	return nil
 }
 
 // RegisterRoutes mounts the four ceremony endpoints on mux:
@@ -150,12 +150,10 @@ func (h *Handler) FinishLogin(w http.ResponseWriter, r *http.Request) {
 //
 // On failure it writes the response and returns ok=false.
 func (h *Handler) userIDFromRequest(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
-	if h.enrollmentSessions != nil {
-		if c, err := r.Cookie(enrollmentCookieName); err == nil && c.Value != "" {
-			userID, err := h.enrollmentSessions.UserHandle(r.Context(), c.Value)
-			if err == nil && len(userID) > 0 {
-				return userID, true
-			}
+	if c, err := r.Cookie(enrollmentCookieName); err == nil && c.Value != "" {
+		userID, err := h.enrollmentSessions.UserHandle(r.Context(), c.Value)
+		if err == nil && len(userID) > 0 {
+			return userID, true
 		}
 	}
 	writeErrorCode(w, http.StatusNotImplemented, "not_implemented",

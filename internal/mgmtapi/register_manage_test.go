@@ -87,7 +87,7 @@ func (f *fakeClientMgmt) Delete(_ context.Context, clientID string) error {
 }
 
 func newMgmtServer(f *fakeClientMgmt) *Server {
-	return New(nil, nil).WithClientRegistration(f, testRegBaseURL)
+	return newTestServerWithClient(nil, f)
 }
 
 // doManage invokes the RFC 7592 handler for method directly, wiring the

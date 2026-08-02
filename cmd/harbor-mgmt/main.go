@@ -157,12 +157,14 @@ func runProduction(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.R
 	if initialAccessToken == "" {
 		return errors.New("production dynamic registration requires INITIAL_ACCESS_TOKEN")
 	}
-	mgmtServer := mgmtapi.New(enroller, logger).
-		WithEnrollmentSessions(enrollmentSessions).
+	mgmtServer, err := mgmtapi.New(enroller, enrollmentSessions, registrationStore, registrationBaseURL, logger)
+	if err != nil {
+		return fmt.Errorf("configure management API: %w", err)
+	}
+	mgmtServer.
 		WithCallerSource(bffCallerAdapter{}).
 		WithConsentStore(grantStore).
 		WithSessionRevoker(sessionStore).
-		WithClientRegistration(registrationStore, registrationBaseURL).
 		WithInitialAccessToken(initialAccessToken).
 		RequireRegistrationAuthorization().
 		WithRecovery(recoveryManager, recoveryStore, recoveryService, recoveryCeremonies).
@@ -179,7 +181,11 @@ func runProduction(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.R
 	mgmtServer.WithProductionAbuseProtection(registrationAbuseProtection.endpoint, registrationAbuseProtection.limiter)
 
 	mux := httpserver.NewHealthMux()
-	webauthn.NewHandler(webauthnService).WithEnrollmentSessions(enrollmentSessions).RegisterRoutes(mux)
+	webauthnHandler, err := webauthn.NewHandler(webauthnService, enrollmentSessions)
+	if err != nil {
+		return fmt.Errorf("configure WebAuthn handler: %w", err)
+	}
+	webauthnHandler.RegisterRoutes(mux)
 	mgmtServer.Routes(mux)
 	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(webauthnService), bff.DiscoverableUserResolver{}, authorizeCompleteURL)
 	mux.HandleFunc("GET /login", loginHandler.BeginLogin)
@@ -318,6 +324,8 @@ func runDevelopment(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.
 		persister = &noopUserPersister{logger: logger}
 	}
 	enroller := identity.NewEnroller(kp, crypto.NewCipher(), persister)
+	registrationStore := clients.NewDBClientRegistrationStore(db.New(pool))
+	registrationBaseURL := getenv("REGISTRATION_BASE_URL", "http://localhost:8081")
 	// Consent store for mgmtapi consent grant endpoints.
 	var consentStore mgmtapi.ConsentStore
 	var sessionRevoker mgmtapi.SessionRevoker
@@ -391,8 +399,11 @@ func runDevelopment(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.
 		logger.Warn("DATABASE_URL not set -- audit trail endpoints will return 503 (dev mode)")
 	}
 
-	mgmtServer := mgmtapi.New(enroller, logger).
-		WithEnrollmentSessions(enrollmentSessions).
+	mgmtServer, err := mgmtapi.New(enroller, enrollmentSessions, registrationStore, registrationBaseURL, logger)
+	if err != nil {
+		return fmt.Errorf("configure management API: %w", err)
+	}
+	mgmtServer.
 		WithCallerSource(bffCallerAdapter{}).
 		WithConsentStore(consentStore).
 		WithSessionRevoker(sessionRevoker).
@@ -453,7 +464,7 @@ func runDevelopment(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.
 			dashRelayStore = &dashboardRelayAdapter{store: rawRelayStore}
 		}
 	}
-	dashHandler := bff.NewDashboardHandler(
+	dashHandler, err := bff.NewDashboardHandler(
 		dashConsentStore,
 		dashSessionStore,
 		dashCredStore,
@@ -462,9 +473,16 @@ func runDevelopment(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.
 		dashTmpl,
 		logger,
 	)
+	if err != nil {
+		return fmt.Errorf("configure dashboard handler: %w", err)
+	}
 
 	mux := httpserver.NewHealthMux()
-	webauthn.NewHandler(svc).WithEnrollmentSessions(enrollmentSessions).RegisterRoutes(mux)
+	webauthnHandler, err := webauthn.NewHandler(svc, enrollmentSessions)
+	if err != nil {
+		return fmt.Errorf("configure WebAuthn handler: %w", err)
+	}
+	webauthnHandler.RegisterRoutes(mux)
 	mgmtServer.Routes(mux)
 	dashHandler.Routes(mux)
 

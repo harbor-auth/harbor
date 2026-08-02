@@ -91,7 +91,7 @@ func TestGetConsentGrants_Success(t *testing.T) {
 		},
 	}
 
-	srv := New(nil, nil).WithConsentStore(store).WithCallerSource(fakeCallerSource{userID: "user-123"})
+	srv := newTestServer(nil).WithConsentStore(store).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -125,7 +125,7 @@ func TestGetConsentGrants_Success(t *testing.T) {
 func TestGetConsentGrants_EmptyList(t *testing.T) {
 	store := &fakeConsentStore{grants: nil}
 
-	srv := New(nil, nil).WithConsentStore(store).WithCallerSource(fakeCallerSource{userID: "user-with-no-grants"})
+	srv := newTestServer(nil).WithConsentStore(store).WithCallerSource(fakeCallerSource{userID: "user-with-no-grants"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -151,7 +151,7 @@ func TestGetConsentGrants_EmptyList(t *testing.T) {
 func TestGetConsentGrants_Unauthorized(t *testing.T) {
 	store := &fakeConsentStore{}
 
-	srv := New(nil, nil).WithConsentStore(store)
+	srv := newTestServer(nil).WithConsentStore(store)
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -177,7 +177,7 @@ func TestGetConsentGrants_Unauthorized(t *testing.T) {
 
 func TestGetConsentGrants_ServiceUnavailable(t *testing.T) {
 	// No consent store wired
-	srv := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
+	srv := newTestServer(nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -196,7 +196,7 @@ func TestGetConsentGrants_StoreError(t *testing.T) {
 		listErr: errors.New("database connection failed"),
 	}
 
-	srv := New(nil, nil).WithConsentStore(store).WithCallerSource(fakeCallerSource{userID: "user-123"})
+	srv := newTestServer(nil).WithConsentStore(store).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -240,7 +240,7 @@ func TestGetConsentGrants_OnlyReturnsOwnGrants(t *testing.T) {
 		},
 	}
 
-	srv := New(nil, nil).WithConsentStore(store).WithCallerSource(fakeCallerSource{userID: "user-123"})
+	srv := newTestServer(nil).WithConsentStore(store).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -282,7 +282,7 @@ func TestDeleteConsentGrant_Success(t *testing.T) {
 	}
 	revoker := &fakeSessionRevoker{}
 
-	srv := New(nil, nil).WithConsentStore(store).WithSessionRevoker(revoker).WithCallerSource(fakeCallerSource{userID: "user-123"})
+	srv := newTestServer(nil).WithConsentStore(store).WithSessionRevoker(revoker).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -309,7 +309,7 @@ func TestDeleteConsentGrant_Idempotent_NoGrant(t *testing.T) {
 	store := &fakeConsentStore{grants: nil}
 	revoker := &fakeSessionRevoker{}
 
-	srv := New(nil, nil).WithConsentStore(store).WithSessionRevoker(revoker).WithCallerSource(fakeCallerSource{userID: "user-123"})
+	srv := newTestServer(nil).WithConsentStore(store).WithSessionRevoker(revoker).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -344,7 +344,7 @@ func TestDeleteConsentGrant_OnlyOwnGrant(t *testing.T) {
 	}
 	revoker := &fakeSessionRevoker{}
 
-	srv := New(nil, nil).WithConsentStore(store).WithSessionRevoker(revoker).WithCallerSource(fakeCallerSource{userID: "user-123"})
+	srv := newTestServer(nil).WithConsentStore(store).WithSessionRevoker(revoker).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -366,7 +366,7 @@ func TestDeleteConsentGrant_OnlyOwnGrant(t *testing.T) {
 func TestDeleteConsentGrant_Unauthorized(t *testing.T) {
 	store := &fakeConsentStore{}
 
-	srv := New(nil, nil).WithConsentStore(store)
+	srv := newTestServer(nil).WithConsentStore(store)
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -383,7 +383,7 @@ func TestDeleteConsentGrant_Unauthorized(t *testing.T) {
 
 func TestDeleteConsentGrant_ServiceUnavailable(t *testing.T) {
 	// No consent store wired
-	srv := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
+	srv := newTestServer(nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -400,7 +400,7 @@ func TestDeleteConsentGrant_ServiceUnavailable(t *testing.T) {
 func TestDeleteConsentGrant_GetError(t *testing.T) {
 	store := &fakeConsentStore{getErr: errors.New("database connection failed")}
 
-	srv := New(nil, nil).WithConsentStore(store).WithCallerSource(fakeCallerSource{userID: "user-123"})
+	srv := newTestServer(nil).WithConsentStore(store).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -429,7 +429,7 @@ func TestDeleteConsentGrant_RevokeError(t *testing.T) {
 		revokeErr: errors.New("revoke failed"),
 	}
 
-	srv := New(nil, nil).WithConsentStore(store).WithCallerSource(fakeCallerSource{userID: "user-123"})
+	srv := newTestServer(nil).WithConsentStore(store).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -459,7 +459,7 @@ func TestDeleteConsentGrant_CascadeError(t *testing.T) {
 	store.revokeErr = errors.New("atomic disconnect failed")
 	revoker := &fakeSessionRevoker{}
 
-	srv := New(nil, nil).WithConsentStore(store).WithSessionRevoker(revoker).WithCallerSource(fakeCallerSource{userID: "user-123"})
+	srv := newTestServer(nil).WithConsentStore(store).WithSessionRevoker(revoker).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -501,7 +501,7 @@ func TestSecurity_CrossUserGrantLeakage_List(t *testing.T) {
 		},
 	}
 
-	srv := New(nil, nil).WithConsentStore(store).WithCallerSource(fakeCallerSource{userID: "user-A"})
+	srv := newTestServer(nil).WithConsentStore(store).WithCallerSource(fakeCallerSource{userID: "user-A"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
@@ -546,7 +546,7 @@ func TestSecurity_CrossUserGrantLeakage_Revoke(t *testing.T) {
 	}
 	revoker := &fakeSessionRevoker{}
 
-	srv := New(nil, nil).WithConsentStore(store).WithSessionRevoker(revoker).WithCallerSource(fakeCallerSource{userID: "user-A"})
+	srv := newTestServer(nil).WithConsentStore(store).WithSessionRevoker(revoker).WithCallerSource(fakeCallerSource{userID: "user-A"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 
