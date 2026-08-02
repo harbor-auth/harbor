@@ -23,7 +23,7 @@ type object map[string]any
 func TestRawSecurityContract(t *testing.T) {
 	objects := loadFiles(t, filepath.Join("..", "k8s", "*.yaml"))
 	assertWorkloadContract(t, "raw", objects)
-	assertRuntimeConfigurationContract(t, objects)
+	assertRuntimeConfigurationContract(t, objects, true)
 }
 
 func TestHelmSecurityContract(t *testing.T) {
@@ -48,6 +48,9 @@ func TestHelmSecurityContract(t *testing.T) {
 		objects = append(objects, decode(t, document)...)
 	}
 	assertWorkloadContract(t, "helm", objects)
+	// The chart defaults intentionally leave deployer-owned credentials empty,
+	// but the rendered Secret must expose every exact runtime key.
+	assertRuntimeConfigurationContract(t, objects, false)
 	assertEnvNameParity(t, loadFiles(t, filepath.Join("..", "k8s", "*.yaml")), objects)
 }
 
@@ -67,6 +70,33 @@ func assertHelmSourceSecurityContract(t *testing.T) {
 		}
 		if !bytes.Contains(data, []byte(`required "`)) || !bytes.Contains(data, []byte(`image.digest`)) {
 			t.Errorf("%s does not fail closed when its immutable image digest is absent", template)
+		}
+	}
+
+	configContract := map[string][]string{
+		"configmap-hot.yaml": {
+			`LOGIN_URL: {{ required "hot.loginURL is required in production" .Values.hot.loginURL`,
+			`REGION: {{ .Values.region`,
+		},
+		"configmap-mgmt.yaml": {
+			`REGISTRATION_BASE_URL: {{ required "mgmt.registrationBaseURL is required in production" .Values.mgmt.registrationBaseURL`,
+			`WEBAUTHN_RP_DISPLAY_NAME:`,
+			`WEBAUTHN_RP_ORIGINS:`,
+			`REGION: {{ .Values.region`,
+		},
+	}
+	for template, required := range configContract {
+		data, readErr := os.ReadFile(filepath.Join("..", "helm", "templates", template))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		for _, fragment := range required {
+			if !bytes.Contains(data, []byte(fragment)) {
+				t.Errorf("%s is missing required runtime contract %q", template, fragment)
+			}
+		}
+		if bytes.Contains(data, []byte("HARBOR_DEV_MODE")) {
+			t.Errorf("%s still emits obsolete HARBOR_DEV_MODE", template)
 		}
 	}
 }
@@ -154,7 +184,7 @@ func assertWorkloadContract(t *testing.T, variant string, objects []object) {
 	}
 }
 
-func assertRuntimeConfigurationContract(t *testing.T, objects []object) {
+func assertRuntimeConfigurationContract(t *testing.T, objects []object, requireSecretValues bool) {
 	t.Helper()
 	requiredConfig := map[string][]string{
 		"harbor-hot":  {"ISSUER", "LOGIN_URL", "REGION"},
@@ -174,7 +204,12 @@ func assertRuntimeConfigurationContract(t *testing.T, objects []object) {
 			}
 		}
 		for _, key := range requiredSecrets[component] {
-			if strings.TrimSpace(fmt.Sprint(value(t, secret, key))) == "" {
+			secretValue, ok := secret[key]
+			if !ok {
+				t.Errorf("%s required secret %s is missing", component, key)
+				continue
+			}
+			if requireSecretValues && strings.TrimSpace(fmt.Sprint(secretValue)) == "" {
 				t.Errorf("%s required secret %s is empty", component, key)
 			}
 		}

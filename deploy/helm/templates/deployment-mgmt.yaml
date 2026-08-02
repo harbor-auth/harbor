@@ -10,9 +10,8 @@ metadata:
   labels:
     {{- include "harbor.mgmt.labels" . | nindent 4 }}
 spec:
-  # SCAFFOLD: set mgmt.replicaCount to 1 until the ceremony/session store is
-  # DB-backed (in-memory WebAuthn state does not survive restarts or cross-pod
-  # routing). See docs/plans/user-enrollment.md.
+  # Enrollment, BFF, and WebAuthn ceremony state is shared through Redis, so
+  # replicas can be rolled and scaled without losing in-flight ceremonies.
   replicas: {{ .Values.mgmt.replicaCount }}
   selector:
     matchLabels:
@@ -28,11 +27,11 @@ spec:
         {{- include "harbor.mgmt.labels" . | nindent 8 }}
       annotations:
         # Hold the app container until the Linkerd proxy sidecar is ready, so
-        # early outbound connections (DB) aren't dropped on startup while the
-        # mesh warms up. See linkerd.io/2/features/proxy-injection.
+        # early outbound connections (PostgreSQL/Redis) aren't dropped on
+        # startup while the mesh warms up.
         config.linkerd.io/proxy-await: enabled
-        # PostgreSQL (5432) is a server-speaks-first protocol that Linkerd
-        # cannot proxy cleanly here; connect to them directly (unmeshed TCP).
+        # PostgreSQL (5432) and Redis (6379) are server-speaks-first protocols
+        # that Linkerd cannot proxy cleanly here; connect to them directly.
         # mTLS still covers hot↔mgmt and ingress↔mgmt edges.
         config.linkerd.io/skip-outbound-ports: "5432,6379"
     spec:

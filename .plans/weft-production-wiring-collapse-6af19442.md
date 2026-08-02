@@ -116,3 +116,17 @@
    fail-closed production composition roots.
 4. Update chart notes to report the new required values accurately, then lint,
    render, and run the deployment contract tests.
+
+## Task 15: align Helm deployments and rendered contracts
+
+1. Strengthen the rendered Helm contract to require exact runtime configuration,
+   reject development/legacy names, and verify both workloads project their
+   ConfigMap and Secret sources.
+2. Remove development-mode configuration and render the region, login,
+   registration, WebAuthn, Redis, and shared user-DEK KEK contract consistently
+   with the raw Kubernetes manifests.
+3. Remove obsolete single-replica/in-memory guidance and update chart install and
+   production documentation for required Postgres, Redis, URLs, registration
+   authorization, and the one shared user-DEK KEK.
+4. Run Helm lint/template assertions and focused deployment contract tests,
+   then commit, rebase, push, and record the result.

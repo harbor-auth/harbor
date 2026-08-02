@@ -58,13 +58,6 @@ SCAFFOLD REMINDERS — do NOT run this in production until these are addressed:
   ✗ Ensure the TLS Secret "{{ .Values.ingress.tlsSecretName }}" exists (e.g. via
     cert-manager) — the Ingress cannot terminate TLS without it.
 {{- end }}
-{{- if gt (int .Values.mgmt.replicaCount) 1 }}
-  ✗ mgmt.replicaCount is {{ .Values.mgmt.replicaCount }} but the WebAuthn ceremony store is
-    in-memory. Passkey ceremonies break across pods/restarts. Set
-    mgmt.replicaCount to 1 until the store is DB-backed
-    (docs/plans/user-enrollment.md).
-{{- end }}
-
 ----------------------------------------------------------------------------
 Run the connectivity smoke tests (hits /healthz on both binaries via their
 in-cluster Services):

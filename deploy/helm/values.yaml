@@ -98,8 +98,7 @@ hot:
     kmsCredentialsSecret: "harbor-kms-credentials"
     # postgres://… DSN. harbor-hot reads clients/grants/sessions/secrets here.
     databaseUrl: ""
-    # redis://… URL. REQUIRED when replicaCount > 1: without it auth codes live
-    # in-process and cross-replica /token exchanges fail.
+    # redis://… URL. Required for distributed auth-code and abuse-control state.
     redisUrl: ""
     # Bearer token guarding /admin/ endpoints (POST /admin/keys/rotate and
     # POST /admin/revoke-jwt). FATAL if unset when DATABASE_URL is set.
@@ -112,10 +111,8 @@ hot:
 # via the cluster-internal Service and locked down by NetworkPolicy.
 # ---------------------------------------------------------------------------
 mgmt:
-  # Pinned to 1 until the ceremony/session store is DB-backed — harbor-mgmt uses
-  # in-memory WebAuthn state that does not survive restarts or cross-pod routing
-  # (a ceremony begun on one pod fails when finished on another). Do not raise
-  # above 1 until then. See docs/plans/user-enrollment.md.
+  # Initial replica count. Ceremony, enrollment, and BFF state is shared in
+  # Redis, so replicas can scale without losing in-flight sessions.
   replicaCount: 1
   image:
     repository: harbor-mgmt
