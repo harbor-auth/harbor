@@ -194,9 +194,9 @@ func runBFFPasskeyFlowDetailed(t *testing.T) (bffFlowResult, bffNonceFlowState, 
 	// page carrying request_id.
 	q := url.Values{}
 	q.Set("response_type", "code")
-	q.Set("client_id", demoClientID)
-	q.Set("redirect_uri", demoRedirectURI)
-	q.Set("scope", demoScope)
+	q.Set("client_id", e2eClientID)
+	q.Set("redirect_uri", e2eRedirectURI)
+	q.Set("scope", e2eScope)
 	q.Set("state", "bff-nonce-state")
 	q.Set("code_challenge", challenge)
 	q.Set("code_challenge_method", "S256")
@@ -311,8 +311,8 @@ func runBFFPasskeyFlowDetailed(t *testing.T) (bffFlowResult, bffNonceFlowState, 
 		}
 		return bffFlowResult{}, bffNonceFlowState{}, false
 	}
-	if loc := compResp.Header.Get("Location"); !strings.HasPrefix(loc, demoRedirectURI) {
-		t.Logf("/authorize/complete redirected to %q, want prefix %q", loc, demoRedirectURI)
+	if loc := compResp.Header.Get("Location"); !strings.HasPrefix(loc, e2eRedirectURI) {
+		t.Logf("/authorize/complete redirected to %q, want prefix %q", loc, e2eRedirectURI)
 		return bffFlowResult{}, bffNonceFlowState{}, false
 	}
 
@@ -334,7 +334,7 @@ func runBFFPasskeyFlowDetailed(t *testing.T) (bffFlowResult, bffNonceFlowState, 
 	}
 
 	// Exchange the code for tokens.
-	tokenResp := postToken(t, code, verifier, demoRedirectURI)
+	tokenResp := postToken(t, code, verifier, e2eRedirectURI)
 	defer func() { _ = tokenResp.Body.Close() }()
 	if tokenResp.StatusCode != http.StatusOK {
 		body, readErr := io.ReadAll(tokenResp.Body)

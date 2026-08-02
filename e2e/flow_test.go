@@ -12,11 +12,9 @@
 //	docker compose -f e2e/docker-compose.yml up -d
 //	HARBOR_E2E_BASE_URL=http://localhost:8080 go test -tags e2e ./e2e/...
 //
-// The harbor-hot scaffold registers a demo client (below) with a stub session
-// resolver that auto-approves, so /authorize should mint a code without a login
-// UI. Assertions check status codes and key JSON fields (resiliently, via
-// map[string]any) rather than exact bodies, so the harness survives benign
-// response-shape changes while still enforcing the security invariants.
+// docker-compose migrates the real PostgreSQL schema and seeds the RP used
+// below. Authentication follows the real Redis-backed BFF/WebAuthn path;
+// bff_login_test.go drives that browser ceremony when a test needs an auth code.
 package e2e
 
 import (
@@ -37,14 +35,14 @@ import (
 
 const (
 	defaultBaseURL   = "http://localhost:8080"
-	demoClientID     = "demo-client"
-	demoRedirectURI  = "http://localhost:3000/callback"
+	e2eClientID      = "harbor-e2e"
+	e2eRedirectURI   = "http://localhost:3000/callback"
 	discoveryPath    = "/.well-known/openid-configuration"
 	healthzPath      = "/healthz"
 	authorizePath    = "/authorize"
 	tokenPath        = "/token"
-	demoScope        = "openid"
-	demoScopeOffline = "openid offline_access"
+	e2eScope         = "openid"
+	e2eScopeOffline  = "openid offline_access"
 	minVerifierChars = 43
 )
 
@@ -160,7 +158,7 @@ func TestDiscoveryDocument(t *testing.T) {
 // response (no redirects followed). Uses the openid-only scope.
 func authorize(t *testing.T, redirectURI, challenge, state string) *http.Response {
 	t.Helper()
-	return authorizeWithScope(t, redirectURI, challenge, state, demoScope)
+	return authorizeWithScope(t, redirectURI, challenge, state, e2eScope)
 }
 
 // authorizeWithScope is like authorize but lets the caller specify the scope
@@ -169,7 +167,7 @@ func authorizeWithScope(t *testing.T, redirectURI, challenge, state, scope strin
 	t.Helper()
 	q := url.Values{}
 	q.Set("response_type", "code")
-	q.Set("client_id", demoClientID)
+	q.Set("client_id", e2eClientID)
 	q.Set("redirect_uri", redirectURI)
 	q.Set("scope", scope)
 	q.Set("state", state)
@@ -193,7 +191,7 @@ func postRefreshTokenAt(t *testing.T, endpoint, refreshToken string) *http.Respo
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
-	form.Set("client_id", demoClientID)
+	form.Set("client_id", e2eClientID)
 	resp, err := http.Post(endpoint+tokenPath, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
 	if err != nil {
 		t.Fatalf("POST %s (refresh_token): %v", tokenPath, err)
@@ -230,22 +228,20 @@ func codeFromLocation(t *testing.T, resp *http.Response) string {
 
 func TestAuthorizeTokenHappyPath(t *testing.T) {
 	verifier, challenge := pkcePair(t)
-	resp := authorize(t, demoRedirectURI, challenge, "state-happy")
+	resp := authorize(t, e2eRedirectURI, challenge, "state-happy")
 	defer resp.Body.Close()
 
-	// The scaffold auto-approves, so we expect a 302 back to the registered
-	// redirect carrying a code. If a login/consent step blocks auto-approval,
-	// tolerate a non-302 but still assert we did NOT bounce to an unvalidated
-	// URI — then skip the token exchange.
+	// A fully authenticated browser returns to the registered redirect. A bare
+	// HTTP client enters the real login flow, which is covered in bff_login_test.
 	if resp.StatusCode != http.StatusFound {
-		t.Logf("authorize returned %d (not 302) — auto-approval may be gated; skipping token exchange", resp.StatusCode)
-		if loc := resp.Header.Get("Location"); loc != "" && !strings.HasPrefix(loc, demoRedirectURI) {
+		t.Logf("authorize returned %d (not 302); skipping token exchange", resp.StatusCode)
+		if loc := resp.Header.Get("Location"); loc != "" && !strings.HasPrefix(loc, e2eRedirectURI) {
 			t.Errorf("non-302 authorize leaked a redirect to an unexpected Location: %q", loc)
 		}
 		return
 	}
-	if loc := resp.Header.Get("Location"); !strings.HasPrefix(loc, demoRedirectURI) {
-		t.Fatalf("authorize redirected to %q, want prefix %q", loc, demoRedirectURI)
+	if loc := resp.Header.Get("Location"); !strings.HasPrefix(loc, e2eRedirectURI) {
+		t.Skipf("authorize entered the real login flow at %q", loc)
 	}
 	code := codeFromLocation(t, resp)
 	if code == "" {
@@ -253,7 +249,7 @@ func TestAuthorizeTokenHappyPath(t *testing.T) {
 	}
 
 	// Exchange the code for tokens.
-	tokenResp := postToken(t, code, verifier, demoRedirectURI)
+	tokenResp := postToken(t, code, verifier, e2eRedirectURI)
 	defer tokenResp.Body.Close()
 	if tokenResp.StatusCode != http.StatusOK {
 		body, err := io.ReadAll(tokenResp.Body)
@@ -282,7 +278,7 @@ func postToken(t *testing.T, code, verifier, redirectURI string) *http.Response 
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
 	form.Set("redirect_uri", redirectURI)
-	form.Set("client_id", demoClientID)
+	form.Set("client_id", e2eClientID)
 	form.Set("code_verifier", verifier)
 
 	resp, err := http.Post(baseURL()+tokenPath, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
@@ -296,10 +292,13 @@ func postToken(t *testing.T, code, verifier, redirectURI string) *http.Response 
 // rejected as invalid_grant (400), never leaking which check failed.
 func TestTokenWrongVerifierIsInvalidGrant(t *testing.T) {
 	_, challenge := pkcePair(t)
-	authResp := authorize(t, demoRedirectURI, challenge, "state-badpkce")
+	authResp := authorize(t, e2eRedirectURI, challenge, "state-badpkce")
 	defer authResp.Body.Close()
 	if authResp.StatusCode != http.StatusFound {
-		t.Skipf("authorize did not auto-approve (%d); cannot obtain a code for the negative test", authResp.StatusCode)
+		t.Skipf("authorize returned %d; cannot obtain a code for the negative test", authResp.StatusCode)
+	}
+	if loc := authResp.Header.Get("Location"); !strings.HasPrefix(loc, e2eRedirectURI) {
+		t.Skipf("authorize entered the real login flow at %q", loc)
 	}
 	code := codeFromLocation(t, authResp)
 	if code == "" {
@@ -308,7 +307,7 @@ func TestTokenWrongVerifierIsInvalidGrant(t *testing.T) {
 
 	// Exchange with a DIFFERENT (wrong) verifier.
 	wrongVerifier, _ := pkcePair(t)
-	resp := postToken(t, code, wrongVerifier, demoRedirectURI)
+	resp := postToken(t, code, wrongVerifier, e2eRedirectURI)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("wrong-verifier /token = %d, want 400", resp.StatusCode)
@@ -336,23 +335,22 @@ func TestTokenWrongVerifierIsInvalidGrant(t *testing.T) {
 //  4. The old refresh_token must be rejected with invalid_grant (rotation invariant,
 //     docs/DESIGN.md §3.5 INV-REFRESH-ROTATION-SINGLE-USE).
 //
-// The test skips gracefully if auto-approval is not wired (non-302 from /authorize)
-// or if the server does not return a refresh_token (server scaffold may not yet
-// support offline_access).
+// A bare HTTP client cannot complete the real passkey login, so this focused
+// protocol test skips when /authorize hands off to the BFF login ceremony.
 //
 // Exercises: INV-REFRESH-ROTATION-SINGLE-USE, INV-REFRESH-OFFLINE-ACCESS-GATE
 func TestAuthorizeTokenRefreshFlow(t *testing.T) {
 	verifier, challenge := pkcePair(t)
 
 	// Step 1: authorize with offline_access so /token will issue a refresh token.
-	authResp := authorizeWithScope(t, demoRedirectURI, challenge, "state-refresh", demoScopeOffline)
+	authResp := authorizeWithScope(t, e2eRedirectURI, challenge, "state-refresh", e2eScopeOffline)
 	defer authResp.Body.Close()
 
 	if authResp.StatusCode != http.StatusFound {
-		t.Skipf("authorize returned %d (not 302) — auto-approval not wired; skipping refresh flow", authResp.StatusCode)
+		t.Skipf("authorize returned %d (not 302); skipping refresh flow", authResp.StatusCode)
 	}
-	if loc := authResp.Header.Get("Location"); !strings.HasPrefix(loc, demoRedirectURI) {
-		t.Fatalf("authorize redirected to %q, want prefix %q", loc, demoRedirectURI)
+	if loc := authResp.Header.Get("Location"); !strings.HasPrefix(loc, e2eRedirectURI) {
+		t.Skipf("authorize entered the real login flow at %q", loc)
 	}
 	code := codeFromLocation(t, authResp)
 	if code == "" {
@@ -361,7 +359,7 @@ func TestAuthorizeTokenRefreshFlow(t *testing.T) {
 
 	// Step 2: exchange the authorization code → expect refresh_token in addition
 	// to access_token (offline_access was consented).
-	tokenResp := postToken(t, code, verifier, demoRedirectURI)
+	tokenResp := postToken(t, code, verifier, e2eRedirectURI)
 	defer tokenResp.Body.Close()
 	if tokenResp.StatusCode != http.StatusOK {
 		body, readErr := io.ReadAll(tokenResp.Body)
@@ -391,9 +389,7 @@ func TestAuthorizeTokenRefreshFlow(t *testing.T) {
 		t.Errorf("token_type = %q, want Bearer", tok1.TokenType)
 	}
 	if tok1.RefreshToken == "" {
-		// The server scaffold may not yet support offline_access — skip rather
-		// than fail so this does not block the CI gate on an in-progress server.
-		t.Skipf("token response has no refresh_token — server may not have offline_access wired (body: %s)", body1)
+		t.Fatalf("token response has no refresh_token despite offline_access (body: %s)", body1)
 	}
 
 	// Step 3: rotate — present the refresh_token to get new tokens.
@@ -495,16 +491,19 @@ func TestRefreshInvalidTokenIsInvalidGrant(t *testing.T) {
 func TestJWKSSignatureVerification(t *testing.T) {
 	// Step 1: full PKCE authorize → code → token.
 	verifier, challenge := pkcePair(t)
-	authResp := authorize(t, demoRedirectURI, challenge, "state-jwks-verify")
+	authResp := authorize(t, e2eRedirectURI, challenge, "state-jwks-verify")
 	defer authResp.Body.Close()
 	if authResp.StatusCode != http.StatusFound {
-		t.Skipf("authorize returned %d (not 302) — auto-approval not wired; skipping JWKS sig verification", authResp.StatusCode)
+		t.Skipf("authorize returned %d (not 302); skipping JWKS sig verification", authResp.StatusCode)
+	}
+	if loc := authResp.Header.Get("Location"); !strings.HasPrefix(loc, e2eRedirectURI) {
+		t.Skipf("authorize entered the real login flow at %q", loc)
 	}
 	code := codeFromLocation(t, authResp)
 	if code == "" {
 		t.Skip("no code from authorize; cannot run JWKS sig verification")
 	}
-	tokenResp := postToken(t, code, verifier, demoRedirectURI)
+	tokenResp := postToken(t, code, verifier, e2eRedirectURI)
 	defer tokenResp.Body.Close()
 	if tokenResp.StatusCode != http.StatusOK {
 		body, readErr := io.ReadAll(tokenResp.Body)
@@ -650,16 +649,19 @@ func TestJWKSSignatureVerification(t *testing.T) {
 func TestJWKSSignatureTamperDetection(t *testing.T) {
 	// Obtain a real id_token via the full PKCE flow.
 	verifier, challenge := pkcePair(t)
-	authResp := authorize(t, demoRedirectURI, challenge, "state-tamper")
+	authResp := authorize(t, e2eRedirectURI, challenge, "state-tamper")
 	defer authResp.Body.Close()
 	if authResp.StatusCode != http.StatusFound {
-		t.Skipf("authorize returned %d (not 302) — auto-approval not wired; skipping tamper test", authResp.StatusCode)
+		t.Skipf("authorize returned %d (not 302); skipping tamper test", authResp.StatusCode)
+	}
+	if loc := authResp.Header.Get("Location"); !strings.HasPrefix(loc, e2eRedirectURI) {
+		t.Skipf("authorize entered the real login flow at %q", loc)
 	}
 	code := codeFromLocation(t, authResp)
 	if code == "" {
 		t.Skip("no code from authorize; cannot run tamper test")
 	}
-	tokenResp := postToken(t, code, verifier, demoRedirectURI)
+	tokenResp := postToken(t, code, verifier, e2eRedirectURI)
 	defer tokenResp.Body.Close()
 	if tokenResp.StatusCode != http.StatusOK {
 		body, readErr := io.ReadAll(tokenResp.Body)
