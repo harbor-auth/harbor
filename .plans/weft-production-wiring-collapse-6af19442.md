@@ -105,3 +105,14 @@
 4. Run focused deploy contracts and repository checks relevant to the change.
 5. Commit, rebase on the shared remote feature branch, push, record the result
    in Hippo, and complete the Weft task.
+
+## Task 14: model the shared user-DEK KEK in Helm
+
+1. Add one explicit global user-DEK KEK value and document that it is distinct
+   from the regional signing-key configuration.
+2. Project the required global value as `HARBOR_KMS_SECRET` into both generated
+   component Secrets, alongside the hot and management runtime secrets.
+3. Add the missing login and dynamic-registration values needed by the two
+   fail-closed production composition roots.
+4. Update chart notes to report the new required values accurately, then lint,
+   render, and run the deployment contract tests.

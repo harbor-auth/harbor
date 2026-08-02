@@ -22,6 +22,13 @@ global:
     # The production hot/mgmt helpers require per-component sha256 digests.
     tag: development-only
     pullPolicy: IfNotPresent
+  # Shared 256-bit KEK used to wrap and unwrap per-user DEKs. Both harbor-hot
+  # and harbor-mgmt MUST receive this exact value: management creates the
+  # wrapped user secrets and hot unwraps them for PPID derivation.
+  # Generate: openssl rand -hex 32
+  # This is NOT signing-key configuration; signing keys are selected by
+  # kmsKeyMap below.
+  userDekKekSecret: "REPLACE_WITH_SHARED_32_BYTE_USER_DEK_KEK"
 
 # ---------------------------------------------------------------------------
 # Region this deployment serves. Binds the issuer/RP-origin hosts to a region
@@ -51,6 +58,9 @@ hot:
   # clients reach (matches ingress.host below), and MUST be per-region in a
   # multi-region deployment.
   issuer: https://auth.example.com
+  # Browser entry point served by harbor-mgmt on the same public origin.
+  # harbor-hot redirects unauthenticated authorization requests here.
+  loginURL: https://auth.example.com/login
   resources:
     requests:
       cpu: 100m
@@ -78,7 +88,9 @@ hot:
   # Secret you manage out-of-band (recommended for production).
   secrets:
     # If set, the chart does NOT create a Secret and instead references this one
-    # (which must expose DATABASE_URL / REDIS_URL / ADMIN_API_TOKEN keys).
+    # (which must expose DATABASE_URL / REDIS_URL / HARBOR_KMS_SECRET /
+    # ADMIN_API_TOKEN keys). When this is set, the external Secret must supply
+    # the same user-DEK KEK as the management Secret.
     existingSecret: ""
     # Name of the Secret managed by External Secrets Operator that exposes
     # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for KMS access. Set to ""
@@ -128,6 +140,8 @@ mgmt:
   # harbor-mgmt refuses to start if DATABASE_URL is set but this is empty.
   # SCAFFOLD: set to https://<ingress.host>/authorize/complete.
   authorizeCompleteURL: https://auth.example.com/authorize/complete
+  # Public base URL returned by dynamic client registration.
+  registrationBaseURL: https://auth.example.com
   # Relay / BYO-domain configuration for DNS setup instructions.
   # mtaDomain is the regional MTA that receives inbound mail (MX record target).
   # relayDomain is the regional relay domain for SPF/DKIM records.
@@ -147,10 +161,16 @@ mgmt:
   networkPolicy:
     enabled: true
   secrets:
+    # When set, this Secret must expose DATABASE_URL / REDIS_URL /
+    # HARBOR_KMS_SECRET / INITIAL_ACCESS_TOKEN. Its HARBOR_KMS_SECRET must
+    # equal the value in harbor-hot's Secret.
     existingSecret: ""
     databaseUrl: ""
     # Shared Redis backs BFF, enrollment, WebAuthn, and abuse-control state.
     redisUrl: ""
+    # Bearer token authorizing dynamic client registration.
+    # Generate: openssl rand -hex 32
+    initialAccessToken: ""
 
 # Production runtime crypto contract shared by hot and management. This is a
 # region=KMS-key-ID map, not KMS credentials; credentials come from workload
