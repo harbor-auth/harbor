@@ -81,3 +81,14 @@
 2. Add tests first for conversion, uniqueness, lifecycle updates, ownership hiding, deletion, and persistence across store instances.
 3. Wire the adapter and DNS verifier into the management composition root using the existing regional MTA/relay configuration.
 4. Run focused tests plus repository build, vet, and test checks; review, commit, rebase, and push the shared feature branch.
+
+## Task 12: harden explicit pgxpool sizing
+
+1. Add focused tests for defaults, valid overrides, malformed/zero/negative/
+   overflowing settings, and `DB_MIN_CONNS <= DB_MAX_CONNS`.
+2. Make pool configuration parsing fail closed before opening PostgreSQL while
+   retaining the documented defaults.
+3. Document and test the per-replica connection budget at the 20-replica HPA
+   ceiling, including reserved operational headroom.
+4. Run focused and repository validation, then commit, rebase, and push the
+   shared feature branch.
