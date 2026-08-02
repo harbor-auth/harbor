@@ -156,6 +156,19 @@ func TestStartupRejectsMissingProductionConfigurationBeforeListen(t *testing.T) 
 	}
 }
 
+func TestValidateProductionURLAllowsOnlyLoopbackHTTP(t *testing.T) {
+	for _, raw := range []string{"http://localhost:8081", "http://127.0.0.1:8081", "http://[::1]:8081", "https://mgmt.example.com"} {
+		if err := validateProductionURL("URL", raw); err != nil {
+			t.Errorf("validateProductionURL(%q) = %v", raw, err)
+		}
+	}
+	for _, raw := range []string{"http://mgmt.example.com", "https://user@mgmt.example.com", "https://mgmt.example.com/#fragment"} {
+		if err := validateProductionURL("URL", raw); err == nil {
+			t.Errorf("validateProductionURL(%q) accepted an insecure URL", raw)
+		}
+	}
+}
+
 func TestProductionGraphWiresOutageAwareAbuseProtection(t *testing.T) {
 	source, err := os.ReadFile("main.go")
 	if err != nil {

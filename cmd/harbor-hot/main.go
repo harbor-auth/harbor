@@ -580,8 +580,10 @@ func validateProductionURL(name, raw string) error {
 	if err != nil {
 		return fmt.Errorf("invalid %s: %w", name, err)
 	}
-	if u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
-		return fmt.Errorf("invalid %s: production requires an absolute credential-free HTTPS URL", name)
+	hostIP := net.ParseIP(u.Hostname())
+	loopbackHTTP := u.Scheme == "http" && (u.Hostname() == "localhost" || (hostIP != nil && hostIP.IsLoopback()))
+	if (u.Scheme != "https" && !loopbackHTTP) || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+		return fmt.Errorf("invalid %s: requires an absolute credential-free HTTPS URL (HTTP is limited to loopback integration endpoints)", name)
 	}
 	return nil
 }

@@ -167,6 +167,19 @@ func TestProductionBFFConfigRejectsInsecureLoginURL(t *testing.T) {
 	}
 }
 
+func TestValidateProductionURLAllowsOnlyLoopbackHTTP(t *testing.T) {
+	for _, raw := range []string{"http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080", "https://harbor.example.com"} {
+		if err := validateProductionURL("URL", raw); err != nil {
+			t.Errorf("validateProductionURL(%q) = %v", raw, err)
+		}
+	}
+	for _, raw := range []string{"http://harbor.example.com", "https://user@harbor.example.com", "https://harbor.example.com/#fragment"} {
+		if err := validateProductionURL("URL", raw); err == nil {
+			t.Errorf("validateProductionURL(%q) accepted an insecure URL", raw)
+		}
+	}
+}
+
 func TestProductionStartupValidatesAbuseAndExternalURLs(t *testing.T) {
 	source, err := os.ReadFile("main.go")
 	if err != nil {
