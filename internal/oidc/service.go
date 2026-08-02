@@ -17,31 +17,11 @@ import (
 // (docs/DESIGN.md §11.2). It returns the resolved subject (PPID) for the user
 // authenticating to this client, and whether they approved consent.
 //
-// SCAFFOLD SEAM: the real implementation runs the hosted auth UI — WebAuthn
-// login (internal/webauthn), MFA/step-up, and the consent screen — and derives
-// the per-RP PPID (internal/identity). The stub below auto-approves a fixed demo
-// subject so /authorize is exercisable before that UI exists.
+// The production implementation runs the hosted auth UI — WebAuthn login
+// (internal/webauthn), MFA/step-up, and the consent screen — and derives the
+// per-RP PPID (internal/identity).
 type SessionResolver interface {
 	Resolve(ctx context.Context, client Client, scope string) (subject, userID string, approved bool, err error)
-}
-
-// stubSessionResolver auto-approves a fixed subject. SCAFFOLD only.
-type stubSessionResolver struct{ subject string }
-
-// NewStubSessionResolver returns a SessionResolver that always authenticates and
-// consents as subject. SCAFFOLD — replace with real passkey login + consent.
-func NewStubSessionResolver(subject string) SessionResolver {
-	return stubSessionResolver{subject: subject}
-}
-
-// Resolve always returns userID="" (empty). This is intentional for unit-test
-// simplicity — Token() gates issueRefreshToken on `result.Code.UserID != ""`
-// (docs/DESIGN.md §3.5), so any test using stubSessionResolver will NEVER
-// receive a refresh token through a full Authorize→Token flow. Use
-// PPIDSessionResolver with a FixedAuthSource for refresh-token integration
-// tests (see newRefreshFlowServerWithStore in refresh_rotation_test.go).
-func (r stubSessionResolver) Resolve(_ context.Context, _ Client, _ string) (string, string, bool, error) {
-	return r.subject, "", true, nil
 }
 
 // RevocationSink receives the theft signal when an authorization code is reused:

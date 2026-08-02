@@ -10,6 +10,8 @@ import (
 	"github.com/harbor-auth/harbor/internal/crypto"
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
 	"github.com/harbor-auth/harbor/internal/oidc"
+
+	oidctest "github.com/harbor-auth/harbor/internal/testsupport/oidc"
 )
 
 // RFC 7636 Appendix B known-answer vector, reused across the HTTP flow tests.
@@ -29,7 +31,7 @@ const (
 // router — exactly the wiring cmd/harbor-hot performs.
 func newFlowServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	clients := oidc.NewInMemoryClientRegistry()
+	clients := oidctest.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
 		ID:            testClientID,
 		SectorID:      "localhost", // required for PPID derivation (§3.2); defensive consistency with prod wiring
@@ -44,9 +46,9 @@ func newFlowServer(t *testing.T) *httptest.Server {
 	svc := oidc.NewService(oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
-		Codes:    oidc.NewInMemoryAuthCodeStore(),
+		Codes:    oidctest.NewInMemoryAuthCodeStore(),
 		Tokens:   oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
-		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
+		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
 	srv := New(Config{
 		Issuer:  "https://eu.harbor.id",

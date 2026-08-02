@@ -46,6 +46,8 @@ import (
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
 	"github.com/harbor-auth/harbor/internal/oidc"
 	"github.com/harbor-auth/harbor/internal/oidcapi"
+
+	oidctest "github.com/harbor-auth/harbor/internal/testsupport/oidc"
 )
 
 const (
@@ -107,7 +109,7 @@ func (m *mockResolver) ResolveUser(_ context.Context, _ *http.Request, _ bff.BFF
 func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bff.InMemoryBFFSessionStore, *oidc.InMemoryConsentStore) {
 	t.Helper()
 
-	clients := oidc.NewInMemoryClientRegistry()
+	clients := oidctest.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
 		ID:            itClientID,
 		SectorID:      "localhost", // required for PPID derivation (§3.2)
@@ -118,9 +120,9 @@ func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bff.I
 	svc := oidc.NewService(oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
-		Codes:    oidc.NewInMemoryAuthCodeStore(),
-		Tokens:   oidc.NewPlaceholderIssuer(),
-		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
+		Codes:    oidctest.NewInMemoryAuthCodeStore(),
+		Tokens:   oidctest.NewPlaceholderIssuer(),
+		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 		Consents: consents,
 	})
 

@@ -13,6 +13,8 @@ import (
 	"github.com/harbor-auth/harbor/internal/crypto"
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
 	"github.com/harbor-auth/harbor/internal/oidc"
+
+	oidctest "github.com/harbor-auth/harbor/internal/testsupport/oidc"
 )
 
 const testClientSecret = "secret"
@@ -25,7 +27,7 @@ func testSecretHash(secret string) []byte {
 // newIntrospectServer builds a Server wired with introspection support.
 func newIntrospectServer(t *testing.T) *httptest.Server {
 	t.Helper()
-	clients := oidc.NewInMemoryClientRegistry()
+	clients := oidctest.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
 		ID:                      testClientID,
 		SectorID:                "localhost",
@@ -49,9 +51,9 @@ func newIntrospectServer(t *testing.T) *httptest.Server {
 	svc := oidc.NewService(oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
-		Codes:    oidc.NewInMemoryAuthCodeStore(),
+		Codes:    oidctest.NewInMemoryAuthCodeStore(),
 		Tokens:   oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
-		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
+		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
 	srv := New(Config{
 		Issuer:  "https://eu.harbor.id",
@@ -222,7 +224,7 @@ func TestPostIntrospect_RejectsUnauthenticatedClientCredentials(t *testing.T) {
 }
 
 func TestPostIntrospect_PublicClientCannotAuthenticate(t *testing.T) {
-	clients := oidc.NewInMemoryClientRegistry()
+	clients := oidctest.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{ID: testClientID, TokenEndpointAuthMethod: "none"})
 	signer, err := crypto.NewLocalSigner()
 	if err != nil {
@@ -230,8 +232,8 @@ func TestPostIntrospect_PublicClientCannotAuthenticate(t *testing.T) {
 	}
 	svc := oidc.NewService(oidc.ServiceConfig{
 		Issuer: "https://eu.harbor.id", Clients: clients,
-		Codes: oidc.NewInMemoryAuthCodeStore(), Tokens: oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
-		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
+		Codes: oidctest.NewInMemoryAuthCodeStore(), Tokens: oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
+		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
 	srv := New(Config{Issuer: "https://eu.harbor.id", Service: svc, Signers: []crypto.Signer{signer}})
 	ts := httptest.NewServer(openapi.HandlerFromMux(srv, http.NewServeMux()))

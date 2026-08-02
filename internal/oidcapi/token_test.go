@@ -12,6 +12,8 @@ import (
 	"github.com/harbor-auth/harbor/internal/crypto"
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
 	"github.com/harbor-auth/harbor/internal/oidc"
+
+	oidctest "github.com/harbor-auth/harbor/internal/testsupport/oidc"
 )
 
 // mintCode runs the /authorize happy path and returns the freshly-issued code.
@@ -67,7 +69,7 @@ func postTokenWithBasic(t *testing.T, ts *httptest.Server, form url.Values, clie
 
 func newClientAuthFlowServer(t *testing.T, method, secret string) *httptest.Server {
 	t.Helper()
-	clients := oidc.NewInMemoryClientRegistry()
+	clients := oidctest.NewInMemoryClientRegistry()
 	client := oidc.Client{
 		ID:                      testClientID,
 		SectorID:                "localhost",
@@ -86,8 +88,8 @@ func newClientAuthFlowServer(t *testing.T, method, secret string) *httptest.Serv
 	}
 	svc := oidc.NewService(oidc.ServiceConfig{
 		Issuer: "https://eu.harbor.id", Clients: clients,
-		Codes: oidc.NewInMemoryAuthCodeStore(), Tokens: oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
-		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
+		Codes: oidctest.NewInMemoryAuthCodeStore(), Tokens: oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
+		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
 	srv := New(Config{Issuer: "https://eu.harbor.id", Service: svc, Signers: []crypto.Signer{signer}})
 	ts := httptest.NewServer(openapi.HandlerFromMux(srv, http.NewServeMux()))

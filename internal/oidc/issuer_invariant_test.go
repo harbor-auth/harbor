@@ -12,11 +12,12 @@ import (
 	"testing"
 
 	"github.com/harbor-auth/harbor/internal/oidc"
+	oidctest "github.com/harbor-auth/harbor/internal/testsupport/oidc"
 )
 
 //harbor:invariant INV-SIGN-ASYM-ONLY
 func TestPlaceholderIssuerIsScaffoldNotReal(t *testing.T) {
-	iss := oidc.NewPlaceholderIssuer()
+	iss := oidctest.NewPlaceholderIssuer()
 	toks, err := iss.Issue(context.Background(), oidc.IssueParams{
 		Issuer:   "https://eu.harbor.id",
 		Subject:  "ppid-subject-123",

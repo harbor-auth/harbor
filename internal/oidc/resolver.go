@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/harbor-auth/harbor/internal/identity"
 )
@@ -18,20 +17,6 @@ import (
 // internal/webauthn (enforced by the arch test).
 type AuthSource interface {
 	AuthenticatedUserID(ctx context.Context) (string, error)
-}
-
-// FixedAuthSource returns a fixed user ID. SCAFFOLD/dev only — replace with the
-// real BFF-session-backed AuthSource in production.
-type FixedAuthSource struct{ userID string }
-
-// NewFixedAuthSource returns an AuthSource that always authenticates as userID.
-func NewFixedAuthSource(userID string) *FixedAuthSource {
-	return &FixedAuthSource{userID: userID}
-}
-
-// AuthenticatedUserID implements AuthSource.
-func (a *FixedAuthSource) AuthenticatedUserID(_ context.Context) (string, error) {
-	return a.userID, nil
 }
 
 // UserSecret is a user's plaintext pairwise secret plus their home region. The
@@ -50,45 +35,10 @@ var ErrUserSecretNotFound = errors.New("oidc: user pairwise secret not found")
 
 // UserSecretLoader loads and decrypts a user's pairwise secret. The DB-backed
 // implementation (internal/clients.DBSecretLoader) unwraps the user's DEK and
-// decrypts users.pairwise_secret; an in-memory implementation is available for
-// tests and dev wiring.
+// decrypts users.pairwise_secret; test fixtures live outside this production
+// package.
 type UserSecretLoader interface {
 	LoadUserSecret(ctx context.Context, userID string) (UserSecret, error)
-}
-
-// InMemorySecretLoader is a dev/test UserSecretLoader. NOT for production — a
-// real loader decrypts from the users table (internal/clients.DBSecretLoader).
-type InMemorySecretLoader struct {
-	mu      sync.RWMutex
-	secrets map[string]UserSecret
-}
-
-// NewInMemorySecretLoader returns an empty loader.
-func NewInMemorySecretLoader() *InMemorySecretLoader {
-	return &InMemorySecretLoader{secrets: make(map[string]UserSecret)}
-}
-
-// Put seeds or replaces the secret for userID.
-func (l *InMemorySecretLoader) Put(userID string, us UserSecret) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	// Clone Secret so a caller that reuses the []byte slice after Put cannot
-	// corrupt the stored secret via the shared backing array.
-	us.Secret = append([]byte(nil), us.Secret...)
-	l.secrets[userID] = us
-}
-
-// LoadUserSecret implements UserSecretLoader.
-func (l *InMemorySecretLoader) LoadUserSecret(_ context.Context, userID string) (UserSecret, error) {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-	us, ok := l.secrets[userID]
-	if !ok {
-		return UserSecret{}, ErrUserSecretNotFound
-	}
-	// Clone Secret so the caller cannot corrupt the stored value via the returned slice.
-	us.Secret = append([]byte(nil), us.Secret...)
-	return us, nil
 }
 
 // PPIDSessionResolverConfig wires a PPIDSessionResolver's collaborators. All

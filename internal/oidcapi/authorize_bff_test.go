@@ -16,6 +16,8 @@ import (
 	"github.com/harbor-auth/harbor/internal/crypto"
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
 	"github.com/harbor-auth/harbor/internal/oidc"
+
+	oidctest "github.com/harbor-auth/harbor/internal/testsupport/oidc"
 )
 
 // testLoginURL is the login UI /authorize redirects unauthenticated browsers to
@@ -36,7 +38,7 @@ func newBFFFlowServer(t *testing.T) (*httptest.Server, *bff.InMemoryBFFSessionSt
 
 func newBFFFlowServerWithStore(t *testing.T, store bff.BFFSessionStore) *httptest.Server {
 	t.Helper()
-	clients := oidc.NewInMemoryClientRegistry()
+	clients := oidctest.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
 		ID:            testClientID,
 		SectorID:      "localhost", // required for PPID derivation (§3.2)
@@ -47,17 +49,17 @@ func newBFFFlowServerWithStore(t *testing.T, store bff.BFFSessionStore) *httptes
 	if err != nil {
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
-	grants := oidc.NewInMemoryGrantStore()
+	grants := oidctest.NewInMemoryGrantStore()
 	svc := oidc.NewService(oidc.ServiceConfig{
 		Issuer:  "https://eu.harbor.id",
 		Clients: clients,
-		Codes:   oidc.NewInMemoryAuthCodeStore(),
+		Codes:   oidctest.NewInMemoryAuthCodeStore(),
 		Tokens:  oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Grants:  grants,
 		// The stub resolver would issue a code in the legacy path; with the BFF
 		// store wired below, /authorize must never reach it for an unauthenticated
 		// request — it redirects to login instead.
-		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
+		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
 	// Authenticated-session tests use this fixed user and target completion,
 	// rather than the explicit-consent handoff covered by consent tests.

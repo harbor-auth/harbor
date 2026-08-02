@@ -16,3 +16,10 @@
    the shared user-DEK KEK to be rejected before that boundary.
 3. Run the focused command tests and preserve the expected red state for the
    later production-wiring tasks.
+
+## Task 3: OIDC test-only scaffold fixtures
+
+1. Inventory production OIDC scaffolds and same-package/cross-package consumers.
+2. Move package-local fixtures into `internal/oidc/test_stores_test.go`.
+3. Add reusable fixtures under `internal/testsupport/oidc` and migrate external tests.
+4. Run focused tests and production-package build checks.

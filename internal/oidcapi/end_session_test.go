@@ -11,6 +11,8 @@ import (
 	"github.com/harbor-auth/harbor/internal/crypto"
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
 	"github.com/harbor-auth/harbor/internal/oidc"
+
+	oidctest "github.com/harbor-auth/harbor/internal/testsupport/oidc"
 )
 
 // --- test doubles -----------------------------------------------------------
@@ -59,7 +61,7 @@ func esStrPtr(s string) *string { return &s }
 // logout URI is esLogoutURI.
 func newEndSessionServer(t *testing.T, verifier LogoutVerifier, revoker SessionRevoker) *Server {
 	t.Helper()
-	grants := oidc.NewInMemoryGrantStore()
+	grants := oidctest.NewInMemoryGrantStore()
 	if _, err := grants.CreateGrant(context.Background(), oidc.NewGrant{
 		Region:      "eu",
 		UserID:      esUserID,
@@ -69,7 +71,7 @@ func newEndSessionServer(t *testing.T, verifier LogoutVerifier, revoker SessionR
 	}); err != nil {
 		t.Fatalf("CreateGrant: %v", err)
 	}
-	registry := oidc.NewInMemoryClientRegistry()
+	registry := oidctest.NewInMemoryClientRegistry()
 	registry.Put(oidc.Client{ID: esClientID, LogoutURIs: []string{esLogoutURI}})
 	return New(Config{
 		Issuer:         esIssuer,
@@ -420,7 +422,7 @@ func TestPostEndSessionRevokesSessionsAndInvalidatesRefreshTokens(t *testing.T) 
 
 func TestGetEndSessionMultipleLogoutURIs(t *testing.T) {
 	revoker := &fakeSessionRevoker{}
-	grants := oidc.NewInMemoryGrantStore()
+	grants := oidctest.NewInMemoryGrantStore()
 	if _, err := grants.CreateGrant(context.Background(), oidc.NewGrant{
 		Region:      "eu",
 		UserID:      esUserID,
@@ -430,7 +432,7 @@ func TestGetEndSessionMultipleLogoutURIs(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateGrant: %v", err)
 	}
-	registry := oidc.NewInMemoryClientRegistry()
+	registry := oidctest.NewInMemoryClientRegistry()
 	// Client with multiple registered logout URIs.
 	logoutURI2 := "https://rp.example.com/logout-alt"
 	registry.Put(oidc.Client{
