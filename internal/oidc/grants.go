@@ -71,24 +71,3 @@ type GrantScopeUpdater interface {
 type GrantDisconnector interface {
 	RevokeGrantAndSessions(ctx context.Context, id string) (bool, error)
 }
-
-// noopGrantStore is a GrantStore that records nothing. Used as the default in
-// ServiceConfig when no persistent store is wired (e.g. dev/test scaffolds that
-// auto-approve consent without persisting it).
-type noopGrantStore struct{}
-
-func (noopGrantStore) FindGrant(_ context.Context, _, _ string) (Grant, bool, error) {
-	// Always returns not-found. See NewService panic guard in service.go for why
-	// this must NOT be paired with a real SessionStore.
-	return Grant{}, false, nil
-}
-func (noopGrantStore) FindGrantByPPID(_ context.Context, _, _ string) (Grant, bool, error) {
-	return Grant{}, false, nil
-}
-func (noopGrantStore) CreateGrant(_ context.Context, _ NewGrant) (Grant, error) {
-	return Grant{}, nil
-}
-func (noopGrantStore) RevokeGrant(_ context.Context, _ string) error { return nil }
-func (noopGrantStore) ListGrantsByUser(_ context.Context, _ string) ([]Grant, error) {
-	return nil, nil
-}

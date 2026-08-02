@@ -17,7 +17,7 @@ func newTestRevokeService(t *testing.T, sessionStore SessionStore) *Service {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 
-	return NewService(ServiceConfig{
+	return mustNewService(ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
 		Codes:        NewInMemoryAuthCodeStore(),
@@ -270,7 +270,7 @@ func TestService_RevokeRefreshToken_LogsDBError(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
 		Codes:        NewInMemoryAuthCodeStore(),
@@ -329,7 +329,7 @@ func TestService_RevokeRefreshToken_EmptyUserID_SkipsRevoke(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
 		Codes:        NewInMemoryAuthCodeStore(),
@@ -378,7 +378,7 @@ func TestService_RevokeRefreshToken_ZeroUUID_SkipsRevoke(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
 		Codes:        NewInMemoryAuthCodeStore(),

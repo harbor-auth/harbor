@@ -48,6 +48,21 @@ type authCodeEntry struct {
 	consumed bool
 }
 
+// noopSessionStore is a deliberately inert test double used by corruption and
+// revocation-path tests that override only the method under examination.
+type noopSessionStore struct{}
+
+func (noopSessionStore) CreateSession(context.Context, RefreshSession) error { return nil }
+func (noopSessionStore) GetSessionByTokenHash(context.Context, []byte) (RefreshSession, error) {
+	return RefreshSession{}, ErrRefreshTokenNotFound
+}
+func (noopSessionStore) RevokeSession(context.Context, string) error                 { return nil }
+func (noopSessionStore) RotateSession(context.Context, string, RefreshSession) error { return nil }
+func (noopSessionStore) RevokeSessionsByUserClient(context.Context, string, string) error {
+	return nil
+}
+func (noopSessionStore) RevokeSessionsByGrant(context.Context, string) error { return nil }
+
 // InMemoryAuthCodeStore is a dev/test AuthCodeStore. NOT for production — a real
 // store is region-local and shared across replicas (e.g. Redis; docs/DESIGN.md
 // §4.4) with its own TTL eviction.

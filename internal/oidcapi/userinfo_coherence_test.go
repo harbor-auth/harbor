@@ -30,7 +30,7 @@ func newFlowServerWithIssuer(t *testing.T, issuer string, signer crypto.Signer) 
 		RedirectURIs:  []string{testRedirectURI},
 		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
 	})
-	svc := oidc.NewService(oidc.ServiceConfig{
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:   issuer,
 		Clients:  clients,
 		Codes:    oidctest.NewInMemoryAuthCodeStore(),

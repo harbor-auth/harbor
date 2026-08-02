@@ -111,18 +111,3 @@ func decodeRefreshToken(s string) ([]byte, error) {
 	}
 	return b, nil
 }
-
-// noopSessionStore is the default when no SessionStore is wired (dev/test
-// scaffolds that never issue a refresh token).
-type noopSessionStore struct{}
-
-func (noopSessionStore) CreateSession(context.Context, RefreshSession) error { return nil }
-func (noopSessionStore) GetSessionByTokenHash(context.Context, []byte) (RefreshSession, error) {
-	return RefreshSession{}, ErrRefreshTokenNotFound
-}
-func (noopSessionStore) RevokeSession(context.Context, string) error                 { return nil }
-func (noopSessionStore) RotateSession(context.Context, string, RefreshSession) error { return nil }
-func (noopSessionStore) RevokeSessionsByUserClient(context.Context, string, string) error {
-	return nil
-}
-func (noopSessionStore) RevokeSessionsByGrant(context.Context, string) error { return nil }

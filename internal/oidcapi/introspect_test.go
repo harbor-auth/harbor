@@ -48,7 +48,7 @@ func newIntrospectServer(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
-	svc := oidc.NewService(oidc.ServiceConfig{
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    oidctest.NewInMemoryAuthCodeStore(),
@@ -230,7 +230,7 @@ func TestPostIntrospect_PublicClientCannotAuthenticate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
-	svc := oidc.NewService(oidc.ServiceConfig{
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer: "https://eu.harbor.id", Clients: clients,
 		Codes: oidctest.NewInMemoryAuthCodeStore(), Tokens: oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),

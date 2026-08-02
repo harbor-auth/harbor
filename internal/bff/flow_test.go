@@ -117,7 +117,7 @@ func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bff.I
 		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
 	})
 	consents := oidc.NewInMemoryConsentStore()
-	svc := oidc.NewService(oidc.ServiceConfig{
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    oidctest.NewInMemoryAuthCodeStore(),

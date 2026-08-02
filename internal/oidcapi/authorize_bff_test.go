@@ -50,7 +50,7 @@ func newBFFFlowServerWithStore(t *testing.T, store bff.BFFSessionStore) *httptes
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
 	grants := oidctest.NewInMemoryGrantStore()
-	svc := oidc.NewService(oidc.ServiceConfig{
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:  "https://eu.harbor.id",
 		Clients: clients,
 		Codes:   oidctest.NewInMemoryAuthCodeStore(),

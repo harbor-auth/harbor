@@ -70,7 +70,7 @@ func clientAuthService(t *testing.T, client Client) *Service {
 	if err := codes.Save(t.Context(), validAuthCode(now)); err != nil {
 		t.Fatalf("Save auth code: %v", err)
 	}
-	return NewService(ServiceConfig{
+	return mustNewService(ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    codes,

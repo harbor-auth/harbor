@@ -25,7 +25,7 @@ func newTestServiceWithSessions(t *testing.T) (*Service, *InMemorySessionStore, 
 		RedirectURIs:  []string{"http://localhost/cb"},
 		ScopesAllowed: []string{"openid", "offline_access", "profile"},
 	})
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:       "https://test.harbor.example",
 		Clients:      clientReg,
 		Codes:        NewInMemoryAuthCodeStore(),
@@ -264,7 +264,7 @@ func TestRefreshTokenRegionPropagated(t *testing.T) {
 		ScopesAllowed: []string{"openid", "offline_access"},
 	})
 
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:       "https://test.harbor.example",
 		Clients:      clientReg,
 		Codes:        NewInMemoryAuthCodeStore(),
@@ -691,7 +691,7 @@ func TestRefreshTokenGrantIDPropagated(t *testing.T) {
 		ScopesAllowed: []string{"openid", "offline_access"},
 	})
 
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:       "https://test.harbor.example",
 		Clients:      clientReg,
 		Codes:        NewInMemoryAuthCodeStore(),

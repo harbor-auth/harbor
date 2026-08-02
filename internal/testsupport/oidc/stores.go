@@ -7,10 +7,72 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"testing"
 	"time"
 
 	harboroidc "github.com/harbor-auth/harbor/internal/oidc"
 )
+
+type recordingRevocationSink struct{}
+
+func (recordingRevocationSink) RevokeCodeFamily(context.Context, harboroidc.AuthCode) error {
+	return nil
+}
+
+type recordingOutbox struct{}
+
+func (recordingOutbox) Enqueue(context.Context, harboroidc.OutboxEntry) error { return nil }
+
+type emptyConsentStore struct{}
+
+func (emptyConsentStore) Get(context.Context, string, string) (harboroidc.ConsentGrant, bool, error) {
+	return harboroidc.ConsentGrant{}, false, nil
+}
+func (emptyConsentStore) Upsert(_ context.Context, userID, clientID string, scopes []string) (harboroidc.ConsentGrant, error) {
+	return harboroidc.ConsentGrant{UserID: userID, ClientID: clientID, Scopes: scopes}, nil
+}
+func (emptyConsentStore) List(context.Context, string) ([]harboroidc.ConsentGrant, error) {
+	return nil, nil
+}
+func (emptyConsentStore) Revoke(context.Context, string) error { return nil }
+
+// NewService completes cfg with isolated fixtures and constructs an OIDC
+// service for tests outside the oidc package.
+func NewService(t testing.TB, cfg harboroidc.ServiceConfig) *harboroidc.Service {
+	t.Helper()
+	if cfg.Clients == nil {
+		cfg.Clients = NewInMemoryClientRegistry()
+	}
+	if cfg.Codes == nil {
+		cfg.Codes = NewInMemoryAuthCodeStore()
+	}
+	if cfg.Tokens == nil {
+		cfg.Tokens = NewPlaceholderIssuer()
+	}
+	if cfg.Sessions == nil {
+		cfg.Sessions = NewStubSessionResolver("test-subject")
+	}
+	if cfg.SessionStore == nil {
+		cfg.SessionStore = NewInMemorySessionStore()
+	}
+	if cfg.Grants == nil {
+		cfg.Grants = NewInMemoryGrantStore()
+	}
+	if cfg.Consents == nil {
+		cfg.Consents = emptyConsentStore{}
+	}
+	if cfg.Revocations == nil {
+		cfg.Revocations = recordingRevocationSink{}
+	}
+	if cfg.Outbox == nil {
+		cfg.Outbox = recordingOutbox{}
+	}
+	svc, err := harboroidc.NewService(cfg)
+	if err != nil {
+		t.Fatalf("oidc.NewService: %v", err)
+	}
+	return svc
+}
 
 // InMemoryClientRegistry is a dev/test harboroidc.ClientRegistry. NOT for production.
 type InMemoryClientRegistry struct {

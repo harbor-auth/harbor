@@ -345,20 +345,6 @@ func (c *DBRevokedJTIChecker) IsRevoked(ctx context.Context, jti string) (bool, 
 	return found, nil
 }
 
-// noopRevokedJTIChecker always returns false (no revocations).
-// Used for testing when no DB is available.
-type noopRevokedJTIChecker struct{}
-
-func (noopRevokedJTIChecker) IsRevoked(context.Context, string) (bool, error) {
-	return false, nil
-}
-
-// NewNoopRevokedJTIChecker returns a checker that never finds revocations.
-// Use for testing or when emergency revocation is not configured.
-func NewNoopRevokedJTIChecker() RevokedJTIChecker {
-	return noopRevokedJTIChecker{}
-}
-
 // verifyES256Signature verifies an ES256 (ECDSA P-256 SHA-256) signature.
 // sigBytes must be the raw R||S format (64 bytes total, 32 bytes each).
 func verifyES256Signature(pubKey *ecdsa.PublicKey, signingInput, sigBytes []byte) bool {

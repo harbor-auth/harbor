@@ -23,3 +23,14 @@
 2. Move package-local fixtures into `internal/oidc/test_stores_test.go`.
 3. Add reusable fixtures under `internal/testsupport/oidc` and migrate external tests.
 4. Run focused tests and production-package build checks.
+
+## Task 4: fail-closed OIDC service construction
+
+1. Require every store, issuer/resolver, and revocation collaborator in
+   `oidc.NewService`, returning a descriptive startup error for omissions.
+2. Delete production noop session, grant, consent, revocation, outbox, and
+   revoked-JTI implementations.
+3. Migrate package and cross-package tests through test-only service fixtures.
+4. Wire the durable consent store in the hot production graph and propagate
+   constructor errors.
+5. Run focused OIDC/API tests plus repository build and vet checks.

@@ -43,7 +43,7 @@ func newFlowServer(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
-	svc := oidc.NewService(oidc.ServiceConfig{
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    oidctest.NewInMemoryAuthCodeStore(),

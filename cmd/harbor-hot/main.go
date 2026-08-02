@@ -227,14 +227,6 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	return httpserver.Run(ctx, addr, handler, logger)
 }
 
-// noopSessionRevoker is a dev/test scaffold implementation of
-// oidcapi.SessionRevoker. It is constructed only by buildDevHotGraph.
-type noopSessionRevoker struct{}
-
-func (noopSessionRevoker) RevokeSessionsByUserClient(_ context.Context, _, _ string) error {
-	return nil
-}
-
 type redisRevocationPublisher struct{ client *redis.Client }
 
 func (p redisRevocationPublisher) Publish(ctx context.Context, channel, message string) error {
@@ -289,6 +281,7 @@ func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redis
 	registry := clients.NewDBClientRegistry(q).WithLogger(logger)
 	codes := clients.NewRedisAuthCodeStore(redisClient, time.Minute)
 	grants := clients.NewDBGrantStore(q)
+	consents := clients.NewDBConsentStore(q)
 	sessionStore := clients.NewDBSessionStoreWithPool(q, pool)
 	outbox := clients.NewDBRevocationOutbox(q, logger)
 	revokedStore := clients.NewDBRevokedJTIStore(q)
@@ -312,23 +305,15 @@ func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redis
 	if err != nil {
 		return oidcapi.Config{}, hotGraph{}, err
 	}
-	svc := oidc.NewService(oidc.ServiceConfig{Issuer: issuer, Clients: registry, Codes: codes, Tokens: tokenIssuer, Sessions: resolver, SessionStore: sessionStore, Grants: grants, Revocations: codeFamilyRevoker{sessionStore}, Outbox: outbox, Logger: logger})
+	svc, err := oidc.NewService(oidc.ServiceConfig{Issuer: issuer, Clients: registry, Codes: codes, Tokens: tokenIssuer, Sessions: resolver, SessionStore: sessionStore, Grants: grants, Consents: consents, Revocations: codeFamilyRevoker{sessionStore}, Outbox: outbox, Logger: logger})
+	if err != nil {
+		return oidcapi.Config{}, hotGraph{}, fmt.Errorf("harbor-hot: build OIDC service: %w", err)
+	}
 	return oidcapi.Config{Issuer: issuer, Service: svc, Signers: signers, Rotator: rotator, RevokedJTIStore: revokedStore, RevocationFilter: filter, RevocationPublisher: redisRevocationPublisher{redisClient}, RevokedJTIChecker: revokedJTIChecker{revokedStore}, LogoutVerifier: verifier, Grants: grants, Clients: registry, SessionRevoker: sessionStore}, hotGraph{postgres: true, redis: true, externalKMS: true, clientRegistry: true, authCodes: true, grants: true, sessions: true, revocations: true, outboxWorker: true, jwtVerifier: true, logoutVerifier: true, sessionRevoker: true}, nil
 }
 
 func buildDevHotGraph(issuer string, runtimeCfg crypto.RuntimeConfig, logger *slog.Logger) (oidcapi.Config, hotGraph, error) {
-	if runtimeCfg.Mode != crypto.RuntimeDevelopment || runtimeCfg.DevKeySecret == "" {
-		return oidcapi.Config{}, hotGraph{}, errors.New("development graph requires explicit development crypto configuration")
-	}
-	signer, err := crypto.NewLocalSigner()
-	if err != nil {
-		return oidcapi.Config{}, hotGraph{}, fmt.Errorf("build development signer: %w", err)
-	}
-	registry := oidc.NewInMemoryClientRegistry()
-	registry.Put(oidc.Client{ID: "demo-client", SectorID: "localhost", RedirectURIs: []string{"http://localhost/callback", "http://localhost:3000/callback", "http://localhost:8081/callback"}, ScopesAllowed: []string{"openid", "profile", "email", "offline_access"}})
-	grants := oidc.NewInMemoryGrantStore()
-	svc := oidc.NewService(oidc.ServiceConfig{Issuer: issuer, Clients: registry, Codes: oidc.NewInMemoryAuthCodeStore(), Tokens: oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}), Sessions: oidc.NewStubSessionResolver("demo-user-ppid"), Grants: grants, Logger: logger})
-	return oidcapi.Config{Issuer: issuer, Service: svc, Signers: []crypto.Signer{signer}, Grants: grants, Clients: registry, SessionRevoker: noopSessionRevoker{}}, hotGraph{}, nil
+	return oidcapi.Config{}, hotGraph{}, errors.New("development OIDC graph has been removed; PostgreSQL and Redis are required")
 }
 
 func buildExternalKeyProvider(ctx context.Context, kmsConfig crypto.KMSConfig) (crypto.KeyProvider, error) {
@@ -448,10 +433,6 @@ func newBFFSessionStore(redisClient *redis.Client, ttl time.Duration, logger *sl
 // without a full BFF login ceremony. The fail-closed startup guard
 // (validateProductionReadiness) ensures the stub is never served in production.
 func newSessionResolver(deps bffDeps, logger *slog.Logger) (oidc.SessionResolver, error) {
-	if envBool("HARBOR_DEV_MODE") {
-		logger.Warn("HARBOR_DEV_MODE: using StubSessionResolver (signing stack still real when DB wired; NEVER for production)")
-		return oidc.NewStubSessionResolver("demo-user-ppid"), nil
-	}
 	if deps.secretLoader == nil || deps.grantStore == nil {
 		return nil, fmt.Errorf("session resolver requires DATABASE_URL + HARBOR_KMS_SECRET — set HARBOR_DEV_MODE=1 to bypass (dev/e2e only)")
 	}

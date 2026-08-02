@@ -45,7 +45,7 @@ func newRevokeServer(t *testing.T) (*httptest.Server, *oidctest.InMemorySessionS
 	}
 	sessionStore := oidctest.NewInMemorySessionStore()
 	grantStore := oidctest.NewInMemoryGrantStore()
-	svc := oidc.NewService(oidc.ServiceConfig{
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
 		Codes:        oidctest.NewInMemoryAuthCodeStore(),
@@ -95,7 +95,7 @@ func TestPostRevoke_RejectsUnauthenticatedClientCredentials(t *testing.T) {
 func TestPostRevoke_PublicClientCannotAuthenticate(t *testing.T) {
 	clients := oidctest.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{ID: testClientID, TokenEndpointAuthMethod: "none"})
-	svc := oidc.NewService(oidc.ServiceConfig{
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer: "https://eu.harbor.id", Clients: clients,
 		Codes: oidctest.NewInMemoryAuthCodeStore(), Tokens: oidctest.NewPlaceholderIssuer(),
 		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
@@ -389,7 +389,7 @@ func TestPostRevoke_AccessToken_AddsToFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
-	svc := oidc.NewService(oidc.ServiceConfig{
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    oidctest.NewInMemoryAuthCodeStore(),
@@ -474,7 +474,7 @@ func TestPostRevoke_WrongHintAccessToken_StillRevokesRefreshToken(t *testing.T) 
 	}
 	sessionStore := oidctest.NewInMemorySessionStore()
 	grantStore := oidctest.NewInMemoryGrantStore()
-	svc := oidc.NewService(oidc.ServiceConfig{
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
 		Codes:        oidctest.NewInMemoryAuthCodeStore(),
@@ -530,7 +530,7 @@ func TestPostRevoke_WrongHintRefreshToken_StillRevokesAccessToken(t *testing.T) 
 	if err != nil {
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
-	svc := oidc.NewService(oidc.ServiceConfig{
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    oidctest.NewInMemoryAuthCodeStore(),
@@ -620,7 +620,7 @@ func TestPostRevoke_CrossClient_Returns200WithoutRevoking(t *testing.T) {
 	}
 	sessionStore := oidctest.NewInMemorySessionStore()
 	grantStore := oidctest.NewInMemoryGrantStore()
-	svc := oidc.NewService(oidc.ServiceConfig{
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
 		Codes:        oidctest.NewInMemoryAuthCodeStore(),

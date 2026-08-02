@@ -6,6 +6,43 @@ import (
 	"time"
 )
 
+// mustNewService supplies isolated test collaborators for fields a test does
+// not exercise and fails the test if construction is rejected.
+func mustNewService(cfg ServiceConfig) *Service {
+	if cfg.Clients == nil {
+		cfg.Clients = NewInMemoryClientRegistry()
+	}
+	if cfg.Codes == nil {
+		cfg.Codes = NewInMemoryAuthCodeStore()
+	}
+	if cfg.Tokens == nil {
+		cfg.Tokens = NewPlaceholderIssuer()
+	}
+	if cfg.Sessions == nil {
+		cfg.Sessions = NewStubSessionResolver("test-subject")
+	}
+	if cfg.SessionStore == nil {
+		cfg.SessionStore = NewInMemorySessionStore()
+	}
+	if cfg.Grants == nil {
+		cfg.Grants = NewInMemoryGrantStore()
+	}
+	if cfg.Consents == nil {
+		cfg.Consents = NewInMemoryConsentStore()
+	}
+	if cfg.Revocations == nil {
+		cfg.Revocations = NewRecordingRevocationSink()
+	}
+	if cfg.Outbox == nil {
+		cfg.Outbox = &recordingOutbox{}
+	}
+	svc, err := NewService(cfg)
+	if err != nil {
+		panic("NewService: " + err.Error())
+	}
+	return svc
+}
+
 // seedSession inserts a grant + RefreshSession into the given stores and returns
 // the plaintext token string the client would hold. The session ID
 // ("session-"+sub) is a simple string, not a UUID — safe for InMemorySessionStore
