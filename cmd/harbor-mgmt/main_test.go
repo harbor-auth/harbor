@@ -169,6 +169,19 @@ func TestValidateProductionURLAllowsOnlyLoopbackHTTP(t *testing.T) {
 	}
 }
 
+func TestValidateProductionHostAllowsWebAuthnLocalhostOnly(t *testing.T) {
+	for _, host := range []string{"localhost", "login.harbor.example.com"} {
+		if err := validateProductionHost("WEBAUTHN_RP_ID", host); err != nil {
+			t.Errorf("validateProductionHost(%q) = %v", host, err)
+		}
+	}
+	for _, host := range []string{"local", "127.0.0.1", "bad/host"} {
+		if err := validateProductionHost("WEBAUTHN_RP_ID", host); err == nil {
+			t.Errorf("validateProductionHost(%q) accepted invalid host", host)
+		}
+	}
+}
+
 func TestProductionGraphWiresOutageAwareAbuseProtection(t *testing.T) {
 	source, err := os.ReadFile("main.go")
 	if err != nil {

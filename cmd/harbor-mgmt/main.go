@@ -380,6 +380,9 @@ func validateProductionOrigins(origins []string, rpID string) error {
 }
 
 func validateProductionHost(name, host string) error {
+	if host == "localhost" {
+		return nil
+	}
 	if host == "" || strings.ContainsAny(host, "/:@?#") || net.ParseIP(host) != nil || !strings.Contains(host, ".") {
 		return fmt.Errorf("invalid %s: production requires a DNS hostname", name)
 	}
