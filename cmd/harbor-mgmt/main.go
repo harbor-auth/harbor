@@ -154,10 +154,13 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		Users:   userLoader,
 	}
 	relayStore := relay.NewStore(q, crypto.NewCipher())
+	mtaDomain := getenv("MTA_DOMAIN", "mta.harbor.id")
 	relayDomain := os.Getenv("RELAY_DOMAIN")
 	if relayDomain == "" {
 		return errors.New("harbor-mgmt requires RELAY_DOMAIN")
 	}
+	byoDomainStore := mgmtapi.NewDBBYODomainStore(q)
+	domainVerifier := relay.NewDomainVerifier(relay.NewNetResolver(), mtaDomain, relayDomain)
 	dashboardTemplates, err := web.ParseDashboardTemplates()
 	if err != nil {
 		return fmt.Errorf("parse dashboard templates: %w", err)
@@ -197,6 +200,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		WithCompliance(complianceDeps).
 		WithAuditTrail(auditTrailDeps).
 		WithRelayStore(relayStore).
+		WithBYODomainStore(byoDomainStore, domainVerifier, mtaDomain, relayDomain).
 		WithRelayDomain(relayDomain)
 	mfaAbuseProtection := newMgmtLimiter(redisClient, "mfa", 30, time.Minute, logger)
 	recoveryAbuseProtection := newMgmtLimiter(redisClient, "recovery", 20, time.Minute, logger)

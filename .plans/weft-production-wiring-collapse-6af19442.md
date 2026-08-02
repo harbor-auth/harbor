@@ -74,3 +74,10 @@
 1. Amend the pre-launch relay migration with the durable BYO-domain lifecycle shape, global domain uniqueness, user ownership, and reversible teardown.
 2. Add sqlc CRUD queries matching the management persistence interface, keeping owner-scoped domain reads from leaking another user's registration.
 3. Regenerate checked-in sqlc bindings and verify generation drift, build, vet, and tests before committing, rebasing, and pushing.
+
+## Task 11: PostgreSQL BYO-domain store
+
+1. Replace the production in-memory implementation with a narrow sqlc-backed adapter that maps database errors to the relay domain contract and preserves owner-scoped reads.
+2. Add tests first for conversion, uniqueness, lifecycle updates, ownership hiding, deletion, and persistence across store instances.
+3. Wire the adapter and DNS verifier into the management composition root using the existing regional MTA/relay configuration.
+4. Run focused tests plus repository build, vet, and test checks; review, commit, rebase, and push the shared feature branch.
