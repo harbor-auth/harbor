@@ -92,3 +92,16 @@
    ceiling, including reserved operational headroom.
 4. Run focused and repository validation, then commit, rebase, and push the
    shared feature branch.
+
+## Task 13: align raw Kubernetes runtime configuration
+
+1. Extend the raw manifest contract to describe the required production
+   configuration for both binaries, including URL and WebAuthn names, Redis
+   projection, removal of development mode, and the shared user-DEK KEK.
+2. Run the focused contract test and confirm it fails against the current raw
+   manifests for the expected missing/obsolete values.
+3. Update the raw ConfigMaps, Secrets, and Deployment documentation to match
+   the fail-closed production composition roots.
+4. Run focused deploy contracts and repository checks relevant to the change.
+5. Commit, rebase on the shared remote feature branch, push, record the result
+   in Hippo, and complete the Weft task.

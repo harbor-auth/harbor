@@ -63,8 +63,9 @@ spec:
             - name: http
               containerPort: 8080
           # Non-secret config first, then secrets (DATABASE_URL/REDIS_URL/
-          # ADMIN_API_TOKEN), then KMS credentials (AWS_ACCESS_KEY_ID/
-          # AWS_SECRET_ACCESS_KEY). envFrom keeps sources cleanly separated.
+          # ADMIN_API_TOKEN/shared user-DEK KEK), then signing-KMS credentials
+          # (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY). envFrom keeps sources
+          # cleanly separated.
           envFrom:
             - configMapRef:
                 name: harbor-hot-config

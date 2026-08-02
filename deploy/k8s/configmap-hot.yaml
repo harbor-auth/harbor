@@ -14,6 +14,8 @@ data:
   # the public HTTPS URL clients reach (matches the Ingress host below), and
   # MUST be per-region in a multi-region deployment.
   ISSUER: "https://auth.example.com"
+  # Browser entry point served by harbor-mgmt on the same public, path-routed
+  # origin. harbor-hot redirects unauthenticated authorization requests here.
+  LOGIN_URL: "https://auth.example.com/login"
   REGION: "EU"
-  HARBOR_DEV_MODE: "false"
   KMS_KEY_MAP: "EU=REPLACE_WITH_REGIONAL_KMS_KEY_ID"

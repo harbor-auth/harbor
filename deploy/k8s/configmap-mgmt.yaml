@@ -10,7 +10,6 @@ metadata:
 data:
   PORT: "8081"
   REGION: "EU"
-  HARBOR_DEV_MODE: "false"
   KMS_KEY_MAP: "EU=REPLACE_WITH_REGIONAL_KMS_KEY_ID"
   # WebAuthn Relying Party config (docs/DESIGN.md §3.1).
   #   RP_ID    — effective domain (no scheme/port). Passkeys are scoped to
@@ -31,5 +30,7 @@ data:
   # refuses to start if DATABASE_URL is set but this is empty.
   # SCAFFOLD: replace example.com with your real domain (matches ISSUER host).
   AUTHORIZE_COMPLETE_URL: "https://auth.example.com/authorize/complete"
+  # Public base URL used in dynamic client registration responses.
+  REGISTRATION_BASE_URL: "https://auth.example.com"
   MTA_DOMAIN: "mta-eu.harbor.id"
   RELAY_DOMAIN: "relay.eu.harbor.id"
