@@ -107,6 +107,32 @@ func TestProductionStartupValidatesOriginsHostsAndRegistrationURL(t *testing.T) 
 	}
 }
 
+func TestStartupRejectsMissingProductionConfigurationBeforeListen(t *testing.T) {
+	startup := productionAssembly(t)
+	listen := strings.Index(startup, "httpserver.Run(")
+	if listen < 0 {
+		t.Fatal("harbor-mgmt startup does not contain the HTTP listen boundary")
+	}
+
+	for name, marker := range map[string]string{
+		"PostgreSQL":                 `production requires DATABASE_URL`,
+		"Redis":                      `production requires REDIS_URL`,
+		"authorize completion URL":   `validateProductionURL("AUTHORIZE_COMPLETE_URL"`,
+		"registration URL":           `validateProductionURL("REGISTRATION_BASE_URL"`,
+		"registration authorization": `production dynamic registration requires INITIAL_ACCESS_TOKEN`,
+		"shared user-DEK KEK":        `HARBOR_KMS_SECRET`,
+	} {
+		check := strings.Index(startup, marker)
+		if check < 0 {
+			t.Errorf("harbor-mgmt startup does not reject missing %s (want %q)", name, marker)
+			continue
+		}
+		if check > listen {
+			t.Errorf("harbor-mgmt checks %s after its HTTP listen boundary", name)
+		}
+	}
+}
+
 func TestProductionGraphWiresOutageAwareAbuseProtection(t *testing.T) {
 	source, err := os.ReadFile("main.go")
 	if err != nil {

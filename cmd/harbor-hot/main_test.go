@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log/slog"
 	"os"
@@ -11,6 +14,55 @@ import (
 
 	"github.com/harbor-auth/harbor/internal/crypto"
 )
+
+func hotStartupAssembly(t *testing.T) string {
+	t.Helper()
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", source, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	for _, declaration := range file.Decls {
+		fn, ok := declaration.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "run" {
+			continue
+		}
+		start := fset.Position(fn.Body.Pos()).Offset
+		end := fset.Position(fn.Body.End()).Offset
+		return string(source[start:end])
+	}
+	t.Fatal("harbor-hot startup must be isolated in run so failures can be tested before listen")
+	return ""
+}
+
+func TestStartupRejectsMissingProductionConfigurationBeforeListen(t *testing.T) {
+	startup := hotStartupAssembly(t)
+	listen := strings.Index(startup, "httpserver.Run(")
+	if listen < 0 {
+		t.Fatal("harbor-hot startup does not contain the HTTP listen boundary")
+	}
+
+	for name, marker := range map[string]string{
+		"PostgreSQL":          `production requires DATABASE_URL`,
+		"Redis":               `production requires REDIS_URL`,
+		"issuer URL":          `validateProductionURL("ISSUER"`,
+		"login URL":           `validateProductionURL("LOGIN_URL"`,
+		"shared user-DEK KEK": `HARBOR_KMS_SECRET`,
+	} {
+		check := strings.Index(startup, marker)
+		if check < 0 {
+			t.Errorf("harbor-hot startup does not reject missing %s (want %q)", name, marker)
+			continue
+		}
+		if check > listen {
+			t.Errorf("harbor-hot checks %s after its HTTP listen boundary", name)
+		}
+	}
+}
 
 func TestBFFConfigValidate(t *testing.T) {
 	tests := []struct {
