@@ -68,3 +68,9 @@
 2. Wire enrollment, WebAuthn, registration, consent/session management, recovery, MFA, compliance, audit, dashboard, and relay exclusively through DB/Redis-backed implementations.
 3. Delete `runDevelopment`, its noop persister, conditional dependency branches, and development fallbacks while retaining the local key provider as the documented crypto exception.
 4. Strengthen the composition-root tests, run focused and repository checks, then commit, rebase, and push the shared feature branch.
+
+## Task 10: BYO-domain persistence schema
+
+1. Amend the pre-launch relay migration with the durable BYO-domain lifecycle shape, global domain uniqueness, user ownership, and reversible teardown.
+2. Add sqlc CRUD queries matching the management persistence interface, keeping owner-scoped domain reads from leaking another user's registration.
+3. Regenerate checked-in sqlc bindings and verify generation drift, build, vet, and tests before committing, rebasing, and pushing.

@@ -42,3 +42,23 @@ CREATE UNIQUE INDEX idx_relay_addresses_user_client ON relay_addresses (user_id,
 
 -- Index for user-centric queries (list all relay addresses for a user).
 CREATE INDEX idx_relay_addresses_user_id ON relay_addresses (user_id);
+
+-- BYO domains are user-owned, region-pinned domain verification challenges.
+-- A domain can have only one owner globally: accepting duplicate registrations
+-- would let a second user race or overwrite the legitimate owner's challenge.
+CREATE TABLE byo_domains (
+    id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    domain          text NOT NULL UNIQUE,
+    user_id         uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    challenge_token text NOT NULL,
+    state           text NOT NULL DEFAULT 'pending',
+    region          text NOT NULL,
+    created_at      timestamptz NOT NULL DEFAULT now(),
+    verified_at     timestamptz,
+    expires_at      timestamptz NOT NULL,
+
+    CONSTRAINT byo_domains_state_valid CHECK (state IN ('pending', 'verified', 'active', 'failed'))
+);
+
+-- Supports owner-scoped listing and ensures ownership checks stay indexed.
+CREATE INDEX idx_byo_domains_user_id ON byo_domains (user_id);
