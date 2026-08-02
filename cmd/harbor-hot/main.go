@@ -63,6 +63,14 @@ func main() {
 // run builds the server and serves until ctx is cancelled. It is split out from
 // main so the exit path has a single error sink and stays testable.
 func run(ctx context.Context, logger *slog.Logger) error {
+	return runWithGraphObserver(ctx, logger, nil)
+}
+
+// runWithGraphObserver is the production startup path with an optional
+// integration-test observation point. The observer cannot replace any
+// dependency; it only receives the fully assembled durable graph immediately
+// before the HTTP server starts accepting traffic.
+func runWithGraphObserver(ctx context.Context, logger *slog.Logger, observe func(hotGraph)) error {
 	if os.Getenv("HARBOR_KMS_SECRET") == "" {
 		return errors.New("harbor-hot requires HARBOR_KMS_SECRET for the shared user-DEK KEK")
 	}
@@ -154,11 +162,12 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// secret, and derives a per-RP PPID while recording consent. This closes the
 	// auth bypass (audit blocker 1.1): /authorize can no longer mint tokens for a
 	// fixed demo user.
-	apiCfg, _, err := buildHotGraph(ctx, issuer, pool, redisClient, deps, kmsCfg, logger)
+	apiCfg, graph, err := buildHotGraph(ctx, issuer, pool, redisClient, deps, kmsCfg, logger)
 	if err != nil {
 		return err
 	}
 	apiCfg.BFFSessions = newBFFSessionStore(redisClient, bffCfg.SessionTTL, logger)
+	graph.implementations["bff_sessions"] = fmt.Sprintf("%T", apiCfg.BFFSessions)
 	apiCfg.LoginURL = bffCfg.LoginURL
 	apiCfg.BFFSessionTTL = bffCfg.SessionTTL
 	logger.Info("BFF login flow enabled", "bff_session_store_redis", true, "bff_session_ttl", bffCfg.SessionTTL.String())
@@ -197,6 +206,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if addr == "" {
 		port := envString("PORT", "8080")
 		addr = ":" + port
+	}
+	if observe != nil {
+		observe(graph)
 	}
 	return httpserver.Run(ctx, addr, handler, logger)
 }
@@ -279,7 +291,24 @@ func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redis
 	if err != nil {
 		return oidcapi.Config{}, hotGraph{}, fmt.Errorf("harbor-hot: build OIDC service: %w", err)
 	}
-	return oidcapi.Config{Issuer: issuer, Service: svc, Signers: signers, Rotator: rotator, RevokedJTIStore: revokedStore, RevocationFilter: filter, RevocationPublisher: redisRevocationPublisher{redisClient}, RevokedJTIChecker: revokedJTIChecker{revokedStore}, LogoutVerifier: verifier, Grants: grants, Clients: registry, SessionRevoker: sessionStore}, hotGraph{postgres: true, redis: true, externalKMS: true, clientRegistry: true, authCodes: true, grants: true, sessions: true, revocations: true, outboxWorker: true, jwtVerifier: true, logoutVerifier: true, sessionRevoker: true}, nil
+	return oidcapi.Config{Issuer: issuer, Service: svc, Signers: signers, Rotator: rotator, RevokedJTIStore: revokedStore, RevocationFilter: filter, RevocationPublisher: redisRevocationPublisher{redisClient}, RevokedJTIChecker: revokedJTIChecker{revokedStore}, LogoutVerifier: verifier, Grants: grants, Clients: registry, SessionRevoker: sessionStore}, hotGraph{
+		secretLoader: deps.secretLoader,
+		grantStore:   deps.grantStore,
+		postgres:     true, redis: true, externalKMS: true,
+		clientRegistry: true, authCodes: true, grants: true, sessions: true,
+		revocations: true, outboxWorker: true, jwtVerifier: true,
+		logoutVerifier: true, sessionRevoker: true,
+		implementations: map[string]string{
+			"clients":       fmt.Sprintf("%T", registry),
+			"codes":         fmt.Sprintf("%T", codes),
+			"grants":        fmt.Sprintf("%T", grants),
+			"consents":      fmt.Sprintf("%T", consents),
+			"sessions":      fmt.Sprintf("%T", sessionStore),
+			"revocations":   fmt.Sprintf("%T", revokedStore),
+			"outbox":        fmt.Sprintf("%T", outbox),
+			"secret_loader": fmt.Sprintf("%T", deps.secretLoader),
+		},
+	}, nil
 }
 
 func buildExternalKeyProvider(ctx context.Context, kmsConfig crypto.KMSConfig) (crypto.KeyProvider, error) {
@@ -328,6 +357,7 @@ type bffDeps struct {
 	postgres, redis, externalKMS                              bool
 	clientRegistry, authCodes, grants, sessions, revocations  bool
 	outboxWorker, jwtVerifier, logoutVerifier, sessionRevoker bool
+	implementations                                           map[string]string
 }
 
 type hotGraph = bffDeps

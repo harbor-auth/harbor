@@ -273,6 +273,10 @@ func TestAuthorizeTokenHappyPath(t *testing.T) {
 
 // postToken exchanges an authorization code at /token.
 func postToken(t *testing.T, code, verifier, redirectURI string) *http.Response {
+	return postTokenAt(t, baseURL(), code, verifier, redirectURI)
+}
+
+func postTokenAt(t *testing.T, endpoint, code, verifier, redirectURI string) *http.Response {
 	t.Helper()
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
@@ -281,7 +285,7 @@ func postToken(t *testing.T, code, verifier, redirectURI string) *http.Response 
 	form.Set("client_id", e2eClientID)
 	form.Set("code_verifier", verifier)
 
-	resp, err := http.Post(baseURL()+tokenPath, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	resp, err := http.Post(endpoint+tokenPath, "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
 	if err != nil {
 		t.Fatalf("POST %s: %v", tokenPath, err)
 	}

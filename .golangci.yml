@@ -21,6 +21,7 @@ run:
   # command make validate/agent-check/CI all use) actually analyze it.
   build-tags:
     - e2e
+    - integration
 
 linters:
   # Explicitly enable the error-handling linters (§1.11).

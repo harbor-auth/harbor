@@ -28,7 +28,12 @@ func hotStartupAssembly(t *testing.T) string {
 	}
 	for _, declaration := range file.Decls {
 		fn, ok := declaration.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "run" {
+		if !ok || (fn.Name.Name != "run" && fn.Name.Name != "runWithGraphObserver") {
+			continue
+		}
+		// run is intentionally a tiny production wrapper; inspect the delegated
+		// composition root where validation and listening actually occur.
+		if fn.Name.Name == "run" {
 			continue
 		}
 		start := fset.Position(fn.Body.Pos()).Offset

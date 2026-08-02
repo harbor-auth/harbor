@@ -55,8 +55,9 @@ const (
 
 // bffFlowResult captures the outcome of one full BFF passkey login → token flow.
 type bffFlowResult struct {
-	userID string // opaque enrollment user id (must NOT equal the PPID)
-	sub    string // the per-RP PPID from the issued token
+	userID       string // opaque enrollment user id (must NOT equal the PPID)
+	sub          string // the per-RP PPID from the issued token
+	refreshToken string // present only when offline_access was requested
 }
 
 // TestBFFPasskeyLoginToTokenFlow drives the authenticated BFF flow to completion
@@ -174,6 +175,13 @@ func TestBFFNonceNotInResponseBodies(t *testing.T) {
 // Both TestBFFNonceClearedAfterAuthorizeComplete and TestBFFNonceNotInResponseBodies
 // use this helper; runBFFPasskeyFlow is a thin wrapper around it.
 func runBFFPasskeyFlowDetailed(t *testing.T) (bffFlowResult, bffNonceFlowState, bool) {
+	return runBFFPasskeyFlowDetailedAt(t, e2eScope, baseURL())
+}
+
+// runBFFPasskeyFlowDetailedAt allows cross-replica protocol tests to perform
+// the browser ceremony on replica A while exchanging the resulting Redis-backed
+// authorization code on another replica.
+func runBFFPasskeyFlowDetailedAt(t *testing.T, scope, tokenEndpoint string) (bffFlowResult, bffNonceFlowState, bool) {
 	t.Helper()
 
 	// 1) Cold path: enroll + register a passkey, keeping the private key so we
@@ -196,7 +204,7 @@ func runBFFPasskeyFlowDetailed(t *testing.T) (bffFlowResult, bffNonceFlowState, 
 	q.Set("response_type", "code")
 	q.Set("client_id", e2eClientID)
 	q.Set("redirect_uri", e2eRedirectURI)
-	q.Set("scope", e2eScope)
+	q.Set("scope", scope)
 	q.Set("state", "bff-nonce-state")
 	q.Set("code_challenge", challenge)
 	q.Set("code_challenge_method", "S256")
@@ -334,7 +342,7 @@ func runBFFPasskeyFlowDetailed(t *testing.T) (bffFlowResult, bffNonceFlowState, 
 	}
 
 	// Exchange the code for tokens.
-	tokenResp := postToken(t, code, verifier, e2eRedirectURI)
+	tokenResp := postTokenAt(t, tokenEndpoint, code, verifier, e2eRedirectURI)
 	defer func() { _ = tokenResp.Body.Close() }()
 	if tokenResp.StatusCode != http.StatusOK {
 		body, readErr := io.ReadAll(tokenResp.Body)
@@ -351,8 +359,9 @@ func runBFFPasskeyFlowDetailed(t *testing.T) (bffFlowResult, bffNonceFlowState, 
 		return bffFlowResult{}, bffNonceFlowState{}, false
 	}
 	var tok struct {
-		IDToken     string `json:"id_token"`
-		AccessToken string `json:"access_token"`
+		IDToken      string `json:"id_token"`
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
 	}
 	if err := json.Unmarshal(tokenBody, &tok); err != nil {
 		t.Logf("decode /token response: %v", err)
@@ -372,7 +381,7 @@ func runBFFPasskeyFlowDetailed(t *testing.T) (bffFlowResult, bffNonceFlowState, 
 		responseBodies:         []string{string(beginBody), string(tokenBody)},
 		nonceClearedInComplete: nonceClearedInComplete,
 	}
-	return bffFlowResult{userID: userID, sub: subFromJWT(t, jwt)}, state, true
+	return bffFlowResult{userID: userID, sub: subFromJWT(t, jwt), refreshToken: tok.RefreshToken}, state, true
 }
 
 // jarNoRedirectClient returns an HTTP client with a cookie jar that captures 3xx

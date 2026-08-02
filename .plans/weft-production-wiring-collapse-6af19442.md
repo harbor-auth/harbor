@@ -130,3 +130,15 @@
    authorization, and the one shared user-DEK KEK.
 4. Run Helm lint/template assertions and focused deployment contract tests,
    then commit, rebase, push, and record the result.
+
+## Task 17: hot live graph and cross-replica integration coverage
+
+1. Add an integration-tagged startup test that invokes the real `run` path
+   against externally containerised PostgreSQL, Redis, and KMS dependencies.
+2. Observe the graph at the composition boundary and assert the concrete
+   PostgreSQL/Redis-backed implementations before cancelling the server.
+3. Move refresh coverage into `e2e/refresh_test.go` and drive the authenticated
+   `offline_access` browser flow on replica A, exchanging the resulting code
+   and rotating its refresh token on replica B.
+4. Run focused unit/tagged compile tests and the available repository checks,
+   then commit, rebase, and push the shared feature branch.
