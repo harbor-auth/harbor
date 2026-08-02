@@ -47,3 +47,10 @@
 2. Move same-package fixtures into `_test.go` files and expose only the enrollment fixture needed by command tests through `internal/testsupport`.
 3. Remove management runtime fallbacks that reference the relocated fixtures, leaving durable DB/Redis implementations as the runtime choices.
 4. Run focused tests plus build/vet checks, review the diff, commit, rebase, and push the shared feature branch.
+
+## Task 7: collapse harbor-hot onto the durable graph
+
+1. Make `run` reject missing PostgreSQL, Redis, login, issuer, and user-DEK key configuration before constructing the HTTP server.
+2. Assemble clients, authorization codes, refresh sessions, grants, consents, BFF state, and revocation services exclusively from PostgreSQL and Redis.
+3. Remove the development/demo graph, readiness guard, `HARBOR_DEV_MODE` branches, and obsolete signing bootstrap implementation and tests while retaining local crypto as the documented crypto-only exception.
+4. Update focused startup and graph tests, then run command tests, repository build/vet, and the relevant project checks before committing and rebasing.
