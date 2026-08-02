@@ -26,23 +26,29 @@ The hot path is exposed via Ingress at: https://{{ .Values.ingress.host }}
 SCAFFOLD REMINDERS — do NOT run this in production until these are addressed:
 ----------------------------------------------------------------------------
 {{- if not .Values.hot.secrets.existingSecret }}
-{{- if or (not .Values.hot.secrets.databaseUrl) (not .Values.hot.secrets.kekSecret) }}
-  ✗ harbor-hot secrets are empty. Set hot.secrets.databaseUrl and
-    hot.secrets.kekSecret, or point hot.secrets.existingSecret at a
-    secrets-manager-provisioned Secret. harbor-hot will FAIL to start with an
-    unset KEK_SECRET when DATABASE_URL is set.
+{{- if or (not .Values.hot.secrets.databaseUrl) (not .Values.hot.secrets.redisUrl) (not .Values.hot.secrets.adminApiToken) }}
+  ✗ harbor-hot secrets are incomplete. Set hot.secrets.databaseUrl,
+    hot.secrets.redisUrl, and hot.secrets.adminApiToken, or point
+    hot.secrets.existingSecret at a secrets-manager-provisioned Secret.
 {{- end }}
-{{- if and (gt (int .Values.hot.replicaCount) 1) (not .Values.hot.secrets.redisUrl) }}
-  ✗ hot.replicaCount is {{ .Values.hot.replicaCount }} but hot.secrets.redisUrl is empty.
-    Auth codes will live in-process and cross-replica /token exchanges will
-    FAIL. Set hot.secrets.redisUrl (or scale to 1 replica).
 {{- end }}
+{{- if not .Values.hot.loginURL }}
+  ✗ hot.loginURL is empty. harbor-hot requires the public management login URL.
 {{- end }}
 {{- if not .Values.mgmt.secrets.existingSecret }}
-{{- if or (not .Values.mgmt.secrets.databaseUrl) (not .Values.mgmt.secrets.kekSecret) }}
-  ✗ harbor-mgmt secrets are empty. Set mgmt.secrets.databaseUrl and
-    mgmt.secrets.kekSecret, or use mgmt.secrets.existingSecret.
+{{- if or (not .Values.mgmt.secrets.databaseUrl) (not .Values.mgmt.secrets.redisUrl) (not .Values.mgmt.secrets.initialAccessToken) }}
+  ✗ harbor-mgmt secrets are incomplete. Set mgmt.secrets.databaseUrl,
+    mgmt.secrets.redisUrl, and mgmt.secrets.initialAccessToken, or use
+    mgmt.secrets.existingSecret.
 {{- end }}
+{{- end }}
+{{- if not .Values.mgmt.registrationBaseURL }}
+  ✗ mgmt.registrationBaseURL is empty. Dynamic registration cannot start.
+{{- end }}
+{{- if or (not .Values.global.userDekKekSecret) (eq .Values.global.userDekKekSecret "REPLACE_WITH_SHARED_32_BYTE_USER_DEK_KEK") }}
+  ✗ global.userDekKekSecret is not configured. Set one shared 256-bit KEK;
+    harbor-hot and harbor-mgmt must use the identical value to unwrap user DEKs.
+    This is separate from the signing-key KMS_KEY_MAP configuration.
 {{- end }}
 {{- if eq .Values.global.image.tag "latest" }}
   ✗ global.image.tag is "latest" — pin an immutable @sha256 digest
@@ -52,13 +58,6 @@ SCAFFOLD REMINDERS — do NOT run this in production until these are addressed:
   ✗ Ensure the TLS Secret "{{ .Values.ingress.tlsSecretName }}" exists (e.g. via
     cert-manager) — the Ingress cannot terminate TLS without it.
 {{- end }}
-{{- if gt (int .Values.mgmt.replicaCount) 1 }}
-  ✗ mgmt.replicaCount is {{ .Values.mgmt.replicaCount }} but the WebAuthn ceremony store is
-    in-memory. Passkey ceremonies break across pods/restarts. Set
-    mgmt.replicaCount to 1 until the store is DB-backed
-    (docs/plans/user-enrollment.md).
-{{- end }}
-
 ----------------------------------------------------------------------------
 Run the connectivity smoke tests (hits /healthz on both binaries via their
 in-cluster Services):

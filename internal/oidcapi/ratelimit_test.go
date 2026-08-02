@@ -16,6 +16,7 @@ import (
 	"github.com/harbor-auth/harbor/internal/clients"
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
 	"github.com/harbor-auth/harbor/internal/telemetry"
+	clientstest "github.com/harbor-auth/harbor/internal/testsupport/clients"
 	dto "github.com/prometheus/client_model/go"
 )
 
@@ -107,7 +108,7 @@ func hasLabel(labels []*dto.LabelPair, name, value string) bool {
 // TestRateLimitMiddleware_UnderLimitPassesThrough verifies that requests below
 // the limit are forwarded to the next handler untouched.
 func TestRateLimitMiddleware_UnderLimitPassesThrough(t *testing.T) {
-	lim := clients.NewMemoryRateLimiter(clients.RateLimiterConfig{Limit: 5, Window: time.Minute})
+	lim := clientstest.NewMemoryRateLimiter(clients.RateLimiterConfig{Limit: 5, Window: time.Minute})
 	h := RateLimitMiddleware(RateLimitConfig{
 		Limiter:  lim,
 		Endpoint: telemetry.EndpointToken,
@@ -138,7 +139,7 @@ func okNextHandler() http.Handler {
 // exhausted the middleware short-circuits with 429, a non-negative Retry-After
 // header, the rate_limited error envelope, and does NOT call the next handler.
 func TestRateLimitMiddleware_OverLimitReturns429(t *testing.T) {
-	lim := clients.NewMemoryRateLimiter(clients.RateLimiterConfig{Limit: 2, Window: time.Minute})
+	lim := clientstest.NewMemoryRateLimiter(clients.RateLimiterConfig{Limit: 2, Window: time.Minute})
 	nextCalled := false
 	h := RateLimitMiddleware(RateLimitConfig{
 		Limiter:  lim,
@@ -195,7 +196,7 @@ func TestRateLimitMiddleware_OverLimitReturns429(t *testing.T) {
 // TestRateLimitMiddleware_PerClientBucketsIndependent verifies that exhausting
 // one client's bucket does not affect another client's bucket.
 func TestRateLimitMiddleware_PerClientBucketsIndependent(t *testing.T) {
-	lim := clients.NewMemoryRateLimiter(clients.RateLimiterConfig{Limit: 2, Window: time.Minute})
+	lim := clientstest.NewMemoryRateLimiter(clients.RateLimiterConfig{Limit: 2, Window: time.Minute})
 	h := RateLimitMiddleware(RateLimitConfig{
 		Limiter:  lim,
 		Endpoint: telemetry.EndpointToken,
@@ -227,7 +228,7 @@ func TestRateLimitMiddleware_PerClientBucketsIndependent(t *testing.T) {
 // TestRateLimitMiddleware_PerIPBucketsIndependent verifies that anonymous
 // requests bucket per source IP, and exhausting one IP does not affect another.
 func TestRateLimitMiddleware_PerIPBucketsIndependent(t *testing.T) {
-	lim := clients.NewMemoryRateLimiter(clients.RateLimiterConfig{Limit: 2, Window: time.Minute})
+	lim := clientstest.NewMemoryRateLimiter(clients.RateLimiterConfig{Limit: 2, Window: time.Minute})
 	h := RateLimitMiddleware(RateLimitConfig{
 		Limiter:  lim,
 		Endpoint: telemetry.EndpointToken,
@@ -363,7 +364,7 @@ func TestRateLimitMiddleware_TrustedProxyHopsZeroIgnoresHeader(t *testing.T) {
 // every request cannot escape their rate-limit bucket when TrustedProxyHops=1.
 // The rightmost entry (appended by nginx-ingress) is the unforgeable real IP.
 func TestRateLimitMiddleware_ForgedXFFCannotEscapeBucket(t *testing.T) {
-	lim := clients.NewMemoryRateLimiter(clients.RateLimiterConfig{Limit: 2, Window: time.Minute})
+	lim := clientstest.NewMemoryRateLimiter(clients.RateLimiterConfig{Limit: 2, Window: time.Minute})
 	h := RateLimitMiddleware(RateLimitConfig{
 		Limiter:                lim,
 		Endpoint:               telemetry.EndpointToken,
@@ -567,5 +568,5 @@ func TestRetryAfterSeconds(t *testing.T) {
 // the real limiters satisfy clients.RateLimiter (used throughout these tests).
 func TestRateLimitInterfaceCompliance(t *testing.T) {
 	var _ clients.RateLimiter = (*stubLimiter)(nil)
-	var _ clients.RateLimiter = (*clients.MemoryRateLimiter)(nil)
+	var _ clients.RateLimiter = (*clientstest.MemoryRateLimiter)(nil)
 }

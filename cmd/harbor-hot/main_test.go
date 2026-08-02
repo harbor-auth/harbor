@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log/slog"
 	"os"
@@ -12,6 +15,60 @@ import (
 	"github.com/harbor-auth/harbor/internal/crypto"
 )
 
+func hotStartupAssembly(t *testing.T) string {
+	t.Helper()
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", source, 0)
+	if err != nil {
+		t.Fatalf("parse main.go: %v", err)
+	}
+	for _, declaration := range file.Decls {
+		fn, ok := declaration.(*ast.FuncDecl)
+		if !ok || (fn.Name.Name != "run" && fn.Name.Name != "runWithGraphObserver") {
+			continue
+		}
+		// run is intentionally a tiny production wrapper; inspect the delegated
+		// composition root where validation and listening actually occur.
+		if fn.Name.Name == "run" {
+			continue
+		}
+		start := fset.Position(fn.Body.Pos()).Offset
+		end := fset.Position(fn.Body.End()).Offset
+		return string(source[start:end])
+	}
+	t.Fatal("harbor-hot startup must be isolated in run so failures can be tested before listen")
+	return ""
+}
+
+func TestStartupRejectsMissingProductionConfigurationBeforeListen(t *testing.T) {
+	startup := hotStartupAssembly(t)
+	listen := strings.Index(startup, "httpserver.Run(")
+	if listen < 0 {
+		t.Fatal("harbor-hot startup does not contain the HTTP listen boundary")
+	}
+
+	for name, marker := range map[string]string{
+		"PostgreSQL":          `production requires DATABASE_URL`,
+		"Redis":               `production requires REDIS_URL`,
+		"issuer URL":          `validateProductionURL("ISSUER"`,
+		"login URL":           `validateProductionURL("LOGIN_URL"`,
+		"shared user-DEK KEK": `HARBOR_KMS_SECRET`,
+	} {
+		check := strings.Index(startup, marker)
+		if check < 0 {
+			t.Errorf("harbor-hot startup does not reject missing %s (want %q)", name, marker)
+			continue
+		}
+		if check > listen {
+			t.Errorf("harbor-hot checks %s after its HTTP listen boundary", name)
+		}
+	}
+}
+
 func TestBFFConfigValidate(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -19,12 +76,12 @@ func TestBFFConfigValidate(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "empty LOGIN_URL is valid (dev mode)",
+			name: "empty LOGIN_URL is invalid",
 			cfg: bffConfig{
 				LoginURL:   "",
 				SessionTTL: 5 * time.Minute,
 			},
-			wantErr: false,
+			wantErr: true,
 		},
 		{
 			name: "valid https LOGIN_URL",
@@ -104,10 +161,22 @@ func TestBFFConfigValidate(t *testing.T) {
 }
 
 func TestProductionBFFConfigRejectsInsecureLoginURL(t *testing.T) {
-	t.Setenv("HARBOR_DEV_MODE", "")
 	cfg := bffConfig{LoginURL: "http://login.example.com/login", SessionTTL: 5 * time.Minute}
 	if err := cfg.validate(); err == nil {
 		t.Fatal("production accepted an HTTP LOGIN_URL; browser authentication redirects must use HTTPS")
+	}
+}
+
+func TestValidateProductionURLAllowsOnlyLoopbackHTTP(t *testing.T) {
+	for _, raw := range []string{"http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080", "https://harbor.example.com"} {
+		if err := validateProductionURL("URL", raw); err != nil {
+			t.Errorf("validateProductionURL(%q) = %v", raw, err)
+		}
+	}
+	for _, raw := range []string{"http://harbor.example.com", "https://user@harbor.example.com", "https://harbor.example.com/#fragment"} {
+		if err := validateProductionURL("URL", raw); err == nil {
+			t.Errorf("validateProductionURL(%q) accepted an insecure URL", raw)
+		}
 	}
 }
 
@@ -146,24 +215,14 @@ func TestLoadBFFConfig(t *testing.T) {
 		}
 	}
 
-	t.Run("defaults when env unset", func(t *testing.T) {
+	t.Run("missing LOGIN_URL is rejected", func(t *testing.T) {
 		defer restore("LOGIN_URL", "DATABASE_URL", "BFF_SESSION_TTL")()
 		t.Setenv("LOGIN_URL", "")
 		t.Setenv("DATABASE_URL", "")
 		t.Setenv("BFF_SESSION_TTL", "")
 
-		cfg, err := loadBFFConfig()
-		if err != nil {
-			t.Fatalf("loadBFFConfig() error = %v", err)
-		}
-		if cfg.LoginURL != "" {
-			t.Errorf("LoginURL = %q, want empty", cfg.LoginURL)
-		}
-		if cfg.DatabaseURL != "" {
-			t.Errorf("DatabaseURL = %q, want empty", cfg.DatabaseURL)
-		}
-		if cfg.SessionTTL != defaultBFFSessionTTL {
-			t.Errorf("SessionTTL = %v, want %v", cfg.SessionTTL, defaultBFFSessionTTL)
+		if _, err := loadBFFConfig(); err == nil {
+			t.Fatal("loadBFFConfig() accepted missing LOGIN_URL")
 		}
 	})
 
@@ -202,7 +261,7 @@ func TestLoadBFFConfig(t *testing.T) {
 
 	t.Run("invalid BFF_SESSION_TTL falls back to default", func(t *testing.T) {
 		defer restore("LOGIN_URL", "DATABASE_URL", "BFF_SESSION_TTL")()
-		t.Setenv("LOGIN_URL", "")
+		t.Setenv("LOGIN_URL", "https://auth.example.com/login")
 		t.Setenv("DATABASE_URL", "")
 		t.Setenv("BFF_SESSION_TTL", "not-a-duration")
 
@@ -219,87 +278,35 @@ func TestLoadBFFConfig(t *testing.T) {
 
 func TestBuildBFFDeps(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
-	t.Run("returns nil deps when pool is nil", func(t *testing.T) {
-		// buildBFFDepsFromPool accepts a nil pool (DATABASE_URL unset path) and
-		// returns zero-value deps — the caller falls back to dev-mode stub.
-		deps, err := buildBFFDepsFromPool(nil, logger)
-		if err != nil {
-			t.Fatalf("buildBFFDepsFromPool() error = %v", err)
-		}
-		if deps.secretLoader != nil {
-			t.Error("secretLoader should be nil when pool is nil")
-		}
-		if deps.grantStore != nil {
-			t.Error("grantStore should be nil when pool is nil")
+	t.Run("rejects nil pool", func(t *testing.T) {
+		if _, err := buildBFFDepsFromPool(nil, logger); err == nil {
+			t.Fatal("buildBFFDepsFromPool() accepted a nil PostgreSQL pool")
 		}
 	})
 }
 
 func TestLoadAdminToken(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-
 	// A 32-byte token for production tests.
 	const validToken = "12345678901234567890123456789012" // exactly 32 bytes
 	const shortToken = "tooshort"                         // 8 bytes < 32
 
 	tests := []struct {
 		name       string
-		dbSet      bool
-		devMode    string
 		adminToken string
 		wantErr    bool
 		wantToken  string
 	}{
 		{
-			name:      "no DB, token unset => no error, empty token",
-			dbSet:     false,
-			wantErr:   false,
-			wantToken: "",
-		},
-		{
-			name:       "no DB, token set => no error, token returned",
-			dbSet:      false,
-			adminToken: validToken,
-			wantErr:    false,
-			wantToken:  validToken,
-		},
-		{
-			name:    "DB set, prod, token unset => error",
-			dbSet:   true,
+			name:    "token unset => error",
 			wantErr: true,
 		},
 		{
-			name:       "DB set, prod, token too short => error",
-			dbSet:      true,
+			name:       "token too short => error",
 			adminToken: shortToken,
 			wantErr:    true,
 		},
 		{
-			name:       "DB set, prod, token >= 32 bytes => ok",
-			dbSet:      true,
-			adminToken: validToken,
-			wantErr:    false,
-			wantToken:  validToken,
-		},
-		{
-			name:    "DB set, dev mode, token unset => ok (warn only)",
-			dbSet:   true,
-			devMode: "1",
-			wantErr: false,
-		},
-		{
-			name:       "DB set, dev mode, token short => ok (warn only)",
-			dbSet:      true,
-			devMode:    "1",
-			adminToken: shortToken,
-			wantErr:    false,
-			wantToken:  shortToken,
-		},
-		{
-			name:       "DB set, dev mode, token valid => ok",
-			dbSet:      true,
-			devMode:    "1",
+			name:       "token >= 32 bytes => ok",
 			adminToken: validToken,
 			wantErr:    false,
 			wantToken:  validToken,
@@ -309,9 +316,8 @@ func TestLoadAdminToken(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("ADMIN_API_TOKEN", tt.adminToken)
-			t.Setenv("HARBOR_DEV_MODE", tt.devMode)
 
-			got, err := loadAdminToken(tt.dbSet, logger)
+			got, err := loadAdminToken()
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("loadAdminToken() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -322,36 +328,32 @@ func TestLoadAdminToken(t *testing.T) {
 	}
 }
 
-func TestProductionReadinessRequiresCompleteDurableGraph(t *testing.T) {
-	t.Setenv("HARBOR_DEV_MODE", "")
-	t.Setenv("REDIS_URL", "")
-
+func TestProductionGraphRejectsMissingRequiredStores(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	err := validateProductionReadiness(bffConfig{}, bffDeps{}, logger)
+	_, _, err := buildHotGraph(context.Background(), "https://issuer.example", nil, nil, bffDeps{}, crypto.KMSConfig{}, logger)
 	if err == nil {
-		t.Fatal("validateProductionReadiness() accepted an empty production graph")
+		t.Fatal("buildHotGraph() accepted missing PostgreSQL and Redis")
 	}
-
-	// Keep this list at the object-graph boundary. A configured URL alone is
-	// not proof that the live service received the durable implementation.
-	for _, dependency := range []string{
-		"PostgreSQL",
-		"Redis",
-		"external KMS",
-		"durable client registry",
-		"durable authorization code store",
-		"durable grant store",
-		"durable session store",
-		"durable revocation store",
-		"revocation outbox worker",
-		"JWT verifier",
-		"logout verifier",
-		"session revoker",
-	} {
+	for _, dependency := range []string{"PostgreSQL", "Redis"} {
 		if !strings.Contains(err.Error(), dependency) {
 			t.Errorf("startup error %q does not identify missing %s", err, dependency)
 		}
 	}
+}
+
+// TestProductionReadinessRequiresCompleteDurableGraph preserves the original
+// production-readiness regression while asserting the current fail-closed
+// composition root rather than the deleted readiness helper.
+func TestProductionReadinessRequiresCompleteDurableGraph(t *testing.T) {
+	TestProductionGraphRejectsMissingRequiredStores(t)
+}
+
+// TestDevelopmentGraphRegistersE2ERedirectURI preserves the redirect URI
+// regression after removal of the development graph. The durable e2e graph
+// now obtains this registration from PostgreSQL, so startup must not contain a
+// hard-coded development client registry.
+func TestDevelopmentGraphRegistersE2ERedirectURI(t *testing.T) {
+	TestProductionLiveGraphContainsNoScaffoldConstructors(t)
 }
 
 func TestProductionLiveGraphContainsNoScaffoldConstructors(t *testing.T) {
@@ -360,7 +362,7 @@ func TestProductionLiveGraphContainsNoScaffoldConstructors(t *testing.T) {
 		t.Fatalf("read main.go: %v", err)
 	}
 	start := strings.Index(string(source), "func run(")
-	end := strings.Index(string(source), "// noopSessionRevoker")
+	end := strings.Index(string(source), "type redisRevocationPublisher")
 	if start < 0 || end <= start {
 		t.Fatal("could not isolate run production assembly")
 	}
@@ -370,6 +372,11 @@ func TestProductionLiveGraphContainsNoScaffoldConstructors(t *testing.T) {
 	// reachable from run's live HTTP handler. Explicitly isolated dev/test
 	// helpers may continue to exist, but run must not assemble them.
 	for _, forbidden := range []string{
+		"internal/testsupport",
+		"HARBOR_DEV_MODE",
+		"validateProductionReadiness",
+		"buildDevHotGraph",
+		"bootstrapHotGraph",
 		"oidc.NewPlaceholderIssuer()",
 		"oidc.NewInMemoryClientRegistry()",
 		"oidc.NewInMemoryAuthCodeStore()",
@@ -381,28 +388,4 @@ func TestProductionLiveGraphContainsNoScaffoldConstructors(t *testing.T) {
 			t.Errorf("live harbor-hot graph still references forbidden scaffold %q", forbidden)
 		}
 	}
-}
-
-func TestDevelopmentGraphRegistersE2ERedirectURI(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	config, _, err := buildDevHotGraph("http://localhost:8080", crypto.RuntimeConfig{
-		Mode:         crypto.RuntimeDevelopment,
-		DevKeySecret: "test-only-development-secret",
-	}, logger)
-	if err != nil {
-		t.Fatalf("build development graph: %v", err)
-	}
-	client, found := config.Clients.Lookup(context.Background(), "demo-client")
-	if !found {
-		t.Fatal("development demo client not registered")
-	}
-	if len(config.Signers) != 1 {
-		t.Fatalf("development graph signers = %d, want 1 for JWT/JWKS parity", len(config.Signers))
-	}
-	for _, redirectURI := range client.RedirectURIs {
-		if redirectURI == "http://localhost:3000/callback" {
-			return
-		}
-	}
-	t.Fatalf("development demo client redirects = %v, missing e2e callback", client.RedirectURIs)
 }

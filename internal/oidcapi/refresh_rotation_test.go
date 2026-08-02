@@ -12,6 +12,8 @@ import (
 
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
 	"github.com/harbor-auth/harbor/internal/oidc"
+
+	oidctest "github.com/harbor-auth/harbor/internal/testsupport/oidc"
 )
 
 // newRefreshFlowServerFull is the single canonical constructor for the full
@@ -23,11 +25,11 @@ import (
 //   - SectorID: "localhost" required: PPIDSessionResolver fails closed without it
 //   - Shared InMemoryGrantStore between resolver and service so FindGrant
 //     succeeds in Refresh() (resolver reads grants written at code exchange)
-func newRefreshFlowServerFull(t *testing.T) (*httptest.Server, *oidc.InMemorySessionStore, *oidc.InMemoryClientRegistry) {
+func newRefreshFlowServerFull(t *testing.T) (*httptest.Server, *oidctest.InMemorySessionStore, *oidctest.InMemoryClientRegistry) {
 	t.Helper()
-	sessions := oidc.NewInMemorySessionStore()
-	grants := oidc.NewInMemoryGrantStore()
-	clients := oidc.NewInMemoryClientRegistry()
+	sessions := oidctest.NewInMemorySessionStore()
+	grants := oidctest.NewInMemoryGrantStore()
+	clients := oidctest.NewInMemoryClientRegistry()
 	ts := newRefreshFlowReplica(t, sessions, grants, clients)
 	return ts, sessions, clients
 }
@@ -35,7 +37,7 @@ func newRefreshFlowServerFull(t *testing.T) (*httptest.Server, *oidc.InMemorySes
 // newRefreshFlowReplica constructs one HTTP replica over shared durable-state
 // test doubles. Tests use multiple instances to ensure correctness does not
 // depend on process-local service state.
-func newRefreshFlowReplica(t *testing.T, sessions oidc.SessionStore, grants *oidc.InMemoryGrantStore, clients *oidc.InMemoryClientRegistry) *httptest.Server {
+func newRefreshFlowReplica(t *testing.T, sessions oidc.SessionStore, grants *oidctest.InMemoryGrantStore, clients *oidctest.InMemoryClientRegistry) *httptest.Server {
 	t.Helper()
 	const userID = "00000000-0000-0000-0000-000000000042"
 
@@ -46,23 +48,23 @@ func newRefreshFlowReplica(t *testing.T, sessions oidc.SessionStore, grants *oid
 		SectorID:      "localhost", // required: PPIDSessionResolver fails closed without it
 	})
 
-	loader := oidc.NewInMemorySecretLoader()
+	loader := oidctest.NewInMemorySecretLoader()
 	loader.Put(userID, oidc.UserSecret{
 		Region: "eu",
 		Secret: bytes.Repeat([]byte{0x01}, 32), // deterministic 256-bit test secret
 	})
 
 	resolver := oidc.NewPPIDSessionResolver(oidc.PPIDSessionResolverConfig{
-		Auth:   oidc.NewFixedAuthSource(userID),
+		Auth:   oidctest.NewFixedAuthSource(userID),
 		Loader: loader,
 		Grants: grants,
 	})
 
-	svc := oidc.NewService(oidc.ServiceConfig{
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
-		Codes:        oidc.NewInMemoryAuthCodeStore(),
-		Tokens:       oidc.NewPlaceholderIssuer(),
+		Codes:        oidctest.NewInMemoryAuthCodeStore(),
+		Tokens:       oidctest.NewPlaceholderIssuer(),
 		Sessions:     resolver,
 		SessionStore: sessions,
 		Grants:       grants,
@@ -77,7 +79,7 @@ func newRefreshFlowReplica(t *testing.T, sessions oidc.SessionStore, grants *oid
 
 // newRefreshFlowServerWithStore is like newRefreshFlowServer but also returns
 // the InMemorySessionStore so tests can manipulate it (e.g. force-expire sessions).
-func newRefreshFlowServerWithStore(t *testing.T) (*httptest.Server, *oidc.InMemorySessionStore) {
+func newRefreshFlowServerWithStore(t *testing.T) (*httptest.Server, *oidctest.InMemorySessionStore) {
 	t.Helper()
 	ts, sessions, _ := newRefreshFlowServerFull(t)
 	return ts, sessions
@@ -85,7 +87,7 @@ func newRefreshFlowServerWithStore(t *testing.T) (*httptest.Server, *oidc.InMemo
 
 // newRefreshFlowServerWithClients is like newRefreshFlowServerWithStore but also
 // returns the InMemoryClientRegistry so tests can manipulate client registrations.
-func newRefreshFlowServerWithClients(t *testing.T) (*httptest.Server, *oidc.InMemorySessionStore, *oidc.InMemoryClientRegistry) {
+func newRefreshFlowServerWithClients(t *testing.T) (*httptest.Server, *oidctest.InMemorySessionStore, *oidctest.InMemoryClientRegistry) {
 	t.Helper()
 	return newRefreshFlowServerFull(t)
 }
@@ -390,8 +392,8 @@ func TestToken_RefreshTheftSignal_RevokesFamily(t *testing.T) {
 
 func TestToken_ConcurrentReplicasRotateRefreshTokenOnce(t *testing.T) {
 	sessions := newSynchronizedLookupSessionStore()
-	grants := oidc.NewInMemoryGrantStore()
-	clients := oidc.NewInMemoryClientRegistry()
+	grants := oidctest.NewInMemoryGrantStore()
+	clients := oidctest.NewInMemoryClientRegistry()
 	replicaA := newRefreshFlowReplica(t, sessions, grants, clients)
 	replicaB := newRefreshFlowReplica(t, sessions, grants, clients)
 	refreshToken := mintRefreshToken(t, replicaA)
@@ -433,12 +435,12 @@ func TestToken_ConcurrentReplicasRotateRefreshTokenOnce(t *testing.T) {
 // RotateSession implementation must still allow only one compare-and-swap to
 // succeed.
 type synchronizedLookupSessionStore struct {
-	store   *oidc.InMemorySessionStore
+	store   *oidctest.InMemorySessionStore
 	lookups sync.WaitGroup
 }
 
 func newSynchronizedLookupSessionStore() *synchronizedLookupSessionStore {
-	s := &synchronizedLookupSessionStore{store: oidc.NewInMemorySessionStore()}
+	s := &synchronizedLookupSessionStore{store: oidctest.NewInMemorySessionStore()}
 	s.lookups.Add(2)
 	return s
 }
@@ -471,9 +473,9 @@ func (s *synchronizedLookupSessionStore) RevokeSessionsByGrant(ctx context.Conte
 }
 
 func TestToken_LogoutOnOneReplicaRevokesRefreshOnSibling(t *testing.T) {
-	sessions := oidc.NewInMemorySessionStore()
-	grants := oidc.NewInMemoryGrantStore()
-	clients := oidc.NewInMemoryClientRegistry()
+	sessions := oidctest.NewInMemorySessionStore()
+	grants := oidctest.NewInMemoryGrantStore()
+	clients := oidctest.NewInMemoryClientRegistry()
 	replicaA := newRefreshFlowReplica(t, sessions, grants, clients)
 	replicaB := newRefreshFlowReplica(t, sessions, grants, clients)
 	refreshToken := mintRefreshToken(t, replicaA)

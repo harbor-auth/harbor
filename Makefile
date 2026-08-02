@@ -235,8 +235,11 @@ e2e: ## Run F8 Go e2e tests (authorize→token→JWKS + §11.7 negatives) agains
 		echo '  bringing up e2e/docker-compose.yml (harbor-hot on :8080)'; \
 		trap 'docker compose -f e2e/docker-compose.yml down -v >/dev/null 2>&1 || true' EXIT; \
 		docker compose -f e2e/docker-compose.yml up -d --wait --wait-timeout 180 \
-			|| { echo '==> ERROR: harbor-hot did not become healthy (see compose logs)'; exit 1; }; \
+			|| { echo '==> ERROR: durable e2e stack did not become healthy'; \
+				docker compose -f e2e/docker-compose.yml logs --no-color; exit 1; }; \
 		echo '  running go test -tags=e2e ./e2e/...'; \
+		DATABASE_URL='postgres://harbor:harbor@localhost:5432/harbor?sslmode=disable' \
+			$(GO) test -tags=e2e ./internal/mgmtapi; \
 		HARBOR_E2E_BASE_URL=http://localhost:8080 $(GO) test -tags=e2e ./e2e/...; \
 	fi
 

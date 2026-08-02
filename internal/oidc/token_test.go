@@ -110,7 +110,7 @@ func TestService_Token_ReuseRevokesCodeFamily(t *testing.T) {
 	registry := NewInMemoryClientRegistry()
 	registry.Put(testClient())
 
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:      "https://eu.harbor.id",
 		Clients:     registry,
 		Codes:       codes,
@@ -154,7 +154,7 @@ func TestService_Token_FailedExchangeDoesNotBurnCode(t *testing.T) {
 			t.Fatalf("Save: %v", err)
 		}
 		revocations := NewRecordingRevocationSink()
-		return NewService(ServiceConfig{
+		return mustNewService(ServiceConfig{
 			Issuer:      "https://eu.harbor.id",
 			Clients:     clients,
 			Codes:       codes,
@@ -199,7 +199,7 @@ func TestService_Token_FailedExchangeDoesNotBurnCode(t *testing.T) {
 
 func TestService_Token_UnknownCode(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  NewInMemoryClientRegistry(),
 		Codes:    NewInMemoryAuthCodeStore(),

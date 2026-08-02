@@ -13,10 +13,8 @@ metadata:
     app.kubernetes.io/part-of: harbor
     app.kubernetes.io/component: cold-path
 spec:
-  # Pinned to 1 until the ceremony/session store is DB-backed: harbor-mgmt uses
-  # in-memory WebAuthn state that does not survive restarts or cross-pod routing,
-  # so a passkey ceremony begun on one pod would fail when finished on another.
-  # See docs/plans/user-enrollment.md.
+  # WebAuthn, enrollment, BFF, and abuse-protection state is shared in Redis,
+  # so rolling replacements and future horizontal scaling preserve ceremonies.
   replicas: 1
   selector:
     matchLabels:
@@ -60,8 +58,9 @@ spec:
           ports:
             - name: http
               containerPort: 8081
-          # Config then secrets (DATABASE_URL/REDIS_URL). Regional KMS key IDs
-          # are non-secret config; credentials come from workload identity.
+          # Config then secrets (DATABASE_URL/REDIS_URL, registration token,
+          # and the shared user-DEK KEK). Regional signing-KMS key IDs are
+          # non-secret config; provider credentials come from workload identity.
           envFrom:
             - configMapRef:
                 name: harbor-mgmt-config

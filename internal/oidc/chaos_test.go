@@ -127,7 +127,7 @@ func newChaosService(sessionStore SessionStore, grantStore GrantStore) *Service 
 		RedirectURIs:  []string{"http://localhost/cb"},
 		ScopesAllowed: []string{"openid", "offline_access"},
 	})
-	return NewService(ServiceConfig{
+	return mustNewService(ServiceConfig{
 		Issuer:       "https://chaos.harbor.example",
 		Clients:      clientReg,
 		Codes:        NewInMemoryAuthCodeStore(),
@@ -337,7 +337,7 @@ func TestChaos_Refresh_FamilyRevokeFails_StillInvalidGrant(t *testing.T) {
 	// client-existence check (which runs after ValidateRefreshParams, only
 	// reached for valid sessions). If this test is extended to also verify
 	// the successor-token path, register testRefreshClientID here.
-	chaosSvc := NewService(ServiceConfig{
+	chaosSvc := mustNewService(ServiceConfig{
 		Issuer:       "https://chaos.harbor.example",
 		Clients:      NewInMemoryClientRegistry(),
 		Codes:        NewInMemoryAuthCodeStore(),
@@ -546,7 +546,7 @@ func TestChaos_Token_ValidateTokenParams_GatesStoreAccess(t *testing.T) {
 	// Use a store that panics on any access — if ValidateTokenParams does NOT
 	// gate the store, the panic fires and makes the gap unmissable.
 	panicCodes := &panicOnAccessAuthCodeStore{}
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:   "https://chaos.harbor.example",
 		Clients:  NewInMemoryClientRegistry(),
 		Codes:    panicCodes,
@@ -666,7 +666,7 @@ func TestChaos_Refresh_OutboxEnqueuesWhenDownstreamFails(t *testing.T) {
 	outbox := &recordingOutbox{}
 
 	var logBuf bytes.Buffer
-	chaosSvc := NewService(ServiceConfig{
+	chaosSvc := mustNewService(ServiceConfig{
 		Issuer:       "https://chaos.harbor.example",
 		Clients:      NewInMemoryClientRegistry(),
 		Codes:        NewInMemoryAuthCodeStore(),
@@ -733,7 +733,7 @@ func TestChaos_Token_OutboxEnqueuesWhenDownstreamFails(t *testing.T) {
 
 	outbox := &recordingOutbox{}
 	var logBuf bytes.Buffer
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:      "https://chaos.harbor.example",
 		Clients:     NewInMemoryClientRegistry(),
 		Codes:       codeStore,
@@ -822,7 +822,7 @@ func TestChaos_Refresh_SignalRefreshReuse_ZeroUUID(t *testing.T) {
 			var logBuf bytes.Buffer
 			logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 
-			svc := NewService(ServiceConfig{
+			svc := mustNewService(ServiceConfig{
 				Issuer:       "https://chaos.harbor.example",
 				Clients:      NewInMemoryClientRegistry(),
 				Codes:        NewInMemoryAuthCodeStore(),
@@ -920,7 +920,7 @@ func TestChaos_Token_SignalCodeReuse_EmptyClientID(t *testing.T) {
 
 	sink := NewRecordingRevocationSink()
 	var logBuf bytes.Buffer
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:      "https://chaos.harbor.example",
 		Clients:     NewInMemoryClientRegistry(),
 		Codes:       codeStore,
@@ -1019,7 +1019,7 @@ func TestChaos_Token_SignalCodeReuse_ConsumePathEmptyClientID(t *testing.T) {
 	var logBuf bytes.Buffer
 	registry := NewInMemoryClientRegistry()
 	registry.Put(Client{ID: clientID})
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:      "https://chaos.harbor.example",
 		Clients:     registry,
 		Codes:       &chaosConsumePathCodeStore{peekCode: peekCode, reuseCode: reuseCode},

@@ -2,7 +2,6 @@ package oidc
 
 import (
 	"context"
-	"sync"
 	"time"
 )
 
@@ -43,8 +42,8 @@ func (c Client) HasLogoutURI(uri string) bool {
 	return false
 }
 
-// ClientRegistry looks up RP registrations by client_id. Backed by sqlc over
-// relying_parties later; in-memory here.
+// ClientRegistry looks up RP registrations by client_id. Production wiring uses
+// the SQL-backed registry in internal/clients.
 type ClientRegistry interface {
 	Lookup(ctx context.Context, clientID string) (Client, bool)
 }
@@ -104,93 +103,4 @@ type AuthCodeStore interface {
 	// consumed, without changing its state.
 	Peek(ctx context.Context, code string) (stored AuthCode, found bool, consumed bool, err error)
 	Consume(ctx context.Context, code string) (ConsumeResult, error)
-}
-
-// InMemoryClientRegistry is a dev/test ClientRegistry. NOT for production.
-type InMemoryClientRegistry struct {
-	mu      sync.RWMutex
-	clients map[string]Client
-}
-
-// NewInMemoryClientRegistry returns an empty registry.
-func NewInMemoryClientRegistry() *InMemoryClientRegistry {
-	return &InMemoryClientRegistry{clients: make(map[string]Client)}
-}
-
-// Put seeds or replaces a client registration.
-func (r *InMemoryClientRegistry) Put(c Client) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.clients[c.ID] = c
-}
-
-// Delete removes a client registration by ID. A no-op if the client was not
-// registered. Used in tests to simulate deregistration of a client.
-func (r *InMemoryClientRegistry) Delete(clientID string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.clients, clientID)
-}
-
-// Lookup implements ClientRegistry.
-func (r *InMemoryClientRegistry) Lookup(_ context.Context, clientID string) (Client, bool) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	c, ok := r.clients[clientID]
-	return c, ok
-}
-
-type authCodeEntry struct {
-	code     AuthCode
-	consumed bool
-}
-
-// InMemoryAuthCodeStore is a dev/test AuthCodeStore. NOT for production — a real
-// store is region-local and shared across replicas (e.g. Redis; docs/DESIGN.md
-// §4.4) with its own TTL eviction.
-type InMemoryAuthCodeStore struct {
-	mu    sync.Mutex
-	codes map[string]*authCodeEntry
-}
-
-// NewInMemoryAuthCodeStore returns an empty code store.
-func NewInMemoryAuthCodeStore() *InMemoryAuthCodeStore {
-	return &InMemoryAuthCodeStore{codes: make(map[string]*authCodeEntry)}
-}
-
-// Save implements AuthCodeStore.
-func (s *InMemoryAuthCodeStore) Save(_ context.Context, code AuthCode) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.codes[code.Code] = &authCodeEntry{code: code}
-	return nil
-}
-
-// Peek implements AuthCodeStore: reads the stored code and its consumed state
-// without mutating it.
-func (s *InMemoryAuthCodeStore) Peek(_ context.Context, code string) (AuthCode, bool, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	entry, ok := s.codes[code]
-	if !ok {
-		return AuthCode{}, false, false, nil
-	}
-	return entry.code, true, entry.consumed, nil
-}
-
-// Consume implements AuthCodeStore with reuse detection: the first call returns
-// ConsumeFirstUse and tombstones the entry; any later call returns
-// ConsumeReused.
-func (s *InMemoryAuthCodeStore) Consume(_ context.Context, code string) (ConsumeResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	entry, ok := s.codes[code]
-	if !ok {
-		return ConsumeResult{Status: ConsumeNotFound}, nil
-	}
-	if entry.consumed {
-		return ConsumeResult{Status: ConsumeReused, Code: entry.code}, nil
-	}
-	entry.consumed = true
-	return ConsumeResult{Status: ConsumeFirstUse, Code: entry.code}, nil
 }

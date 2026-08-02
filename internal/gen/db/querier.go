@@ -29,6 +29,10 @@ type Querier interface {
 	// payload (DESIGN §4.4, §10). The payload_encrypted column holds ciphertext
 	// under the user's DEK; the operator sees only event_type + timestamp.
 	CreateAuditEventWithPayload(ctx context.Context, arg CreateAuditEventWithPayloadParams) (AuditEvent, error)
+	// Queries for user-owned BYO-domain verification challenges. Domain names are
+	// globally unique, while reads by name are owner-scoped to avoid disclosing
+	// another user's registration.
+	CreateBYODomain(ctx context.Context, arg CreateBYODomainParams) (ByoDomain, error)
 	// CreateCredential persists a newly-registered passkey. webauthn_cred_id is the
 	// opaque rawID from the authenticator (DESIGN §3.1); webauthn_pubkey is the COSE
 	// public key; webauthn_aaguid identifies the authenticator model.
@@ -71,6 +75,7 @@ type Querier interface {
 	// Deactivates a relay address by (user_id, client_id) pair. Convenience
 	// method for when the caller has the user/client but not the address ID.
 	DeactivateRelayAddressByUserClient(ctx context.Context, arg DeactivateRelayAddressByUserClientParams) error
+	DeleteBYODomain(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error)
 	DeleteCredential(ctx context.Context, id pgtype.UUID) error
 	// Clean up delivered revocation signals older than the retention period.
 	// Background cleanup, off the hot path.
@@ -132,6 +137,7 @@ type Querier interface {
 	// Returns the single active signing key used for signing new tokens.
 	// The partial unique index idx_signing_keys_one_active guarantees at most one.
 	GetActiveSigningKey(ctx context.Context) (SigningKey, error)
+	GetBYODomainByName(ctx context.Context, arg GetBYODomainByNameParams) (ByoDomain, error)
 	// Retrieves the active consent grant for a (user, client) pair.
 	// Returns NULL if no active grant exists (revoked grants are excluded).
 	GetConsentGrantByUserClient(ctx context.Context, arg GetConsentGrantByUserClientParams) (ConsentGrant, error)
@@ -221,6 +227,7 @@ type Querier interface {
 	// so the caller can decrypt under the user's DEK (DESIGN §4.4). Only the
 	// owning user's endpoint decrypts; the operator has no plaintext read path.
 	ListAuditEventsByUserWithPayload(ctx context.Context, arg ListAuditEventsByUserWithPayloadParams) ([]AuditEvent, error)
+	ListBYODomainsByUser(ctx context.Context, userID pgtype.UUID) ([]ByoDomain, error)
 	// Lists all active consent grants for a user, ordered by most recent first.
 	// Used by harbor-mgmt to show the user their connected apps.
 	ListConsentGrantsByUser(ctx context.Context, userID pgtype.UUID) ([]ConsentGrant, error)
@@ -294,6 +301,7 @@ type Querier interface {
 	// ownership of their custom domain.
 	SetRelayAddressBYODomain(ctx context.Context, id pgtype.UUID) error
 	SetUserStatus(ctx context.Context, arg SetUserStatusParams) error
+	UpdateBYODomainState(ctx context.Context, arg UpdateBYODomainStateParams) (ByoDomain, error)
 	// UpdateCredentialSignCount advances a passkey's signature counter after an
 	// assertion — a monotonically increasing counter is how WebAuthn detects a
 	// cloned authenticator (DESIGN §3.1). The `sign_count < $2` guard makes the

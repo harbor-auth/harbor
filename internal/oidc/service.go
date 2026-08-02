@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -17,31 +18,11 @@ import (
 // (docs/DESIGN.md §11.2). It returns the resolved subject (PPID) for the user
 // authenticating to this client, and whether they approved consent.
 //
-// SCAFFOLD SEAM: the real implementation runs the hosted auth UI — WebAuthn
-// login (internal/webauthn), MFA/step-up, and the consent screen — and derives
-// the per-RP PPID (internal/identity). The stub below auto-approves a fixed demo
-// subject so /authorize is exercisable before that UI exists.
+// The production implementation runs the hosted auth UI — WebAuthn login
+// (internal/webauthn), MFA/step-up, and the consent screen — and derives the
+// per-RP PPID (internal/identity).
 type SessionResolver interface {
 	Resolve(ctx context.Context, client Client, scope string) (subject, userID string, approved bool, err error)
-}
-
-// stubSessionResolver auto-approves a fixed subject. SCAFFOLD only.
-type stubSessionResolver struct{ subject string }
-
-// NewStubSessionResolver returns a SessionResolver that always authenticates and
-// consents as subject. SCAFFOLD — replace with real passkey login + consent.
-func NewStubSessionResolver(subject string) SessionResolver {
-	return stubSessionResolver{subject: subject}
-}
-
-// Resolve always returns userID="" (empty). This is intentional for unit-test
-// simplicity — Token() gates issueRefreshToken on `result.Code.UserID != ""`
-// (docs/DESIGN.md §3.5), so any test using stubSessionResolver will NEVER
-// receive a refresh token through a full Authorize→Token flow. Use
-// PPIDSessionResolver with a FixedAuthSource for refresh-token integration
-// tests (see newRefreshFlowServerWithStore in refresh_rotation_test.go).
-func (r stubSessionResolver) Resolve(_ context.Context, _ Client, _ string) (string, string, bool, error) {
-	return r.subject, "", true, nil
 }
 
 // RevocationSink receives the theft signal when an authorization code is reused:
@@ -66,17 +47,6 @@ type RevocationOutbox interface {
 	// Enqueue inserts a revocation signal into the outbox for durable delivery.
 	Enqueue(ctx context.Context, entry OutboxEntry) error
 }
-
-// noopRevocationSink is the default when no sink is wired.
-type noopRevocationSink struct{}
-
-func (noopRevocationSink) RevokeCodeFamily(context.Context, AuthCode) error { return nil }
-
-// noopRevocationOutbox is the default when no outbox is wired (dev/test only).
-// In production, wire DBRevocationOutbox for durable theft-signal delivery.
-type noopRevocationOutbox struct{}
-
-func (noopRevocationOutbox) Enqueue(context.Context, OutboxEntry) error { return nil }
 
 // RecordingRevocationSink records revoked code families in memory. Useful for
 // tests and dev wiring that want to assert the theft signal fired.
@@ -109,9 +79,9 @@ func (s *RecordingRevocationSink) Revoked() []AuthCode {
 // §11.7). Codes are single-use and short-lived.
 const defaultCodeTTL = 60 * time.Second
 
-// ServiceConfig wires the Service's collaborators. Clients, Codes, Tokens, and
-// Sessions are required; Revocations, NewCode, Now, and CodeTTL default to
-// sensible values (the last three are seams for deterministic tests).
+// ServiceConfig wires the Service's collaborators. All stores, the issuer,
+// resolver, and revocation collaborators are required. NewCode, Now, and
+// CodeTTL retain defaults as seams for deterministic tests.
 // Logger defaults to slog.Default() — never nil, never a no-op discard
 // (a silent default would re-introduce the error-swallow the field is here
 // to prevent; see docs/design/principles/error-handling.md §1.11).
@@ -121,11 +91,11 @@ type ServiceConfig struct {
 	Codes        AuthCodeStore
 	Tokens       TokenIssuer
 	Sessions     SessionResolver
-	SessionStore SessionStore     // optional; defaults to noopSessionStore (no refresh tokens)
-	Grants       GrantStore       // optional; defaults to noopGrantStore
-	Consents     ConsentStore     // optional; defaults to noopConsentStore (skip consent check)
-	Revocations  RevocationSink   // optional; defaults to noopRevocationSink
-	Outbox       RevocationOutbox // optional; defaults to noopRevocationOutbox (no durable delivery)
+	SessionStore SessionStore
+	Grants       GrantStore
+	Consents     ConsentStore
+	Revocations  RevocationSink
+	Outbox       RevocationOutbox
 	Logger       *slog.Logger
 	NewCode      func() (string, error)
 	NewSessionID func() (string, error) // optional; defaults to uuid.NewString
@@ -155,8 +125,29 @@ type Service struct {
 	codeTTL        time.Duration
 }
 
-// NewService builds a Service, applying defaults for the optional config fields.
-func NewService(cfg ServiceConfig) *Service {
+// NewService builds a Service. It rejects an incomplete object graph so a
+// missing durable or security-critical collaborator fails at startup.
+func NewService(cfg ServiceConfig) (*Service, error) {
+	required := []struct {
+		name  string
+		value any
+	}{
+		{"client registry", cfg.Clients},
+		{"authorization code store", cfg.Codes},
+		{"token issuer", cfg.Tokens},
+		{"session resolver", cfg.Sessions},
+		{"refresh session store", cfg.SessionStore},
+		{"grant store", cfg.Grants},
+		{"consent store", cfg.Consents},
+		{"revocation sink", cfg.Revocations},
+		{"revocation outbox", cfg.Outbox},
+	}
+	for _, dependency := range required {
+		if dependency.value == nil {
+			return nil, fmt.Errorf("oidc: ServiceConfig.%s is required", dependency.name)
+		}
+	}
+
 	svc := &Service{
 		issuer:         cfg.Issuer,
 		clients:        cfg.Clients,
@@ -166,7 +157,7 @@ func NewService(cfg ServiceConfig) *Service {
 		sessionStore:   cfg.SessionStore,
 		grants:         cfg.Grants,
 		consents:       cfg.Consents,
-		enforceConsent: cfg.Consents != nil,
+		enforceConsent: true,
 		revocations:    cfg.Revocations,
 		outbox:         cfg.Outbox,
 		logger:         cfg.Logger,
@@ -174,21 +165,6 @@ func NewService(cfg ServiceConfig) *Service {
 		newSessionID:   cfg.NewSessionID,
 		now:            cfg.Now,
 		codeTTL:        cfg.CodeTTL,
-	}
-	if svc.grants == nil {
-		svc.grants = noopGrantStore{}
-	}
-	if svc.consents == nil {
-		svc.consents = noopConsentStore{}
-	}
-	if svc.sessionStore == nil {
-		svc.sessionStore = noopSessionStore{}
-	}
-	if svc.revocations == nil {
-		svc.revocations = noopRevocationSink{}
-	}
-	if svc.outbox == nil {
-		svc.outbox = noopRevocationOutbox{}
 	}
 	if svc.logger == nil {
 		svc.logger = slog.Default()
@@ -208,22 +184,7 @@ func NewService(cfg ServiceConfig) *Service {
 	if svc.codeTTL == 0 {
 		svc.codeTTL = defaultCodeTTL
 	}
-	// Misconfiguration guard (catches both cfg.Grants == nil and the typed-non-nil
-	// bypass where the caller passes cfg.Grants = noopGrantStore{} explicitly).
-	// A real SessionStore with noopGrantStore means every Refresh() returns
-	// invalid_grant (noopGrantStore returns found=false for every lookup) — an
-	// invisible production outage. Panic at construction so the bug surfaces at
-	// startup rather than silently in production traffic.
-	// The inverse (Grants without SessionStore) is legitimate: PPID resolution
-	// uses grants; refresh tokens are independently optional.
-	if cfg.SessionStore != nil {
-		if _, isNoop := svc.grants.(noopGrantStore); isNoop {
-			panic("oidc: ServiceConfig.SessionStore is set but Grants is noopGrantStore — " +
-				"Refresh() will return invalid_grant for every valid token; " +
-				"wire both or neither")
-		}
-	}
-	return svc
+	return svc, nil
 }
 
 // AuthorizeResult is a successful /authorize outcome: a redirect back to the RP
@@ -291,50 +252,46 @@ func (s *Service) ConsentRequired(ctx context.Context, userID, clientID, scope, 
 // ApproveConsent persists the requested scope set only after the user has made
 // an explicit approval decision.
 func (s *Service) ApproveConsent(ctx context.Context, userID, clientID, scope string) *AuthorizeError {
-	existing, found, err := s.findConsentGrant(ctx, userID, clientID)
+	grant, found, err := s.grants.FindGrant(ctx, userID, clientID)
 	if err != nil {
 		return redirectErr(ErrCodeServerError, "could not check consent status")
 	}
 	scopes := strings.Fields(scope)
 	if found {
-		scopes = mergeScopes(existing.Scopes, scopes)
+		scopes = mergeScopes(grant.Scopes, scopes)
 	}
-	if _, canonical := s.grants.(noopGrantStore); !canonical {
-		// On first approval the resolver creates the canonical grant after PPID
-		// derivation. Existing grants are updated in place so session grant_ids
-		// remain stable across scope escalation.
-		if !found {
-			return nil
-		}
-		updater, ok := s.grants.(GrantScopeUpdater)
-		if !ok {
-			return redirectErr(ErrCodeServerError, "canonical grant store cannot update scopes")
-		}
-		if _, err := updater.UpdateGrantScopes(ctx, userID, clientID, scopes); err != nil {
+	// On first approval the resolver creates the canonical grant after PPID
+	// derivation. Existing grants are updated in place so session grant_ids
+	// remain stable across scope escalation.
+	if !found {
+		if _, err := s.consents.Upsert(ctx, userID, clientID, scopes); err != nil {
+			s.logger.ErrorContext(ctx, "consent upsert failed",
+				slog.String("client_id", clientID), slog.Any("error", err))
 			return redirectErr(ErrCodeServerError, "could not persist consent")
 		}
 		return nil
 	}
-	if _, err := s.consents.Upsert(ctx, userID, clientID, scopes); err != nil {
-		s.logger.ErrorContext(ctx, "consent upsert failed",
-			slog.String("client_id", clientID), slog.Any("error", err))
+	updater, ok := s.grants.(GrantScopeUpdater)
+	if !ok {
+		return redirectErr(ErrCodeServerError, "canonical grant store cannot update scopes")
+	}
+	if _, err := updater.UpdateGrantScopes(ctx, userID, clientID, scopes); err != nil {
 		return redirectErr(ErrCodeServerError, "could not persist consent")
 	}
 	return nil
 }
 
-// findConsentGrant makes the canonical grants ledger authoritative whenever a
-// real GrantStore is wired. The legacy ConsentStore fallback remains only for
-// isolated pre-ledger tests and dev scaffolds.
+// findConsentGrant checks the canonical grant first, then the explicit consent
+// ledger used before a PPID-bearing grant has been created.
 func (s *Service) findConsentGrant(ctx context.Context, userID, clientID string) (ConsentGrant, bool, error) {
-	if _, noop := s.grants.(noopGrantStore); !noop {
-		grant, found, err := s.grants.FindGrant(ctx, userID, clientID)
-		if err != nil || !found {
-			return ConsentGrant{}, found, err
-		}
-		return ConsentGrant{ID: grant.ID, UserID: grant.UserID, ClientID: grant.ClientID, Scopes: grant.Scopes, GrantedAt: grant.CreatedAt, RevokedAt: grant.RevokedAt}, true, nil
+	grant, found, err := s.grants.FindGrant(ctx, userID, clientID)
+	if err != nil {
+		return ConsentGrant{}, false, err
 	}
-	return s.consents.Get(ctx, userID, clientID)
+	if !found {
+		return s.consents.Get(ctx, userID, clientID)
+	}
+	return ConsentGrant{ID: grant.ID, UserID: grant.UserID, ClientID: grant.ClientID, Scopes: grant.Scopes, GrantedAt: grant.CreatedAt, RevokedAt: grant.RevokedAt}, true, nil
 }
 
 // AuthorizeWithUser issues a code for a pre-authenticated user (BFF flow).
@@ -577,15 +534,14 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 // The user's home region is recovered from the consent grant (just created by
 // PPIDSessionResolver.Resolve) so the session satisfies the user-owned-row
 // contract (DESIGN §10). Fail-closed on region: if the grant cannot be found
-// (consent revoked in the ~60s code-TTL window, or noopGrantStore dev wiring)
+// (for example, consent revoked in the ~60s code-TTL window)
 // the refresh token is skipped — an unregioned session would propagate forever
 // through RotateSession's `newSession.Region = session.Region` copy.
 // The H9-2 panic guard ensures that in production (real SessionStore) a real
 // GrantStore is always wired, so the not-found path is a genuine edge case.
 func (s *Service) issueRefreshToken(ctx context.Context, tokens *IssuedTokens, code AuthCode) {
 	// Recover the region from the consent grant. Fail-closed: if the grant is
-	// gone (consent revoked between /authorize and /token, or noopGrantStore
-	// dev wiring), skip the refresh token rather than creating an unregioned
+	// gone (consent revoked between /authorize and /token), skip the refresh token rather than creating an unregioned
 	// session that propagates the empty region forever via RotateSession.
 	grant, found, err := s.grants.FindGrant(ctx, code.UserID, code.ClientID)
 	if err != nil {
@@ -595,9 +551,7 @@ func (s *Service) issueRefreshToken(ctx context.Context, tokens *IssuedTokens, c
 		return
 	}
 	if !found {
-		// Consent was revoked between Authorize and Token (race), or this is a
-		// noopGrantStore dev wiring (SessionStore also noop in that case per the
-		// NewService panic guard). Either way, skip the refresh token.
+		// Consent was revoked between Authorize and Token (race). Skip the refresh token.
 		s.logger.WarnContext(ctx, "skipping refresh token: no active grant found — consent may have been revoked between /authorize and /token",
 			slog.String("client_id", code.ClientID))
 		return
@@ -992,7 +946,7 @@ func (s *Service) signalCodeReuse(ctx context.Context, code AuthCode) {
 	// because RevokeSessionsByUserClient(userID, clientID) uses both as direct
 	// lookup keys. Here, the full AuthCode struct is passed to RevokeCodeFamily;
 	// the RevocationSink implementation determines how code.Subject is used. In
-	// all current implementations (noopRevocationSink, RecordingRevocationSink),
+	// the current implementations,
 	// Subject is not a filter key, so only ClientID is validated here. If a
 	// future RevocationSink uses code.Subject as a lookup key, add a guard here
 	// and update INV-CODE-THEFT-SIGNAL-EMPTY-CLIENT-GUARD.

@@ -115,7 +115,7 @@ func (m *memClientStore) len() int { return len(m.byID) }
 // newIntegrationServer wires a Server over the mem store exactly as production
 // does (the same store backs both POST /register and the RFC 7592 routes).
 func newIntegrationServer(store *memClientStore) *Server {
-	return New(nil, nil).WithClientRegistration(store, testRegBaseURL)
+	return newTestServerWithClient(nil, store)
 }
 
 // serveMgmt drives one request through the real mux the way a client would.

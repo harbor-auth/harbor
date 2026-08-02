@@ -19,6 +19,18 @@ type AuditEvent struct {
 	PayloadEncrypted []byte `json:"payload_encrypted"`
 }
 
+type ByoDomain struct {
+	ID             pgtype.UUID        `json:"id"`
+	Domain         string             `json:"domain"`
+	UserID         pgtype.UUID        `json:"user_id"`
+	ChallengeToken string             `json:"challenge_token"`
+	State          string             `json:"state"`
+	Region         string             `json:"region"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	VerifiedAt     pgtype.Timestamptz `json:"verified_at"`
+	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
+}
+
 type ConsentGrant struct {
 	ID        pgtype.UUID        `json:"id"`
 	UserID    pgtype.UUID        `json:"user_id"`

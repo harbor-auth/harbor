@@ -63,6 +63,28 @@ environment variable on harbor-mgmt.
   `kubectl apply -k deploy/k8s/`. Secrets are placeholders — replace them via
   your secrets manager before deploying.
 
+## PostgreSQL connection budget
+
+Each Harbor replica uses an explicitly bounded pgx pool. The defaults are
+`DB_MAX_CONNS=10`, `DB_MIN_CONNS=2`, and
+`DB_MAX_CONN_LIFETIME=30m`. Overrides must be positive, must fit their Go
+integer/duration types, and `DB_MIN_CONNS` must not exceed
+`DB_MAX_CONNS`; invalid settings stop startup.
+
+Size PostgreSQL for every replica that shares the database:
+
+```
+application connections = replica ceiling × DB_MAX_CONNS
+required max_connections >= application connections + operational headroom
+```
+
+At harbor-hot's 20-replica HPA ceiling, the default is `20 × 10 = 200`
+application connections. Configure PostgreSQL with `max_connections >= 220`
+to reserve 20 connections for administration and monitoring. Add the budgets
+of harbor-mgmt, harbor-relay, migration jobs, and any other database clients
+when they share the same PostgreSQL server; alternatively lower each
+deployment's `DB_MAX_CONNS`.
+
 ## Admin Endpoint Access
 
 The `/admin/` path prefix (e.g. `/admin/keys/rotate`, `/admin/revoke-jwt`) is

@@ -24,7 +24,7 @@ func acrAMRFlowServer(t *testing.T) (*Service, *InMemoryAuthCodeStore) {
 	if err != nil {
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    codes,

@@ -75,7 +75,44 @@ func newTestDashHandler(t *testing.T, consents DashboardConsentStore, sessions D
 	if err != nil {
 		t.Fatalf("ParseDashboardTemplates: %v", err)
 	}
-	return NewDashboardHandler(consents, sessions, creds, nil, relay, tmpl, nil)
+	h, err := NewDashboardHandler(consents, sessions, creds, nil, relay, tmpl, nil)
+	if err != nil {
+		t.Fatalf("NewDashboardHandler: %v", err)
+	}
+	return h
+}
+
+func TestNewDashboardHandler_RejectsMissingRequiredCollaborators(t *testing.T) {
+	tmpl, err := web.ParseDashboardTemplates()
+	if err != nil {
+		t.Fatalf("ParseDashboardTemplates: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		consents DashboardConsentStore
+		sessions DashboardSessionStore
+		creds    clients.DashboardCredentialStore
+	}{
+		{"consent store", nil, &fakeDashSessionStore{}, &fakeDashCredStore{}},
+		{"session store", &fakeDashConsentStore{}, nil, &fakeDashCredStore{}},
+		{"credential store", &fakeDashConsentStore{}, &fakeDashSessionStore{}, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := NewDashboardHandler(tt.consents, tt.sessions, tt.creds, nil, nil, tmpl, nil); err == nil {
+				t.Fatalf("NewDashboardHandler accepted a nil %s", tt.name)
+			}
+		})
+	}
+}
+
+// TestDashboard_NilDepsReturn503 retains the historical nil-dependency
+// regression. Missing collaborators are now rejected earlier, at construction,
+// instead of allowing a handler to survive until it can return a 503.
+func TestDashboard_NilDepsReturn503(t *testing.T) {
+	TestNewDashboardHandler_RejectsMissingRequiredCollaborators(t)
 }
 
 func authedCtxRequest(method, path, userID string) *http.Request {
@@ -237,77 +274,4 @@ func min(a, b int) int {
 		return a
 	}
 	return b
-}
-
-// TestDashboard_NilDepsReturn503 verifies that handlers requiring consents,
-// sessions, or credentials return 503 Service Unavailable rather than
-// nil-dereffing when DATABASE_URL is unset and those deps are nil.
-func TestDashboard_NilDepsReturn503(t *testing.T) {
-	tmpl, err := web.ParseDashboardTemplates()
-	if err != nil {
-		t.Fatalf("ParseDashboardTemplates: %v", err)
-	}
-
-	t.Run("GetConnectedApps_nil_consents", func(t *testing.T) {
-		h := NewDashboardHandler(nil, &fakeDashSessionStore{}, &fakeDashCredStore{}, nil, nil, tmpl, nil)
-		rec := httptest.NewRecorder()
-		h.GetConnectedApps(rec, authedCtxRequest(http.MethodGet, "/dashboard/apps", "user-a"))
-		if rec.Code != http.StatusServiceUnavailable {
-			t.Errorf("status = %d, want 503", rec.Code)
-		}
-	})
-
-	t.Run("PostRevokeApp_nil_consents", func(t *testing.T) {
-		h := NewDashboardHandler(nil, &fakeDashSessionStore{}, &fakeDashCredStore{}, nil, nil, tmpl, nil)
-		rec := httptest.NewRecorder()
-		r := httptest.NewRequest(http.MethodPost, "/dashboard/apps/g1/revoke", nil)
-		r.SetPathValue("grant_id", "g1")
-		r = r.WithContext(ContextWithUserID(r.Context(), "user-a"))
-		h.PostRevokeApp(rec, r)
-		if rec.Code != http.StatusServiceUnavailable {
-			t.Errorf("status = %d, want 503", rec.Code)
-		}
-	})
-
-	t.Run("GetSessions_nil_sessions", func(t *testing.T) {
-		h := NewDashboardHandler(&fakeDashConsentStore{}, nil, &fakeDashCredStore{}, nil, nil, tmpl, nil)
-		rec := httptest.NewRecorder()
-		h.GetSessions(rec, authedCtxRequest(http.MethodGet, "/dashboard/sessions", "user-a"))
-		if rec.Code != http.StatusServiceUnavailable {
-			t.Errorf("status = %d, want 503", rec.Code)
-		}
-	})
-
-	t.Run("GetSessions_nil_credentials", func(t *testing.T) {
-		h := NewDashboardHandler(&fakeDashConsentStore{}, &fakeDashSessionStore{sessions: map[string][]oidc.RefreshSession{}}, nil, nil, nil, tmpl, nil)
-		rec := httptest.NewRecorder()
-		h.GetSessions(rec, authedCtxRequest(http.MethodGet, "/dashboard/sessions", "user-a"))
-		if rec.Code != http.StatusServiceUnavailable {
-			t.Errorf("status = %d, want 503", rec.Code)
-		}
-	})
-
-	t.Run("PostRevokeSession_nil_sessions", func(t *testing.T) {
-		h := NewDashboardHandler(&fakeDashConsentStore{}, nil, &fakeDashCredStore{}, nil, nil, tmpl, nil)
-		rec := httptest.NewRecorder()
-		r := httptest.NewRequest(http.MethodPost, "/dashboard/sessions/s1/revoke", nil)
-		r.SetPathValue("session_id", "s1")
-		r = r.WithContext(ContextWithUserID(r.Context(), "user-a"))
-		h.PostRevokeSession(rec, r)
-		if rec.Code != http.StatusServiceUnavailable {
-			t.Errorf("status = %d, want 503", rec.Code)
-		}
-	})
-
-	t.Run("PostRevokeCredential_nil_credentials", func(t *testing.T) {
-		h := NewDashboardHandler(&fakeDashConsentStore{}, &fakeDashSessionStore{}, nil, nil, nil, tmpl, nil)
-		rec := httptest.NewRecorder()
-		r := httptest.NewRequest(http.MethodPost, "/dashboard/credentials/c1/revoke", nil)
-		r.SetPathValue("credential_id", "c1")
-		r = r.WithContext(ContextWithUserID(r.Context(), "user-a"))
-		h.PostRevokeCredential(rec, r)
-		if rec.Code != http.StatusServiceUnavailable {
-			t.Errorf("status = %d, want 503", rec.Code)
-		}
-	})
 }

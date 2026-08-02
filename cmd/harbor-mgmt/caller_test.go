@@ -12,8 +12,33 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/harbor-auth/harbor/internal/bff"
+	"github.com/harbor-auth/harbor/internal/clients"
+	"github.com/harbor-auth/harbor/internal/identity"
 	"github.com/harbor-auth/harbor/internal/mgmtapi"
+	bfftest "github.com/harbor-auth/harbor/internal/testsupport/bff"
+	mgmtapitest "github.com/harbor-auth/harbor/internal/testsupport/mgmtapi"
 )
+
+type callerTestEnroller struct{}
+
+func (callerTestEnroller) Enroll(context.Context, string) (identity.EnrollResult, error) {
+	return identity.EnrollResult{}, nil
+}
+
+type callerTestRegistrationStore struct{}
+
+func (callerTestRegistrationStore) Create(context.Context, clients.NewRegisteredClient) (clients.RegisteredClient, error) {
+	return clients.RegisteredClient{}, nil
+}
+
+func newCallerTestServer(t *testing.T) *mgmtapi.Server {
+	t.Helper()
+	srv, err := mgmtapi.New(callerTestEnroller{}, mgmtapitest.NewInMemoryEnrollmentSessionStore(), callerTestRegistrationStore{}, "https://mgmt.example.com", nil)
+	if err != nil {
+		t.Fatalf("mgmtapi.New: %v", err)
+	}
+	return srv
+}
 
 // TestBffCallerAdapter_SpoofedHeader_NoSession is a cmd-level integration test
 // that wires the real bff.Middleware and bffCallerAdapter together and confirms
@@ -32,10 +57,10 @@ import (
 // consulted by any layer — confirming the header-spoofing vulnerability
 // (audit finding C1) is closed at the cmd wiring level.
 func TestBffCallerAdapter_SpoofedHeader_NoSession(t *testing.T) {
-	store := bff.NewInMemoryBFFSessionStore()
+	store := bfftest.NewInMemoryBFFSessionStore()
 
 	// Wire the same way cmd/harbor-mgmt/main.go does (lines ~288, ~377).
-	srv := mgmtapi.New(nil, nil).WithCallerSource(bffCallerAdapter{})
+	srv := newCallerTestServer(t).WithCallerSource(bffCallerAdapter{})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 	handler := bff.Middleware(store)(mux)
@@ -63,7 +88,7 @@ func TestBffCallerAdapter_SpoofedHeader_NoSession(t *testing.T) {
 // 401 would mean no identity was found (i.e., the spoofed header was silently
 // adopted instead of the session).
 func TestBffCallerAdapter_SpoofedHeader_WithSession(t *testing.T) {
-	store := bff.NewInMemoryBFFSessionStore()
+	store := bfftest.NewInMemoryBFFSessionStore()
 
 	const sessionUser = "user-A"
 	const spoofedUser = "user-B"
@@ -81,7 +106,7 @@ func TestBffCallerAdapter_SpoofedHeader_WithSession(t *testing.T) {
 		t.Fatalf("store.SetUser: %v", err)
 	}
 
-	srv := mgmtapi.New(nil, nil).WithCallerSource(bffCallerAdapter{})
+	srv := newCallerTestServer(t).WithCallerSource(bffCallerAdapter{})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 	handler := bff.Middleware(store)(mux)
@@ -113,8 +138,8 @@ func TestBffCallerAdapter_EnrollmentOnlySessionCannotCallManagementAPI(t *testin
 
 func TestRecoverySessionIssuerBindsBFFAndEnrollmentRecords(t *testing.T) {
 	ctx := context.Background()
-	bffSessions := bff.NewInMemoryBFFSessionStore()
-	enrollmentSessions := mgmtapi.NewInMemoryEnrollmentSessionStore()
+	bffSessions := bfftest.NewInMemoryBFFSessionStore()
+	enrollmentSessions := mgmtapitest.NewInMemoryEnrollmentSessionStore()
 	issuer := &recoverySessionIssuer{
 		bffSessions:        bffSessions,
 		enrollmentSessions: enrollmentSessions,

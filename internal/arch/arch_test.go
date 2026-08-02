@@ -81,6 +81,104 @@ func containsMatching(set map[string]bool, substrs ...string) string {
 	return ""
 }
 
+var productionGraphAllowedSymbols = map[string]bool{
+	// Revocation filters are deliberate hot-path caches backed by durable state.
+	"InMemoryRevocationFilter":    true,
+	"NewInMemoryRevocationFilter": true,
+	"BloomRevocationFilter":       true,
+	"NewBloomRevocationFilter":    true,
+	// Local crypto remains the production implementation until the HSM work lands.
+	"LocalKeyProvider":    true,
+	"NewLocalKeyProvider": true,
+	"LocalSigner":         true,
+	"NewLocalSigner":      true,
+}
+
+func forbiddenProductionGraphSymbol(name string) bool {
+	if productionGraphAllowedSymbols[name] {
+		return false
+	}
+	lower := strings.ToLower(name)
+	for _, fragment := range []string{
+		"demo", "inmemory", "noop", "stub", "placeholder", "devmode", "development", "bootstrap",
+	} {
+		if strings.Contains(lower, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestProductionCompositionRootsContainNoScaffolds prevents test helpers or
+// permissive fallback implementations from becoming reachable from a shipped
+// binary. It inspects only non-test source: composition-root tests may import
+// internal/testsupport, but production files may not.
+func TestProductionCompositionRootsContainNoScaffolds(t *testing.T) {
+	root := repoRoot(t)
+	for _, command := range []string{"harbor-hot", "harbor-mgmt"} {
+		t.Run(command, func(t *testing.T) {
+			dir := filepath.Join(root, "cmd", command)
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatalf("read composition root: %v", err)
+			}
+			for _, entry := range entries {
+				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+					continue
+				}
+				if strings.Contains(strings.ToLower(entry.Name()), "bootstrap") {
+					t.Errorf("dead bootstrap source %q remains in the production composition root", entry.Name())
+				}
+				path := filepath.Join(dir, entry.Name())
+				fset := token.NewFileSet()
+				file, err := parser.ParseFile(fset, path, nil, 0)
+				if err != nil {
+					t.Fatalf("parse %s: %v", path, err)
+				}
+				for _, imp := range file.Imports {
+					importPath, err := strconv.Unquote(imp.Path.Value)
+					if err != nil {
+						t.Fatalf("unquote import in %s: %v", path, err)
+					}
+					if strings.Contains(importPath, modulePath+"/internal/testsupport") {
+						t.Errorf("%s imports test-only package %q", entry.Name(), importPath)
+					}
+				}
+				ast.Inspect(file, func(node ast.Node) bool {
+					switch n := node.(type) {
+					case *ast.Ident:
+						if forbiddenProductionGraphSymbol(n.Name) {
+							t.Errorf("%s uses forbidden production scaffold symbol %q at %s", entry.Name(), n.Name, fset.Position(n.Pos()))
+						}
+					case *ast.BasicLit:
+						if n.Kind != token.STRING {
+							break
+						}
+						value, err := strconv.Unquote(n.Value)
+						if err == nil && (value == "HARBOR_DEV_MODE" || value == "demo-client") {
+							t.Errorf("%s contains forbidden production scaffold value %q at %s", entry.Name(), value, fset.Position(n.Pos()))
+						}
+					}
+					return true
+				})
+			}
+		})
+	}
+}
+
+func TestProductionGraphExceptionsRemainAllowed(t *testing.T) {
+	for symbol := range productionGraphAllowedSymbols {
+		if forbiddenProductionGraphSymbol(symbol) {
+			t.Errorf("documented production exception %q is forbidden", symbol)
+		}
+	}
+	for _, symbol := range []string{"NewInMemoryStore", "noopSessionStore", "NewStubResolver", "NewPlaceholderIssuer", "runDevelopment", "bootstrapGraph", "demoClient"} {
+		if !forbiddenProductionGraphSymbol(symbol) {
+			t.Errorf("production scaffold %q is allowed", symbol)
+		}
+	}
+}
+
 // TestHotPathDoesNotImportMgmtPackages enforces §4.1/§6.1: the hot path
 // (cmd/harbor-hot) is stateless in the sense of owning no mutable PII state —
 // it MAY read from the DB via internal/clients (client registry, grant store,

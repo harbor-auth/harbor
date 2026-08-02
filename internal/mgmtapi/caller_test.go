@@ -48,7 +48,7 @@ var userScopedEndpoints = []struct {
 // wired (all nil). The callerID check fires before any nil-store check on
 // every user-scoped endpoint, so nil stores do not mask a missing 401.
 func newMinimalServer(callerSource CallerSource) *Server {
-	s := New(nil, nil)
+	s := newTestServer(nil)
 	if callerSource != nil {
 		s = s.WithCallerSource(callerSource)
 	}
@@ -95,7 +95,7 @@ func TestSpoofing_HeaderPresentWithWrongUser_StoreReceivesSessionUser(t *testing
 	const spoofedUser = "user-B"
 
 	recorder := &recordingConsentStore{}
-	srv := New(nil, nil).
+	srv := newTestServer(nil).
 		WithCallerSource(fakeCallerSource{userID: sessionUser}).
 		WithConsentStore(recorder)
 	mux := http.NewServeMux()

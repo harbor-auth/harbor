@@ -11,7 +11,6 @@ data:
   # REGION binds this instance's RP origin host to a region so the fail-closed
   # region middleware resolves it (harbor-mgmt refuses to boot otherwise).
   REGION: {{ .Values.region | default "EU" | quote }}
-  HARBOR_DEV_MODE: "false"
   KMS_KEY_MAP: {{ required "kmsKeyMap is required in production" .Values.kmsKeyMap | quote }}
   # WebAuthn Relying Party config. Env var names MUST match what harbor-mgmt
   # reads (cmd/harbor-mgmt/main.go): WEBAUTHN_RP_ID, WEBAUTHN_RP_DISPLAY_NAME,
@@ -31,6 +30,8 @@ data:
   # 404 against the harbor-mgmt origin (audit finding M2). harbor-mgmt refuses
   # to start if DATABASE_URL is set but this is empty.
   AUTHORIZE_COMPLETE_URL: {{ .Values.mgmt.authorizeCompleteURL | quote }}
+  # Public base URL emitted by authenticated dynamic client registration.
+  REGISTRATION_BASE_URL: {{ required "mgmt.registrationBaseURL is required in production" .Values.mgmt.registrationBaseURL | quote }}
   # Relay / BYO-domain configuration. These domains are used to generate DNS
   # setup instructions for users who bring their own custom email domains.
   # MTA_DOMAIN is the regional MTA that receives inbound mail (e.g., mta-eu.harbor.id).

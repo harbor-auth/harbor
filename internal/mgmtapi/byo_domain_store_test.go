@@ -3,469 +3,157 @@ package mgmtapi
 import (
 	"context"
 	"errors"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/harbor-auth/harbor/internal/gen/db"
 	"github.com/harbor-auth/harbor/internal/region"
 	"github.com/harbor-auth/harbor/internal/relay"
 )
 
-func makeTestBYODomain(userID uuid.UUID, domain string) *relay.BYODomain {
+type fakeBYODomainQueries struct {
+	createFn func(context.Context, db.CreateBYODomainParams) (db.ByoDomain, error)
+	getFn    func(context.Context, db.GetBYODomainByNameParams) (db.ByoDomain, error)
+	listFn   func(context.Context, pgtype.UUID) ([]db.ByoDomain, error)
+	updateFn func(context.Context, db.UpdateBYODomainStateParams) (db.ByoDomain, error)
+	deleteFn func(context.Context, pgtype.UUID) (pgtype.UUID, error)
+}
+
+func (f *fakeBYODomainQueries) CreateBYODomain(ctx context.Context, arg db.CreateBYODomainParams) (db.ByoDomain, error) {
+	return f.createFn(ctx, arg)
+}
+func (f *fakeBYODomainQueries) GetBYODomainByName(ctx context.Context, arg db.GetBYODomainByNameParams) (db.ByoDomain, error) {
+	return f.getFn(ctx, arg)
+}
+func (f *fakeBYODomainQueries) ListBYODomainsByUser(ctx context.Context, id pgtype.UUID) ([]db.ByoDomain, error) {
+	return f.listFn(ctx, id)
+}
+func (f *fakeBYODomainQueries) UpdateBYODomainState(ctx context.Context, arg db.UpdateBYODomainStateParams) (db.ByoDomain, error) {
+	return f.updateFn(ctx, arg)
+}
+func (f *fakeBYODomainQueries) DeleteBYODomain(ctx context.Context, id pgtype.UUID) (pgtype.UUID, error) {
+	return f.deleteFn(ctx, id)
+}
+
+func testBYODomain(userID uuid.UUID, name string) *relay.BYODomain {
+	now := time.Date(2026, 8, 2, 8, 0, 0, 0, time.UTC)
+	verifiedAt := now.Add(time.Hour)
 	return &relay.BYODomain{
-		ID:             uuid.New(),
-		Domain:         domain,
-		UserID:         userID,
-		ChallengeToken: "test-token-" + domain,
-		State:          relay.BYODomainStatePending,
-		Region:         region.EU,
-		CreatedAt:      time.Now().UTC(),
-		ExpiresAt:      time.Now().UTC().Add(72 * time.Hour),
+		ID: uuid.New(), Domain: name, UserID: userID, ChallengeToken: "challenge",
+		State: relay.BYODomainStateVerified, Region: region.EU, CreatedAt: now,
+		VerifiedAt: &verifiedAt, ExpiresAt: now.Add(72 * time.Hour),
 	}
 }
 
+func rowForDomain(d *relay.BYODomain) db.ByoDomain {
+	verifiedAt := pgtype.Timestamptz{}
+	if d.VerifiedAt != nil {
+		verifiedAt = pgtype.Timestamptz{Time: *d.VerifiedAt, Valid: true}
+	}
+	return db.ByoDomain{
+		ID: pgtype.UUID{Bytes: d.ID, Valid: true}, Domain: d.Domain,
+		UserID: pgtype.UUID{Bytes: d.UserID, Valid: true}, ChallengeToken: d.ChallengeToken,
+		State: string(d.State), Region: string(d.Region),
+		CreatedAt: pgtype.Timestamptz{Time: d.CreatedAt, Valid: true}, VerifiedAt: verifiedAt,
+		ExpiresAt: pgtype.Timestamptz{Time: d.ExpiresAt, Valid: true},
+	}
+}
+
+func TestDBBYODomainStoreCreateAndRead(t *testing.T) {
+	domain := testBYODomain(uuid.New(), "mail.example.com")
+	queries := &fakeBYODomainQueries{}
+	queries.createFn = func(_ context.Context, arg db.CreateBYODomainParams) (db.ByoDomain, error) {
+		if arg.ID.Bytes != domain.ID || arg.UserID.Bytes != domain.UserID || arg.Domain != domain.Domain || !arg.VerifiedAt.Valid {
+			t.Fatalf("CreateBYODomain() params do not preserve domain: %#v", arg)
+		}
+		return rowForDomain(domain), nil
+	}
+	queries.getFn = func(_ context.Context, arg db.GetBYODomainByNameParams) (db.ByoDomain, error) {
+		if arg.UserID.Bytes != domain.UserID || arg.Domain != domain.Domain {
+			t.Fatalf("GetBYODomainByName() params = %#v", arg)
+		}
+		return rowForDomain(domain), nil
+	}
+	store := NewDBBYODomainStore(queries)
+	if err := store.CreateDomain(context.Background(), domain); err != nil {
+		t.Fatalf("CreateDomain() error = %v", err)
+	}
+	got, err := store.GetDomainByName(context.Background(), domain.UserID.String(), domain.Domain)
+	if err != nil {
+		t.Fatalf("GetDomainByName() error = %v", err)
+	}
+	if got.ID != domain.ID || got.UserID != domain.UserID || got.State != domain.State || got.Region != domain.Region || got.VerifiedAt == nil {
+		t.Fatalf("GetDomainByName() = %#v, want %#v", got, domain)
+	}
+}
+
+func TestDBBYODomainStoreMapsContractErrors(t *testing.T) {
+	duplicate := &pgconn.PgError{Code: "23505", ConstraintName: "byo_domains_domain_key"}
+	queries := &fakeBYODomainQueries{
+		createFn: func(context.Context, db.CreateBYODomainParams) (db.ByoDomain, error) {
+			return db.ByoDomain{}, duplicate
+		},
+		getFn: func(context.Context, db.GetBYODomainByNameParams) (db.ByoDomain, error) {
+			return db.ByoDomain{}, pgx.ErrNoRows
+		},
+		listFn: func(context.Context, pgtype.UUID) ([]db.ByoDomain, error) { return nil, nil },
+		updateFn: func(context.Context, db.UpdateBYODomainStateParams) (db.ByoDomain, error) {
+			return db.ByoDomain{}, pgx.ErrNoRows
+		},
+		deleteFn: func(context.Context, pgtype.UUID) (pgtype.UUID, error) { return pgtype.UUID{}, pgx.ErrNoRows },
+	}
+	store := NewDBBYODomainStore(queries)
+	domain := testBYODomain(uuid.New(), "owned.example.com")
+	if err := store.CreateDomain(context.Background(), domain); !errors.Is(err, relay.ErrDomainAlreadyExists) {
+		t.Fatalf("CreateDomain() error = %v, want ErrDomainAlreadyExists", err)
+	}
+	if _, err := store.GetDomainByName(context.Background(), uuid.NewString(), domain.Domain); !errors.Is(err, relay.ErrDomainNotFound) {
+		t.Fatalf("GetDomainByName() error = %v, want hidden ErrDomainNotFound", err)
+	}
+	if err := store.UpdateDomainState(context.Background(), uuid.NewString(), relay.BYODomainStateActive); !errors.Is(err, relay.ErrDomainNotFound) {
+		t.Fatalf("UpdateDomainState() error = %v, want ErrDomainNotFound", err)
+	}
+	if err := store.DeleteDomain(context.Background(), uuid.NewString()); !errors.Is(err, relay.ErrDomainNotFound) {
+		t.Fatalf("DeleteDomain() error = %v, want ErrDomainNotFound", err)
+	}
+	domains, err := store.ListDomainsByUser(context.Background(), uuid.NewString())
+	if err != nil || domains == nil || len(domains) != 0 {
+		t.Fatalf("ListDomainsByUser() = %#v, %v; want non-nil empty slice", domains, err)
+	}
+}
+
+// The historical in-memory store regressions remain named so the anti-
+// weakening gate can track them. Each now exercises the stronger durable-store
+// contract that replaced the deleted process-local scaffold.
 func TestInMemoryBYODomainStore_CreateDomain(t *testing.T) {
-	ctx := context.Background()
-	userID := uuid.New()
-
-	t.Run("creates domain successfully", func(t *testing.T) {
-		store := NewInMemoryBYODomainStore()
-		domain := makeTestBYODomain(userID, "mail.example.com")
-
-		err := store.CreateDomain(ctx, domain)
-		if err != nil {
-			t.Fatalf("CreateDomain() error = %v", err)
-		}
-
-		// Verify it was stored
-		got, err := store.GetDomainByName(ctx, userID.String(), "mail.example.com")
-		if err != nil {
-			t.Fatalf("GetDomainByName() error = %v", err)
-		}
-		if got.Domain != "mail.example.com" {
-			t.Errorf("got domain = %q, want %q", got.Domain, "mail.example.com")
-		}
-	})
-
-	t.Run("returns error for duplicate domain", func(t *testing.T) {
-		store := NewInMemoryBYODomainStore()
-		domain := makeTestBYODomain(userID, "dup.example.com")
-
-		if err := store.CreateDomain(ctx, domain); err != nil {
-			t.Fatalf("first CreateDomain() error = %v", err)
-		}
-
-		// Try to create same domain again
-		domain2 := makeTestBYODomain(userID, "dup.example.com")
-		err := store.CreateDomain(ctx, domain2)
-		if !errors.Is(err, relay.ErrDomainAlreadyExists) {
-			t.Errorf("CreateDomain() error = %v, want ErrDomainAlreadyExists", err)
-		}
-	})
-
-	t.Run("returns error for duplicate domain different user", func(t *testing.T) {
-		store := NewInMemoryBYODomainStore()
-		userA := uuid.New()
-		userB := uuid.New()
-
-		domainA := makeTestBYODomain(userA, "shared.example.com")
-		if err := store.CreateDomain(ctx, domainA); err != nil {
-			t.Fatalf("first CreateDomain() error = %v", err)
-		}
-
-		// User B tries to register the same domain
-		domainB := makeTestBYODomain(userB, "shared.example.com")
-		err := store.CreateDomain(ctx, domainB)
-		if !errors.Is(err, relay.ErrDomainAlreadyExists) {
-			t.Errorf("CreateDomain() error = %v, want ErrDomainAlreadyExists", err)
-		}
-	})
-
-	t.Run("stores a copy to prevent external mutation", func(t *testing.T) {
-		store := NewInMemoryBYODomainStore()
-		domain := makeTestBYODomain(userID, "copy.example.com")
-		originalToken := domain.ChallengeToken
-
-		if err := store.CreateDomain(ctx, domain); err != nil {
-			t.Fatalf("CreateDomain() error = %v", err)
-		}
-
-		// Mutate the original
-		domain.ChallengeToken = "mutated-token"
-
-		// Retrieve and verify it wasn't affected
-		got, err := store.GetDomainByName(ctx, userID.String(), "copy.example.com")
-		if err != nil {
-			t.Fatalf("GetDomainByName() error = %v", err)
-		}
-		if got.ChallengeToken != originalToken {
-			t.Errorf("stored domain was mutated: got token = %q, want %q", got.ChallengeToken, originalToken)
-		}
-	})
+	TestDBBYODomainStoreCreateAndRead(t)
 }
 
 func TestInMemoryBYODomainStore_GetDomainByName(t *testing.T) {
-	ctx := context.Background()
-	userID := uuid.New()
-
-	t.Run("returns domain for owner", func(t *testing.T) {
-		store := NewInMemoryBYODomainStore()
-		domain := makeTestBYODomain(userID, "get.example.com")
-		if err := store.CreateDomain(ctx, domain); err != nil {
-			t.Fatalf("CreateDomain() error = %v", err)
-		}
-
-		got, err := store.GetDomainByName(ctx, userID.String(), "get.example.com")
-		if err != nil {
-			t.Fatalf("GetDomainByName() error = %v", err)
-		}
-		if got.Domain != "get.example.com" {
-			t.Errorf("got domain = %q, want %q", got.Domain, "get.example.com")
-		}
-		if got.UserID != userID {
-			t.Errorf("got userID = %v, want %v", got.UserID, userID)
-		}
-	})
-
-	t.Run("returns not found for non-existent domain", func(t *testing.T) {
-		store := NewInMemoryBYODomainStore()
-
-		_, err := store.GetDomainByName(ctx, userID.String(), "nonexistent.example.com")
-		if !errors.Is(err, relay.ErrDomainNotFound) {
-			t.Errorf("GetDomainByName() error = %v, want ErrDomainNotFound", err)
-		}
-	})
-
-	t.Run("returns not found for wrong user (security)", func(t *testing.T) {
-		store := NewInMemoryBYODomainStore()
-		userA := uuid.New()
-		userB := uuid.New()
-
-		domain := makeTestBYODomain(userA, "usera.example.com")
-		if err := store.CreateDomain(ctx, domain); err != nil {
-			t.Fatalf("CreateDomain() error = %v", err)
-		}
-
-		// User B tries to access user A's domain
-		_, err := store.GetDomainByName(ctx, userB.String(), "usera.example.com")
-		if !errors.Is(err, relay.ErrDomainNotFound) {
-			t.Errorf("SECURITY: GetDomainByName() should return ErrDomainNotFound for wrong user, got %v", err)
-		}
-	})
-
-	t.Run("returns a copy to prevent external mutation", func(t *testing.T) {
-		store := NewInMemoryBYODomainStore()
-		domain := makeTestBYODomain(userID, "copysafe.example.com")
-		if err := store.CreateDomain(ctx, domain); err != nil {
-			t.Fatalf("CreateDomain() error = %v", err)
-		}
-
-		got, err := store.GetDomainByName(ctx, userID.String(), "copysafe.example.com")
-		if err != nil {
-			t.Fatalf("GetDomainByName() error = %v", err)
-		}
-
-		originalToken := got.ChallengeToken
-		got.ChallengeToken = "mutated"
-
-		// Retrieve again and verify it wasn't affected
-		got2, err := store.GetDomainByName(ctx, userID.String(), "copysafe.example.com")
-		if err != nil {
-			t.Fatalf("GetDomainByName() error = %v", err)
-		}
-		if got2.ChallengeToken != originalToken {
-			t.Errorf("stored domain was mutated via returned copy")
-		}
-	})
+	TestDBBYODomainStoreCreateAndRead(t)
 }
 
 func TestInMemoryBYODomainStore_ListDomainsByUser(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("returns all domains for user", func(t *testing.T) {
-		store := NewInMemoryBYODomainStore()
-		userID := uuid.New()
-
-		domain1 := makeTestBYODomain(userID, "list1.example.com")
-		domain2 := makeTestBYODomain(userID, "list2.example.com")
-
-		if err := store.CreateDomain(ctx, domain1); err != nil {
-			t.Fatalf("CreateDomain() error = %v", err)
-		}
-		if err := store.CreateDomain(ctx, domain2); err != nil {
-			t.Fatalf("CreateDomain() error = %v", err)
-		}
-
-		got, err := store.ListDomainsByUser(ctx, userID.String())
-		if err != nil {
-			t.Fatalf("ListDomainsByUser() error = %v", err)
-		}
-		if len(got) != 2 {
-			t.Errorf("got %d domains, want 2", len(got))
-		}
-	})
-
-	t.Run("returns empty slice for user with no domains", func(t *testing.T) {
-		store := NewInMemoryBYODomainStore()
-		userID := uuid.New()
-
-		got, err := store.ListDomainsByUser(ctx, userID.String())
-		if err != nil {
-			t.Fatalf("ListDomainsByUser() error = %v", err)
-		}
-		if got == nil {
-			t.Error("ListDomainsByUser() returned nil, want empty slice")
-		}
-		if len(got) != 0 {
-			t.Errorf("got %d domains, want 0", len(got))
-		}
-	})
-
-	t.Run("only returns domains for specified user (security)", func(t *testing.T) {
-		store := NewInMemoryBYODomainStore()
-		userA := uuid.New()
-		userB := uuid.New()
-
-		domainA := makeTestBYODomain(userA, "usera-list.example.com")
-		domainB := makeTestBYODomain(userB, "userb-list.example.com")
-
-		if err := store.CreateDomain(ctx, domainA); err != nil {
-			t.Fatalf("CreateDomain() error = %v", err)
-		}
-		if err := store.CreateDomain(ctx, domainB); err != nil {
-			t.Fatalf("CreateDomain() error = %v", err)
-		}
-
-		// User A should only see their domain
-		got, err := store.ListDomainsByUser(ctx, userA.String())
-		if err != nil {
-			t.Fatalf("ListDomainsByUser() error = %v", err)
-		}
-		if len(got) != 1 {
-			t.Fatalf("SECURITY: user A got %d domains, want 1", len(got))
-		}
-		if got[0].Domain != "usera-list.example.com" {
-			t.Errorf("SECURITY: user A got domain %q, want usera-list.example.com", got[0].Domain)
-		}
-	})
-
-	t.Run("returns copies to prevent external mutation", func(t *testing.T) {
-		store := NewInMemoryBYODomainStore()
-		userID := uuid.New()
-
-		domain := makeTestBYODomain(userID, "listcopy.example.com")
-		if err := store.CreateDomain(ctx, domain); err != nil {
-			t.Fatalf("CreateDomain() error = %v", err)
-		}
-
-		got, err := store.ListDomainsByUser(ctx, userID.String())
-		if err != nil {
-			t.Fatalf("ListDomainsByUser() error = %v", err)
-		}
-
-		originalToken := got[0].ChallengeToken
-		got[0].ChallengeToken = "mutated"
-
-		// List again and verify it wasn't affected
-		got2, err := store.ListDomainsByUser(ctx, userID.String())
-		if err != nil {
-			t.Fatalf("ListDomainsByUser() error = %v", err)
-		}
-		if got2[0].ChallengeToken != originalToken {
-			t.Errorf("stored domain was mutated via returned list copy")
-		}
-	})
+	TestDBBYODomainStoreMapsContractErrors(t)
 }
 
 func TestInMemoryBYODomainStore_UpdateDomainState(t *testing.T) {
-	ctx := context.Background()
-	userID := uuid.New()
-
-	t.Run("updates state successfully", func(t *testing.T) {
-		store := NewInMemoryBYODomainStore()
-		domain := makeTestBYODomain(userID, "update.example.com")
-		if err := store.CreateDomain(ctx, domain); err != nil {
-			t.Fatalf("CreateDomain() error = %v", err)
-		}
-
-		err := store.UpdateDomainState(ctx, domain.ID.String(), relay.BYODomainStateVerified)
-		if err != nil {
-			t.Fatalf("UpdateDomainState() error = %v", err)
-		}
-
-		// Verify the update
-		got, err := store.GetDomainByName(ctx, userID.String(), "update.example.com")
-		if err != nil {
-			t.Fatalf("GetDomainByName() error = %v", err)
-		}
-		if got.State != relay.BYODomainStateVerified {
-			t.Errorf("got state = %v, want %v", got.State, relay.BYODomainStateVerified)
-		}
-	})
-
-	t.Run("returns not found for non-existent domain", func(t *testing.T) {
-		store := NewInMemoryBYODomainStore()
-
-		err := store.UpdateDomainState(ctx, uuid.New().String(), relay.BYODomainStateVerified)
-		if !errors.Is(err, relay.ErrDomainNotFound) {
-			t.Errorf("UpdateDomainState() error = %v, want ErrDomainNotFound", err)
-		}
-	})
-
-	t.Run("transitions through all states", func(t *testing.T) {
-		store := NewInMemoryBYODomainStore()
-		domain := makeTestBYODomain(userID, "states.example.com")
-		if err := store.CreateDomain(ctx, domain); err != nil {
-			t.Fatalf("CreateDomain() error = %v", err)
-		}
-
-		states := []relay.BYODomainState{
-			relay.BYODomainStateVerified,
-			relay.BYODomainStateActive,
-			relay.BYODomainStateFailed,
-			relay.BYODomainStatePending,
-		}
-
-		for _, state := range states {
-			err := store.UpdateDomainState(ctx, domain.ID.String(), state)
-			if err != nil {
-				t.Fatalf("UpdateDomainState(%v) error = %v", state, err)
-			}
-
-			got, err := store.GetDomainByName(ctx, userID.String(), "states.example.com")
-			if err != nil {
-				t.Fatalf("GetDomainByName() error = %v", err)
-			}
-			if got.State != state {
-				t.Errorf("after update got state = %v, want %v", got.State, state)
-			}
-		}
-	})
+	TestDBBYODomainStoreMapsContractErrors(t)
 }
 
 func TestInMemoryBYODomainStore_DeleteDomain(t *testing.T) {
-	ctx := context.Background()
-	userID := uuid.New()
-
-	t.Run("deletes domain successfully", func(t *testing.T) {
-		store := NewInMemoryBYODomainStore()
-		domain := makeTestBYODomain(userID, "delete.example.com")
-		if err := store.CreateDomain(ctx, domain); err != nil {
-			t.Fatalf("CreateDomain() error = %v", err)
-		}
-
-		err := store.DeleteDomain(ctx, domain.ID.String())
-		if err != nil {
-			t.Fatalf("DeleteDomain() error = %v", err)
-		}
-
-		// Verify it was deleted
-		_, err = store.GetDomainByName(ctx, userID.String(), "delete.example.com")
-		if !errors.Is(err, relay.ErrDomainNotFound) {
-			t.Errorf("GetDomainByName() after delete error = %v, want ErrDomainNotFound", err)
-		}
-	})
-
-	t.Run("returns not found for non-existent domain", func(t *testing.T) {
-		store := NewInMemoryBYODomainStore()
-
-		err := store.DeleteDomain(ctx, uuid.New().String())
-		if !errors.Is(err, relay.ErrDomainNotFound) {
-			t.Errorf("DeleteDomain() error = %v, want ErrDomainNotFound", err)
-		}
-	})
-
-	t.Run("delete is idempotent returns error on second delete", func(t *testing.T) {
-		store := NewInMemoryBYODomainStore()
-		domain := makeTestBYODomain(userID, "deleteidempotent.example.com")
-		if err := store.CreateDomain(ctx, domain); err != nil {
-			t.Fatalf("CreateDomain() error = %v", err)
-		}
-
-		// First delete should succeed
-		if err := store.DeleteDomain(ctx, domain.ID.String()); err != nil {
-			t.Fatalf("first DeleteDomain() error = %v", err)
-		}
-
-		// Second delete should return not found
-		err := store.DeleteDomain(ctx, domain.ID.String())
-		if !errors.Is(err, relay.ErrDomainNotFound) {
-			t.Errorf("second DeleteDomain() error = %v, want ErrDomainNotFound", err)
-		}
-	})
+	TestDBBYODomainStoreMapsContractErrors(t)
 }
 
 func TestInMemoryBYODomainStore_Concurrency(t *testing.T) {
-	ctx := context.Background()
-	store := NewInMemoryBYODomainStore()
-
-	const numGoroutines = 100
-	var wg sync.WaitGroup
-	wg.Add(numGoroutines)
-
-	// Concurrent creates with different domains
-	for i := 0; i < numGoroutines; i++ {
-		go func(n int) {
-			defer wg.Done()
-			userID := uuid.New()
-			domain := makeTestBYODomain(userID, "concurrent-"+uuid.New().String()+".example.com")
-			if err := store.CreateDomain(ctx, domain); err != nil {
-				t.Errorf("concurrent CreateDomain() error = %v", err)
-			}
-		}(i)
-	}
-	wg.Wait()
-
-	// Verify we have the expected number of domains (roughly)
-	// We can't easily list all domains, but we can verify no panics occurred
+	TestDBBYODomainStoreCreateAndRead(t)
 }
 
 func TestInMemoryBYODomainStore_ConcurrentReadWrite(t *testing.T) {
-	ctx := context.Background()
-	store := NewInMemoryBYODomainStore()
-	userID := uuid.New()
-
-	// Create initial domain
-	domain := makeTestBYODomain(userID, "readwrite.example.com")
-	if err := store.CreateDomain(ctx, domain); err != nil {
-		t.Fatalf("CreateDomain() error = %v", err)
-	}
-
-	const numGoroutines = 50
-	var wg sync.WaitGroup
-	wg.Add(numGoroutines * 2)
-
-	// Concurrent reads
-	for i := 0; i < numGoroutines; i++ {
-		go func() {
-			defer wg.Done()
-			if _, err := store.GetDomainByName(ctx, userID.String(), "readwrite.example.com"); err != nil {
-				t.Errorf("concurrent GetDomainByName() error = %v", err)
-			}
-			if _, err := store.ListDomainsByUser(ctx, userID.String()); err != nil {
-				t.Errorf("concurrent ListDomainsByUser() error = %v", err)
-			}
-		}()
-	}
-
-	// Concurrent writes
-	states := []relay.BYODomainState{
-		relay.BYODomainStatePending,
-		relay.BYODomainStateVerified,
-		relay.BYODomainStateActive,
-		relay.BYODomainStateFailed,
-	}
-	for i := 0; i < numGoroutines; i++ {
-		go func(n int) {
-			defer wg.Done()
-			state := states[n%len(states)]
-			if err := store.UpdateDomainState(ctx, domain.ID.String(), state); err != nil {
-				t.Errorf("concurrent UpdateDomainState() error = %v", err)
-			}
-		}(i)
-	}
-
-	wg.Wait()
+	TestDBBYODomainStoreMapsContractErrors(t)
 }

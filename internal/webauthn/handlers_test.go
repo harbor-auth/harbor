@@ -12,8 +12,40 @@ import (
 	gowebauthn "github.com/go-webauthn/webauthn/webauthn"
 )
 
+func TestNewHandler_RejectsMissingRequiredCollaborators(t *testing.T) {
+	svc, err := NewService(testConfig(), NewInMemoryStore(), NewInMemorySessionStore())
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	tests := []struct {
+		name       string
+		service    *Service
+		enrollment EnrollmentSessionStore
+	}{
+		{"service", nil, &fakeEnrollmentSessionStore{}},
+		{"enrollment session store", svc, nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := NewHandler(tt.service, tt.enrollment); err == nil {
+				t.Fatalf("NewHandler accepted a nil %s", tt.name)
+			}
+		})
+	}
+}
+
 // testEnrollKey is an arbitrary enrollment session key value; the fake store
 // ignores the key and returns its configured user handle.
+func mustNewHandler(svc *Service, enrollment EnrollmentSessionStore) *Handler {
+	h, err := NewHandler(svc, enrollment)
+	if err != nil {
+		panic(err)
+	}
+	return h
+}
+
 const testEnrollKey = "test-enroll-key"
 
 // fakeEnrollmentSessionStore is an in-memory enrollment session store for tests.
@@ -52,7 +84,7 @@ func newCeremonyMux(t *testing.T, userHandle []byte) *http.ServeMux {
 // muxForService wires handler routes for svc with an enrollment store resolving
 // to userHandle.
 func muxForService(svc *Service, userHandle []byte) *http.ServeMux {
-	handler := NewHandler(svc).WithEnrollmentSessions(&fakeEnrollmentSessionStore{userHandle: userHandle})
+	handler := mustNewHandler(svc, &fakeEnrollmentSessionStore{userHandle: userHandle})
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(mux)
 	return mux
@@ -109,7 +141,9 @@ func TestHandler_BeginRegistration_UnknownUser(t *testing.T) {
 func TestHandler_UserIDPath_DisabledByDefault(t *testing.T) {
 	svc, _ := newTestService(t)
 	mux := http.NewServeMux()
-	RegisterRoutes(mux, svc) // no enrollment sessions wired
+	if err := RegisterRoutes(mux, svc, &fakeEnrollmentSessionStore{}); err != nil {
+		t.Fatalf("register routes: %v", err)
+	}
 
 	for _, path := range []string{
 		"/webauthn/register/begin",
@@ -157,7 +191,7 @@ func TestHandler_BeginRegistration_MissingUserID(t *testing.T) {
 // returns an error) → 501.
 func TestHandler_ExpiredEnrollmentSession_Returns501(t *testing.T) {
 	svc, _ := newTestService(t)
-	handler := NewHandler(svc).WithEnrollmentSessions(&fakeEnrollmentSessionStore{err: errors.New("expired")})
+	handler := mustNewHandler(svc, &fakeEnrollmentSessionStore{err: errors.New("expired")})
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(mux)
 
@@ -185,7 +219,7 @@ func TestHandler_FinishRegistration_MissingUserID(t *testing.T) {
 // when the enrollment session is expired/invalid → 501.
 func TestHandler_FinishRegistration_InvalidUserIDEncoding(t *testing.T) {
 	svc, _ := newTestService(t)
-	handler := NewHandler(svc).WithEnrollmentSessions(&fakeEnrollmentSessionStore{err: errors.New("session expired")})
+	handler := mustNewHandler(svc, &fakeEnrollmentSessionStore{err: errors.New("session expired")})
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(mux)
 	req := enrollReq(http.MethodPost, "/webauthn/register/finish", strings.NewReader("{}"))
@@ -273,7 +307,7 @@ func TestHandler_EnrollmentSession_ReadsUserHandle(t *testing.T) {
 		t.Fatalf("NewService: %v", err)
 	}
 
-	handler := NewHandler(svc).WithEnrollmentSessions(&fakeEnrollmentSessionStore{userHandle: []byte("enrolled-user")})
+	handler := mustNewHandler(svc, &fakeEnrollmentSessionStore{userHandle: []byte("enrolled-user")})
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(mux)
 
@@ -351,7 +385,7 @@ func TestHandler_BeginLogin_InvalidUserIDEncoding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}
-	handler := NewHandler(svc).WithEnrollmentSessions(&fakeEnrollmentSessionStore{err: errors.New("session expired")})
+	handler := mustNewHandler(svc, &fakeEnrollmentSessionStore{err: errors.New("session expired")})
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(mux)
 	req := enrollReq(http.MethodPost, "/webauthn/login/begin", nil)
@@ -402,7 +436,7 @@ func TestHandler_FinishLogin_MissingUserID(t *testing.T) {
 // enrollment session is expired/invalid → 501.
 func TestHandler_FinishLogin_InvalidUserIDEncoding(t *testing.T) {
 	svc, _ := newTestService(t)
-	handler := NewHandler(svc).WithEnrollmentSessions(&fakeEnrollmentSessionStore{err: errors.New("session expired")})
+	handler := mustNewHandler(svc, &fakeEnrollmentSessionStore{err: errors.New("session expired")})
 	mux := http.NewServeMux()
 	handler.RegisterRoutes(mux)
 	req := enrollReq(http.MethodPost, "/webauthn/login/finish", strings.NewReader("{}"))

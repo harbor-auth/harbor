@@ -46,9 +46,13 @@ func ConnectDB(ctx context.Context, logger *slog.Logger) (*pgxpool.Pool, error) 
 		return nil, fmt.Errorf("pgxpool.ParseConfig: %w", err)
 	}
 
-	cfg.MaxConns = envInt32("DB_MAX_CONNS", defaultMaxConns)
-	cfg.MinConns = envInt32("DB_MIN_CONNS", defaultMinConns)
-	cfg.MaxConnLifetime = envDuration("DB_MAX_CONN_LIFETIME", defaultMaxConnLifetime)
+	settings, err := poolSettingsFromEnv()
+	if err != nil {
+		return nil, fmt.Errorf("database pool configuration: %w", err)
+	}
+	cfg.MaxConns = settings.maxConns
+	cfg.MinConns = settings.minConns
+	cfg.MaxConnLifetime = settings.maxConnLifetime
 
 	logger.Info("connecting to database",
 		"max_conns", cfg.MaxConns,
@@ -68,30 +72,63 @@ func ConnectDB(ctx context.Context, logger *slog.Logger) (*pgxpool.Pool, error) 
 	return pool, nil
 }
 
-// envInt32 reads an environment variable as an int32, returning def on parse
-// error or when the variable is unset.
-func envInt32(key string, def int32) int32 {
+type poolSettings struct {
+	maxConns        int32
+	minConns        int32
+	maxConnLifetime time.Duration
+}
+
+func poolSettingsFromEnv() (poolSettings, error) {
+	maxConns, err := positiveEnvInt32("DB_MAX_CONNS", defaultMaxConns)
+	if err != nil {
+		return poolSettings{}, err
+	}
+	minConns, err := positiveEnvInt32("DB_MIN_CONNS", defaultMinConns)
+	if err != nil {
+		return poolSettings{}, err
+	}
+	if minConns > maxConns {
+		return poolSettings{}, fmt.Errorf("DB_MIN_CONNS (%d) must not exceed DB_MAX_CONNS (%d)", minConns, maxConns)
+	}
+	maxConnLifetime, err := positiveEnvDuration("DB_MAX_CONN_LIFETIME", defaultMaxConnLifetime)
+	if err != nil {
+		return poolSettings{}, err
+	}
+	return poolSettings{
+		maxConns:        maxConns,
+		minConns:        minConns,
+		maxConnLifetime: maxConnLifetime,
+	}, nil
+}
+
+// positiveEnvInt32 reads a positive, int32-bounded environment value.
+func positiveEnvInt32(key string, def int32) (int32, error) {
 	v := os.Getenv(key)
 	if v == "" {
-		return def
+		return def, nil
 	}
 	n, err := strconv.ParseInt(v, 10, 32)
 	if err != nil {
-		return def
+		return 0, fmt.Errorf("%s must be a positive 32-bit integer: %w", key, err)
 	}
-	return int32(n)
+	if n <= 0 {
+		return 0, fmt.Errorf("%s must be positive", key)
+	}
+	return int32(n), nil
 }
 
-// envDuration reads an environment variable as a time.Duration, returning def
-// on parse error or when the variable is unset.
-func envDuration(key string, def time.Duration) time.Duration {
+// positiveEnvDuration reads a positive time.Duration environment value.
+func positiveEnvDuration(key string, def time.Duration) (time.Duration, error) {
 	v := os.Getenv(key)
 	if v == "" {
-		return def
+		return def, nil
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil {
-		return def
+		return 0, fmt.Errorf("%s must be a valid positive duration: %w", key, err)
 	}
-	return d
+	if d <= 0 {
+		return 0, fmt.Errorf("%s must be positive", key)
+	}
+	return d, nil
 }

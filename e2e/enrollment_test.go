@@ -287,7 +287,7 @@ func TestFirstPasskeyPersistsKeyedOffUserID(t *testing.T) {
 
 	ok := registerPasskey(t, client)
 	if !ok {
-		t.Skip("passkey registration ceremony did not complete on this stack — skipping persistence assertions")
+		t.Fatal("passkey registration ceremony did not complete; enrollment must not degrade to 501 or an unwired handler")
 	}
 
 	// A credential must now exist, keyed off the REAL user id (not a client-

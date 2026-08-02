@@ -16,6 +16,9 @@ import (
 	"github.com/harbor-auth/harbor/internal/crypto"
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
 	"github.com/harbor-auth/harbor/internal/oidc"
+
+	bfftest "github.com/harbor-auth/harbor/internal/testsupport/bff"
+	oidctest "github.com/harbor-auth/harbor/internal/testsupport/oidc"
 )
 
 // testLoginURL is the login UI /authorize redirects unauthenticated browsers to
@@ -28,15 +31,15 @@ const testLoginURL = "https://mgmt.harbor.id/login"
 // redirects the browser to the login UI so the passkey ceremony can run first.
 // Returns the test server plus the session store so a test can assert a session
 // was created.
-func newBFFFlowServer(t *testing.T) (*httptest.Server, *bff.InMemoryBFFSessionStore) {
+func newBFFFlowServer(t *testing.T) (*httptest.Server, *bfftest.InMemoryBFFSessionStore) {
 	t.Helper()
-	store := bff.NewInMemoryBFFSessionStore()
+	store := bfftest.NewInMemoryBFFSessionStore()
 	return newBFFFlowServerWithStore(t, store), store
 }
 
 func newBFFFlowServerWithStore(t *testing.T, store bff.BFFSessionStore) *httptest.Server {
 	t.Helper()
-	clients := oidc.NewInMemoryClientRegistry()
+	clients := oidctest.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
 		ID:            testClientID,
 		SectorID:      "localhost", // required for PPID derivation (§3.2)
@@ -47,17 +50,17 @@ func newBFFFlowServerWithStore(t *testing.T, store bff.BFFSessionStore) *httptes
 	if err != nil {
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
-	grants := oidc.NewInMemoryGrantStore()
-	svc := oidc.NewService(oidc.ServiceConfig{
+	grants := oidctest.NewInMemoryGrantStore()
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:  "https://eu.harbor.id",
 		Clients: clients,
-		Codes:   oidc.NewInMemoryAuthCodeStore(),
+		Codes:   oidctest.NewInMemoryAuthCodeStore(),
 		Tokens:  oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Grants:  grants,
 		// The stub resolver would issue a code in the legacy path; with the BFF
 		// store wired below, /authorize must never reach it for an unauthenticated
 		// request — it redirects to login instead.
-		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
+		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
 	// Authenticated-session tests use this fixed user and target completion,
 	// rather than the explicit-consent handoff covered by consent tests.
@@ -318,7 +321,7 @@ func getAuthorizeCompleteWithCookie(t *testing.T, ts *httptest.Server, requestID
 // nonce-gate tests target /authorize/complete with a session that would issue a
 // code IF (and only if) the presented browser nonce matches — isolating the
 // nonce check from the UserID check.
-func seedAuthenticatedSession(t *testing.T, store *bff.InMemoryBFFSessionStore, requestID string) []byte {
+func seedAuthenticatedSession(t *testing.T, store *bfftest.InMemoryBFFSessionStore, requestID string) []byte {
 	t.Helper()
 	nonce, err := bff.NewBrowserNonce()
 	if err != nil {
@@ -504,7 +507,7 @@ func TestAuthorizeComplete_ConcurrentRequestsConsumeSessionOnce(t *testing.T) {
 }
 
 func TestAuthorizeComplete_ConsumeFailureFailsClosed(t *testing.T) {
-	base := bff.NewInMemoryBFFSessionStore()
+	base := bfftest.NewInMemoryBFFSessionStore()
 	const requestID = "consume-store-failure"
 	nonce := seedAuthenticatedSession(t, base, requestID)
 	store := consumeErrorBFFStore{BFFSessionStore: base, err: errors.New("redis unavailable")}

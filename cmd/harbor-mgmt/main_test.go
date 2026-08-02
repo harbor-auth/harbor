@@ -22,23 +22,21 @@ func productionAssembly(t *testing.T) string {
 	}
 	for _, declaration := range file.Decls {
 		fn, ok := declaration.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "runProduction" {
+		if !ok || fn.Name.Name != "run" {
 			continue
 		}
 		start := fset.Position(fn.Body.Pos()).Offset
 		end := fset.Position(fn.Body.End()).Offset
 		return string(source[start:end])
 	}
-	t.Fatal("production startup must be isolated in runProduction so its object graph can be audited")
+	t.Fatal("startup must be isolated in run so its object graph can be audited")
 	return ""
 }
 
 // TestProductionLiveGraphRequiresDurableDependencies is a source-level guard
 // around the composition root. Unit tests for each store are not sufficient:
 // the shipped binary must actually put the durable implementations in its live
-// HTTP graph. The production assembly is deliberately isolated in runProduction
-// so dev/test scaffolds can remain available without becoming reachable in a
-// production process.
+// HTTP graph. The assembly is deliberately isolated in run so it can be audited.
 func TestProductionLiveGraphRequiresDurableDependencies(t *testing.T) {
 	productionAssembly := productionAssembly(t)
 
@@ -48,15 +46,21 @@ func TestProductionLiveGraphRequiresDurableDependencies(t *testing.T) {
 		"mgmtapi.NewRedisEnrollmentSessionStore",
 		"webauthn.NewRedisSessionStore",
 		"webauthn.NewDBStore",
-		"webauthn.NewHandler",
-		"WithEnrollmentSessions",
+		"webauthn.NewHandler(webauthnService, enrollmentSessions)",
+		"mgmtapi.New(enroller, enrollmentSessions, registrationStore",
 		"clients.NewDBUserPersister",
 		"clients.NewDBGrantStore",
 		"clients.NewDBSessionStoreWithPool",
 		"clients.NewDBClientRegistrationStore",
 		"clients.NewDBRecoveryStore",
 		"mfa.NewDBStore",
-		"WithClientRegistration",
+		"clients.NewDBAuditStore",
+		"clients.NewDBDashboardCredentialStore",
+		"relay.NewStore",
+		"WithCompliance",
+		"WithAuditTrail",
+		"WithRelayStore",
+		"dashboardHandler.Routes",
 		"WithRecovery",
 		"WithScopedSessionIssuer",
 		"WithMFA",
@@ -68,6 +72,19 @@ func TestProductionLiveGraphRequiresDurableDependencies(t *testing.T) {
 	}
 }
 
+func TestStartupHasOneDurableGraph(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	assembly := string(source)
+	for _, forbidden := range []string{"internal/testsupport", "HARBOR_DEV_MODE", "runDevelopment", "RuntimeDevelopment", "noopUserPersister", "bootstrapManagementGraph"} {
+		if strings.Contains(assembly, forbidden) {
+			t.Errorf("harbor-mgmt still contains development graph marker %q", forbidden)
+		}
+	}
+}
+
 // TestProductionLiveGraphContainsNoScaffolds prevents a future refactor from
 // satisfying readiness checks while retaining an insecure fallback in the
 // handler that is actually served.
@@ -75,7 +92,13 @@ func TestProductionLiveGraphContainsNoScaffolds(t *testing.T) {
 	productionAssembly := productionAssembly(t)
 
 	for _, forbidden := range []string{
+		"internal/testsupport",
+		"HARBOR_DEV_MODE",
+		"runDevelopment",
+		"bootstrapManagementGraph",
 		"noopUserPersister",
+		"NewPlaceholderIssuer",
+		"NewStubSessionResolver",
 		"NewInMemoryBFFSessionStore",
 		"NewInMemoryStore",
 		"NewInMemorySessionStore",
@@ -103,6 +126,58 @@ func TestProductionStartupValidatesOriginsHostsAndRegistrationURL(t *testing.T) 
 	} {
 		if !strings.Contains(assembly, required) {
 			t.Errorf("production harbor-mgmt startup does not enforce %q", required)
+		}
+	}
+}
+
+func TestStartupRejectsMissingProductionConfigurationBeforeListen(t *testing.T) {
+	startup := productionAssembly(t)
+	listen := strings.Index(startup, "httpserver.Run(")
+	if listen < 0 {
+		t.Fatal("harbor-mgmt startup does not contain the HTTP listen boundary")
+	}
+
+	for name, marker := range map[string]string{
+		"PostgreSQL":                 `production requires DATABASE_URL`,
+		"Redis":                      `production requires REDIS_URL`,
+		"authorize completion URL":   `validateProductionURL("AUTHORIZE_COMPLETE_URL"`,
+		"registration URL":           `validateProductionURL("REGISTRATION_BASE_URL"`,
+		"registration authorization": `production dynamic registration requires INITIAL_ACCESS_TOKEN`,
+		"shared user-DEK KEK":        `HARBOR_KMS_SECRET`,
+	} {
+		check := strings.Index(startup, marker)
+		if check < 0 {
+			t.Errorf("harbor-mgmt startup does not reject missing %s (want %q)", name, marker)
+			continue
+		}
+		if check > listen {
+			t.Errorf("harbor-mgmt checks %s after its HTTP listen boundary", name)
+		}
+	}
+}
+
+func TestValidateProductionURLAllowsOnlyLoopbackHTTP(t *testing.T) {
+	for _, raw := range []string{"http://localhost:8081", "http://127.0.0.1:8081", "http://[::1]:8081", "https://mgmt.example.com"} {
+		if err := validateProductionURL("URL", raw); err != nil {
+			t.Errorf("validateProductionURL(%q) = %v", raw, err)
+		}
+	}
+	for _, raw := range []string{"http://mgmt.example.com", "https://user@mgmt.example.com", "https://mgmt.example.com/#fragment"} {
+		if err := validateProductionURL("URL", raw); err == nil {
+			t.Errorf("validateProductionURL(%q) accepted an insecure URL", raw)
+		}
+	}
+}
+
+func TestValidateProductionHostAllowsWebAuthnLocalhostOnly(t *testing.T) {
+	for _, host := range []string{"localhost", "login.harbor.example.com"} {
+		if err := validateProductionHost("WEBAUTHN_RP_ID", host); err != nil {
+			t.Errorf("validateProductionHost(%q) = %v", host, err)
+		}
+	}
+	for _, host := range []string{"local", "127.0.0.1", "bad/host"} {
+		if err := validateProductionHost("WEBAUTHN_RP_ID", host); err == nil {
+			t.Errorf("validateProductionHost(%q) accepted invalid host", host)
 		}
 	}
 }

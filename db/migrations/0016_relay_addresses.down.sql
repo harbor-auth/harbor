@@ -2,6 +2,8 @@
 SET lock_timeout = '3s';
 SET statement_timeout = '30s';
 
+DROP INDEX IF EXISTS idx_byo_domains_user_id;
+DROP TABLE IF EXISTS byo_domains;
 DROP INDEX IF EXISTS idx_relay_addresses_user_id;
 DROP INDEX IF EXISTS idx_relay_addresses_user_client;
 DROP INDEX IF EXISTS idx_relay_addresses_relay_token;

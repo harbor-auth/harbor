@@ -2,10 +2,9 @@
 // (docs/DESIGN.md §4.1, §8). It serves the dashboard/BFF, enrollment, consent,
 // audit and admin surfaces.
 //
-// Today it exposes the liveness probe, the passkey (WebAuthn) registration and
-// assertion ceremonies, and the user-enrollment endpoint (docs/DESIGN.md §11.1).
-// The ceremony store and session store are in-memory scaffolds; the sqlc-backed
-// stores plug in behind the same interfaces once DATABASE_URL is wired.
+// It exposes the complete durable management graph: enrollment and WebAuthn,
+// dynamic client registration, consent/session management, recovery and MFA,
+// compliance/audit, dashboard, and relay surfaces.
 package main
 
 import (
@@ -21,8 +20,6 @@ import (
 	"syscall"
 	"time"
 
-	awsconfig "github.com/aws/aws-sdk-go-v2/config"
-	awskms "github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/harbor-auth/harbor/internal/bff"
@@ -54,26 +51,20 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	runtimeCfg, err := crypto.LoadRuntimeConfigFromEnv()
-	if err != nil {
-		logger.Error("invalid runtime crypto configuration", "error", err)
-		os.Exit(1)
-	}
-	if runtimeCfg.Mode == crypto.RuntimeDevelopment {
-		logger.Warn("HARBOR_DEV_MODE enabled — using development scaffolds")
-		err = runDevelopment(ctx, logger, runtimeCfg)
-	} else {
-		err = runProduction(ctx, logger, runtimeCfg)
-	}
+	err := run(ctx, logger)
 	if err != nil && ctx.Err() == nil {
 		logger.Error("harbor-mgmt exited", "error", err)
 		os.Exit(1)
 	}
 }
 
-// runProduction is the fail-closed composition root. Every stateful dependency
-// served from this graph is shared by all replicas.
-func runProduction(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.RuntimeConfig) error {
+// run is the fail-closed composition root. Every stateful dependency served
+// from this graph is shared by all replicas.
+func run(ctx context.Context, logger *slog.Logger) error {
+	userDEKKEK := os.Getenv("HARBOR_KMS_SECRET")
+	if userDEKKEK == "" {
+		return errors.New("harbor-mgmt requires HARBOR_KMS_SECRET for the shared user-DEK KEK")
+	}
 	if envBool("RATE_LIMIT_DISABLED") {
 		return errors.New("RATE_LIMIT_DISABLED is not allowed in production")
 	}
@@ -115,15 +106,12 @@ func runProduction(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.R
 		}
 	}()
 
-	kekResolver, err := crypto.NewEnvKEKResolver(runtimeCfg.KMS)
+	// The local provider is the documented crypto-only exception until the HSM
+	// signing-key plan supplies an external backend for user-DEK wrapping.
+	kp, err := crypto.NewLocalKeyProvider(userDEKKEK)
 	if err != nil {
-		return fmt.Errorf("configure KMS key map: %w", err)
+		return fmt.Errorf("configure user-DEK key provider: %w", err)
 	}
-	awsConfig, err := awsconfig.LoadDefaultConfig(ctx)
-	if err != nil {
-		return fmt.Errorf("load KMS client configuration: %w", err)
-	}
-	kp := crypto.NewKMSKeyProvider(crypto.NewAWSKMSClient(awskms.NewFromConfig(awsConfig)), kekResolver)
 
 	q := db.New(pool)
 	bffStore := bff.NewRedisBFFSessionStore(redisClient, bffSessionTTL)
@@ -152,23 +140,68 @@ func runProduction(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.R
 	if err != nil {
 		return fmt.Errorf("configure MFA: %w", err)
 	}
+	userLoader := clients.NewDBComplianceUserLoader(q)
+	auditRecorder := identity.NewAuditRecorder(userLoader, q, kp, crypto.NewCipher(), logger)
+	auditTrailDeps := &mgmtapi.AuditTrailDeps{
+		Store:     clients.NewDBAuditStore(q),
+		Users:     userLoader,
+		Keys:      kp,
+		Decryptor: crypto.NewCipher(),
+	}
+	complianceDeps := &mgmtapi.ComplianceDeps{
+		Bundler: identity.NewExportBundler(q, q, q, q, kp, crypto.NewCipher()),
+		Eraser:  identity.NewEraser(q, q, auditRecorder, logger),
+		Users:   userLoader,
+	}
+	relayStore := relay.NewStore(q, crypto.NewCipher())
+	mtaDomain := getenv("MTA_DOMAIN", "mta.harbor.id")
+	relayDomain := os.Getenv("RELAY_DOMAIN")
+	if relayDomain == "" {
+		return errors.New("harbor-mgmt requires RELAY_DOMAIN")
+	}
+	byoDomainStore := mgmtapi.NewDBBYODomainStore(q)
+	domainVerifier := relay.NewDomainVerifier(relay.NewNetResolver(), mtaDomain, relayDomain)
+	dashboardTemplates, err := web.ParseDashboardTemplates()
+	if err != nil {
+		return fmt.Errorf("parse dashboard templates: %w", err)
+	}
+	dashboardHandler, err := bff.NewDashboardHandler(
+		grantStore,
+		sessionStore,
+		clients.NewDBDashboardCredentialStore(q),
+		auditTrailDeps,
+		&dashboardRelayAdapter{store: relayStore},
+		dashboardTemplates,
+		logger,
+	)
+	if err != nil {
+		return fmt.Errorf("configure dashboard handler: %w", err)
+	}
 
 	initialAccessToken := os.Getenv("INITIAL_ACCESS_TOKEN")
 	if initialAccessToken == "" {
 		return errors.New("production dynamic registration requires INITIAL_ACCESS_TOKEN")
 	}
-	mgmtServer := mgmtapi.New(enroller, logger).
-		WithEnrollmentSessions(enrollmentSessions).
+	mgmtServer, err := mgmtapi.New(enroller, enrollmentSessions, registrationStore, registrationBaseURL, logger)
+	if err != nil {
+		return fmt.Errorf("configure management API: %w", err)
+	}
+	mgmtServer.
 		WithCallerSource(bffCallerAdapter{}).
 		WithConsentStore(grantStore).
 		WithSessionRevoker(sessionStore).
-		WithClientRegistration(registrationStore, registrationBaseURL).
+		WithConsentAuditLog(auditRecorder).
 		WithInitialAccessToken(initialAccessToken).
 		RequireRegistrationAuthorization().
 		WithRecovery(recoveryManager, recoveryStore, recoveryService, recoveryCeremonies).
 		WithScopedSessionIssuer(&recoverySessionIssuer{bffSessions: bffStore, enrollmentSessions: enrollmentSessions}).
 		WithMFA(mfaService).
-		WithMFASessionStamper(bffMFASessionStamper{store: bffStore})
+		WithMFASessionStamper(bffMFASessionStamper{store: bffStore}).
+		WithCompliance(complianceDeps).
+		WithAuditTrail(auditTrailDeps).
+		WithRelayStore(relayStore).
+		WithBYODomainStore(byoDomainStore, domainVerifier, mtaDomain, relayDomain).
+		WithRelayDomain(relayDomain)
 	mfaAbuseProtection := newMgmtLimiter(redisClient, "mfa", 30, time.Minute, logger)
 	recoveryAbuseProtection := newMgmtLimiter(redisClient, "recovery", 20, time.Minute, logger)
 	enrollmentAbuseProtection := newMgmtLimiter(redisClient, "enroll", 10, time.Minute, logger)
@@ -179,440 +212,59 @@ func runProduction(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.R
 	mgmtServer.WithProductionAbuseProtection(registrationAbuseProtection.endpoint, registrationAbuseProtection.limiter)
 
 	mux := httpserver.NewHealthMux()
-	webauthn.NewHandler(webauthnService).WithEnrollmentSessions(enrollmentSessions).RegisterRoutes(mux)
+	webauthnHandler, err := webauthn.NewHandler(webauthnService, enrollmentSessions)
+	if err != nil {
+		return fmt.Errorf("configure WebAuthn handler: %w", err)
+	}
+	webauthnHandler.RegisterRoutes(mux)
 	mgmtServer.Routes(mux)
+	dashboardHandler.Routes(mux)
 	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(webauthnService), bff.DiscoverableUserResolver{}, authorizeCompleteURL)
 	mux.HandleFunc("GET /login", loginHandler.BeginLogin)
 	mux.HandleFunc("POST /login/complete", loginHandler.FinishLogin)
 	handler := bff.Middleware(bffStore)(requireSensitiveManagementStepUp(bff.NewStepUpGate(bffStore, bff.DefaultStepUpTTL), mux))
+	regionName := os.Getenv("REGION")
+	if regionName == "" {
+		return errors.New("harbor-mgmt requires REGION")
+	}
+	reg, err := region.Parse(regionName)
+	if err != nil {
+		return fmt.Errorf("invalid REGION: %w", err)
+	}
+	if err := region.BindIssuerHost(rpOrigins[0], reg); err != nil {
+		return fmt.Errorf("bind WebAuthn origin to REGION: %w", err)
+	}
+	if _, err := region.Resolve(rpOrigins[0]); err != nil {
+		return fmt.Errorf("resolve WebAuthn origin region: %w", err)
+	}
 	handler = mgmtapi.RegionMiddleware(telemetry.New(logger))(handler)
+	if observe, _ := ctx.Value(mgmtGraphObserverKey{}).(func(mgmtGraph)); observe != nil {
+		observe(mgmtGraph{implementations: map[string]string{
+			"bff_sessions":        fmt.Sprintf("%T", bffStore),
+			"enrollment_sessions": fmt.Sprintf("%T", enrollmentSessions),
+			"credentials":         fmt.Sprintf("%T", credentialStore),
+			"ceremony_sessions":   fmt.Sprintf("%T", ceremonySessions),
+			"users":               fmt.Sprintf("%T", persister),
+			"grants":              fmt.Sprintf("%T", grantStore),
+			"sessions":            fmt.Sprintf("%T", sessionStore),
+			"registration":        fmt.Sprintf("%T", registrationStore),
+			"byo_domains":         fmt.Sprintf("%T", byoDomainStore),
+		}})
+	}
 	return httpserver.Run(ctx, ":"+getenv("PORT", "8081"), handler, logger)
 }
 
-func runDevelopment(ctx context.Context, logger *slog.Logger, runtimeCfg crypto.RuntimeConfig) error {
-	// Development retains the legacy explicit cleanup calls; cancellation is
-	// owned by main's signal context.
-	stop := func() {}
-
-	// DB-backed stores plug in when DATABASE_URL is configured; otherwise we run
-	// on in-memory dev scaffolds (docs/DESIGN.md §10).
-	pool, err := clients.ConnectDB(ctx, logger)
-	if err != nil {
-		if ctx.Err() != nil {
-			// SIGINT/SIGTERM arrived during startup (before the server bound).
-			// This is a clean shutdown, not a crash — exit 0 so process managers
-			// (systemd, k8s) don't restart the process.
-			logger.Info("startup cancelled by signal — exiting cleanly", "error", err)
-			stop()
-			os.Exit(0)
-		}
-		logger.Error("database connection failed", "error", err)
-		stop()
-		os.Exit(1)
-	}
-	if pool != nil {
-		defer pool.Close()
-	}
-
-	// BFF session store: Redis for multi-replica safety when REDIS_URL is set,
-	// otherwise an in-memory dev scaffold (docs/plans/bff-session-middleware.md).
-	// A configured-but-unreachable Redis is fatal — mirrors the ConnectDB guard
-	// so a prod misconfiguration surfaces at startup rather than silently
-	// falling back to a store that isn't shared across replicas.
-	redisClient, err := clients.ConnectRedis(ctx, logger)
-	if err != nil {
-		if ctx.Err() != nil {
-			logger.Info("startup cancelled by signal — exiting cleanly", "error", err)
-			stop()
-			if pool != nil {
-				pool.Close()
-			}
-			os.Exit(0)
-		}
-		logger.Error("redis connection failed", "error", err)
-		stop()
-		if pool != nil {
-			pool.Close()
-		}
-		os.Exit(1) //nolint:gocritic // pool already closed above
-	}
-	if redisClient != nil {
-		defer func() {
-			if err := redisClient.Close(); err != nil {
-				logger.Warn("redis close error", "error", err)
-			}
-		}()
-	}
-
-	var bffStore bff.BFFSessionStore
-	if redisClient != nil {
-		bffStore = bff.NewRedisBFFSessionStore(redisClient, bffSessionTTL)
-	} else {
-		logger.Warn("REDIS_URL not set — using in-memory BFF session store (dev only; not shared across replicas)")
-		bffStore = bff.NewInMemoryBFFSessionStore()
-	}
-
-	port := getenv("PORT", "8081")
-
-	// Relying Party config (docs/DESIGN.md §3.1). RP ID is the effective domain
-	// (no scheme/port); origins are the fully-qualified sites permitted to run
-	// ceremonies. Defaults target local dev.
-	rpID := getenv("WEBAUTHN_RP_ID", "localhost")
-	rpDisplayName := getenv("WEBAUTHN_RP_DISPLAY_NAME", "Harbor")
-	rpOrigins := splitAndTrim(getenv("WEBAUTHN_RP_ORIGINS", "http://localhost:"+port))
-
-	// Credential store: DB-backed when DATABASE_URL is configured, in-memory for
-	// dev (see docs/plans/user-enrollment.md). WithPool enables atomic
-	// first-passkey enrollment (credential insert + pending→active flip in one tx).
-	var store webauthn.Store
-	if pool != nil {
-		store = webauthn.NewDBStore(db.New(pool)).WithPool(pool)
-		logger.Info("webauthn store: using DB-backed store")
-	} else {
-		logger.Warn("DATABASE_URL not set — using in-memory WebAuthn store (dev only; credentials lost on restart)")
-		store = webauthn.NewInMemoryStore()
-	}
-	// WebAuthn session store: Redis for multi-replica safety when REDIS_URL is set,
-	// otherwise an in-memory dev scaffold (docs/plans/webauthn-session-store.md).
-	var sessions webauthn.SessionStore
-	if redisClient != nil {
-		sessions = webauthn.NewRedisSessionStore(redisClient, bffSessionTTL)
-	} else {
-		logger.Warn("REDIS_URL not set — using in-memory WebAuthn session store (dev only; not shared across replicas)")
-		sessions = webauthn.NewInMemorySessionStore()
-	}
-	var enrollmentSessions mgmtapi.EnrollmentSessionStore
-	if redisClient != nil {
-		enrollmentSessions = mgmtapi.NewRedisEnrollmentSessionStore(redisClient)
-	} else {
-		enrollmentSessions = mgmtapi.NewInMemoryEnrollmentSessionStore()
-	}
-
-	svc, err := webauthn.NewService(webauthn.Config{
-		RPID:          rpID,
-		RPDisplayName: rpDisplayName,
-		RPOrigins:     rpOrigins,
-	}, store, sessions)
-	if err != nil {
-		logger.Error("failed to configure webauthn service", "error", err)
-		// os.Exit skips deferred functions, so release resources explicitly.
-		// We call stop() first (cancels the context), then pool.Close() —
-		// the opposite of what LIFO defer order would produce (pool first, then
-		// stop). pgxpool handles a pre-cancelled context gracefully. pool may be
-		// nil when DATABASE_URL is not set.
-		stop()
-		if pool != nil {
-			pool.Close()
-		}
-		if redisClient != nil {
-			if err := redisClient.Close(); err != nil {
-				logger.Warn("redis close error on exit", "error", err)
-			}
-		}
-		os.Exit(1)
-	}
-
-	// Local crypto is available only in the explicitly selected development
-	// graph and requires caller-supplied key material. Production uses the same
-	// regional KMS map as harbor-hot (docs/DESIGN.md §7.3).
-	kp, err := crypto.NewLocalKeyProvider(runtimeCfg.DevKeySecret)
-	if err != nil {
-		logger.Error("failed to create key provider", "error", err)
-		// os.Exit skips deferred functions, so release resources explicitly.
-		stop()
-		if pool != nil {
-			pool.Close()
-		}
-		if redisClient != nil {
-			if err := redisClient.Close(); err != nil {
-				logger.Warn("redis close error on exit", "error", err)
-			}
-		}
-		os.Exit(1)
-	}
-
-	// PersistUser target: a real sqlc-backed UserPersister when DATABASE_URL is
-	// configured, otherwise the no-op scaffold that drops enrollments (dev only;
-	// docs/DESIGN.md §10).
-	var persister identity.UserPersister
-	if pool != nil {
-		persister = clients.NewDBUserPersister(db.New(pool))
-	} else {
-		logger.Warn("DATABASE_URL not set — enrollments will not be persisted (dev mode)")
-		persister = &noopUserPersister{logger: logger}
-	}
-	enroller := identity.NewEnroller(kp, crypto.NewCipher(), persister)
-	// Consent store for mgmtapi consent grant endpoints.
-	var consentStore mgmtapi.ConsentStore
-	var sessionRevoker mgmtapi.SessionRevoker
-	if pool != nil {
-		q := db.New(pool)
-		consentStore = clients.NewDBGrantStore(q)
-		sessionRevoker = clients.NewDBSessionStore(q)
-	}
-
-	// MFA (TOTP second factor + recovery codes) is wired only when DATABASE_URL
-	// is configured: the envelope-encrypted factors and per-user DEKs require the
-	// DB and the KMS-backed key provider (docs/DESIGN.md §7.3). Without a DB the
-	// /mfa/* routes stay in a 503 state (mgmtapi.Server.WithMFA(nil)).
-	var mfaService mgmtapi.MFAService
-	if pool != nil {
-		q := db.New(pool)
-		svc, err := mfa.NewService(mfa.ServiceConfig{
-			Store:  mfa.NewDBStore(q),
-			Cipher: crypto.NewCipher(),
-			Keys:   clients.NewDBMFAKeyResolver(q, kp),
-		})
-		if err != nil {
-			logger.Error("failed to configure MFA service", "error", err)
-			stop()
-			pool.Close()
-			if redisClient != nil {
-				if err := redisClient.Close(); err != nil {
-					logger.Warn("redis close error on exit", "error", err)
-				}
-			}
-			os.Exit(1)
-		}
-		mfaService = svc
-	} else {
-		logger.Warn("DATABASE_URL not set — MFA endpoints will return 503 (dev mode)")
-	}
-
-	// Compliance (DSAR export + erase) endpoints. Only wired when DATABASE_URL is
-	// configured; without a DB the bundle assembly and crypto-shred are impossible.
-	var complianceDeps *mgmtapi.ComplianceDeps
-	if pool != nil {
-		q := db.New(pool)
-		userLoader := clients.NewDBComplianceUserLoader(q)
-		auditRecorder := identity.NewAuditRecorder(userLoader, q, kp, crypto.NewCipher(), logger)
-		bundler := identity.NewExportBundler(q, q, q, q, kp, crypto.NewCipher())
-		eraser := identity.NewEraser(q, q, auditRecorder, logger)
-		complianceDeps = &mgmtapi.ComplianceDeps{
-			Bundler: bundler,
-			Eraser:  eraser,
-			Users:   userLoader,
-		}
-		logger.Info("compliance service: export and erase endpoints enabled")
-	} else {
-		logger.Warn("DATABASE_URL not set -- compliance endpoints will return 503 (dev mode)")
-	}
-
-	// Audit trail read-path (GET /audit-events + BFF GET /profile/audit-events).
-	// Only wired when DATABASE_URL is configured; without a DB both endpoints
-	// return 503 Service Unavailable (fail-closed).
-	var auditTrailDeps *mgmtapi.AuditTrailDeps
-	if pool != nil {
-		q := db.New(pool)
-		auditTrailDeps = &mgmtapi.AuditTrailDeps{
-			Store:     clients.NewDBAuditStore(q),
-			Users:     clients.NewDBComplianceUserLoader(q),
-			Keys:      kp,
-			Decryptor: crypto.NewCipher(),
-		}
-		logger.Info("audit trail: read endpoints enabled")
-	} else {
-		logger.Warn("DATABASE_URL not set -- audit trail endpoints will return 503 (dev mode)")
-	}
-
-	mgmtServer := mgmtapi.New(enroller, logger).
-		WithEnrollmentSessions(enrollmentSessions).
-		WithCallerSource(bffCallerAdapter{}).
-		WithConsentStore(consentStore).
-		WithSessionRevoker(sessionRevoker).
-		WithMFA(mfaService).
-		WithCompliance(complianceDeps).
-		WithAuditTrail(auditTrailDeps)
-	mgmtServer.WithMFASessionStamper(bffMFASessionStamper{store: bffStore})
-
-	// Relay store for /relay-addresses endpoints. Only wire when DATABASE_URL is
-	// configured; otherwise the relay endpoints stay in a 503 Service Unavailable
-	// state (fail-closed — the mint path needs the cipher and a real DB).
-	var rawRelayStore *relay.Store
-	if pool != nil {
-		rawRelayStore = relay.NewStore(db.New(pool), crypto.NewCipher())
-		mgmtServer.WithRelayStore(rawRelayStore)
-		logger.Info("relay store: using DB-backed store")
-	} else {
-		logger.Warn("DATABASE_URL not set — relay endpoints will return 503 (dev mode)")
-	}
-	// BYO-domain store and verifier for /byo-domains endpoints. The store is
-	// always in-memory (DB persistence is a follow-up); the verifier uses the
-	// system DNS resolver and regional MTA/relay domain configuration.
-	mtaDomain := getenv("MTA_DOMAIN", "mta.harbor.id")
-	relayDomain := getenv("RELAY_DOMAIN", "relay.harbor.id")
-	byoDomainStore := mgmtapi.NewInMemoryBYODomainStore()
-	domainVerifier := relay.NewDomainVerifier(relay.NewNetResolver(), mtaDomain, relayDomain)
-	mgmtServer.WithBYODomainStore(byoDomainStore, domainVerifier, mtaDomain, relayDomain)
-	logger.Info("byo-domain store: using in-memory store (dev scaffold)", "mta_domain", mtaDomain, "relay_domain", relayDomain)
-
-	// Dashboard templates are embedded at compile time; a parse failure is fatal.
-	dashTmpl, err := web.ParseDashboardTemplates()
-	if err != nil {
-		logger.Error("failed to parse dashboard templates", "error", err)
-		stop()
-		if pool != nil {
-			pool.Close()
-		}
-		if redisClient != nil {
-			if err := redisClient.Close(); err != nil {
-				logger.Warn("redis close error on exit", "error", err)
-			}
-		}
-		os.Exit(1)
-	}
-
-	// Dashboard handler: composes shipped stores (consent, sessions, credentials,
-	// relay). All deps are nil-safe -- absent deps render gracefully, not 503.
-	var dashConsentStore bff.DashboardConsentStore
-	var dashSessionStore bff.DashboardSessionStore
-	var dashCredStore clients.DashboardCredentialStore
-	var dashRelayStore bff.DashboardRelayStore
-	if pool != nil {
-		q := db.New(pool)
-		dashConsentStore = clients.NewDBGrantStore(q)
-		dashSessionStore = clients.NewDBSessionStore(q)
-		dashCredStore = clients.NewDBDashboardCredentialStore(q)
-		if rawRelayStore != nil {
-			dashRelayStore = &dashboardRelayAdapter{store: rawRelayStore}
-		}
-	}
-	dashHandler := bff.NewDashboardHandler(
-		dashConsentStore,
-		dashSessionStore,
-		dashCredStore,
-		auditTrailDeps,
-		dashRelayStore,
-		dashTmpl,
-		logger,
-	)
-
-	mux := httpserver.NewHealthMux()
-	webauthn.NewHandler(svc).WithEnrollmentSessions(enrollmentSessions).RegisterRoutes(mux)
-	mgmtServer.Routes(mux)
-	dashHandler.Routes(mux)
-
-	// BFF login endpoints (docs/plans/bff-session-middleware.md §11.2 step 2).
-	// /login initiates the passkey assertion bound to a BFF session; /login/complete
-	// finishes it, writes the authenticated user_id to the session, and redirects
-	// back to harbor-hot/authorize/complete.
-	//
-	// AUTHORIZE_COMPLETE_URL must be the absolute URL of the /authorize/complete
-	// endpoint on harbor-hot (M2 fix: the relative path resolves against the
-	// harbor-mgmt origin and 404s — the absolute URL is required).
-	authorizeCompleteURL := os.Getenv("AUTHORIZE_COMPLETE_URL")
-	if authorizeCompleteURL == "" {
-		if pool != nil {
-			// A real DB is wired — this is a production deployment. Refusing to
-			// start without AUTHORIZE_COMPLETE_URL prevents the M2 bug from
-			// silently 404ing at the last step of every login.
-			logger.Error("AUTHORIZE_COMPLETE_URL must be set when DATABASE_URL is configured — refusing to start")
-			stop()
-			pool.Close()
-			if redisClient != nil {
-				if err := redisClient.Close(); err != nil {
-					logger.Warn("redis close error on exit", "error", err)
-				}
-			}
-			os.Exit(1)
-		}
-		// Dev/test mode: fall back to a relative path so the integration tests
-		// and local dev work without extra env config.
-		logger.Warn("AUTHORIZE_COMPLETE_URL not set — using relative /authorize/complete fallback (dev only; will 404 in production)")
-		authorizeCompleteURL = "/authorize/complete"
-	}
-	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(svc), bff.DiscoverableUserResolver{}, authorizeCompleteURL)
-	mux.HandleFunc("GET /login", loginHandler.BeginLogin)
-	mux.HandleFunc("POST /login/complete", loginHandler.FinishLogin)
-
-	// Wrap the mux with the BFF middleware so downstream handlers can read the
-	// authenticated user from the BFF session context (via bff.UserIDFromContext).
-	// The middleware is non-rejecting: it only populates context when a valid
-	// authenticated session cookie is present.
-	handler := bff.Middleware(bffStore)(requireSensitiveManagementStepUp(bff.NewStepUpGate(bffStore, bff.DefaultStepUpTTL), mux))
-
-	// Bind this instance's public RP origin host to its REGION (same rationale as
-	// harbor-hot): the region middleware fail-closed rejects any Host it cannot
-	// resolve, so a single-region/dev deployment MUST declare REGION for its own
-	// origin host to resolve. Binding is add-only and conflict-rejecting, and the
-	// boot invariant refuses to serve a surface that rejects its own origin.
-	if raw := os.Getenv("REGION"); raw != "" {
-		// A set REGION with no origin to anchor it to would be silently dropped —
-		// exactly the silent-misconfig footgun the rest of this fail-closed design
-		// fights. Refuse to boot loudly instead.
-		if len(rpOrigins) == 0 {
-			logger.Error("REGION set but no WEBAUTHN_RP_ORIGINS to anchor it to — refusing to boot", "region", raw)
-			os.Exit(1)
-		}
-		reg, err := region.Parse(raw)
-		if err != nil {
-			logger.Error("invalid REGION — refusing to boot", "region", raw, "error", err)
-			os.Exit(1)
-		}
-		if err := region.BindIssuerHost(rpOrigins[0], reg); err != nil {
-			logger.Error("failed to bind RP origin host to REGION — refusing to boot", "origin", rpOrigins[0], "region", reg, "error", err)
-			os.Exit(1)
-		}
-	}
-	if len(rpOrigins) > 0 {
-		if _, err := region.Resolve(rpOrigins[0]); err != nil {
-			logger.Error("RP origin host does not resolve to a region — refusing to boot; set REGION for single-region/dev deployments", "origin", rpOrigins[0], "error", err)
-			os.Exit(1)
-		}
-	}
-
-	// Region-pinning middleware is the OUTERMOST layer so EVERY request has a
-	// resolved, pinned region on its context before any user-data handler runs
-	// (docs/DESIGN.md §5; OpenSpec regional-data-residency-routing REQ-001,
-	// REQ-002). Resolution is total and fail-closed: a request whose Host does
-	// not map to a known region is rejected here with a defined 400 (and metered
-	// PII-free) before it can reach a handler — never defaulted to a region.
-	handler = mgmtapi.RegionMiddleware(telemetry.New(logger))(handler)
-
-	logger.Info("starting harbor-mgmt", "port", port, "rp_id", rpID)
-	if err := httpserver.Run(ctx, ":"+port, handler, logger); err != nil {
-		if ctx.Err() != nil {
-			// Signal arrived while the server was running — httpserver.Run returned
-			// a non-nil error coincident with context cancellation. Treat as a clean
-			// shutdown so process managers don't restart the process.
-			logger.Info("server stopped by signal — exiting cleanly", "error", err)
-			stop()
-			if pool != nil {
-				pool.Close()
-			}
-			if redisClient != nil {
-				if err := redisClient.Close(); err != nil {
-					logger.Warn("redis close error on exit", "error", err)
-				}
-			}
-			os.Exit(0)
-		}
-		logger.Error("harbor-mgmt exited with error", "error", err)
-		// os.Exit skips deferred functions, so release resources explicitly.
-		stop()
-		if pool != nil {
-			pool.Close()
-		}
-		if redisClient != nil {
-			if err := redisClient.Close(); err != nil {
-				logger.Warn("redis close error on exit", "error", err)
-			}
-		}
-		os.Exit(1)
-	}
-	return nil
+type mgmtGraph struct {
+	implementations map[string]string
 }
 
-// noopUserPersister drops enrollments. Replace with a sqlc-backed
-// implementation once DATABASE_URL is wired (docs/plans/user-enrollment.md).
-type noopUserPersister struct {
-	logger *slog.Logger
-}
+type mgmtGraphObserverKey struct{}
 
-func (p *noopUserPersister) PersistUser(_ context.Context, r identity.UserRecord) error {
-	p.logger.Warn("enrollment scaffold: PersistUser is a no-op (DATABASE_URL not wired)",
-		"region", r.Region)
-	return nil
+// runWithGraphObserver invokes the unchanged production composition root with
+// a read-only integration-test observation point. The observer cannot replace
+// dependencies or alter the served handler.
+func runWithGraphObserver(ctx context.Context, logger *slog.Logger, observe func(mgmtGraph)) error {
+	return run(context.WithValue(ctx, mgmtGraphObserverKey{}, observe), logger)
 }
 
 // dashboardRelayAdapter bridges *relay.Store (which returns raw encrypted
@@ -697,8 +349,10 @@ func validateProductionURL(name, raw string) error {
 	if err != nil {
 		return fmt.Errorf("invalid %s: %w", name, err)
 	}
-	if u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
-		return fmt.Errorf("invalid %s: production requires an absolute credential-free HTTPS URL", name)
+	hostIP := net.ParseIP(u.Hostname())
+	loopbackHTTP := u.Scheme == "http" && (u.Hostname() == "localhost" || (hostIP != nil && hostIP.IsLoopback()))
+	if (u.Scheme != "https" && !loopbackHTTP) || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+		return fmt.Errorf("invalid %s: requires an absolute credential-free HTTPS URL (HTTP is limited to loopback integration endpoints)", name)
 	}
 	return nil
 }
@@ -726,6 +380,9 @@ func validateProductionOrigins(origins []string, rpID string) error {
 }
 
 func validateProductionHost(name, host string) error {
+	if host == "localhost" {
+		return nil
+	}
 	if host == "" || strings.ContainsAny(host, "/:@?#") || net.ParseIP(host) != nil || !strings.Contains(host, ".") {
 		return fmt.Errorf("invalid %s: production requires a DNS hostname", name)
 	}

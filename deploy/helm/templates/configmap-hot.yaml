@@ -12,8 +12,9 @@ data:
   # ISSUER anchors the OIDC discovery document. MUST be the public HTTPS URL
   # clients reach (matches the Ingress host).
   ISSUER: {{ .Values.hot.issuer | quote }}
+  # Browser entry point served by harbor-mgmt on the same public origin.
+  LOGIN_URL: {{ required "hot.loginURL is required in production" .Values.hot.loginURL | quote }}
   # REGION binds the issuer host to a region so the fail-closed region
   # middleware resolves /authorize and /token (docs/DESIGN.md §5).
   REGION: {{ .Values.region | default "EU" | quote }}
-  HARBOR_DEV_MODE: "false"
   KMS_KEY_MAP: {{ required "kmsKeyMap is required in production" .Values.kmsKeyMap | quote }}

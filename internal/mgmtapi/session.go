@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
-	"sync"
 	"time"
 )
 
@@ -44,57 +43,4 @@ func NewEnrollmentSessionKey() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
-}
-
-// enrollmentEntry is a stored user handle plus its expiry.
-type enrollmentEntry struct {
-	userHandle []byte
-	expires    time.Time
-}
-
-// InMemoryEnrollmentSessionStore is a development/testing EnrollmentSessionStore.
-// Production wiring should use a shared, short-TTL store (e.g. Redis) so the
-// enrollment→registration handoff works across replicas (docs/DESIGN.md §4.4).
-type InMemoryEnrollmentSessionStore struct {
-	mu       sync.Mutex
-	sessions map[string]enrollmentEntry
-	ttl      time.Duration
-	now      func() time.Time
-}
-
-// NewInMemoryEnrollmentSessionStore returns a store whose entries expire after a
-// short TTL — the enrollment→passkey handoff is expected within minutes.
-func NewInMemoryEnrollmentSessionStore() *InMemoryEnrollmentSessionStore {
-	return &InMemoryEnrollmentSessionStore{
-		sessions: make(map[string]enrollmentEntry),
-		ttl:      enrollmentSessionTTL,
-		now:      time.Now,
-	}
-}
-
-// Save implements EnrollmentSessionStore.
-func (s *InMemoryEnrollmentSessionStore) Save(_ context.Context, key string, userHandle []byte) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// Copy so a later mutation of the caller's slice can't change stored state.
-	h := make([]byte, len(userHandle))
-	copy(h, userHandle)
-	s.sessions[key] = enrollmentEntry{userHandle: h, expires: s.now().Add(s.ttl)}
-	return nil
-}
-
-// UserHandle implements EnrollmentSessionStore, treating an expired entry as
-// absent (and evicting it).
-func (s *InMemoryEnrollmentSessionStore) UserHandle(_ context.Context, key string) ([]byte, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	entry, ok := s.sessions[key]
-	if !ok {
-		return nil, ErrEnrollmentSessionNotFound
-	}
-	if s.now().After(entry.expires) {
-		delete(s.sessions, key)
-		return nil, ErrEnrollmentSessionNotFound
-	}
-	return entry.userHandle, nil
 }

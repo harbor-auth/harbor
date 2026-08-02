@@ -23,6 +23,7 @@ type object map[string]any
 func TestRawSecurityContract(t *testing.T) {
 	objects := loadFiles(t, filepath.Join("..", "k8s", "*.yaml"))
 	assertWorkloadContract(t, "raw", objects)
+	assertRuntimeConfigurationContract(t, objects, true)
 }
 
 func TestHelmSecurityContract(t *testing.T) {
@@ -47,6 +48,9 @@ func TestHelmSecurityContract(t *testing.T) {
 		objects = append(objects, decode(t, document)...)
 	}
 	assertWorkloadContract(t, "helm", objects)
+	// The chart defaults intentionally leave deployer-owned credentials empty,
+	// but the rendered Secret must expose every exact runtime key.
+	assertRuntimeConfigurationContract(t, objects, false)
 	assertEnvNameParity(t, loadFiles(t, filepath.Join("..", "k8s", "*.yaml")), objects)
 }
 
@@ -66,6 +70,33 @@ func assertHelmSourceSecurityContract(t *testing.T) {
 		}
 		if !bytes.Contains(data, []byte(`required "`)) || !bytes.Contains(data, []byte(`image.digest`)) {
 			t.Errorf("%s does not fail closed when its immutable image digest is absent", template)
+		}
+	}
+
+	configContract := map[string][]string{
+		"configmap-hot.yaml": {
+			`LOGIN_URL: {{ required "hot.loginURL is required in production" .Values.hot.loginURL`,
+			`REGION: {{ .Values.region`,
+		},
+		"configmap-mgmt.yaml": {
+			`REGISTRATION_BASE_URL: {{ required "mgmt.registrationBaseURL is required in production" .Values.mgmt.registrationBaseURL`,
+			`WEBAUTHN_RP_DISPLAY_NAME:`,
+			`WEBAUTHN_RP_ORIGINS:`,
+			`REGION: {{ .Values.region`,
+		},
+	}
+	for template, required := range configContract {
+		data, readErr := os.ReadFile(filepath.Join("..", "helm", "templates", template))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		for _, fragment := range required {
+			if !bytes.Contains(data, []byte(fragment)) {
+				t.Errorf("%s is missing required runtime contract %q", template, fragment)
+			}
+		}
+		if bytes.Contains(data, []byte("HARBOR_DEV_MODE")) {
+			t.Errorf("%s still emits obsolete HARBOR_DEV_MODE", template)
 		}
 	}
 }
@@ -118,13 +149,10 @@ func assertWorkloadContract(t *testing.T, variant string, objects []object) {
 
 			config := find(t, objects, "ConfigMap", component+"-config")
 			configData := pathMap(t, config, "data")
-			for _, key := range []string{"REGION", "KMS_KEY_MAP", "HARBOR_DEV_MODE"} {
+			for _, key := range []string{"REGION", "KMS_KEY_MAP"} {
 				if strings.TrimSpace(fmt.Sprint(value(t, configData, key))) == "" {
 					t.Errorf("required config %s missing", key)
 				}
-			}
-			if fmt.Sprint(value(t, configData, "HARBOR_DEV_MODE")) != "false" {
-				t.Error("production manifest must explicitly disable development mode")
 			}
 
 			secret := find(t, objects, "Secret", component+"-secrets")
@@ -134,9 +162,9 @@ func assertWorkloadContract(t *testing.T, variant string, objects []object) {
 					t.Errorf("required secret %s missing", key)
 				}
 			}
-			for _, forbidden := range []string{"KEK_SECRET", "HARBOR_KEK_SECRET", "HARBOR_KMS_SECRET"} {
+			for _, forbidden := range []string{"KEK_SECRET", "HARBOR_KEK_SECRET"} {
 				if _, ok := secretData[forbidden]; ok {
-					t.Errorf("development-only local crypto secret %s is reachable", forbidden)
+					t.Errorf("obsolete crypto secret %s is reachable", forbidden)
 				}
 			}
 
@@ -154,6 +182,80 @@ func assertWorkloadContract(t *testing.T, variant string, objects []object) {
 			}
 		})
 	}
+}
+
+func assertRuntimeConfigurationContract(t *testing.T, objects []object, requireSecretValues bool) {
+	t.Helper()
+	requiredConfig := map[string][]string{
+		"harbor-hot":  {"ISSUER", "LOGIN_URL", "REGION"},
+		"harbor-mgmt": {"AUTHORIZE_COMPLETE_URL", "REGISTRATION_BASE_URL", "REGION", "WEBAUTHN_RP_DISPLAY_NAME", "WEBAUTHN_RP_ID", "WEBAUTHN_RP_ORIGINS"},
+	}
+	requiredSecrets := map[string][]string{
+		"harbor-hot":  {"DATABASE_URL", "HARBOR_KMS_SECRET", "REDIS_URL"},
+		"harbor-mgmt": {"DATABASE_URL", "HARBOR_KMS_SECRET", "INITIAL_ACCESS_TOKEN", "REDIS_URL"},
+	}
+
+	for _, component := range []string{"harbor-hot", "harbor-mgmt"} {
+		config := pathMap(t, find(t, objects, "ConfigMap", component+"-config"), "data")
+		secret := pathMap(t, find(t, objects, "Secret", component+"-secrets"), "stringData")
+		for _, key := range requiredConfig[component] {
+			if strings.TrimSpace(fmt.Sprint(value(t, config, key))) == "" {
+				t.Errorf("%s required config %s is empty", component, key)
+			}
+		}
+		for _, key := range requiredSecrets[component] {
+			secretValue, ok := secret[key]
+			if !ok {
+				t.Errorf("%s required secret %s is missing", component, key)
+				continue
+			}
+			if requireSecretValues && strings.TrimSpace(fmt.Sprint(secretValue)) == "" {
+				t.Errorf("%s required secret %s is empty", component, key)
+			}
+		}
+
+		deployment := find(t, objects, "Deployment", component)
+		container := named(t, pathSlice(t, pathMap(t, deployment, "spec", "template", "spec"), "containers"), component)
+		envFrom := referencedEnvSources(t, container)
+		for _, name := range []string{component + "-config", component + "-secrets"} {
+			if !envFrom[name] {
+				t.Errorf("%s does not project %s", component, name)
+			}
+		}
+
+		for _, legacy := range []string{"HARBOR_DEV_MODE", "HARBOR_KEK_SECRET", "WEBAUTHN_ORIGIN", "WEBAUTHN_RP_NAME"} {
+			if _, ok := config[legacy]; ok {
+				t.Errorf("%s config still exposes obsolete %s", component, legacy)
+			}
+			if _, ok := secret[legacy]; ok {
+				t.Errorf("%s secret still exposes obsolete %s", component, legacy)
+			}
+		}
+	}
+
+	hotSecret := pathMap(t, find(t, objects, "Secret", "harbor-hot-secrets"), "stringData")
+	mgmtSecret := pathMap(t, find(t, objects, "Secret", "harbor-mgmt-secrets"), "stringData")
+	if hotSecret["HARBOR_KMS_SECRET"] != mgmtSecret["HARBOR_KMS_SECRET"] {
+		t.Error("hot and management must receive the same HARBOR_KMS_SECRET user-DEK KEK")
+	}
+}
+
+func referencedEnvSources(t *testing.T, container object) map[string]bool {
+	t.Helper()
+	names := map[string]bool{}
+	for _, item := range pathSlice(t, container, "envFrom") {
+		source, ok := asObject(item)
+		if !ok {
+			t.Fatal("envFrom source is not a map")
+		}
+		for _, kind := range []string{"configMapRef", "secretRef"} {
+			ref, ok := asObject(source[kind])
+			if ok {
+				names[fmt.Sprint(ref["name"])] = true
+			}
+		}
+	}
+	return names
 }
 
 func assertEnvNameParity(t *testing.T, raw, helm []object) {

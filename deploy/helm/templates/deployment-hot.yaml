@@ -65,9 +65,9 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.hot.port }}
-          # Non-secret config first, then secrets (DATABASE_URL/REDIS_URL/
-          # ADMIN_API_TOKEN), then KMS credentials (AWS_ACCESS_KEY_ID/
-          # AWS_SECRET_ACCESS_KEY). envFrom keeps sources cleanly separated.
+          # Runtime config (REGION/ISSUER/LOGIN_URL), then required durable-store
+          # and application secrets (DATABASE_URL/REDIS_URL/HARBOR_KMS_SECRET/
+          # ADMIN_API_TOKEN), then optional cloud KMS credentials.
           envFrom:
             - configMapRef:
                 name: {{ include "harbor.fullname" . }}-hot-config

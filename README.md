@@ -64,42 +64,41 @@ make test-integration  # integration tests (real Postgres/Redis; -tags=integrati
 Harbor is a modular monolith split into two binaries (see
 [docs/DESIGN.md](docs/DESIGN.md) §4.1).
 
-**`harbor-hot`** — the stateless OIDC / token hot path (`/authorize`, `/token`,
-`/jwks`, discovery, `/healthz`):
+Both binaries deliberately use the production object graph in local
+development. Start PostgreSQL, Redis, the migration/RP seed jobs, local KMS,
+and both services with:
 
 ```bash
-PORT=8080 \
-ISSUER=http://localhost:8080 \
-  go run ./cmd/harbor-hot          # or ./bin/harbor-hot after `make build`
+docker compose -f e2e/docker-compose.yml up -d --wait
 ```
 
-| Env | Default | Purpose |
-|---|---|---|
-| `PORT` | `8080` | Listen port. |
-| `ISSUER` | `http://localhost:$PORT` | Issuer that anchors the discovery document. |
+The compose stack applies every migration and idempotently registers the
+`harbor-e2e` public RP with `http://localhost:3000/callback`. It does not enable
+a development mode or install an auto-approved demo user. `harbor-hot` is at
+`http://localhost:8080`; `harbor-mgmt` and the passkey login UI are at
+`http://localhost:8081`.
 
-**`harbor-mgmt`** — the management / dashboard cold path plus the passkey
-(WebAuthn) registration & assertion ceremonies:
+Run the live end-to-end suite against that graph:
 
 ```bash
-PORT=8081 \
-WEBAUTHN_RP_ID=localhost \
-WEBAUTHN_RP_DISPLAY_NAME=Harbor \
-WEBAUTHN_RP_ORIGINS=http://localhost:8081 \
-  go run ./cmd/harbor-mgmt         # or ./bin/harbor-mgmt after `make build`
+HARBOR_E2E_BASE_URL=http://localhost:8080 \
+HARBOR_MGMT_E2E_BASE_URL=http://localhost:8081 \
+HARBOR_E2E_DATABASE_URL='postgres://harbor:harbor@localhost:5432/harbor?sslmode=disable' \
+  go test -tags e2e ./e2e/...
 ```
 
-| Env | Default | Purpose |
-|---|---|---|
-| `PORT` | `8081` | Listen port. |
-| `WEBAUTHN_RP_ID` | `localhost` | Relying Party ID (effective domain, no scheme/port). |
-| `WEBAUTHN_RP_DISPLAY_NAME` | `Harbor` | Human-readable RP name. |
-| `WEBAUTHN_RP_ORIGINS` | `http://localhost:$PORT` | Comma-separated allowed ceremony origins. |
-| `WEBAUTHN_ALLOW_INSECURE_USER_ID` | `false` | **DEV ONLY** — trust a client-supplied `user_id`. Never enable in production. |
+Stop the stack and remove its local database/Redis state with:
 
-> **Scaffold status:** flow backends are in-memory / stubbed (demo client,
-> auto-approving login/consent, unsigned placeholder tokens) so the flows are
-> exercisable before the real registry, HSM signer, and auth UI land.
+```bash
+docker compose -f e2e/docker-compose.yml down -v
+```
+
+To run either binary outside compose, provide the same required configuration:
+`DATABASE_URL`, `REDIS_URL`, `REGION`, the shared `HARBOR_KMS_SECRET`, and the
+component-specific URLs, WebAuthn, registration, admin, and signing-KMS values
+shown in [`e2e/docker-compose.yml`](e2e/docker-compose.yml). Missing durable or
+security-critical dependencies are startup errors; there is no dev/noop boot
+path.
 
 ### Codegen & validation
 

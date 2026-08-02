@@ -150,7 +150,10 @@ func newFullTestDashHandler(t *testing.T) *http.ServeMux {
 	if err != nil {
 		t.Fatalf("ParseDashboardTemplates: %v", err)
 	}
-	h := NewDashboardHandler(consentStore, sessionStore, credStore, nil, relayStore, tmpl, nil)
+	h, err := NewDashboardHandler(consentStore, sessionStore, credStore, nil, relayStore, tmpl, nil)
+	if err != nil {
+		t.Fatalf("NewDashboardHandler: %v", err)
+	}
 	mux := http.NewServeMux()
 	h.Routes(mux)
 	return mux

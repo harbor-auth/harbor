@@ -10,6 +10,66 @@ import (
 	"time"
 )
 
+func TestNewService_RejectsMissingRequiredCollaborators(t *testing.T) {
+	valid := ServiceConfig{
+		Issuer:       "https://eu.harbor.id",
+		Clients:      NewInMemoryClientRegistry(),
+		Codes:        NewInMemoryAuthCodeStore(),
+		Tokens:       NewPlaceholderIssuer(),
+		Sessions:     NewStubSessionResolver("test-subject"),
+		SessionStore: NewInMemorySessionStore(),
+		Grants:       NewInMemoryGrantStore(),
+		Consents:     NewInMemoryConsentStore(),
+		Revocations:  NewRecordingRevocationSink(),
+		Outbox:       &recordingOutbox{},
+	}
+
+	tests := []struct {
+		name   string
+		remove func(*ServiceConfig)
+	}{
+		{"client registry", func(cfg *ServiceConfig) { cfg.Clients = nil }},
+		{"authorization code store", func(cfg *ServiceConfig) { cfg.Codes = nil }},
+		{"token issuer", func(cfg *ServiceConfig) { cfg.Tokens = nil }},
+		{"session resolver", func(cfg *ServiceConfig) { cfg.Sessions = nil }},
+		{"refresh session store", func(cfg *ServiceConfig) { cfg.SessionStore = nil }},
+		{"grant store", func(cfg *ServiceConfig) { cfg.Grants = nil }},
+		{"consent store", func(cfg *ServiceConfig) { cfg.Consents = nil }},
+		{"revocation sink", func(cfg *ServiceConfig) { cfg.Revocations = nil }},
+		{"revocation outbox", func(cfg *ServiceConfig) { cfg.Outbox = nil }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := valid
+			tt.remove(&cfg)
+			if _, err := NewService(cfg); err == nil {
+				t.Fatalf("NewService accepted a nil %s", tt.name)
+			}
+		})
+	}
+}
+
+// TestNewService_PanicsWhenSessionStoreWithoutGrantStore retains the original
+// configuration regression. Construction now returns an error rather than
+// panicking, while preserving the same fail-closed invariant.
+func TestNewService_PanicsWhenSessionStoreWithoutGrantStore(t *testing.T) {
+	cfg := ServiceConfig{
+		Issuer:       "https://test",
+		Clients:      NewInMemoryClientRegistry(),
+		Codes:        NewInMemoryAuthCodeStore(),
+		Tokens:       NewPlaceholderIssuer(),
+		Sessions:     NewStubSessionResolver("sub"),
+		SessionStore: NewInMemorySessionStore(),
+		Consents:     NewInMemoryConsentStore(),
+		Revocations:  NewRecordingRevocationSink(),
+		Outbox:       &recordingOutbox{},
+	}
+	if _, err := NewService(cfg); err == nil {
+		t.Fatal("NewService accepted a session store without a grant store")
+	}
+}
+
 // newTestAuthorizeService returns a Service configured for /authorize tests with
 // an in-memory client registry seeded with a demo client.
 func newTestAuthorizeService(t *testing.T) (*Service, *InMemoryClientRegistry) {
@@ -17,7 +77,7 @@ func newTestAuthorizeService(t *testing.T) (*Service, *InMemoryClientRegistry) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    NewInMemoryAuthCodeStore(),
@@ -123,7 +183,7 @@ func TestService_Authorize_SessionResolutionError(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    NewInMemoryAuthCodeStore(),
@@ -155,7 +215,7 @@ func TestService_Authorize_ConsentDenied(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    NewInMemoryAuthCodeStore(),
@@ -180,7 +240,7 @@ func TestService_Authorize_CodeGenerationError(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    NewInMemoryAuthCodeStore(),
@@ -223,7 +283,7 @@ func TestService_Authorize_CodeStorageError(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    errAuthCodeStore{saveErr: errors.New("storage failed")},
@@ -265,7 +325,7 @@ func (s peekErrAuthCodeStore) Consume(_ context.Context, _ string) (ConsumeResul
 }
 
 func TestService_Token_PeekError(t *testing.T) {
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  NewInMemoryClientRegistry(),
 		Codes:    peekErrAuthCodeStore{peekErr: errors.New("database connection failed")},
@@ -308,7 +368,7 @@ func TestService_Token_ConsumeError(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	registry := NewInMemoryClientRegistry()
 	registry.Put(testClient())
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:  "https://eu.harbor.id",
 		Clients: registry,
 		Codes: consumeErrAuthCodeStore{
@@ -332,27 +392,6 @@ func TestService_Token_ConsumeError(t *testing.T) {
 	}
 }
 
-// TestNewService_PanicsWhenSessionStoreWithoutGrantStore verifies the startup
-// misconfiguration guard: passing a real SessionStore without a GrantStore (or
-// with the default noopGrantStore) must panic at construction time rather than
-// silently serving invalid_grant for every valid refresh token in production.
-func TestNewService_PanicsWhenSessionStoreWithoutGrantStore(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("expected panic when SessionStore is set but Grants is nil/noopGrantStore")
-		}
-	}()
-	NewService(ServiceConfig{
-		Issuer:       "https://test",
-		Clients:      NewInMemoryClientRegistry(),
-		Codes:        NewInMemoryAuthCodeStore(),
-		Tokens:       NewPlaceholderIssuer(),
-		Sessions:     NewStubSessionResolver("sub"),
-		SessionStore: NewInMemorySessionStore(),
-		// Grants intentionally omitted → defaults to noopGrantStore → must panic
-	})
-}
-
 func TestService_Token_IssueError(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	codes := NewInMemoryAuthCodeStore()
@@ -362,7 +401,7 @@ func TestService_Token_IssueError(t *testing.T) {
 	registry := NewInMemoryClientRegistry()
 	registry.Put(testClient())
 
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  registry,
 		Codes:    codes,
@@ -384,7 +423,7 @@ func TestService_Token_IssueError(t *testing.T) {
 }
 
 func TestService_Token_InvalidGrantType(t *testing.T) {
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  NewInMemoryClientRegistry(),
 		Codes:    NewInMemoryAuthCodeStore(),
@@ -405,7 +444,7 @@ func TestService_Token_InvalidGrantType(t *testing.T) {
 }
 
 func TestService_Token_MissingParams(t *testing.T) {
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  NewInMemoryClientRegistry(),
 		Codes:    NewInMemoryAuthCodeStore(),
@@ -476,7 +515,7 @@ func TestService_signalCodeReuse_LogsRevocationError(t *testing.T) {
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:      "https://eu.harbor.id",
 		Clients:     NewInMemoryClientRegistry(),
 		Codes:       consumedCodeStore{code: code},
@@ -517,7 +556,7 @@ func TestService_signalCodeReuse_NoLogOnSuccess(t *testing.T) {
 	// Use RecordingRevocationSink which succeeds (returns nil).
 	revocations := NewRecordingRevocationSink()
 
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:      "https://eu.harbor.id",
 		Clients:     NewInMemoryClientRegistry(),
 		Codes:       consumedCodeStore{code: code},
@@ -563,7 +602,7 @@ func TestService_Authorize_UpsertsConsentOnApproval(t *testing.T) {
 	clients.Put(testClient())
 	consents := NewInMemoryConsentStore()
 
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    NewInMemoryAuthCodeStore(),
@@ -624,7 +663,7 @@ func TestService_Authorize_ScopeEscalation_PersistsMergedScopes(t *testing.T) {
 		t.Fatalf("Upsert failed: %v", err)
 	}
 
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    NewInMemoryAuthCodeStore(),
@@ -681,7 +720,7 @@ func TestService_Authorize_ConsentUpsertError(t *testing.T) {
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    NewInMemoryAuthCodeStore(),
@@ -757,7 +796,7 @@ func TestService_signalCodeReuse_LogDoesNotContainPII(t *testing.T) {
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 
-	svc := NewService(ServiceConfig{
+	svc := mustNewService(ServiceConfig{
 		Issuer:      "https://eu.harbor.id",
 		Clients:     NewInMemoryClientRegistry(),
 		Codes:       consumedCodeStore{code: code},

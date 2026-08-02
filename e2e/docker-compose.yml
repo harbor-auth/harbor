@@ -1,107 +1,172 @@
-# Harbor — Foundation F8: agent-runnable local e2e stack.
+# Harbor local end-to-end stack. Both binaries use the same durable object
+# graph as production: PostgreSQL, Redis, and KMS-backed signing keys.
 #
-# Brings up the stateless hot path (harbor-hot) so e2e/flow_test.go can drive the
-# real authorize→token→JWKS flow, including the §11.7 negatives. This is the
-# stack the Makefile's conformance gate (§1.8 Stage 7) builds on.
-#
-# Run:
+# Run from the repository root:
 #   docker compose -f e2e/docker-compose.yml up -d --wait
-#   HARBOR_E2E_BASE_URL=http://localhost:8080 go test -tags e2e ./e2e/...
-#   docker compose -f e2e/docker-compose.yml down
-#
-# The harbor-hot service defines a /healthz healthcheck, so `up -d --wait`
-# blocks until harbor-hot is actually READY (no external poll needed).
-#
-# harbor-hot's flow backends are in-memory scaffolds today (demo-client, stub
-# session, unsigned placeholder tokens), so the flow is exercisable with no DB.
+#   HARBOR_E2E_BASE_URL=http://localhost:8080 \
+#     HARBOR_MGMT_E2E_BASE_URL=http://localhost:8081 \
+#     HARBOR_E2E_DATABASE_URL=postgres://harbor:harbor@localhost:5432/harbor?sslmode=disable \
+#     go test -tags e2e ./e2e/...
+#   docker compose -f e2e/docker-compose.yml down -v
+
+x-harbor-dependencies: &harbor-dependencies
+  DATABASE_URL: postgres://harbor:harbor@postgres:5432/harbor?sslmode=disable
+  REDIS_URL: redis://redis:6379/0
+  # Both binaries must derive the same KEK when wrapping/unwrapping user DEKs.
+  HARBOR_KMS_SECRET: e2e-shared-user-dek-kek-change-me
+
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: harbor
+      POSTGRES_USER: harbor
+      POSTGRES_PASSWORD: harbor
+    ports: ["5432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U harbor -d harbor"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  localstack:
+    image: localstack/localstack:4.7
+    environment:
+      SERVICES: kms
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:4566/_localstack/health | grep -q '\"kms\"'"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    image: migrate/migrate:v4.18.1
+    command: ["-path=/migrations", "-database=postgres://harbor:harbor@postgres:5432/harbor?sslmode=disable", "up"]
+    volumes:
+      - ../db/migrations:/migrations:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  seed-rp:
+    image: postgres:16-alpine
+    environment:
+      PGPASSWORD: harbor
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        psql -h postgres -U harbor -d harbor <<'SQL'
+        INSERT INTO relying_parties (
+          client_id, name, sector_id, redirect_uris, token_format,
+          scopes_allowed, grant_types, response_types,
+          token_endpoint_auth_method, created_at
+        ) VALUES (
+          'harbor-e2e', 'Harbor local e2e RP', 'localhost',
+          ARRAY['http://localhost:3000/callback'], 'jwt',
+          ARRAY['openid', 'offline_access'],
+          ARRAY['authorization_code', 'refresh_token'], ARRAY['code'],
+          'none', now()
+        )
+        ON CONFLICT (client_id) DO UPDATE SET
+          name = EXCLUDED.name, sector_id = EXCLUDED.sector_id,
+          redirect_uris = EXCLUDED.redirect_uris,
+          token_format = EXCLUDED.token_format,
+          scopes_allowed = EXCLUDED.scopes_allowed,
+          grant_types = EXCLUDED.grant_types,
+          response_types = EXCLUDED.response_types,
+          token_endpoint_auth_method = EXCLUDED.token_endpoint_auth_method;
+        SQL
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  kms-init:
+    image: amazon/aws-cli:2.27.49
+    environment:
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_DEFAULT_REGION: eu-west-1
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        key_id="$$(aws --endpoint-url=http://localstack:4566 kms create-key --query KeyMetadata.KeyId --output text)"
+        aws --endpoint-url=http://localstack:4566 kms create-alias \
+          --alias-name alias/harbor-e2e --target-key-id "$$key_id"
+    depends_on:
+      localstack:
+        condition: service_healthy
+
   harbor-hot:
     image: golang:1.26
     working_dir: /src
     command: ["go", "run", "./cmd/harbor-hot"]
     environment:
+      <<: *harbor-dependencies
       PORT: "8080"
-      ISSUER: "http://localhost:8080"
-      # This single-region dev stack serves its issuer at localhost, which is not
-      # in the default *.harbor.id host map. REGION binds the issuer host to a
-      # region at boot so the fail-closed region middleware resolves /authorize
-      # and /token instead of 400-rejecting them (region.BindIssuerHost).
-      REGION: "EU"
-      # Dev mode bypasses the fail-closed startup guard (validateProductionReadiness)
-      # so the flow can run without DATABASE_URL/REDIS_URL/LOGIN_URL.
-      HARBOR_DEV_MODE: "1"
-      # Local crypto is available only with the explicit dev-mode opt-in above.
-      # This deterministic test-only secret is never used by production manifests.
-      HARBOR_KMS_SECRET: "e2e-development-only-key-material"
-    ports:
-      - "8080:8080"
+      ISSUER: http://localhost:8080
+      REGION: EU
+      LOGIN_URL: http://localhost:8081/login
+      ADMIN_API_TOKEN: e2e-admin-token-at-least-32-bytes-long
+      KMS_KEY_MAP: EU=alias/harbor-e2e
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_REGION: eu-west-1
+      AWS_ENDPOINT_URL: http://localstack:4566
+    ports: ["8080:8080"]
     volumes:
-      # Mount the repo read-only; go run compiles from source inside the pinned
-      # golang image so the e2e run needs no local Go toolchain.
       - ..:/src:ro
-    # Assumptions for this in-container probe: (a) `curl` is present in the image
-    # (true for the Debian-based golang:1.26; if the base ever slims, switch to a
-    # wget/shell form); and (b) it probes `localhost` INSIDE the container, so it
-    # assumes harbor-hot binds all interfaces (`:8080`/`0.0.0.0`, not
-    # `127.0.0.1`) — otherwise the container can report healthy while the
-    # host-side `go test` (via the published port) still cannot connect.
+    depends_on:
+      seed-rp:
+        condition: service_completed_successfully
+      kms-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
       interval: 3s
       timeout: 3s
-      retries: 10
-      # go run compiles harbor-hot on a cold start; start_period keeps those
-      # early (pre-ready) failures from counting against `retries`.
+      retries: 20
       start_period: 120s
 
-  # harbor-mgmt: the cold-path management / BFF binary that runs the passkey
-  # login ceremony (/login, /login/complete). e2e/bff_login_test.go drives it at
-  # localhost:8081 to exercise the authenticated login → /authorize/complete →
-  # /token flow end-to-end.
   harbor-mgmt:
     image: golang:1.26
     working_dir: /src
     command: ["go", "run", "./cmd/harbor-mgmt"]
     environment:
+      <<: *harbor-dependencies
       PORT: "8081"
-      # Bind the RP-origin host to a region so the fail-closed region middleware
-      # resolves it at boot instead of refusing to start.
-      REGION: "EU"
-      # Dev mode bypasses the fail-closed startup guard so this stack runs
-      # without DATABASE_URL/REDIS_URL.
-      HARBOR_DEV_MODE: "1"
-      # Local crypto is available only with the explicit dev-mode opt-in above.
-      # This deterministic test-only secret is never used by production manifests.
-      HARBOR_KMS_SECRET: "e2e-development-only-key-material"
-      # WebAuthn Relying Party config. Passkeys registered here are asserted on
-      # this same origin during the login ceremony.
-      WEBAUTHN_RP_ID: "localhost"
-      WEBAUTHN_RP_DISPLAY_NAME: "Harbor"
-      WEBAUTHN_RP_ORIGINS: "http://localhost:8081"
-      # After a successful passkey assertion harbor-mgmt redirects the browser to
-      # harbor-hot's /authorize/complete to resume the OIDC flow (audit fix M2).
-      # This MUST be the ABSOLUTE URL of that endpoint on harbor-hot — a relative
-      # path would resolve against the harbor-mgmt origin (:8081) and 404. Both
-      # binaries share the localhost origin here, mirroring the single public
-      # host / path-routed topology required in production (see deploy/README.md)
-      # because the __Host- BFF cookie cannot span two different hosts.
-      AUTHORIZE_COMPLETE_URL: "http://localhost:8080/authorize/complete"
-    ports:
-      - "8081:8081"
+      REGION: EU
+      AUTHORIZE_COMPLETE_URL: http://localhost:8080/authorize/complete
+      REGISTRATION_BASE_URL: http://localhost:8081
+      INITIAL_ACCESS_TOKEN: e2e-registration-token-at-least-32-bytes
+      WEBAUTHN_RP_ID: localhost
+      WEBAUTHN_RP_DISPLAY_NAME: Harbor
+      WEBAUTHN_RP_ORIGINS: http://localhost:8081
+      RELAY_DOMAIN: relay.localhost
+      MTA_DOMAIN: mta.localhost
+    ports: ["8081:8081"]
     volumes:
-      # Mount the repo read-only; go run compiles harbor-mgmt from source inside
-      # the pinned golang image so the e2e run needs no local Go toolchain.
       - ..:/src:ro
-    # Wait for harbor-hot to be READY first: the login flow resumes on
-    # harbor-hot's /authorize/complete, so it must be up before mgmt is useful.
     depends_on:
       harbor-hot:
+        condition: service_healthy
+      seed-rp:
+        condition: service_completed_successfully
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8081/healthz"]
       interval: 3s
       timeout: 3s
-      retries: 10
-      # go run compiles harbor-mgmt on a cold start; start_period keeps those
-      # early (pre-ready) failures from counting against `retries`.
+      retries: 20
       start_period: 120s

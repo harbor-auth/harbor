@@ -3,6 +3,7 @@ package mgmtapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 
@@ -130,39 +131,32 @@ type Server struct {
 	logger *slog.Logger
 }
 
-// New returns a Server. A nil enroller is valid and puts the enrollment route
-// into an unavailable (503) state — see the Server.enroller field. A nil logger
-// falls back to slog.Default().
-func New(enroller Enroller, logger *slog.Logger) *Server {
+// New returns a Server with the dependencies required for enrollment and
+// dynamic client registration. A nil logger falls back to slog.Default().
+func New(enroller Enroller, sessions EnrollmentSessionStore, clientReg ClientRegistrationStore, registrationBaseURL string, logger *slog.Logger) (*Server, error) {
+	if enroller == nil {
+		return nil, errors.New("mgmtapi: enroller is required")
+	}
+	if sessions == nil {
+		return nil, errors.New("mgmtapi: enrollment session store is required")
+	}
+	if clientReg == nil {
+		return nil, errors.New("mgmtapi: client registration store is required")
+	}
+	if registrationBaseURL == "" {
+		return nil, errors.New("mgmtapi: registration base URL is required")
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{enroller: enroller, logger: logger}
-}
-
-// WithEnrollmentSessions attaches the enrollment session store used to bridge
-// POST /enroll and the passkey registration ceremony. When set, a successful
-// enrollment returns an HttpOnly cookie carrying the session key. A nil store
-// leaves the cookie unset. Returns s for chaining.
-func (s *Server) WithEnrollmentSessions(sessions EnrollmentSessionStore) *Server {
-	s.sessions = sessions
-	return s
-}
-
-// WithClientRegistration wires the RFC 7591 POST /register endpoint. store
-// persists new clients; baseURL is the external base used to build each
-// client's registration_client_uri ({baseURL}/register/{client_id}). A nil
-// store leaves /register in a 503 state. Returns s for chaining.
-func (s *Server) WithClientRegistration(store ClientRegistrationStore, baseURL string) *Server {
-	s.clientReg = store
-	s.registrationBaseURL = baseURL
+	s := &Server{enroller: enroller, sessions: sessions, clientReg: clientReg, registrationBaseURL: registrationBaseURL, logger: logger}
 	// A store that also implements the RFC 7592 management behaviour (the
 	// production *clients.DBClientRegistrationStore does) transparently enables
 	// the GET/PUT/DELETE /register/{client_id} routes.
-	if mgmt, ok := store.(ClientManagementStore); ok {
+	if mgmt, ok := clientReg.(ClientManagementStore); ok {
 		s.clientMgmt = mgmt
 	}
-	return s
+	return s, nil
 }
 
 // WithInitialAccessToken gates the RFC 7591 POST /register endpoint behind an

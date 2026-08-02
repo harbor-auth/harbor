@@ -122,7 +122,7 @@ func containsAuditEvent(f *fakeRecoveryAuditLogger, eventType string) bool {
 // given fakes wired in.
 func newRecoveryServer(codes RecoveryCodeGenerator, store RecoveryCodeStore, verifier RecoveryVerifier) (*Server, *InMemoryRecoveryCeremonyStore) {
 	ceremonies := NewInMemoryRecoveryCeremonyStore()
-	s := New(nil, nil).WithRecovery(codes, store, verifier, ceremonies)
+	s := newTestServer(nil).WithRecovery(codes, store, verifier, ceremonies)
 	return s, ceremonies
 }
 
@@ -164,7 +164,7 @@ func TestPostRecoveryCodes_Unauthorized(t *testing.T) {
 }
 
 func TestPostRecoveryCodes_Unavailable(t *testing.T) {
-	s := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-1"}) // no recovery wired
+	s := newTestServer(nil).WithCallerSource(fakeCallerSource{userID: "user-1"}) // no recovery wired
 	req := httptest.NewRequest(http.MethodPost, "/recovery/codes", strings.NewReader("{}"))
 	rec := httptest.NewRecorder()
 	s.PostRecoveryCodes(rec, req)
@@ -468,7 +468,7 @@ func TestPostRecoveryComplete_MissingFields(t *testing.T) {
 }
 
 func TestPostRecoveryComplete_Unavailable(t *testing.T) {
-	s := New(nil, nil) // no recovery wired
+	s := newTestServer(nil) // no recovery wired
 	req := httptest.NewRequest(http.MethodPost, "/recovery/complete", strings.NewReader(`{"recovery_request_id":"x","code":"y"}`))
 	rec := httptest.NewRecorder()
 	s.PostRecoveryComplete(rec, req)

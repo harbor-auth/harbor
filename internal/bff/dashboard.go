@@ -2,6 +2,7 @@ package bff
 
 import (
 	"context"
+	"errors"
 	"html/template"
 	"log/slog"
 	"net/http"
@@ -83,7 +84,16 @@ func NewDashboardHandler(
 	relay DashboardRelayStore,
 	tmpl *template.Template,
 	logger *slog.Logger,
-) *DashboardHandler {
+) (*DashboardHandler, error) {
+	if consents == nil {
+		return nil, errors.New("bff: dashboard consent store is required")
+	}
+	if sessions == nil {
+		return nil, errors.New("bff: dashboard session store is required")
+	}
+	if credentials == nil {
+		return nil, errors.New("bff: dashboard credential store is required")
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -100,7 +110,7 @@ func NewDashboardHandler(
 		pageViews:      telemetry.NewCounter("dashboard_page_views_total", "Total dashboard page views by view.", telemetry.DimEndpoint),
 		appRevokes:     telemetry.NewCounter("dashboard_app_revokes_total", "Total app consent revocations from the dashboard.", telemetry.DimOutcome),
 		sessionRevokes: telemetry.NewCounter("dashboard_session_revokes_total", "Total session revocations from the dashboard.", telemetry.DimOutcome),
-	}
+	}, nil
 }
 
 // Routes registers the dashboard routes on mux behind RequireFullScope.
@@ -182,11 +192,6 @@ func (h *DashboardHandler) GetConnectedApps(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if h.consents == nil {
-		http.Error(w, "consent store not available", http.StatusServiceUnavailable)
-		return
-	}
-
 	grants, err := h.consents.ListGrantsByUser(r.Context(), userID)
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "bff: dashboard: list consent grants failed",
@@ -206,11 +211,6 @@ func (h *DashboardHandler) PostRevokeApp(w http.ResponseWriter, r *http.Request)
 	userID := UserIDFromContext(r.Context())
 	if userID == "" {
 		http.Error(w, "authentication required", http.StatusUnauthorized)
-		return
-	}
-
-	if h.consents == nil {
-		http.Error(w, "consent store not available", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -329,11 +329,6 @@ func (h *DashboardHandler) GetSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.sessions == nil || h.credentials == nil {
-		http.Error(w, "session store not available", http.StatusServiceUnavailable)
-		return
-	}
-
 	sessions, err := h.sessions.ListSessionsByUser(r.Context(), userID)
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "bff: dashboard: list sessions failed", "error", err)
@@ -361,11 +356,6 @@ func (h *DashboardHandler) PostRevokeSession(w http.ResponseWriter, r *http.Requ
 	userID := UserIDFromContext(r.Context())
 	if userID == "" {
 		http.Error(w, "authentication required", http.StatusUnauthorized)
-		return
-	}
-
-	if h.sessions == nil {
-		http.Error(w, "session store not available", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -412,11 +402,6 @@ func (h *DashboardHandler) PostRevokeCredential(w http.ResponseWriter, r *http.R
 	userID := UserIDFromContext(r.Context())
 	if userID == "" {
 		http.Error(w, "authentication required", http.StatusUnauthorized)
-		return
-	}
-
-	if h.credentials == nil {
-		http.Error(w, "credential store not available", http.StatusServiceUnavailable)
 		return
 	}
 

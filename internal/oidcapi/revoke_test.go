@@ -15,12 +15,14 @@ import (
 	"github.com/harbor-auth/harbor/internal/crypto"
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
 	"github.com/harbor-auth/harbor/internal/oidc"
+
+	oidctest "github.com/harbor-auth/harbor/internal/testsupport/oidc"
 )
 
 // newRevokeServer builds a Server wired with revocation support.
-func newRevokeServer(t *testing.T) (*httptest.Server, *oidc.InMemorySessionStore) {
+func newRevokeServer(t *testing.T) (*httptest.Server, *oidctest.InMemorySessionStore) {
 	t.Helper()
-	clients := oidc.NewInMemoryClientRegistry()
+	clients := oidctest.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
 		ID:                      testClientID,
 		SectorID:                "localhost",
@@ -41,14 +43,14 @@ func newRevokeServer(t *testing.T) (*httptest.Server, *oidc.InMemorySessionStore
 	if err != nil {
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
-	sessionStore := oidc.NewInMemorySessionStore()
-	grantStore := oidc.NewInMemoryGrantStore()
-	svc := oidc.NewService(oidc.ServiceConfig{
+	sessionStore := oidctest.NewInMemorySessionStore()
+	grantStore := oidctest.NewInMemoryGrantStore()
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
-		Codes:        oidc.NewInMemoryAuthCodeStore(),
+		Codes:        oidctest.NewInMemoryAuthCodeStore(),
 		Tokens:       oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
-		Sessions:     oidc.NewStubSessionResolver("demo-subject-ppid"),
+		Sessions:     oidctest.NewStubSessionResolver("demo-subject-ppid"),
 		SessionStore: sessionStore,
 		Grants:       grantStore,
 	})
@@ -91,12 +93,12 @@ func TestPostRevoke_RejectsUnauthenticatedClientCredentials(t *testing.T) {
 }
 
 func TestPostRevoke_PublicClientCannotAuthenticate(t *testing.T) {
-	clients := oidc.NewInMemoryClientRegistry()
+	clients := oidctest.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{ID: testClientID, TokenEndpointAuthMethod: "none"})
-	svc := oidc.NewService(oidc.ServiceConfig{
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer: "https://eu.harbor.id", Clients: clients,
-		Codes: oidc.NewInMemoryAuthCodeStore(), Tokens: oidc.NewPlaceholderIssuer(),
-		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
+		Codes: oidctest.NewInMemoryAuthCodeStore(), Tokens: oidctest.NewPlaceholderIssuer(),
+		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
 	srv := New(Config{Issuer: "https://eu.harbor.id", Service: svc})
 	ts := httptest.NewServer(openapi.HandlerFromMux(srv, http.NewServeMux()))
@@ -374,7 +376,7 @@ func TestPostRevoke_NoHint_Returns200(t *testing.T) {
 // token adds its JTI to the revocation filter.
 func TestPostRevoke_AccessToken_AddsToFilter(t *testing.T) {
 	// Build a server with a filter we can inspect
-	clients := oidc.NewInMemoryClientRegistry()
+	clients := oidctest.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
 		ID:                      testClientID,
 		SectorID:                "localhost",
@@ -387,12 +389,12 @@ func TestPostRevoke_AccessToken_AddsToFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
-	svc := oidc.NewService(oidc.ServiceConfig{
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
-		Codes:    oidc.NewInMemoryAuthCodeStore(),
+		Codes:    oidctest.NewInMemoryAuthCodeStore(),
 		Tokens:   oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
-		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
+		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
 	filter := oidc.NewInMemoryRevocationFilter()
 	srv := New(Config{
@@ -457,7 +459,7 @@ func TestPostRevoke_AccessToken_AddsToFilter(t *testing.T) {
 // (RFC 7009: hint is advisory, server should try both types).
 func TestPostRevoke_WrongHintAccessToken_StillRevokesRefreshToken(t *testing.T) {
 	// Build a server with a session store we can verify
-	clients := oidc.NewInMemoryClientRegistry()
+	clients := oidctest.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
 		ID:                      testClientID,
 		SectorID:                "localhost",
@@ -470,14 +472,14 @@ func TestPostRevoke_WrongHintAccessToken_StillRevokesRefreshToken(t *testing.T) 
 	if err != nil {
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
-	sessionStore := oidc.NewInMemorySessionStore()
-	grantStore := oidc.NewInMemoryGrantStore()
-	svc := oidc.NewService(oidc.ServiceConfig{
+	sessionStore := oidctest.NewInMemorySessionStore()
+	grantStore := oidctest.NewInMemoryGrantStore()
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
-		Codes:        oidc.NewInMemoryAuthCodeStore(),
+		Codes:        oidctest.NewInMemoryAuthCodeStore(),
 		Tokens:       oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
-		Sessions:     oidc.NewStubSessionResolver("demo-subject-ppid"),
+		Sessions:     oidctest.NewStubSessionResolver("demo-subject-ppid"),
 		SessionStore: sessionStore,
 		Grants:       grantStore,
 	})
@@ -515,7 +517,7 @@ func TestPostRevoke_WrongHintAccessToken_StillRevokesRefreshToken(t *testing.T) 
 // TestPostRevoke_WrongHintRefreshToken_StillRevokesAccessToken verifies that
 // providing token_type_hint=refresh_token for an access token still revokes it.
 func TestPostRevoke_WrongHintRefreshToken_StillRevokesAccessToken(t *testing.T) {
-	clients := oidc.NewInMemoryClientRegistry()
+	clients := oidctest.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
 		ID:                      testClientID,
 		SectorID:                "localhost",
@@ -528,12 +530,12 @@ func TestPostRevoke_WrongHintRefreshToken_StillRevokesAccessToken(t *testing.T) 
 	if err != nil {
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
-	svc := oidc.NewService(oidc.ServiceConfig{
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
-		Codes:    oidc.NewInMemoryAuthCodeStore(),
+		Codes:    oidctest.NewInMemoryAuthCodeStore(),
 		Tokens:   oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
-		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
+		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
 	filter := oidc.NewInMemoryRevocationFilter()
 	srv := New(Config{
@@ -595,7 +597,7 @@ func TestPostRevoke_WrongHintRefreshToken_StillRevokesAccessToken(t *testing.T) 
 // enumeration) but the token remains active.
 func TestPostRevoke_CrossClient_Returns200WithoutRevoking(t *testing.T) {
 	// Build a server with two clients
-	clients := oidc.NewInMemoryClientRegistry()
+	clients := oidctest.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
 		ID:                      "client-a",
 		SectorID:                "localhost",
@@ -616,14 +618,14 @@ func TestPostRevoke_CrossClient_Returns200WithoutRevoking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
-	sessionStore := oidc.NewInMemorySessionStore()
-	grantStore := oidc.NewInMemoryGrantStore()
-	svc := oidc.NewService(oidc.ServiceConfig{
+	sessionStore := oidctest.NewInMemorySessionStore()
+	grantStore := oidctest.NewInMemoryGrantStore()
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
-		Codes:        oidc.NewInMemoryAuthCodeStore(),
+		Codes:        oidctest.NewInMemoryAuthCodeStore(),
 		Tokens:       oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
-		Sessions:     oidc.NewStubSessionResolver("demo-subject-ppid"),
+		Sessions:     oidctest.NewStubSessionResolver("demo-subject-ppid"),
 		SessionStore: sessionStore,
 		Grants:       grantStore,
 	})
@@ -708,7 +710,7 @@ func TestPostRevoke_EnumerationResistance_UniformResponses(t *testing.T) {
 
 // createRefreshTokenInStore creates a refresh session in the store and returns
 // the encoded plaintext token.
-func createRefreshTokenInStore(t *testing.T, store *oidc.InMemorySessionStore, userID, clientID string) string {
+func createRefreshTokenInStore(t *testing.T, store *oidctest.InMemorySessionStore, userID, clientID string) string {
 	t.Helper()
 	// Generate a deterministic opaque token for testing
 	plaintext := make([]byte, 32)

@@ -3,11 +3,8 @@
 // discovery, /healthz) and guards the abuse-sensitive endpoints with per-client
 // rate limiting (docs/plans/rate-limiting.md).
 //
-// Rate-limiter wiring:
-//   - REDIS_URL set   -> RedisRateLimiter (sliding-window, Lua-atomic, shared
-//     across replicas).
-//   - REDIS_URL unset -> in-memory MemoryRateLimiter (single-replica dev/test
-//     fallback). This keeps local runs working without Redis.
+// Rate-limiter wiring uses RedisRateLimiter (sliding-window, Lua-atomic, shared
+// across replicas).
 //   - RATE_LIMIT_DISABLED truthy -> development-only transparent passthrough;
 //     production rejects this setting at startup.
 //
@@ -66,9 +63,23 @@ func main() {
 // run builds the server and serves until ctx is cancelled. It is split out from
 // main so the exit path has a single error sink and stays testable.
 func run(ctx context.Context, logger *slog.Logger) error {
-	runtimeCfg, err := crypto.LoadRuntimeConfigFromEnv()
+	return runWithGraphObserver(ctx, logger, nil)
+}
+
+// runWithGraphObserver is the production startup path with an optional
+// integration-test observation point. The observer cannot replace any
+// dependency; it only receives the fully assembled durable graph immediately
+// before the HTTP server starts accepting traffic.
+func runWithGraphObserver(ctx context.Context, logger *slog.Logger, observe func(hotGraph)) error {
+	if os.Getenv("HARBOR_KMS_SECRET") == "" {
+		return errors.New("harbor-hot requires HARBOR_KMS_SECRET for the shared user-DEK KEK")
+	}
+	if envBool("RATE_LIMIT_DISABLED") {
+		return errors.New("RATE_LIMIT_DISABLED is not allowed in production")
+	}
+	kmsCfg, err := crypto.LoadKMSConfigFromEnv()
 	if err != nil {
-		return fmt.Errorf("load runtime crypto configuration: %w", err)
+		return fmt.Errorf("load signing KMS configuration: %w", err)
 	}
 	// Load and validate the BFF session dependencies up front so a
 	// misconfiguration (malformed LOGIN_URL, non-positive TTL) fails fast at
@@ -85,18 +96,29 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		"bff_session_ttl", bffCfg.SessionTTL.String(),
 	)
 
-	// Redis powers cross-replica rate limiting AND shared BFF session state.
-	// ConnectRedis returns (nil, nil) when REDIS_URL is unset — we then fall
-	// back to in-memory limiters and an in-memory BFF session store.
+	if os.Getenv("DATABASE_URL") == "" {
+		return errors.New("harbor-hot production requires DATABASE_URL")
+	}
+	if os.Getenv("REDIS_URL") == "" {
+		return errors.New("harbor-hot production requires REDIS_URL")
+	}
+
+	// Redis powers cross-replica rate limiting, authorization codes, revocation
+	// fan-out, and shared BFF session state.
 	redisClient, err := clients.ConnectRedis(ctx, logger)
 	if err != nil {
 		return err
 	}
+	if redisClient == nil {
+		return errors.New("harbor-hot requires Redis")
+	}
+	defer func() {
+		if closeErr := redisClient.Close(); closeErr != nil {
+			logger.Warn("redis close error", "error", closeErr)
+		}
+	}()
 
-	// Open the DB pool once — shared by both the signing stack (signing keys)
-	// and the BFF session resolver deps (DEK unwrapping, grant store). When
-	// DATABASE_URL is unset, pool is nil and both sub-systems degrade to their
-	// dev-only fallbacks.
+	// Open the required DB pool once and share it across every durable store.
 	pool, err := clients.ConnectDB(ctx, logger)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -106,39 +128,26 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		}
 		return err
 	}
-	if pool != nil {
-		defer pool.Close()
+	if pool == nil {
+		return errors.New("harbor-hot requires PostgreSQL")
 	}
+	defer pool.Close()
 
-	// BFF session resolver dependencies: secret loader (DEK unwrapping for PPID
-	// derivation) and grant store (consent records). Reuses the already-opened
-	// pool rather than re-connecting; returns zero-value deps when pool is nil.
-	var deps bffDeps
-	if envBool("HARBOR_DEV_MODE") {
-		deps, err = buildBFFDepsFromPool(pool, logger)
-		if err != nil {
-			return err
-		}
+	deps, err := buildBFFDepsFromPool(pool, logger)
+	if err != nil {
+		return err
 	}
 	logger.Info("BFF DB-backed dependencies wired",
 		"secret_loader_wired", deps.secretLoader != nil,
 		"grant_store_wired", deps.grantStore != nil,
 	)
 
-	// Fail-closed startup guard: production deployments MUST have the complete
-	// BFF flow wired (LOGIN_URL + DATABASE_URL + REDIS_URL) or we refuse to
-	// start. Without all three, /authorize would either skip the login redirect
-	// entirely or fall back to the insecure demo-user stub resolver — both are
-	// total auth bypasses (audit blocker 1.1). The HARBOR_DEV_MODE escape hatch
-	// allows local dev and e2e tests to run without the full stack.
 	issuer := envString("ISSUER", "https://harbor.local")
-	if !envBool("HARBOR_DEV_MODE") {
-		if err := validateProductionURL("ISSUER", issuer); err != nil {
-			return err
-		}
-		if err := validateProductionURL("LOGIN_URL", bffCfg.LoginURL); err != nil {
-			return err
-		}
+	if err := validateProductionURL("ISSUER", issuer); err != nil {
+		return err
+	}
+	if err := validateProductionURL("LOGIN_URL", bffCfg.LoginURL); err != nil {
+		return err
 	}
 
 	// Bind the issuer host to a region so the region middleware resolves it.
@@ -157,43 +166,21 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// secret, and derives a per-RP PPID while recording consent. This closes the
 	// auth bypass (audit blocker 1.1): /authorize can no longer mint tokens for a
 	// fixed demo user.
-	apiCfg, graph, err := buildHotGraph(ctx, issuer, pool, redisClient, deps, runtimeCfg, logger)
+	apiCfg, graph, err := buildHotGraph(ctx, issuer, pool, redisClient, deps, kmsCfg, logger)
 	if err != nil {
 		return err
 	}
-	if err := validateProductionReadiness(bffCfg, graph, logger); err != nil {
-		return err
-	}
-
-	// Wire the BFF login flow when LOGIN_URL is configured: /authorize then
-	// creates a BFF session and redirects to the login UI instead of issuing a
-	// code for the demo user (audit blocker 1.1, auth bypass). The session store
-	// shares the "bff_session:" Redis namespace with harbor-mgmt, so a login
-	// completed on the cold path is visible to /authorize here. When LOGIN_URL is
-	// unset (dev/e2e) the BFF flow stays off and /authorize keeps its current
-	// direct-issuance behavior.
-	if bffCfg.LoginURL != "" {
-		apiCfg.BFFSessions = newBFFSessionStore(redisClient, bffCfg.SessionTTL, logger)
-		apiCfg.LoginURL = bffCfg.LoginURL
-		apiCfg.BFFSessionTTL = bffCfg.SessionTTL
-		logger.Info("BFF login flow enabled",
-			"bff_session_store_redis", redisClient != nil,
-			"bff_session_ttl", bffCfg.SessionTTL.String(),
-		)
-	} else {
-		logger.Warn("LOGIN_URL not set — BFF login flow disabled; /authorize will not redirect to login (dev only)")
-	}
+	apiCfg.BFFSessions = newBFFSessionStore(redisClient, bffCfg.SessionTTL, logger)
+	graph.implementations["bff_sessions"] = fmt.Sprintf("%T", apiCfg.BFFSessions)
+	apiCfg.LoginURL = bffCfg.LoginURL
+	apiCfg.BFFSessionTTL = bffCfg.SessionTTL
+	logger.Info("BFF login flow enabled", "bff_session_store_redis", true, "bff_session_ttl", bffCfg.SessionTTL.String())
 
 	srv := oidcapi.New(apiCfg)
 
-	// Admin auth boot guard and middleware wiring. The guard is fail-closed:
-	// when a real DB is connected (admin endpoints are live) ADMIN_API_TOKEN
-	// must be set and at least 32 bytes — refusing to boot otherwise mirrors
-	// the KEK_SECRET guard above and closes the unauthenticated admin surface
-	// (audit finding C2). When pool is nil (dev, no DB) the guard is skipped
-	// and the middleware is still constructed; with an empty token it is
-	// fail-closed and rejects every admin request with 401.
-	adminToken, err := loadAdminToken(pool != nil, logger)
+	// The admin endpoints are always backed by the required database, so their
+	// credential is also unconditionally required at startup.
+	adminToken, err := loadAdminToken()
 	if err != nil {
 		return err
 	}
@@ -224,15 +211,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		port := envString("PORT", "8080")
 		addr = ":" + port
 	}
+	if observe != nil {
+		observe(graph)
+	}
 	return httpserver.Run(ctx, addr, handler, logger)
-}
-
-// noopSessionRevoker is a dev/test scaffold implementation of
-// oidcapi.SessionRevoker. It is constructed only by buildDevHotGraph.
-type noopSessionRevoker struct{}
-
-func (noopSessionRevoker) RevokeSessionsByUserClient(_ context.Context, _, _ string) error {
-	return nil
 }
 
 type redisRevocationPublisher struct{ client *redis.Client }
@@ -268,20 +250,16 @@ func (r codeFamilyRevoker) RevokeCodeFamily(ctx context.Context, code oidc.AuthC
 	return r.sessions.RevokeSessionsByUserClient(ctx, code.UserID, code.ClientID)
 }
 
-func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redisClient *redis.Client, deps bffDeps, runtimeCfg crypto.RuntimeConfig, logger *slog.Logger) (oidcapi.Config, hotGraph, error) {
-	if runtimeCfg.Mode == crypto.RuntimeDevelopment {
-		return buildDevHotGraph(issuer, runtimeCfg, logger)
-	}
+func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redisClient *redis.Client, deps bffDeps, kmsCfg crypto.KMSConfig, logger *slog.Logger) (oidcapi.Config, hotGraph, error) {
 	if pool == nil || redisClient == nil {
-		return oidcapi.Config{}, hotGraph{}, errors.New("production harbor-hot requires PostgreSQL and Redis")
+		return oidcapi.Config{}, hotGraph{}, errors.New("harbor-hot requires PostgreSQL and Redis")
 	}
 
-	keyProvider, err := buildExternalKeyProvider(ctx, runtimeCfg.KMS)
+	keyProvider, err := buildExternalKeyProvider(ctx, kmsCfg)
 	if err != nil {
 		return oidcapi.Config{}, hotGraph{}, err
 	}
 	q := gendb.New(pool)
-	deps = bffDeps{secretLoader: clients.NewDBSecretLoader(q, keyProvider, crypto.NewCipher()), grantStore: clients.NewDBGrantStore(q)}
 	tokenIssuer, signers, rotator, err := buildSigningStackWithProvider(ctx, pool, keyProvider, logger)
 	if err != nil {
 		return oidcapi.Config{}, hotGraph{}, err
@@ -289,6 +267,7 @@ func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redis
 	registry := clients.NewDBClientRegistry(q).WithLogger(logger)
 	codes := clients.NewRedisAuthCodeStore(redisClient, time.Minute)
 	grants := clients.NewDBGrantStore(q)
+	consents := clients.NewDBConsentStore(q)
 	sessionStore := clients.NewDBSessionStoreWithPool(q, pool)
 	outbox := clients.NewDBRevocationOutbox(q, logger)
 	revokedStore := clients.NewDBRevokedJTIStore(q)
@@ -312,23 +291,28 @@ func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redis
 	if err != nil {
 		return oidcapi.Config{}, hotGraph{}, err
 	}
-	svc := oidc.NewService(oidc.ServiceConfig{Issuer: issuer, Clients: registry, Codes: codes, Tokens: tokenIssuer, Sessions: resolver, SessionStore: sessionStore, Grants: grants, Revocations: codeFamilyRevoker{sessionStore}, Outbox: outbox, Logger: logger})
-	return oidcapi.Config{Issuer: issuer, Service: svc, Signers: signers, Rotator: rotator, RevokedJTIStore: revokedStore, RevocationFilter: filter, RevocationPublisher: redisRevocationPublisher{redisClient}, RevokedJTIChecker: revokedJTIChecker{revokedStore}, LogoutVerifier: verifier, Grants: grants, Clients: registry, SessionRevoker: sessionStore}, hotGraph{postgres: true, redis: true, externalKMS: true, clientRegistry: true, authCodes: true, grants: true, sessions: true, revocations: true, outboxWorker: true, jwtVerifier: true, logoutVerifier: true, sessionRevoker: true}, nil
-}
-
-func buildDevHotGraph(issuer string, runtimeCfg crypto.RuntimeConfig, logger *slog.Logger) (oidcapi.Config, hotGraph, error) {
-	if runtimeCfg.Mode != crypto.RuntimeDevelopment || runtimeCfg.DevKeySecret == "" {
-		return oidcapi.Config{}, hotGraph{}, errors.New("development graph requires explicit development crypto configuration")
-	}
-	signer, err := crypto.NewLocalSigner()
+	svc, err := oidc.NewService(oidc.ServiceConfig{Issuer: issuer, Clients: registry, Codes: codes, Tokens: tokenIssuer, Sessions: resolver, SessionStore: sessionStore, Grants: grants, Consents: consents, Revocations: codeFamilyRevoker{sessionStore}, Outbox: outbox, Logger: logger})
 	if err != nil {
-		return oidcapi.Config{}, hotGraph{}, fmt.Errorf("build development signer: %w", err)
+		return oidcapi.Config{}, hotGraph{}, fmt.Errorf("harbor-hot: build OIDC service: %w", err)
 	}
-	registry := oidc.NewInMemoryClientRegistry()
-	registry.Put(oidc.Client{ID: "demo-client", SectorID: "localhost", RedirectURIs: []string{"http://localhost/callback", "http://localhost:3000/callback", "http://localhost:8081/callback"}, ScopesAllowed: []string{"openid", "profile", "email", "offline_access"}})
-	grants := oidc.NewInMemoryGrantStore()
-	svc := oidc.NewService(oidc.ServiceConfig{Issuer: issuer, Clients: registry, Codes: oidc.NewInMemoryAuthCodeStore(), Tokens: oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}), Sessions: oidc.NewStubSessionResolver("demo-user-ppid"), Grants: grants, Logger: logger})
-	return oidcapi.Config{Issuer: issuer, Service: svc, Signers: []crypto.Signer{signer}, Grants: grants, Clients: registry, SessionRevoker: noopSessionRevoker{}}, hotGraph{}, nil
+	return oidcapi.Config{Issuer: issuer, Service: svc, Signers: signers, Rotator: rotator, RevokedJTIStore: revokedStore, RevocationFilter: filter, RevocationPublisher: redisRevocationPublisher{redisClient}, RevokedJTIChecker: revokedJTIChecker{revokedStore}, LogoutVerifier: verifier, Grants: grants, Clients: registry, SessionRevoker: sessionStore}, hotGraph{
+		secretLoader: deps.secretLoader,
+		grantStore:   deps.grantStore,
+		postgres:     true, redis: true, externalKMS: true,
+		clientRegistry: true, authCodes: true, grants: true, sessions: true,
+		revocations: true, outboxWorker: true, jwtVerifier: true,
+		logoutVerifier: true, sessionRevoker: true,
+		implementations: map[string]string{
+			"clients":       fmt.Sprintf("%T", registry),
+			"codes":         fmt.Sprintf("%T", codes),
+			"grants":        fmt.Sprintf("%T", grants),
+			"consents":      fmt.Sprintf("%T", consents),
+			"sessions":      fmt.Sprintf("%T", sessionStore),
+			"revocations":   fmt.Sprintf("%T", revokedStore),
+			"outbox":        fmt.Sprintf("%T", outbox),
+			"secret_loader": fmt.Sprintf("%T", deps.secretLoader),
+		},
+	}, nil
 }
 
 func buildExternalKeyProvider(ctx context.Context, kmsConfig crypto.KMSConfig) (crypto.KeyProvider, error) {
@@ -368,9 +352,7 @@ func buildSigningStackWithProvider(ctx context.Context, pool *pgxpool.Pool, kp c
 
 // bffDeps bundles the DB-backed dependencies the PPIDSessionResolver needs to
 // replace the insecure demo-user stub resolver (docs/DESIGN.md §9, audit
-// blocker 1.1). They are constructed once at startup so a later task can wire
-// the real resolver without re-plumbing DB access. When pool is nil (no
-// DATABASE_URL) every field is nil and the caller falls back to dev mode.
+// blocker 1.1). They are constructed once at startup from required storage.
 type bffDeps struct {
 	// secretLoader decrypts a user's pairwise secret for PPID derivation.
 	secretLoader *clients.DBSecretLoader
@@ -379,15 +361,14 @@ type bffDeps struct {
 	postgres, redis, externalKMS                              bool
 	clientRegistry, authCodes, grants, sessions, revocations  bool
 	outboxWorker, jwtVerifier, logoutVerifier, sessionRevoker bool
+	implementations                                           map[string]string
 }
 
 type hotGraph = bffDeps
 
 // buildBFFDepsFromPool constructs the BFF session resolver dependencies from an
 // already-opened DB pool. The caller (run) manages the pool lifecycle; this
-// function does not open or close it. When pool is nil (DATABASE_URL unset), it
-// returns zero-value deps — the dev path where HARBOR_DEV_MODE skips the
-// readiness guard and newSessionResolver falls back to StubSessionResolver.
+// function does not open or close it. A nil pool is rejected.
 //
 // A configured pool REQUIRES HARBOR_KMS_SECRET: the secret loader unwraps DEKs
 // that harbor-mgmt's enrollment sealed under that same KMS secret, so the two
@@ -397,8 +378,7 @@ type hotGraph = bffDeps
 // user's pairwise secret.
 func buildBFFDepsFromPool(pool *pgxpool.Pool, logger *slog.Logger) (bffDeps, error) {
 	if pool == nil {
-		logger.Warn("DATABASE_URL not set — BFF session resolver deps unavailable (dev only; session resolver will use stub)")
-		return bffDeps{}, nil
+		return bffDeps{}, errors.New("build BFF dependencies: PostgreSQL is required")
 	}
 
 	kmsSecret := os.Getenv("HARBOR_KMS_SECRET")
@@ -421,39 +401,24 @@ func buildBFFDepsFromPool(pool *pgxpool.Pool, logger *slog.Logger) (bffDeps, err
 // reads to find the user a login ceremony authenticated. It shares the
 // "bff_session:" Redis namespace with harbor-mgmt's writer so a login completed
 // on the cold path is visible here (docs/plans/bff-session-middleware.md).
-// Redis-backed for multi-replica safety when REDIS_URL is set, otherwise an
-// in-memory dev scaffold (single-replica only; not shared across replicas).
-func newBFFSessionStore(redisClient *redis.Client, ttl time.Duration, logger *slog.Logger) bff.BFFSessionStore {
-	if redisClient != nil {
-		return bff.NewRedisBFFSessionStore(redisClient, ttl)
-	}
-	logger.Warn("REDIS_URL not set — using in-memory BFF session store (dev only; not shared across replicas)")
-	return bff.NewInMemoryBFFSessionStore()
+// Redis-backed for multi-replica safety.
+func newBFFSessionStore(redisClient *redis.Client, ttl time.Duration, _ *slog.Logger) bff.BFFSessionStore {
+	return bff.NewRedisBFFSessionStore(redisClient, ttl)
 }
 
 // newSessionResolver returns the SessionResolver the OIDC /authorize flow uses
 // to resolve the authenticated user into a per-RP pairwise subject (PPID).
 //
-// When the DB-backed deps are wired (DATABASE_URL + HARBOR_KMS_SECRET set) AND
-// HARBOR_DEV_MODE is NOT set, it returns the real oidc.PPIDSessionResolver: it
+// With the required DB-backed dependencies, it returns the real
+// oidc.PPIDSessionResolver: it
 // reads the signed-in user from the BFF session context (bff.BFFAuthSource —
 // never a client-supplied value), loads + decrypts that user's pairwise secret,
 // and derives a stable, non-correlating sub while recording consent
-// (docs/DESIGN.md §3.2, §11.2). This closes the auth bypass (audit blocker
-// 1.1): /authorize can no longer issue tokens for a fixed demo user.
-//
-// When HARBOR_DEV_MODE=1 (dev/e2e), the stub resolver is used regardless of
-// whether the DB is wired. This lets developers test the real ES256 signing
-// stack (DATABASE_URL + KEK_SECRET) while still running the /authorize flow
-// without a full BFF login ceremony. The fail-closed startup guard
-// (validateProductionReadiness) ensures the stub is never served in production.
+// (docs/DESIGN.md §3.2, §11.2). This closes the auth bypass: /authorize can no
+// longer issue tokens for a fixed demo user.
 func newSessionResolver(deps bffDeps, logger *slog.Logger) (oidc.SessionResolver, error) {
-	if envBool("HARBOR_DEV_MODE") {
-		logger.Warn("HARBOR_DEV_MODE: using StubSessionResolver (signing stack still real when DB wired; NEVER for production)")
-		return oidc.NewStubSessionResolver("demo-user-ppid"), nil
-	}
 	if deps.secretLoader == nil || deps.grantStore == nil {
-		return nil, fmt.Errorf("session resolver requires DATABASE_URL + HARBOR_KMS_SECRET — set HARBOR_DEV_MODE=1 to bypass (dev/e2e only)")
+		return nil, errors.New("session resolver requires DATABASE_URL and HARBOR_KMS_SECRET")
 	}
 	logger.Info("session resolver: using PPIDSessionResolver (BFF-authenticated, DB-backed)")
 	return oidc.NewPPIDSessionResolver(oidc.PPIDSessionResolverConfig{
@@ -461,64 +426,6 @@ func newSessionResolver(deps bffDeps, logger *slog.Logger) (oidc.SessionResolver
 		Loader: deps.secretLoader,
 		Grants: deps.grantStore,
 	}), nil
-}
-
-// validateProductionReadiness enforces the fail-closed startup guard: in
-// production (HARBOR_DEV_MODE not set), the complete BFF auth flow must be
-// wired — LOGIN_URL for the redirect, DATABASE_URL for the PPIDSessionResolver
-// deps, and implicitly REDIS_URL for the shared BFF session store. Without all
-// three, /authorize would silently degrade to the insecure demo-user stub or
-// skip the login redirect, both of which are total auth bypasses.
-//
-// Dev and e2e runs set HARBOR_DEV_MODE=1 to bypass this guard; they accept the
-// security trade-off of running without a real identity backend.
-func validateProductionReadiness(cfg bffConfig, graph bffDeps, logger *slog.Logger) error {
-	if envBool("HARBOR_DEV_MODE") {
-		logger.Warn("HARBOR_DEV_MODE enabled — skipping production readiness checks (NEVER use in production)")
-		return nil
-	}
-	if envBool("RATE_LIMIT_DISABLED") {
-		return errors.New("RATE_LIMIT_DISABLED is not allowed in production")
-	}
-
-	var missing []string
-	if cfg.LoginURL == "" {
-		missing = append(missing, "LOGIN_URL")
-	}
-	if os.Getenv("REDIS_URL") == "" {
-		missing = append(missing, "REDIS_URL (required for shared BFF session store)")
-	}
-	if cfg.DatabaseURL == "" {
-		missing = append(missing, "DATABASE_URL")
-	}
-	checks := []struct {
-		ready bool
-		name  string
-	}{
-		{graph.postgres, "PostgreSQL"}, {graph.redis, "Redis"}, {graph.externalKMS, "external KMS"},
-		{graph.clientRegistry, "durable client registry"}, {graph.authCodes, "durable authorization code store"},
-		{graph.grants, "durable grant store"}, {graph.sessions, "durable session store"},
-		{graph.revocations, "durable revocation store"}, {graph.outboxWorker, "revocation outbox worker"},
-		{graph.jwtVerifier, "JWT verifier"}, {graph.logoutVerifier, "logout verifier"},
-		{graph.sessionRevoker, "session revoker"},
-	}
-	for _, check := range checks {
-		if !check.ready {
-			missing = append(missing, check.name)
-		}
-	}
-
-	if len(missing) > 0 {
-		return fmt.Errorf("production startup guard failed: missing required BFF dependencies %v — set HARBOR_DEV_MODE=1 to bypass (dev/e2e only)", missing)
-	}
-
-	logger.Info("production readiness check passed",
-		"login_url_set", true,
-		"redis_url_set", true,
-		"secret_loader_wired", true,
-		"grant_store_wired", true,
-	)
-	return nil
 }
 
 // defaultBFFSessionTTL mirrors the harbor-mgmt BFF session writer default
@@ -532,11 +439,9 @@ const defaultBFFSessionTTL = 5 * time.Minute
 // It is parsed and validated at startup so a misconfiguration fails loudly
 // instead of silently degrading to the insecure demo-user stub resolver.
 type bffConfig struct {
-	// LoginURL is the absolute URL of the harbor-mgmt BFF /login endpoint that
-	// /authorize redirects unauthenticated users to. Empty in dev (no redirect).
+	// LoginURL is the required absolute URL of harbor-mgmt's BFF /login endpoint.
 	LoginURL string
-	// DatabaseURL is the Postgres DSN backing the PPID session resolver. Empty
-	// falls back to the in-memory dev scaffold (mirrors clients.ConnectDB).
+	// DatabaseURL is the required Postgres DSN backing the PPID session resolver.
 	DatabaseURL string
 	// SessionTTL is the lifetime of a BFF session record. It must match the
 	// harbor-mgmt writer (docs/plans/bff-session-middleware.md — 5 min).
@@ -564,22 +469,23 @@ func loadBFFConfig() (bffConfig, error) {
 // scheme-less value would produce a broken redirect. SessionTTL must be
 // positive so sessions actually persist.
 func (c bffConfig) validate() error {
-	if c.LoginURL != "" {
-		u, err := url.Parse(c.LoginURL)
-		if err != nil {
-			return fmt.Errorf("invalid LOGIN_URL %q: %w", c.LoginURL, err)
-		}
-		if u.Scheme != "http" && u.Scheme != "https" {
-			return fmt.Errorf("invalid LOGIN_URL %q: must be an absolute http(s) URL", c.LoginURL)
-		}
-		if u.Host == "" {
-			return fmt.Errorf("invalid LOGIN_URL %q: missing host", c.LoginURL)
-		}
-		if !envBool("HARBOR_DEV_MODE") && u.Scheme != "https" {
-			hostIP := net.ParseIP(u.Hostname())
-			if u.Hostname() != "localhost" && (hostIP == nil || !hostIP.IsLoopback()) {
-				return fmt.Errorf("invalid LOGIN_URL %q: production login URL must use HTTPS", c.LoginURL)
-			}
+	if c.LoginURL == "" {
+		return errors.New("LOGIN_URL is required")
+	}
+	u, err := url.Parse(c.LoginURL)
+	if err != nil {
+		return fmt.Errorf("invalid LOGIN_URL %q: %w", c.LoginURL, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("invalid LOGIN_URL %q: must be an absolute http(s) URL", c.LoginURL)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("invalid LOGIN_URL %q: missing host", c.LoginURL)
+	}
+	if u.Scheme != "https" {
+		hostIP := net.ParseIP(u.Hostname())
+		if u.Hostname() != "localhost" && (hostIP == nil || !hostIP.IsLoopback()) {
+			return fmt.Errorf("invalid LOGIN_URL %q: production login URL must use HTTPS", c.LoginURL)
 		}
 	}
 	if c.SessionTTL <= 0 {
@@ -660,7 +566,7 @@ func buildRateLimits(redisClient *redis.Client, logger *slog.Logger) []oidcapi.E
 			Endpoint:               spec.endpoint,
 			Window:                 window,
 			Logger:                 logger,
-			FailClosedOnError:      !envBool("HARBOR_DEV_MODE"),
+			FailClosedOnError:      true,
 			TrustedForwardedHeader: trustedHeader,
 			TrustedProxyHops:       trustedHops,
 		})
@@ -674,28 +580,24 @@ func validateProductionURL(name, raw string) error {
 	if err != nil {
 		return fmt.Errorf("invalid %s: %w", name, err)
 	}
-	if u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
-		return fmt.Errorf("invalid %s: production requires an absolute credential-free HTTPS URL", name)
+	hostIP := net.ParseIP(u.Hostname())
+	loopbackHTTP := u.Scheme == "http" && (u.Hostname() == "localhost" || (hostIP != nil && hostIP.IsLoopback()))
+	if (u.Scheme != "https" && !loopbackHTTP) || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+		return fmt.Errorf("invalid %s: requires an absolute credential-free HTTPS URL (HTTP is limited to loopback integration endpoints)", name)
 	}
 	return nil
 }
 
-// newLimiter returns the backend limiter for one endpoint: Redis-backed when a
-// client is available (production / multi-replica), otherwise the in-memory
-// fallback for local dev. The Redis key prefix namespaces buckets per endpoint
-// so /token and /authorize never share a limit.
+// newLimiter returns the Redis-backed limiter for one endpoint. The Redis key
+// prefix namespaces buckets per endpoint so /token and /authorize never share
+// a limit.
 func newLimiter(redisClient *redis.Client, spec endpointLimitSpec, limit int, window time.Duration, logger *slog.Logger) clients.RateLimiter {
 	cfg := clients.RateLimiterConfig{
 		KeyPrefix: "ratelimit:" + string(spec.endpoint) + ":",
 		Limit:     limit,
 		Window:    window,
 	}
-	if redisClient != nil {
-		return clients.NewRedisRateLimiter(redisClient, cfg, logger)
-	}
-	logger.Warn("REDIS_URL unset: using in-memory rate limiter (single-replica dev only)",
-		"component", "harbor-hot", "endpoint", string(spec.endpoint))
-	return clients.NewMemoryRateLimiter(cfg)
+	return clients.NewRedisRateLimiter(redisClient, cfg, logger)
 }
 
 // minAdminTokenBytes is the minimum acceptable length for ADMIN_API_TOKEN.
@@ -703,27 +605,12 @@ func newLimiter(redisClient *redis.Client, spec endpointLimitSpec, limit int, wi
 // offline brute-force attacks on the SHA-256 comparison.
 const minAdminTokenBytes = 32
 
-// loadAdminToken enforces the fail-closed admin-auth boot guard. When a real
-// DB is wired (databaseURLSet == true) ADMIN_API_TOKEN must be set and at
+// loadAdminToken enforces the fail-closed admin-auth boot guard. ADMIN_API_TOKEN must be set and at
 // least minAdminTokenBytes long — otherwise key-rotation and JWT-revocation
 // are reachable without any credential (audit finding C2, mirrors KEK_SECRET
-// guard). HARBOR_DEV_MODE bypasses the length check with a warning so that
-// e2e/dev runs work without setting the token; the returned token still builds
-// a fail-closed middleware (empty token → 401 on every admin request).
 // The token value is never logged (docs/DESIGN.md §6.5).
-func loadAdminToken(databaseURLSet bool, logger *slog.Logger) (string, error) {
+func loadAdminToken() (string, error) {
 	token := os.Getenv("ADMIN_API_TOKEN")
-	if !databaseURLSet {
-		// Admin endpoints are inert without a real DB; middleware remains
-		// fail-closed regardless of token value.
-		return token, nil
-	}
-	if envBool("HARBOR_DEV_MODE") {
-		if len(token) < minAdminTokenBytes {
-			logger.Warn("HARBOR_DEV_MODE: ADMIN_API_TOKEN missing or < 32 bytes — admin endpoints will reject all requests (NEVER for production)")
-		}
-		return token, nil
-	}
 	if len(token) < minAdminTokenBytes {
 		return "", fmt.Errorf(
 			"ADMIN_API_TOKEN must be set and at least %d bytes when DATABASE_URL is configured — "+

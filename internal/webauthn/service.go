@@ -40,6 +40,12 @@ type Service struct {
 
 // NewService validates the RP config and returns a ready Service.
 func NewService(cfg Config, store Store, sessions SessionStore) (*Service, error) {
+	if store == nil {
+		return nil, errors.New("webauthn: credential store is required")
+	}
+	if sessions == nil {
+		return nil, errors.New("webauthn: ceremony session store is required")
+	}
 	wa, err := gowebauthn.New(&gowebauthn.Config{
 		RPID:          cfg.RPID,
 		RPDisplayName: cfg.RPDisplayName,

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -48,8 +47,8 @@ var ErrRefreshTokenNotFound = errors.New("oidc: refresh token not found or expir
 var ErrRefreshTokenRevoked = errors.New("oidc: refresh token has been revoked (possible theft)")
 
 // SessionStore persists and rotates refresh-token sessions (docs/DESIGN.md §3.5,
-// §10). The sqlc-backed implementation is in internal/clients; an in-memory
-// stub is available for unit tests.
+// §10). The sqlc-backed implementation is in internal/clients; test fixtures
+// live outside this production package.
 type SessionStore interface {
 	// CreateSession stores a new session. The caller supplies the hash; plaintext
 	// is NEVER passed to the store.
@@ -78,139 +77,6 @@ type SessionStore interface {
 	// enabling the §11.3 user-initiated disconnect flow where a user can revoke
 	// access to a single connected app without affecting other grants.
 	RevokeSessionsByGrant(ctx context.Context, grantID string) error
-}
-
-// sessionEntry is a stored session plus its revoked flag (in-memory store).
-type sessionEntry struct {
-	s       RefreshSession
-	revoked bool
-}
-
-// InMemorySessionStore is a dev/test SessionStore. NOT for production — a real
-// store persists sessions durably (internal/clients.DBSessionStore).
-//
-// Time: expiry checks use time.Now() directly (wall-clock), not an injectable
-// clock. Use ForceExpireAllForTest() to fast-forward expiry in tests rather
-// than sleeping. A future refactor could inject a clock via the constructor, but
-// the current test-helper approach is sufficient for the existing test surface.
-type InMemorySessionStore struct {
-	mu     sync.Mutex
-	byID   map[string]*sessionEntry
-	byHash map[string]*sessionEntry // key: base64url(sha256(token))
-}
-
-// NewInMemorySessionStore returns an empty store.
-func NewInMemorySessionStore() *InMemorySessionStore {
-	return &InMemorySessionStore{
-		byID:   make(map[string]*sessionEntry),
-		byHash: make(map[string]*sessionEntry),
-	}
-}
-
-// CreateSession implements SessionStore.
-func (s *InMemorySessionStore) CreateSession(_ context.Context, rs RefreshSession) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	entry := &sessionEntry{s: rs}
-	s.byID[rs.ID] = entry
-	s.byHash[base64.RawURLEncoding.EncodeToString(rs.TokenHash)] = entry
-	return nil
-}
-
-// GetSessionByTokenHash implements SessionStore.
-func (s *InMemorySessionStore) GetSessionByTokenHash(_ context.Context, hash []byte) (RefreshSession, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	key := base64.RawURLEncoding.EncodeToString(hash)
-	entry, ok := s.byHash[key]
-	if !ok {
-		return RefreshSession{}, ErrRefreshTokenNotFound
-	}
-	if entry.revoked {
-		return entry.s, ErrRefreshTokenRevoked
-	}
-	if time.Now().After(entry.s.ExpiresAt) {
-		return RefreshSession{}, ErrRefreshTokenNotFound
-	}
-	return entry.s, nil
-}
-
-// RevokeSession implements SessionStore.
-func (s *InMemorySessionStore) RevokeSession(_ context.Context, id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if e, ok := s.byID[id]; ok {
-		e.revoked = true
-		e.s.RevokedAt = time.Now()
-	}
-	return nil
-}
-
-// RotateSession implements SessionStore. Revoke + create happen under a single
-// lock acquisition, so there is no crash window between them.
-func (s *InMemorySessionStore) RotateSession(_ context.Context, oldID string, newSession RefreshSession) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	// Compare-and-swap the old session. A concurrent replica that observed the
-	// token before the winner rotated it must not mint a second successor.
-	e, ok := s.byID[oldID]
-	if !ok || e.revoked || !time.Now().Before(e.s.ExpiresAt) {
-		return ErrRefreshTokenRevoked
-	}
-	e.revoked = true
-	e.s.RevokedAt = time.Now()
-	// Create new.
-	entry := &sessionEntry{s: newSession}
-	s.byID[newSession.ID] = entry
-	s.byHash[base64.RawURLEncoding.EncodeToString(newSession.TokenHash)] = entry
-	return nil
-}
-
-// ForceExpireAllForTest immediately back-dates every active session's ExpiresAt
-// to one second in the past, simulating TTL expiry without sleeping.
-// For use in tests only — not called from production code paths.
-//
-// NOTE: This method intentionally lives in non-test code (not export_test.go)
-// because internal/oidcapi tests call it cross-package on a *InMemorySessionStore
-// value imported from internal/oidc. Moving it to export_test.go would make it
-// invisible to external test packages (Go test exports are intra-package only)
-// without introducing a separate testutil package. Accept as a test-helper
-// with a sufficiently obvious name to prevent accidental production use.
-func (s *InMemorySessionStore) ForceExpireAllForTest() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	past := time.Now().Add(-time.Second)
-	for _, e := range s.byID {
-		if !e.revoked {
-			e.s.ExpiresAt = past
-		}
-	}
-}
-
-// RevokeSessionsByUserClient implements SessionStore (theft signal family revoke).
-func (s *InMemorySessionStore) RevokeSessionsByUserClient(_ context.Context, userID, clientID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, e := range s.byID {
-		if e.s.UserID == userID && e.s.ClientID == clientID {
-			e.revoked = true
-			e.s.RevokedAt = time.Now()
-		}
-	}
-	return nil
-}
-
-// RevokeSessionsByGrant implements SessionStore (per-grant revoke for §11.3 disconnect flow).
-func (s *InMemorySessionStore) RevokeSessionsByGrant(_ context.Context, grantID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, e := range s.byID {
-		if e.s.GrantID == grantID {
-			e.revoked = true
-			e.s.RevokedAt = time.Now()
-		}
-	}
-	return nil
 }
 
 // hashRefreshToken returns the SHA-256 digest of plaintext. Only the digest is
@@ -245,18 +111,3 @@ func decodeRefreshToken(s string) ([]byte, error) {
 	}
 	return b, nil
 }
-
-// noopSessionStore is the default when no SessionStore is wired (dev/test
-// scaffolds that never issue a refresh token).
-type noopSessionStore struct{}
-
-func (noopSessionStore) CreateSession(context.Context, RefreshSession) error { return nil }
-func (noopSessionStore) GetSessionByTokenHash(context.Context, []byte) (RefreshSession, error) {
-	return RefreshSession{}, ErrRefreshTokenNotFound
-}
-func (noopSessionStore) RevokeSession(context.Context, string) error                 { return nil }
-func (noopSessionStore) RotateSession(context.Context, string, RefreshSession) error { return nil }
-func (noopSessionStore) RevokeSessionsByUserClient(context.Context, string, string) error {
-	return nil
-}
-func (noopSessionStore) RevokeSessionsByGrant(context.Context, string) error { return nil }

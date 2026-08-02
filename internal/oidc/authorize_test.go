@@ -112,7 +112,7 @@ func TestValidateAuthorize_RedirectChannelErrors(t *testing.T) {
 func testServiceWithConsent(consents ConsentStore) *Service {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
-	return NewService(ServiceConfig{
+	return mustNewService(ServiceConfig{
 		Issuer:   "https://test.example",
 		Clients:  clients,
 		Codes:    NewInMemoryAuthCodeStore(),

@@ -88,7 +88,7 @@ func newTestAuditDeps(store AuditStore, users AuditUserReader, keys AuditKeyUnwr
 // the authenticated caller via a fakeCallerSource; an empty userID leaves the
 // server without a caller source so requests resolve as unauthenticated (401).
 func newAuditMux(deps *AuditTrailDeps, userID string) *http.ServeMux {
-	srv := New(nil, nil).WithAuditTrail(deps)
+	srv := newTestServer(nil).WithAuditTrail(deps)
 	if userID != "" {
 		srv = srv.WithCallerSource(fakeCallerSource{userID: userID})
 	}
@@ -126,7 +126,7 @@ func TestGetAuditEvents_Unauthorized(t *testing.T) {
 
 func TestGetAuditEvents_ServiceUnavailable(t *testing.T) {
 	// nil auditTrail → 503.
-	srv := New(nil, nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
+	srv := newTestServer(nil).WithCallerSource(fakeCallerSource{userID: "user-123"})
 	mux := http.NewServeMux()
 	srv.Routes(mux)
 

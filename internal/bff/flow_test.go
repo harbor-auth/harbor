@@ -46,6 +46,9 @@ import (
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
 	"github.com/harbor-auth/harbor/internal/oidc"
 	"github.com/harbor-auth/harbor/internal/oidcapi"
+
+	bfftest "github.com/harbor-auth/harbor/internal/testsupport/bff"
+	oidctest "github.com/harbor-auth/harbor/internal/testsupport/oidc"
 )
 
 const (
@@ -104,10 +107,10 @@ func (m *mockResolver) ResolveUser(_ context.Context, _ *http.Request, _ bff.BFF
 // spec (ServerInterface) — it's a BFF-specific route that is manually registered
 // in production (cmd/harbor-mgmt). We replicate that wiring here by adding the
 // route to the mux before passing it to HandlerFromMux.
-func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bff.InMemoryBFFSessionStore, *oidc.InMemoryConsentStore) {
+func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bfftest.InMemoryBFFSessionStore, *oidc.InMemoryConsentStore) {
 	t.Helper()
 
-	clients := oidc.NewInMemoryClientRegistry()
+	clients := oidctest.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{
 		ID:            itClientID,
 		SectorID:      "localhost", // required for PPID derivation (§3.2)
@@ -115,16 +118,16 @@ func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bff.I
 		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
 	})
 	consents := oidc.NewInMemoryConsentStore()
-	svc := oidc.NewService(oidc.ServiceConfig{
+	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
-		Codes:    oidc.NewInMemoryAuthCodeStore(),
-		Tokens:   oidc.NewPlaceholderIssuer(),
-		Sessions: oidc.NewStubSessionResolver("demo-subject-ppid"),
+		Codes:    oidctest.NewInMemoryAuthCodeStore(),
+		Tokens:   oidctest.NewPlaceholderIssuer(),
+		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 		Consents: consents,
 	})
 
-	store := bff.NewInMemoryBFFSessionStore()
+	store := bfftest.NewInMemoryBFFSessionStore()
 	srv := oidcapi.New(oidcapi.Config{
 		Issuer:      "https://eu.harbor.id",
 		Service:     svc,

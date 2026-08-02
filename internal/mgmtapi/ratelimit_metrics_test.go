@@ -1,4 +1,4 @@
-package mgmtapi_test
+package mgmtapi
 
 // Tests for the aggregate 429 rate-limit instrumentation
 // (observability-metrics: abuse visibility without PII).
@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/harbor-auth/harbor/internal/mgmtapi"
 	"github.com/harbor-auth/harbor/internal/region"
 	"github.com/harbor-auth/harbor/internal/telemetry"
 )
@@ -64,7 +63,7 @@ func TestSensitiveRoutesHaveOutageAwareAbuseGates(t *testing.T) {
 }
 
 func TestWriteRateLimited_Returns429AndAggregateMetric(t *testing.T) {
-	s := mgmtapi.New(nil, nil)
+	s := newTestServer(nil)
 	rec := httptest.NewRecorder()
 
 	s.WriteRateLimited(rec, telemetry.EndpointEnroll, region.US)
