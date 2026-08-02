@@ -61,3 +61,10 @@
 2. Preserve explicit optional audit, relay, logging, and product-toggle dependencies.
 3. Migrate composition roots and test fixtures to the error-returning constructors.
 4. Run focused tests, repository build/vet, and project checks before committing, rebasing, and pushing.
+
+## Task 9: collapse harbor-mgmt onto the durable graph
+
+1. Replace the production/development branch with one fail-closed `run` composition root that requires PostgreSQL, Redis, external URLs, registration authorization, and the shared user-DEK KEK.
+2. Wire enrollment, WebAuthn, registration, consent/session management, recovery, MFA, compliance, audit, dashboard, and relay exclusively through DB/Redis-backed implementations.
+3. Delete `runDevelopment`, its noop persister, conditional dependency branches, and development fallbacks while retaining the local key provider as the documented crypto exception.
+4. Strengthen the composition-root tests, run focused and repository checks, then commit, rebase, and push the shared feature branch.

@@ -22,23 +22,21 @@ func productionAssembly(t *testing.T) string {
 	}
 	for _, declaration := range file.Decls {
 		fn, ok := declaration.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "runProduction" {
+		if !ok || fn.Name.Name != "run" {
 			continue
 		}
 		start := fset.Position(fn.Body.Pos()).Offset
 		end := fset.Position(fn.Body.End()).Offset
 		return string(source[start:end])
 	}
-	t.Fatal("production startup must be isolated in runProduction so its object graph can be audited")
+	t.Fatal("startup must be isolated in run so its object graph can be audited")
 	return ""
 }
 
 // TestProductionLiveGraphRequiresDurableDependencies is a source-level guard
 // around the composition root. Unit tests for each store are not sufficient:
 // the shipped binary must actually put the durable implementations in its live
-// HTTP graph. The production assembly is deliberately isolated in runProduction
-// so dev/test scaffolds can remain available without becoming reachable in a
-// production process.
+// HTTP graph. The assembly is deliberately isolated in run so it can be audited.
 func TestProductionLiveGraphRequiresDurableDependencies(t *testing.T) {
 	productionAssembly := productionAssembly(t)
 
@@ -56,6 +54,13 @@ func TestProductionLiveGraphRequiresDurableDependencies(t *testing.T) {
 		"clients.NewDBClientRegistrationStore",
 		"clients.NewDBRecoveryStore",
 		"mfa.NewDBStore",
+		"clients.NewDBAuditStore",
+		"clients.NewDBDashboardCredentialStore",
+		"relay.NewStore",
+		"WithCompliance",
+		"WithAuditTrail",
+		"WithRelayStore",
+		"dashboardHandler.Routes",
 		"WithRecovery",
 		"WithScopedSessionIssuer",
 		"WithMFA",
@@ -63,6 +68,19 @@ func TestProductionLiveGraphRequiresDurableDependencies(t *testing.T) {
 	} {
 		if !strings.Contains(productionAssembly, required) {
 			t.Errorf("production harbor-mgmt graph does not wire %q", required)
+		}
+	}
+}
+
+func TestStartupHasOneDurableGraph(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	assembly := string(source)
+	for _, forbidden := range []string{"HARBOR_DEV_MODE", "runDevelopment", "RuntimeDevelopment", "noopUserPersister"} {
+		if strings.Contains(assembly, forbidden) {
+			t.Errorf("harbor-mgmt still contains development graph marker %q", forbidden)
 		}
 	}
 }
