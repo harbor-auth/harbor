@@ -1,7 +1,8 @@
 # Harbor GitOps deployment (ArgoCD)
 
 This directory holds the GitOps configuration that drives the running Harbor
-deployment on the RKE2 cluster. Git is the source of truth: a push to `main`
+deployment on the dedicated `harbor-core` K3s cluster. Git is the source of
+truth: a push to `main`
 deploys itself.
 
 ## Contents
@@ -27,7 +28,7 @@ git push to main (Go / Dockerfile change)
           └─ pins global.image.tag → <sha> in values-prod.yaml, commits [skip ci]
               └─▶ ArgoCD (Application `harbor`) sees the git change
                     └─ runs `helm upgrade` (deploy/helm + values-prod.yaml)
-                        └─▶ RKE2 rolls out the new images
+                        └─▶ K3s rolls out the new images
 ```
 
 Images are pinned to the **immutable commit SHA** (not `:latest`) in
@@ -54,9 +55,12 @@ curl -sk https://argocd.internal.harborauth.com/healthz
 # Should return: ok
 ```
 
-If the DNS record does not exist, create an `A` record pointing at the cluster
-node IP (`51.89.98.90`) in your DNS provider. cert-manager will provision a TLS
-certificate automatically if the ingress annotation is present.
+Create the `AAAA` record at the Harbor guest IPv6
+(`2a01:4f8:140:4423:1::10`). Do **not** point an `A` record at the hypervisor:
+one shared IPv4 cannot map TCP/80 and TCP/443 independently to both guests.
+IPv4 support requires a second routed address or a deliberately managed edge
+proxy. cert-manager will provision a TLS certificate when the configured issuer
+is available.
 
 #### 2. Sealed Secrets controller
 
@@ -261,18 +265,18 @@ If the admin account is disabled and SSO is broken (e.g. GitHub is down or the
 OAuth app is misconfigured):
 
 ```bash
-# SSH to the cluster node:
-ssh ubuntu@51.89.98.90
+# SSH to the Harbor guest through the hardened hypervisor account:
+ssh -J harborops@78.47.238.62 harborops@10.77.1.10
 
 # Re-enable the admin account directly:
-kubectl -n argocd patch cm argocd-cm \
+sudo k3s kubectl -n argocd patch cm argocd-cm \
   --type='json' \
   -p='[{"op":"replace","path":"/data/admin.enabled","value":"true"}]'
 
-kubectl rollout restart deployment argocd-server -n argocd
+sudo k3s kubectl rollout restart deployment argocd-server -n argocd
 
 # Retrieve the current admin password hash from argocd-secret:
-kubectl -n argocd get secret argocd-secret \
+sudo k3s kubectl -n argocd get secret argocd-secret \
   -o jsonpath='{.data.admin\.password}' | base64 -d
 # This is the bcrypt hash. If you have lost the plaintext, set a new one:
 NEW_PASSWORD_HASH=$(htpasswd -bnBC 10 "" "<new-password>" | tr -d ':\n')

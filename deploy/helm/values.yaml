@@ -157,6 +157,14 @@ mgmt:
     minAvailable: 1
   networkPolicy:
     enabled: true
+  # Optional, narrowly scoped endpoint for a separately operated Harbor Cloud
+  # cluster. It is disabled for self-hosters by default. Production must place
+  # this NodePort behind a private encrypted transport (the reference host uses
+  # WireGuard) and restrict allowedCIDR to the Harbor Cloud tunnel address.
+  cloudIntegration:
+    enabled: false
+    nodePort: 30081
+    allowedCIDR: ""
   secrets:
     # When set, this Secret must expose DATABASE_URL / REDIS_URL /
     # HARBOR_KMS_SECRET / INITIAL_ACCESS_TOKEN. Its HARBOR_KMS_SECRET must

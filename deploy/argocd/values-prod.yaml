@@ -1,5 +1,5 @@
-# Production Helm value overrides for the single-node RKE2 deployment
-# (ns31170412 / auth.harborauth.com), consumed by the ArgoCD Application
+# Production Helm value overrides for the isolated Harbor K3s cluster
+# (harbor-core VM / auth.harborauth.com), consumed by the ArgoCD Application
 # in this directory.
 #
 # Per-component image digests are pinned automatically by
@@ -26,8 +26,7 @@ hot:
   pdb:
     enabled: false
   networkPolicy:
-    # RKE2 ships the nginx ingress controller in kube-system, not ingress-nginx.
-    ingressControllerNamespace: kube-system
+    ingressControllerNamespace: ingress-nginx
   # Reference the Secret provisioned out-of-band in the harbor namespace
   # (DATABASE_URL / REDIS_URL / KEK_SECRET) rather than committing credentials.
   secrets:
@@ -44,6 +43,12 @@ mgmt:
     enabled: false
   secrets:
     existingSecret: harbor-mgmt-secrets
+  cloudIntegration:
+    enabled: true
+    nodePort: 30081
+    # Harbor Cloud's WireGuard tunnel address; the two clusters share no pod or
+    # service network and Harbor Cloud receives no Harbor kubeconfig.
+    allowedCIDR: 10.88.0.2/32
 ingress:
   enabled: true
   className: nginx
