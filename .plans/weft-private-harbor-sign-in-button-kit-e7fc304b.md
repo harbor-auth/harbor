@@ -46,3 +46,39 @@
    `typescript`/`react`/`@types/react` as devDependencies in
    `react/node_modules` and ran `tsc --noEmit` — zero errors.
 4. Commit and push.
+
+# Task 5: Minimal executable RP integration example (Go) — state/nonce/PKCE S256
+
+1. Add `sdk/sign-in-button/examples/minimal-rp/main.go`: wires an
+   `http.ServeMux` with `/auth/login` and `/auth/callback`, performs OIDC
+   discovery (`{ISSUER}/.well-known/openid-configuration`, validating the
+   returned `issuer` matches configured `ISSUER` exactly) at startup to
+   find the authorization/token endpoints, and owns the in-memory
+   `sessionStore` (pending pre-auth records + established post-auth
+   sessions) shared by both handlers.
+2. Add `login.go`: `LoginHandler{AuthorizeURL, ClientID, RedirectURI,
+   Sessions}`. `ServeHTTP` mints CSPRNG `state`/`nonce`/PKCE
+   `code_verifier` (+ S256 `code_challenge`), stores them server-side keyed
+   by a fresh opaque session id set as an `HttpOnly`/`Secure`/`SameSite=Lax`
+   cookie, and redirects to `AuthorizeURL` with `redirect_uri` fixed to the
+   pre-configured `RedirectURI` field (never derived from the request).
+3. Add `callback.go`: `CallbackHandler{TokenEndpoint, ClientID,
+   RedirectURI, Issuer, Sessions, HTTPClient}`. `ServeHTTP` looks up the
+   pending session via `takePending` (delete-on-read, so a state/session is
+   redeemable at most once), rejects any state mismatch or unknown session
+   with a generic `"login failed"` (no detail leaked), exchanges the code
+   via stdlib `net/http` (posting `code_verifier`), decodes the ID token
+   claims (no signature verification — documented as a hard production
+   requirement, not in scope for this state/nonce/PKCE demo) and checks
+   `nonce`/`iss`/`aud`/`exp`, then rotates the session by minting a new
+   post-auth session id and discarding the pre-auth one.
+4. Add `README.md`: run command, required env vars (`ISSUER`, `CLIENT_ID`,
+   `REDIRECT_URI`, optional `ADDR`), what's intentionally out of scope
+   (JWKS signature verification).
+5. Verify: `go build ./sdk/sign-in-button/...` and `go vet
+   ./sdk/sign-in-button/...` both clean; `gofmt -l` clean; ran the server
+   against a throwaway fake-IdP discovery endpoint on loopback and curled
+   both routes — `/auth/login` redirects with `state`/`nonce`/
+   `code_challenge`/`code_challenge_method=S256` and sets the session
+   cookie; `/auth/callback` with a bogus `state` returns a generic 400.
+6. Commit and push.
