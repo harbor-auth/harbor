@@ -1,22 +1,28 @@
-# Define the harbor-cloud management API OpenAPI contract
+# Implement scoped service-JWT verifier with replay resistance
 
-1. Read the openspec change artifacts (proposal/design/tasks/spec) for
-   `harbor-cloud-management-api-contract-2ee993ea` to pin down the exact
-   routes, scopes, error codes, and idempotency semantics.
-2. Author `api/openapi/harbor-cloud.yaml` (OpenAPI 3.1, Apache-2.0) with
-   `POST /admin/v1/sessions`, `POST /admin/v1/namespaces`,
-   `GET /admin/v1/namespaces/{id}`, `DELETE /admin/v1/namespaces/{id}`,
-   `POST /admin/v1/keys/rotate`; a `cloudServiceAuth` bearer scheme; a
-   required `Idempotency-Key` header on create/delete/mint; and a stable
-   `Error` schema covering namespace_already_exists,
-   idempotency_key_reused, cross_tenant_forbidden, session_expired,
-   insufficient_scope, token_replayed, rate_limited.
-3. Add a dedicated `oapi-codegen-cloud.yaml` config (separate Go package
-   from `harbor.gen.go` to avoid schema-name collisions) and wire it into
-   `make generate`.
-4. Run `make generate`, keep only the new `internal/gen/openapi/cloud/`
-   output (revert unrelated pre-existing tool-version drift in
-   `internal/gen/db/**` and `harbor.gen.go` from local sqlc/oapi-codegen
-   version skew).
-5. Verify `go build ./...` and `go vet ./...` stay green, commit, rebase,
-   and push.
+Task 3 of the harbor-cloud-management-api-contract feature.
+
+1. Read `openspec/changes/harbor-cloud-management-api-contract-2ee993ea/design.md`
+   §2 and `api/openapi/harbor-cloud.yaml`'s `cloudServiceAuth` scheme to pin down
+   the exact claim/error semantics, and the existing verifier/admin-auth
+   patterns (`internal/oidc/jwt_verifier.go`, `internal/oidcapi/admin_auth.go`)
+   to match project conventions (hand-rolled compact-JWT parsing, no new JWT
+   dependency, constant-time comparisons via SHA-256 + `subtle.ConstantTimeCompare`).
+2. Add `internal/cloudapi/serviceauth.go`:
+   - `ServiceClaims` (Audience, Subject, Scopes, ExpiresAt, JTI) and
+     `ServiceAuthVerifier.Verify(ctx, bearer) (ServiceClaims, error)`.
+   - Support ES256 and EdDSA, verified against a single configured trust
+     anchor public key (PEM, from `CLOUD_SERVICE_AUTH_PUBLIC_KEY` — parsed by
+     the constructor here; wiring reads the env var in a later task).
+   - Fail closed when the trust anchor or the replay guard aren't configured.
+   - `ReplayGuard` interface + `RedisReplayGuard` (SETNX, TTL = token exp).
+   - PII-free audit event via `internal/telemetry` on every accept/reject
+     (adds an allow-listed `caller` field for the machine service-identity
+     subject; reuses `path_template`/`result`/`error_code`).
+   - Never accept `ADMIN_API_TOKEN` or the RFC 7591 initial-access token —
+     this verifier only ever parses/verifies the bearer JWT it's handed.
+3. Add `internal/cloudapi/serviceauth_test.go` covering: valid, wrong-audience,
+   missing-scope, expired, replayed, unconfigured-trust-anchor (plus malformed
+   token / wrong-algorithm / unconfigured-replay-guard as bonus coverage).
+4. `go build ./...`, `go vet ./...`, `go test ./internal/cloudapi/... ./internal/telemetry/...`,
+   then the full `go test ./...` for regressions. Commit and push.
