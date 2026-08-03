@@ -57,6 +57,19 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
+    {{- if .Values.mgmt.cloudIntegration.enabled }}
+    # harbor-hot, for the internal/cloudapi key-rotation proxy call
+    # (POST /admin/v1/keys/rotate -> harbor-hot's POST /admin/keys/rotate,
+    # HARBOR_HOT_INTERNAL_URL). Only opened when cloudIntegration is enabled —
+    # harbor-mgmt has no other reason to reach harbor-hot directly.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "harbor.hot.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: {{ .Values.hot.port }}
+          protocol: TCP
+    {{- end }}
     # Regional PostgreSQL. Label matches the Bitnami postgresql chart pod.
     # SCAFFOLD: podSelector only matches same-namespace postgres pods. If your
     # DB is in another namespace or is managed/external, replace with an ipBlock

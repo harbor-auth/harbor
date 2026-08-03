@@ -24,6 +24,7 @@ import (
 
 	"github.com/harbor-auth/harbor/internal/bff"
 	"github.com/harbor-auth/harbor/internal/clients"
+	"github.com/harbor-auth/harbor/internal/cloudapi"
 	"github.com/harbor-auth/harbor/internal/crypto"
 	"github.com/harbor-auth/harbor/internal/gen/db"
 	"github.com/harbor-auth/harbor/internal/httpserver"
@@ -67,6 +68,29 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	if envBool("RATE_LIMIT_DISABLED") {
 		return errors.New("RATE_LIMIT_DISABLED is not allowed in production")
+	}
+	// The Harbor Cloud management API (internal/cloudapi) is wired only when
+	// explicitly enabled (mgmt.cloudIntegration.enabled in deploy config) —
+	// harbor-hot's public listener never imports this package, and by
+	// default no /admin/v1/* route is registered at all (a 404, not an
+	// auth failure). When enabled, its three dependencies are required
+	// up front so a misconfigured deployment fails at boot rather than
+	// serving cloudapi routes that silently 401 every request.
+	cloudIntegrationEnabled := envBool("CLOUD_INTEGRATION_ENABLED")
+	var cloudServiceAuthPublicKey, cloudHotProxyToken, cloudHotInternalURL string
+	if cloudIntegrationEnabled {
+		cloudServiceAuthPublicKey = os.Getenv("CLOUD_SERVICE_AUTH_PUBLIC_KEY")
+		if cloudServiceAuthPublicKey == "" {
+			return errors.New("harbor-mgmt requires CLOUD_SERVICE_AUTH_PUBLIC_KEY when CLOUD_INTEGRATION_ENABLED is set")
+		}
+		cloudHotProxyToken = os.Getenv("MGMT_HOT_PROXY_TOKEN")
+		if cloudHotProxyToken == "" {
+			return errors.New("harbor-mgmt requires MGMT_HOT_PROXY_TOKEN when CLOUD_INTEGRATION_ENABLED is set")
+		}
+		cloudHotInternalURL = os.Getenv("HARBOR_HOT_INTERNAL_URL")
+		if err := validateInternalURL("HARBOR_HOT_INTERNAL_URL", cloudHotInternalURL); err != nil {
+			return err
+		}
 	}
 	authorizeCompleteURL := os.Getenv("AUTHORIZE_COMPLETE_URL")
 	if err := validateProductionURL("AUTHORIZE_COMPLETE_URL", authorizeCompleteURL); err != nil {
@@ -219,6 +243,19 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	webauthnHandler.RegisterRoutes(mux)
 	mgmtServer.Routes(mux)
 	dashboardHandler.Routes(mux)
+	if cloudIntegrationEnabled {
+		cloudVerifier, err := cloudapi.NewServiceAuthVerifier(cloudapi.ServiceAuthVerifierConfig{
+			PublicKeyPEM: cloudServiceAuthPublicKey,
+			ReplayGuard:  cloudapi.NewRedisReplayGuard(redisClient),
+			Logger:       telemetry.New(logger),
+		})
+		if err != nil {
+			return fmt.Errorf("configure cloud service auth verifier: %w", err)
+		}
+		cloudStore := cloudapi.NewStore(q)
+		cloudKeysHandler := cloudapi.NewKeysHandler(cloudVerifier, cloudHotInternalURL, cloudHotProxyToken, nil)
+		registerCloudAPIRoutes(mux, cloudVerifier, cloudStore, cloudKeysHandler, newCloudAPILimiters(redisClient, logger))
+	}
 	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(webauthnService), bff.DiscoverableUserResolver{}, authorizeCompleteURL)
 	mux.HandleFunc("GET /login", loginHandler.BeginLogin)
 	mux.HandleFunc("POST /login/complete", loginHandler.FinishLogin)
@@ -353,6 +390,24 @@ func validateProductionURL(name, raw string) error {
 	loopbackHTTP := u.Scheme == "http" && (u.Hostname() == "localhost" || (hostIP != nil && hostIP.IsLoopback()))
 	if (u.Scheme != "https" && !loopbackHTTP) || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
 		return fmt.Errorf("invalid %s: requires an absolute credential-free HTTPS URL (HTTP is limited to loopback integration endpoints)", name)
+	}
+	return nil
+}
+
+// validateInternalURL checks that raw is an absolute http(s) URL with no
+// embedded credentials. Unlike validateProductionURL it permits plain HTTP to
+// a non-loopback host — HARBOR_HOT_INTERNAL_URL points at another pod's
+// cluster-internal Service DNS name (e.g.
+// "http://harbor-hot.harbor.svc.cluster.local:8080"), reached over a network
+// where transport encryption is provided by the service mesh (Linkerd mTLS),
+// not the URL scheme.
+func validateInternalURL(name, raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid %s: %w", name, err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
+		return fmt.Errorf("invalid %s: requires an absolute credential-free HTTP(S) URL", name)
 	}
 	return nil
 }

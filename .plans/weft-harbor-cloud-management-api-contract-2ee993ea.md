@@ -1,40 +1,75 @@
-# Task 6: Key-rotation proxy handler with a second internal admin credential
+# Task 7: Wire cloudapi into harbor-mgmt behind the cloudIntegration gate and deploy config
 
-## Scope (per tasks.md §6 + assigned task)
+## Scope (per tasks.md §7 + assigned task)
 
-1. `internal/oidcapi/admin_auth.go`: extend `AdminAuthConfig`/`AdminAuthMiddleware`
-   to accept a set of independently-labeled Bearer credentials instead of one
-   `Token`. Log which label matched on every accepted/rejected request.
-   Preserve constant-time comparison (compare against every configured
-   credential, no early exit) and fail-closed behavior (empty credential set
-   => always 401).
-2. `cmd/harbor-hot/main.go`: wire a second, optional `MGMT_HOT_PROXY_TOKEN`
-   credential (label "cloud-proxy") alongside the existing required
-   `ADMIN_API_TOKEN` (label "operator") — needed for the "operator vs
-   cloud-proxy" audit-log distinction to actually work end-to-end. Optional
-   because harbor-hot runs standalone without Harbor Cloud integration.
-3. `internal/cloudapi/keys.go`: `KeysHandler.PostKeysRotate` —
-   - verifies the caller's `cloudServiceAuth` bearer via `ServiceAuthVerifier`
-   - requires `keys:rotate` scope (403 `insufficient_scope` otherwise)
-   - proxies to harbor-hot's unmodified `POST /admin/keys/rotate` using
-     `MGMT_HOT_PROXY_TOKEN` (never `ADMIN_API_TOKEN`)
-   - relays harbor-hot's response status/body; maps transport failures to
-     500 `server_error` per `api/openapi/harbor-cloud.yaml`.
-4. Tests: `admin_auth_test.go` (multi-credential accept/reject + label
-   logging), `keys_test.go` (scope enforcement, correct credential used in
-   the proxy call, cross-package check that harbor-hot's
-   `AdminAuthMiddleware` logs `credential=cloud-proxy` vs `credential=operator`).
+1. `cmd/harbor-mgmt/main.go`: read `CLOUD_INTEGRATION_ENABLED` (new boolean
+   gate env var, mirrors `mgmt.cloudIntegration.enabled`), and when set,
+   require `CLOUD_SERVICE_AUTH_PUBLIC_KEY`, `MGMT_HOT_PROXY_TOKEN`, and
+   `HARBOR_HOT_INTERNAL_URL` before the HTTP listen boundary (fail-fast, same
+   convention as the other required-env checks already in `run`). Build
+   `cloudapi.ServiceAuthVerifier` (Redis replay guard, reusing the existing
+   Redis client), `cloudapi.Store` (reusing the existing `db.Queries`), and
+   `cloudapi.KeysHandler`, then register all five `/admin/v1/*` routes on the
+   existing mux via a new helper.
+2. New file `cmd/harbor-mgmt/cloudapi.go`: `registerCloudAPIRoutes` wires the
+   five routes. `namespaces.go`/`sessions.go` handlers do their own idempotency
+   but NOT service-auth (their doc comments say auth is "enforced by the auth
+   middleware ahead of this handler" — this task is that middleware); wrap
+   them with a `cloudAuthorized` middleware that calls
+   `ServiceAuthVerifier.Verify` + checks the route's required scope
+   (`sessions:mint` / `namespaces:read` / `namespaces:write`).
+   `keys.go`'s `PostKeysRotate` already self-verifies (it needs the
+   `cloud-proxy`-labeled distinction to be internal to that handler) — wrapping
+   it in `cloudAuthorized` too would call `Verify` twice and reject the second
+   call as a replay of its own `jti`, so `keys.rotate` is wired WITHOUT the
+   extra auth middleware, only the rate limiter. Every route also gets a
+   dedicated Redis-backed rate limiter (`cloudRateLimited`) that denies
+   (`429 rate_limited`) on a limiter backend error — fail-closed, mirroring
+   `mgmtapi.productionAbuseGate`.
+3. `deploy/helm/values.yaml` + `deploy/helm/templates/{secret-mgmt,
+   deployment-mgmt,networkpolicy-mgmt}.yaml`: add
+   `mgmt.cloudIntegration.{cloudServiceAuthPublicKey,hotProxyToken}` (secret
+   material — go in `secret-mgmt.yaml`, gated on `cloudIntegration.enabled`)
+   and an env entry on the container computing `HARBOR_HOT_INTERNAL_URL` from
+   the existing `harbor-hot` Service DNS name (non-secret, so it's a plain
+   `env:` entry on `deployment-mgmt.yaml`, not routed through the ConfigMap —
+   keeps `configmap-mgmt.yaml` untouched per the task's file list).
+   `networkpolicy-mgmt.yaml` gets an egress rule to `harbor-hot`'s pod on
+   `hot.port` (mgmt now calls hot for the keys-rotate proxy), gated the same
+   way. `cloudIntegration.enabled: false` stays the shipped default.
+4. `deploy/k8s/{configmap-mgmt,secret-mgmt,deployment-mgmt}.yaml`: mirror the
+   same three env vars as commented `REPLACE_ME` placeholders (raw manifests
+   have no `if`-gating, so they ship inert but present).
+5. Tests: extend `cmd/harbor-mgmt/main_test.go` with the same AST-level
+   "required before listen" convention for the three new conditional env
+   checks, plus a new `cmd/harbor-mgmt/cloudapi_test.go` exercising
+   `registerCloudAPIRoutes` end-to-end over `httptest` for: missing bearer
+   (401), wrong scope (403), and rate-limiter backend error (429, fail
+   closed) — using a fake `clients.RateLimiter` and a real
+   `ServiceAuthVerifier` (ES256, miniredis-backed replay guard, mirroring
+   `internal/cloudapi/serviceauth_test.go`'s `newTestEnv`). A fake querier
+   satisfies `cloudapi.Store`'s unexported `querier` interface structurally
+   (its methods are exported-named, taking exported `internal/gen/db` types),
+   so no real Postgres is needed for these wiring-only tests.
 
 ## Out of scope
 
-- Binary wiring of `internal/cloudapi` into `cmd/harbor-mgmt` (task 7).
-- Namespace/session handler changes (tasks 4/5, other agents — task 4's
-  `namespaces.go` landed on this branch in parallel with its own `Server`
-  type; `sessions.go` (task 5) and `keys.go` (this task) are both
-  self-contained handler types instead. Reconciling `Server` /
-  `SessionsHandler` / `KeysHandler` into one type satisfying
-  `cloudopenapi.ServerInterface` is task 7's job, not this task's).
-- Helm/k8s deploy config (task 7).
+- Full contract/fixture-driven and cross-process integration tests (task 8) —
+  this task's own tests only prove the wiring (gate, auth, scope, rate-limit
+  fail-closed), not the full happy-path namespace/session/key-rotate
+  behavior, which is already covered by tasks 4/5/6's unit tests.
+- `invariants/registry.yaml` + docs (task 9).
+- Wiring `MGMT_HOT_PROXY_TOKEN` into harbor-hot's own deploy config
+  (`deploy/helm/templates/secret-hot.yaml` etc.) — out of this task's
+  explicit file list; harbor-hot's code already reads the env var (task 6),
+  but nothing sets it in a chart/manifest yet. Filed as a follow-on so
+  `cloudIntegration.enabled: true` actually works end-to-end in a real
+  deployment.
+- `internal/mgmtapi/region_middleware.go`'s host-based region gate wraps the
+  whole handler, including `/admin/v1/*` — Harbor Cloud's calls arrive via
+  the WireGuard NodePort, possibly with a `Host` header that doesn't map to
+  a bound region, which would 400 before reaching the cloudapi routes.
+  Not in this task's file list; filed as a follow-on.
 
 ## Notes
 
@@ -154,4 +189,18 @@ simply never mounted (the actual disabled-state behavior, since an
 unregistered `net/http` pattern always 404s) rather than against
 `cmd/harbor-mgmt` directly — `cmd/harbor-mgmt` is a `main` package and can't
 be imported from `internal/cloudapi`, and task 7 owns the real gate wiring
-and its own tests there.
+and its own tests there. Task 7 landed its production reconciliation as
+described below; it did not change task 8's test-local adapter (that
+remains a valid, independent proof of the same contract).
+
+## Task 7 (production wiring, landed after the task 8 notes above)
+
+- `*cloudapi.Server` already implements 3 of the 5 `cloudopenapi.ServerInterface`
+  methods with matching signatures (`PostAdminV1Namespaces`,
+  `GetAdminV1Namespace`, `DeleteAdminV1Namespace`); `SessionsHandler.PostSessions`
+  and `KeysHandler.PostKeysRotate` use their own hand-rolled signatures instead
+  (per task 6's plan notes) — this task hand-wires all five with
+  `mux.HandleFunc("METHOD /path", ...)` rather than
+  `cloudopenapi.HandlerFromMux`, since the three types were never reconciled
+  into one `ServerInterface` implementation and doing so is unnecessary just
+  to wire routes.

@@ -181,14 +181,33 @@ mgmt:
   # cluster. It is disabled for self-hosters by default. Production must place
   # this NodePort behind a private encrypted transport (the reference host uses
   # WireGuard) and restrict allowedCIDR to the Harbor Cloud tunnel address.
+  #
+  # When enabled, harbor-mgmt additionally registers the internal, versioned
+  # /admin/v1/* management API (internal/cloudapi) that Harbor Cloud calls for
+  # session minting, namespace lifecycle, and signing-key rotation — never
+  # exposed by harbor-hot's public listener.
   cloudIntegration:
     enabled: false
     nodePort: 30081
     allowedCIDR: ""
+    # PEM-encoded SPKI trust-anchor public key (ES256 or Ed25519) harbor-mgmt
+    # verifies Harbor Cloud's self-issued cloudServiceAuth JWTs against. An
+    # empty value fails closed: every /admin/v1/* request is rejected.
+    cloudServiceAuthPublicKey: ""
+    # Second, distinct internal admin credential harbor-mgmt presents to
+    # harbor-hot when proxying POST /admin/v1/keys/rotate — never the
+    # operator's ADMIN_API_TOKEN. harbor-hot independently reads this same
+    # value from its own MGMT_HOT_PROXY_TOKEN env var (internal/oidcapi's
+    # AdminAuthMiddleware, labeled "cloud-proxy") — this chart does not yet
+    # wire it into hot's Secret, so set it identically by hand on both sides
+    # until that follow-on lands.
+    # Generate: openssl rand -hex 32
+    hotProxyToken: ""
   secrets:
     # When set, this Secret must expose DATABASE_URL / REDIS_URL /
-    # HARBOR_KMS_SECRET / INITIAL_ACCESS_TOKEN. Its HARBOR_KMS_SECRET must
-    # equal the value in harbor-hot's Secret.
+    # HARBOR_KMS_SECRET / INITIAL_ACCESS_TOKEN, and, when cloudIntegration is
+    # enabled, CLOUD_SERVICE_AUTH_PUBLIC_KEY / MGMT_HOT_PROXY_TOKEN. Its
+    # HARBOR_KMS_SECRET must equal the value in harbor-hot's Secret.
     existingSecret: ""
     databaseUrl: ""
     # Shared Redis backs BFF, enrollment, WebAuthn, and abuse-control state.
