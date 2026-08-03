@@ -8,23 +8,35 @@ Reference deployment artifacts for self-hosters.
 
 ## BFF Topology — Single Public Host (Required)
 
-The Browser-Facing BFF (passkey login ceremony, `/login`, `/login/complete`) uses
-cookies with the `__Host-` prefix. This prefix forces `Path=/` and prohibits a
-`Domain` attribute, which means **the cookie cannot span two different public
-hostnames**.
+The Browser-Facing BFF (passkey login ceremony, `/login`, `/login/complete`,
+plus the public signup/sign-in surface — `/signup*`, `/signin`, `/enroll`,
+`/webauthn/*`, `/recovery/*` — see
+[docs/design/product/signup-cta-contract.md](../docs/design/product/signup-cta-contract.md))
+uses cookies with the `__Host-` prefix. This prefix forces `Path=/` and
+prohibits a `Domain` attribute, which means **the cookie cannot span two
+different public hostnames**.
 
 The only supported topology is therefore **one public hostname fronting both
-binaries** via path-routed ingress:
+binaries** via path-routed ingress. `harbor-mgmt` serves every pre-session and
+BFF-session path — not just `/login*` — so a path-routing ingress must send
+each of these prefixes to `harbor-mgmt`, with everything else falling through
+to `harbor-hot`:
 
 ```
-https://auth.example.com/login*   → harbor-mgmt  (BFF / passkey ceremony)
-https://auth.example.com/*        → harbor-hot   (OIDC hot path)
+https://auth.example.com/login*     → harbor-mgmt  (BFF / passkey ceremony)
+https://auth.example.com/signup*    → harbor-mgmt  (public signup journey)
+https://auth.example.com/signin     → harbor-mgmt  (public sign-in entry point)
+https://auth.example.com/enroll     → harbor-mgmt  (enrollment session)
+https://auth.example.com/webauthn/* → harbor-mgmt  (WebAuthn ceremonies)
+https://auth.example.com/recovery/* → harbor-mgmt  (recovery codes/ack)
+https://auth.example.com/*          → harbor-hot   (OIDC hot path)
 ```
 
 Both services live behind the same TLS terminator and hostname. The
-`__Host-harbor-bff` cookie set during `/login` is readable by the subsequent
-request to `/authorize/complete` (served by harbor-hot) because they share the
-same origin.
+`__Host-harbor-bff` cookie set during `/login` (or `/signin`, or the
+post-registration handoff from `/signup/passkey`) is readable by the
+subsequent request to `/authorize/complete` (served by harbor-hot) because
+they share the same origin.
 
 **Split-host topology is not supported.** If harbor-hot and harbor-mgmt are
 exposed under different public hostnames, `__Host-` cookies minted by harbor-mgmt
@@ -33,6 +45,14 @@ around this — it would remove a critical security invariant. Instead, use a
 path-routing ingress (see `deploy/helm/templates/ingress.yaml` and
 `deploy/k8s/ingress.yaml` for a starting point) or place both services behind a
 reverse proxy on a shared hostname.
+
+> **Known gap:** the example manifests referenced above (`deploy/k8s/ingress.yaml`,
+> `deploy/helm/templates/ingress.yaml`) currently route only the `/login`
+> prefix to `harbor-mgmt`, predating the public signup/sign-in surface — they
+> need broadening to the full prefix list above before `/signup`, `/signin`,
+> `/enroll`, `/webauthn/*`, and `/recovery/*` will actually resolve through
+> them. This doc describes the required topology; updating the example
+> manifests themselves is tracked as follow-on infra work, not done here.
 
 ### AUTHORIZE_COMPLETE_URL
 

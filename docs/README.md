@@ -52,6 +52,14 @@ docs/plans/         → future WHAT — intent not yet built
 | [bff-flow-wiring](features/bff-flow-wiring.md) | implemented | §9, §11.2 | `internal/bff/`, `internal/oidc/`, `cmd/harbor-hot/` | 2026-07-22 |
 | [redis-enrollment-session](features/redis-enrollment-session.md) | implemented | §9, §4.1 | `internal/clients/`, `internal/webauthn/`, `cmd/harbor-mgmt/` | 2026-07-22 |
 | [harbor-cloud-management-api](features/harbor-cloud-management-api.md) | implemented | — (see openspec change) | `internal/cloudapi/`, `cmd/harbor-mgmt/`, `api/openapi/harbor-cloud.yaml`, `deploy/helm/` | 2026-08-04 |
+| [signup-cta-contract](design/product/signup-cta-contract.md) | implemented | §9, §11.1 | `internal/bff/signup.go`, `internal/bff/signin.go`, `internal/bff/returnto.go` | 2026-08-03 |
+
+> `signup-cta-contract` lives under `design/product/` rather than
+> `features/` — it's the external-facing, versioned URL contract the Harbor
+> Cloud marketing site and demo link against, not an internal as-built
+> capability doc. It follows `design/product/`'s own header/cross-reference
+> convention (see [privacy-positioning](design/product/privacy-positioning.md))
+> rather than the `_templates/feature.md` frontmatter.
 
 ## Plans (future / in progress)
 

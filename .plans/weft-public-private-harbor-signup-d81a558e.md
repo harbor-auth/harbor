@@ -53,3 +53,42 @@ Within this task's scope, `GET /signup/success` validates its own `return_to` qu
 5. Tests (`internal/bff/signup_test.go`): update `newTestSignupHandler`/`TestNewSignupHandler_RejectsNilTemplate` for the new constructor signature; `TestSignupHandler_SuccessRoute_RequiresFullScope` (403 for `SessionScopeEnrollmentOnly` through the mux, mirroring `TestRequireFullScope_DeniesEnrollmentOnlyScope`); `TestGetSignupSuccess_NoSessionUnauthorized` (empty context, no scope at all defaults full but no `UserID` → 401); `TestGetSignupSuccess_ReturnToAllowlisted`/`_UnrecognizedFallsBackToDefault`/`_MissingFallsBackToDefault` (link rendered exactly matches, never the rejected value); `TestGetSignupSuccess_EmitsAuditEvents` (fake `SignupAuditRecorder` capturing calls, asserts all three event types recorded for the caller's own `userID`, no PII in `detail`); `TestGetSignupSuccess_NilAuditRecorderIsGraceful` (nil audit never panics/blocks the render).
 6. Follow-on suggested (out of scope, filed via `weft-agent tasks suggest`): thread `return_to` as real server-side session state end-to-end — `GET /signup?return_to=` (task 2, already "completed" but never implemented this) needs to validate-and-store it, and `EnrollmentSessionStore`, `ScopedSessionIssuer.IssueEnrollmentSession`, and `BFFSessionRecord` all need a carrier field so the value survives the `/signup` → `/signup/passkey` → webauthn ceremony → handoff → `/signup/recovery` → `/signup/success` multi-page journey without falling back to the default on every real request — today `/signup/success` can only honor a `return_to` supplied directly on its own URL, not one that started the journey at `/signup`. This is REQ-004 / design.md Decision 5's literal requirement and isn't satisfied by a single-file task.
 7. Verify: `go build ./...`, `go vet ./...`, `gofmt -l .`, `go test ./...`.
+
+## Task 6: Publish the stable CTA URL contract
+
+Investigation confirmed `GetSignup` (`internal/bff/signup.go`) never reads its
+own query string — `return_to` and `region` on `GET /signup` are accepted
+(still `200`) but currently inert (region comes from the in-page form's POST
+to `/enroll`; `return_to` isn't carried anywhere from this entry point, per
+task 4's follow-on). The doc documents that honestly rather than asserting
+the query parameters do anything today. Also found, via `deploy/contract`'s
+`assertPublicLoginRoute`, that the example ingress manifests
+(`deploy/k8s/ingress.yaml`, `deploy/helm/templates/ingress.yaml`) route only
+`/login` to harbor-mgmt — `/signup*`, `/signin`, `/enroll`, `/webauthn/*`,
+`/recovery/*` would all 404 through them today. Fixing those manifests (and
+their contract test) touches files outside this task's list and has its own
+test to update, so it's filed as a follow-on (`ftask_165be36d`) rather than
+done here; `deploy/README.md` documents it as a known gap instead.
+
+1. Added `docs/design/product/signup-cta-contract.md`: the versioned URL
+   contract for `GET /signup`, `GET /signup?return_to=&region=`, and
+   `GET /signin?return_to=` — auth, response shape, `return_to` allowlist
+   semantics (`bff.ValidateReturnTo`), region-picker semantics, the
+   single-host path-routed topology prerequisite, and the known
+   return_to/region-on-`/signup`-is-inert gap.
+2. Added `internal/bff/signup_cta_contract_test.go`: builds the real
+   `SignupHandler`/`SigninHandler` on a mux the same way
+   `cmd/harbor-mgmt/main.go` wires them and asserts all three published URLs
+   return `200 text/html`; a second test locks in the "query params are
+   inert" claim (identical body with/without them, `return_to` never echoed)
+   as a regression guard for that section of the doc.
+3. `docs/README.md`: added a Features-table row cross-linking the new doc,
+   with a short note on why it lives under `design/product/` instead of
+   `features/`.
+4. `deploy/README.md`: expanded the BFF Topology ASCII diagram to list every
+   harbor-mgmt-served prefix (not just `/login*`), cross-linked the new
+   contract doc, and called out the ingress-manifest gap explicitly as a
+   known limitation rather than leaving it undocumented.
+5. Verify: `go build ./...`, `go vet ./...`, `gofmt -l .`, `go test ./...`
+   (all green, including the new tests and the untouched `deploy/contract`
+   suite).
