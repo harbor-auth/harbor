@@ -193,6 +193,26 @@ and its own tests there. Task 7 landed its production reconciliation as
 described below; it did not change task 8's test-local adapter (that
 remains a valid, independent proof of the same contract).
 
+### Verification
+
+No PostgreSQL/Redis in this container (no docker, no root, no systemd) so
+`-tags=integration` tests were verified to compile clean
+(`go vet -tags=integration ./...`) and skip gracefully
+(`DATABASE_URL is not set; ...`) rather than run end-to-end — matching how
+`cmd/harbor-mgmt`/`cmd/harbor-hot`'s own `-tags=integration` files already
+behave in this same environment.
+
+`go build ./...`, `go vet ./...` / `-tags=integration`, `go test ./...`
+/ `-tags=integration` all pass repo-wide. The PATH `golangci-lint` binary is
+still the pre-existing go1.24-built one noted in task 13's entry above and
+can't type-check go1.25 modules at all (`can't load config: the Go language
+version (go1.24) ... is lower than 1.25.0`) — installed
+`golangci-lint@v2.12.2` (go1.25) locally to get ground truth, matching task
+13's precedent. `golangci-lint run ./...` (before task 14 landed) reported
+exactly one issue, `namespaces.go:281` (outside this task's file scope) —
+nothing new from this task's files. `go run ./tools/lint/testweakening --base
+origin/main` is clean.
+
 ## Task 7 (production wiring, landed after the task 8 notes above)
 
 - `*cloudapi.Server` already implements 3 of the 5 `cloudopenapi.ServerInterface`
@@ -223,3 +243,16 @@ Verified with `golangci-lint run ./internal/cloudapi/...` (v2.12.2, go1.25,
 installed locally per task 13's notes) — 0 issues, i.e. this was the last
 finding in the package. `go build ./...`, `go vet ./internal/cloudapi/...`,
 and `go test ./internal/cloudapi/...` all pass.
+
+## Task 8 re-verification (after tasks 7/14 landed)
+
+Rebased task 8's test suite onto tasks 7 and 14. `internal/cloudapi`'s
+production files (`namespaces.go`, `keys.go`, `sessions.go`, `serviceauth.go`)
+are unchanged by task 7/14 in ways that affect the test-local
+`contractAdapter`/`requireServiceAuth` harness — task 7 wired its OWN
+`mux.HandleFunc` router directly in `cmd/harbor-mgmt/cloudapi.go` rather than
+via `cloudopenapi.ServerInterface`, so it does not supersede or conflict with
+task 8's adapter. Re-ran the full suite: `go build ./...`, `go vet ./...` /
+`-tags=integration`, `go test ./...` / `-tags=integration`, and
+`golangci-lint run ./...` (v2.12.2 local) all clean — 0 issues repo-wide (the
+one pre-existing `namespaces.go:281` finding was fixed by task 14).
