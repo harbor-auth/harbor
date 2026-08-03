@@ -1,0 +1,23 @@
+{
+  "name": "@harbor-auth/sign-in-with-private-harbor-react",
+  "version": "0.1.0",
+  "description": "Dependency-light React \"Sign in with Private Harbor\" button component.",
+  "license": "Apache-2.0",
+  "main": "index.ts",
+  "types": "index.ts",
+  "files": [
+    "SignInWithPrivateHarborButton.tsx",
+    "index.ts",
+    "package.json"
+  ],
+  "peerDependencies": {
+    "react": ">=17.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "typescript": "^5.5.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

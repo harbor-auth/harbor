@@ -23,3 +23,26 @@
    deps, no root to install) — logic verified statically; real visual QA is
    Task 9 in this feature.
 4. Commit and push.
+
+# Task 4: Dependency-light React SignInWithPrivateHarborButton component
+
+1. Add `sdk/sign-in-button/react/SignInWithPrivateHarborButton.tsx`
+   implementing the `SignInWithPrivateHarborButtonProps` contract from spec
+   REQ-002 (`href` required/RP-owned, `variant`, `size`, `disabled`,
+   `ariaLabel` — no `state`/`nonce`/`code_challenge`/`client_id`/
+   `redirect_uri`). The SVG per variant/size is reproduced inline as JSX
+   (byte-faithful to `assets/button-<variant>-<size>.svg`) rather than
+   imported from the asset file, so the component has zero bundler
+   requirements (no SVGR/raw-loader config needed) — documented in a code
+   comment, with the bundler-driven alternative noted for consumers who
+   prefer it. Reuses the `phb-button*`/`phb-btn*` classes from
+   `css/sign-in-button.css`.
+2. Add `sdk/sign-in-button/react/index.ts` barrel export and
+   `sdk/sign-in-button/react/package.json` (name, version 0.1.0,
+   `peerDependencies.react`, `files`, `license: Apache-2.0`), plus a local
+   `tsconfig.json` so the package can be typechecked standalone.
+3. Verify: no pnpm/tsc preinstalled in this container, but `npm` exists
+   unlinked at `/usr/lib/node_modules/npm/bin/npm-cli.js`; installed
+   `typescript`/`react`/`@types/react` as devDependencies in
+   `react/node_modules` and ran `tsc --noEmit` — zero errors.
+4. Commit and push.
