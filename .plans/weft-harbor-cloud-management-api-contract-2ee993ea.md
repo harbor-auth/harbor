@@ -204,3 +204,22 @@ remains a valid, independent proof of the same contract).
   `cloudopenapi.HandlerFromMux`, since the three types were never reconciled
   into one `ServerInterface` implementation and doing so is unnecessary just
   to wire routes.
+
+## Task 14: Fix errcheck finding in internal/cloudapi/namespaces.go
+
+`namespaces.go:281`'s `hashNamespaceCreateRequest` discarded `json.Marshal`'s
+error on a blank assignment (`canon, _ := json.Marshal(...)`), flagged by
+errcheck's `check-blank: true`. Chose "check and handle" over `//nolint`
+since the function has exactly one caller (`PostAdminV1Namespaces`) already
+in a position to call `writeInternalError` on failure — changed
+`hashNamespaceCreateRequest` to return `([32]byte, error)` and handle the
+error at the call site with `writeInternalError(w, "cloudapi: hash namespace
+create request", err)`, matching the convention already used for the
+`json.Marshal` in the same handler (namespace response marshaling, a few
+lines below). Removed the now-inaccurate "cannot fail" comment along with
+the blank assignment it justified.
+
+Verified with `golangci-lint run ./internal/cloudapi/...` (v2.12.2, go1.25,
+installed locally per task 13's notes) — 0 issues, i.e. this was the last
+finding in the package. `go build ./...`, `go vet ./internal/cloudapi/...`,
+and `go test ./internal/cloudapi/...` all pass.

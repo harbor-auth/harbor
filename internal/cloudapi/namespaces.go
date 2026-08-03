@@ -147,7 +147,11 @@ func (s *Server) PostAdminV1Namespaces(w http.ResponseWriter, r *http.Request, p
 	}
 
 	ctx := r.Context()
-	reqHash := hashNamespaceCreateRequest(req)
+	reqHash, err := hashNamespaceCreateRequest(req)
+	if err != nil {
+		writeInternalError(w, "cloudapi: hash namespace create request", err)
+		return
+	}
 
 	stored, outcome, err := s.checkIdempotency(ctx, idempotencyKey, opNamespaceCreate, reqHash)
 	if err != nil {
@@ -275,11 +279,12 @@ type canonicalNamespaceCreateRequest struct {
 
 // hashNamespaceCreateRequest computes the idempotency ledger's request_hash
 // for a namespace create request.
-func hashNamespaceCreateRequest(req cloudopenapi.NamespaceCreateRequest) [32]byte {
-	// A fixed Go struct always marshals its fields in the same order, so this
-	// cannot fail — the same reasoning oidcapi.New applies to jwksBytes.
-	canon, _ := json.Marshal(canonicalNamespaceCreateRequest{ID: req.Id, DisplayName: req.DisplayName})
-	return sha256.Sum256(canon)
+func hashNamespaceCreateRequest(req cloudopenapi.NamespaceCreateRequest) ([32]byte, error) {
+	canon, err := json.Marshal(canonicalNamespaceCreateRequest{ID: req.Id, DisplayName: req.DisplayName})
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return sha256.Sum256(canon), nil
 }
 
 // namespaceResponse builds the wire NamespaceResponse from a domain
