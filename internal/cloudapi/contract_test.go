@@ -141,7 +141,7 @@ type contractFixture struct {
 	Name string `json:"name"`
 	// SpecScenario names the exact "#### Scenario: ..." heading in spec.md
 	// this fixture proves, so drift between the two is easy to audit by hand.
-	SpecScenario string `json:"spec_scenario"`
+	SpecScenario string         `json:"spec_scenario"`
 	Steps        []contractStep `json:"steps"`
 }
 
