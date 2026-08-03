@@ -1,0 +1,224 @@
+global:
+  enabled: true
+  tlsDisable: false
+
+injector:
+  enabled: false
+
+csi:
+  enabled: false
+
+ui:
+  enabled: false
+
+server:
+  image:
+    registry: quay.io
+    repository: openbao/openbao
+    # OpenBao 2.6.1, pinned to the linux/amd64 manifest.
+    tag: "2.6.1@sha256:15e90b578c970ae57b596ed51295380cd54f93860fe36758f05b455d71aae0e0"
+    pullPolicy: IfNotPresent
+
+  logLevel: info
+  logFormat: json
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  dataStorage:
+    enabled: true
+    size: 5Gi
+    storageClass: local-path
+    accessMode: ReadWriteOnce
+
+  auditStorage:
+    enabled: true
+    size: 2Gi
+    storageClass: local-path
+    accessMode: ReadWriteOnce
+
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+
+  standalone:
+    enabled: false
+
+  ha:
+    enabled: true
+    replicas: 1
+    disruptionBudget:
+      enabled: false
+    raft:
+      enabled: true
+      setNodeId: true
+      config: |
+        ui = false
+
+        listener "tcp" {
+          address            = "[::]:8200"
+          cluster_address    = "[::]:8201"
+          tls_disable        = 0
+          tls_min_version    = "tls12"
+          tls_cert_file      = "/openbao/tls/tls.crt"
+          tls_key_file       = "/openbao/tls/tls.key"
+          tls_client_ca_file = "/openbao/tls/ca.crt"
+        }
+
+        storage "raft" {
+          path = "/openbao/data"
+        }
+
+        audit "file" "file" {
+          description = "Persistent OpenBao API audit log"
+          options {
+            file_path = "/openbao/audit/audit.log"
+            mode      = "0600"
+            log_raw   = "false"
+          }
+        }
+
+        service_registration "kubernetes" {}
+
+  affinity: ""
+
+  service:
+    enabled: true
+    type: ClusterIP
+    active:
+      enabled: false
+    standby:
+      enabled: false
+
+  ingress:
+    enabled: false
+
+  authDelegator:
+    enabled: true
+
+  serviceAccount:
+    create: true
+    name: openbao
+    createSecret: false
+    serviceDiscovery:
+      enabled: true
+
+  volumes:
+    - name: openbao-server-tls
+      secret:
+        secretName: openbao-server-tls
+        defaultMode: 0440
+    - name: tmp
+      emptyDir: {}
+  volumeMounts:
+    - name: openbao-server-tls
+      mountPath: /openbao/tls
+      readOnly: true
+    - name: tmp
+      mountPath: /tmp
+
+  readinessProbe:
+    enabled: true
+    path: /v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204
+    initialDelaySeconds: 5
+  livenessProbe:
+    enabled: true
+    path: /v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204
+    initialDelaySeconds: 30
+
+  statefulSet:
+    securityContext:
+      pod:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      container:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+
+  networkPolicy:
+    enabled: true
+    ingress:
+      - from:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: harbor
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: harbor-hot
+        ports:
+          - port: 8200
+            protocol: TCP
+      - from:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: openbao
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: openbao
+                component: server
+        ports:
+          - port: 8200
+            protocol: TCP
+          - port: 8201
+            protocol: TCP
+      # Kubelet probes originate from the Harbor VM's node address.
+      - from:
+          - ipBlock:
+              cidr: 10.77.1.10/32
+        ports:
+          - port: 8200
+            protocol: TCP
+    egress:
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: kube-system
+            podSelector:
+              matchLabels:
+                k8s-app: kube-dns
+        ports:
+          - port: 53
+            protocol: UDP
+          - port: 53
+            protocol: TCP
+      # TokenReview and Kubernetes service registration. This is the K3s API
+      # Service IP in the isolated Harbor cluster, not a routable host address.
+      - to:
+          - ipBlock:
+              cidr: 10.43.0.1/32
+        ports:
+          - port: 443
+            protocol: TCP
+      # K3s may enforce egress after the kubernetes Service is DNATed to the
+      # control-plane endpoint. Keep that exception to the one Harbor node.
+      - to:
+          - ipBlock:
+              cidr: 10.77.1.10/32
+        ports:
+          - port: 6443
+            protocol: TCP
+      - to:
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: openbao
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: openbao
+                component: server
+        ports:
+          - port: 8200
+            protocol: TCP
+          - port: 8201
+            protocol: TCP

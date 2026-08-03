@@ -55,7 +55,22 @@ spec:
       ports:
         - port: 5432
           protocol: TCP
-    # External HTTPS — Cloudflare KMS API, remote JWKS fetch, and any other
+    {{- if eq (.Values.hot.kms.provider | default "aws") "openbao" }}
+    # OpenBao Transit KMS. Both selectors are required, so this does not allow
+    # arbitrary traffic to the OpenBao namespace or to same-named pods elsewhere.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: openbao
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: openbao
+              component: server
+      ports:
+        - port: 8200
+          protocol: TCP
+    {{- end }}
+    # External HTTPS — managed KMS APIs, remote JWKS fetch, and any other
     # outbound TLS calls harbor-hot makes. ipBlock 0.0.0.0/0 is intentionally
     # broad but port-locked to 443 only; internal CIDRs are excluded to avoid
     # accidentally bypassing same-cluster NetworkPolicies via this rule.

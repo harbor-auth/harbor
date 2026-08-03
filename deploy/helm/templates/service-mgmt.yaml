@@ -17,3 +17,28 @@ spec:
       port: 80
       targetPort: http
       protocol: TCP
+{{- if .Values.mgmt.cloudIntegration.enabled }}
+---
+# Dedicated cross-cluster endpoint for Harbor Cloud. This is intentionally a
+# separate Service so the ordinary management Service remains ClusterIP-only.
+# externalTrafficPolicy=Local preserves the WireGuard peer address for the
+# NetworkPolicy below.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "harbor.fullname" . }}-mgmt-cloud
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "harbor.mgmt.labels" . | nindent 4 }}
+spec:
+  type: NodePort
+  externalTrafficPolicy: Local
+  selector:
+    {{- include "harbor.mgmt.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.mgmt.port }}
+      targetPort: http
+      nodePort: {{ .Values.mgmt.cloudIntegration.nodePort }}
+      protocol: TCP
+{{- end }}

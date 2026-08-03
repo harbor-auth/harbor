@@ -18,3 +18,11 @@ data:
   # middleware resolves /authorize and /token (docs/DESIGN.md §5).
   REGION: {{ .Values.region | default "EU" | quote }}
   KMS_KEY_MAP: {{ required "kmsKeyMap is required in production" .Values.kmsKeyMap | quote }}
+  KMS_PROVIDER: {{ .Values.hot.kms.provider | default "aws" | quote }}
+  {{- if eq (.Values.hot.kms.provider | default "aws") "openbao" }}
+  OPENBAO_ADDR: {{ required "hot.kms.openbao.address is required for OpenBao" .Values.hot.kms.openbao.address | quote }}
+  OPENBAO_KUBERNETES_ROLE: {{ required "hot.kms.openbao.kubernetesRole is required for OpenBao" .Values.hot.kms.openbao.kubernetesRole | quote }}
+  OPENBAO_TOKEN_PATH: "/var/run/secrets/openbao/token"
+  OPENBAO_CACERT: "/var/run/secrets/openbao-ca/ca.crt"
+  OPENBAO_TRANSIT_MOUNT: {{ .Values.hot.kms.openbao.transitMount | default "transit" | quote }}
+  {{- end }}

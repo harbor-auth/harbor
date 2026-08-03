@@ -1,0 +1,63 @@
+# Internal-only CA for OpenBao's service TLS. This CA protects the transport;
+# it is deliberately separate from OpenBao's Shamir unseal keys.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: openbao-selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: openbao-root-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: OpenBao Internal Root CA
+  secretName: openbao-root-ca
+  duration: 87600h # 10 years; rotate deliberately with a dual-trust window.
+  renewBefore: 8760h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: openbao-selfsigned
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: openbao-ca
+spec:
+  ca:
+    # ClusterIssuer CA secrets are resolved in cert-manager's cluster-resource
+    # namespace (cert-manager in this K3s installation).
+    secretName: openbao-root-ca
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: openbao-server
+  namespace: openbao
+spec:
+  secretName: openbao-server-tls
+  commonName: openbao.openbao.svc
+  dnsNames:
+    - openbao
+    - openbao.openbao
+    - openbao.openbao.svc
+    - openbao.openbao.svc.cluster.local
+    - openbao-0.openbao-internal
+    - openbao-0.openbao-internal.openbao.svc
+    - openbao-0.openbao-internal.openbao.svc.cluster.local
+  duration: 2160h # 90 days
+  renewBefore: 360h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: openbao-ca
+    kind: ClusterIssuer

@@ -22,6 +22,11 @@ global:
     # The production hot/mgmt helpers require per-component sha256 digests.
     tag: development-only
     pullPolicy: IfNotPresent
+  postgresTLS:
+    # Mount the issuing CA so DATABASE_URL can use sslmode=verify-full.
+    enabled: false
+    secretName: harbor-postgresql-tls
+    mountPath: /var/run/secrets/postgresql
   # Shared 256-bit KEK used to wrap and unwrap per-user DEKs. Both harbor-hot
   # and harbor-mgmt MUST receive this exact value: management creates the
   # wrapped user secrets and hot unwraps them for PPID derivation.
@@ -95,7 +100,7 @@ hot:
     # Name of the Secret managed by External Secrets Operator that exposes
     # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for KMS access. Set to ""
     # to disable (if not using ESO / KMS).
-    kmsCredentialsSecret: "harbor-kms-credentials"
+    kmsCredentialsSecret: ""
     # postgres://… DSN. harbor-hot reads clients/grants/sessions/secrets here.
     databaseUrl: ""
     # redis://… URL. Required for distributed auth-code and abuse-control state.
@@ -104,6 +109,18 @@ hot:
     # POST /admin/revoke-jwt). FATAL if unset when DATABASE_URL is set.
     # Generate: openssl rand -hex 32
     adminApiToken: ""
+  # External envelope-encryption provider. AWS remains available for hosted
+  # deployments; the isolated single-node production cluster uses OpenBao
+  # Transit with a projected Kubernetes identity.
+  kms:
+    provider: aws
+    openbao:
+      address: ""
+      kubernetesRole: harbor-hot
+      transitMount: transit
+      caConfigMap: openbao-ca
+      tokenAudience: openbao
+      tokenExpirationSeconds: 600
 
 # ---------------------------------------------------------------------------
 # harbor-mgmt: the cold-path management binary (passkey ceremonies, user
@@ -157,6 +174,14 @@ mgmt:
     minAvailable: 1
   networkPolicy:
     enabled: true
+  # Optional, narrowly scoped endpoint for a separately operated Harbor Cloud
+  # cluster. It is disabled for self-hosters by default. Production must place
+  # this NodePort behind a private encrypted transport (the reference host uses
+  # WireGuard) and restrict allowedCIDR to the Harbor Cloud tunnel address.
+  cloudIntegration:
+    enabled: false
+    nodePort: 30081
+    allowedCIDR: ""
   secrets:
     # When set, this Secret must expose DATABASE_URL / REDIS_URL /
     # HARBOR_KMS_SECRET / INITIAL_ACCESS_TOKEN. Its HARBOR_KMS_SECRET must
@@ -302,6 +327,7 @@ ingress:
   # exist before the Ingress can terminate TLS.
   tlsSecretName: harbor-tls
   annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-production
     # Force TLS: an OIDC issuer over plaintext leaks codes/tokens.
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"

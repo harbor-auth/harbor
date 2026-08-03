@@ -116,6 +116,43 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.global.postgresTLS.enabled }}
+            - name: postgresql-ca
+              mountPath: {{ .Values.global.postgresTLS.mountPath }}
+              readOnly: true
+            {{- end }}
+            {{- if eq (.Values.hot.kms.provider | default "aws") "openbao" }}
+            - name: openbao-token
+              mountPath: /var/run/secrets/openbao
+              readOnly: true
+            - name: openbao-ca
+              mountPath: /var/run/secrets/openbao-ca
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if .Values.global.postgresTLS.enabled }}
+        - name: postgresql-ca
+          secret:
+            secretName: {{ required "global.postgresTLS.secretName is required when PostgreSQL TLS is enabled" .Values.global.postgresTLS.secretName }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
+        {{- if eq (.Values.hot.kms.provider | default "aws") "openbao" }}
+        - name: openbao-token
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: {{ .Values.hot.kms.openbao.tokenAudience | default "openbao" | quote }}
+                  expirationSeconds: {{ .Values.hot.kms.openbao.tokenExpirationSeconds | default 600 }}
+        - name: openbao-ca
+          configMap:
+            name: {{ required "hot.kms.openbao.caConfigMap is required for OpenBao" .Values.hot.kms.openbao.caConfigMap }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}

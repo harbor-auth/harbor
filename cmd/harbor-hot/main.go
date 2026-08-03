@@ -320,11 +320,28 @@ func buildExternalKeyProvider(ctx context.Context, kmsConfig crypto.KMSConfig) (
 	if err != nil {
 		return nil, fmt.Errorf("external KMS configuration required: %w", err)
 	}
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("external KMS client configuration: %w", err)
+	switch provider := strings.ToLower(envString("KMS_PROVIDER", "aws")); provider {
+	case "openbao":
+		client, openBaoErr := crypto.NewOpenBaoKMSClient(crypto.OpenBaoKMSConfig{
+			Address:      os.Getenv("OPENBAO_ADDR"),
+			Role:         os.Getenv("OPENBAO_KUBERNETES_ROLE"),
+			TokenPath:    os.Getenv("OPENBAO_TOKEN_PATH"),
+			CACertPath:   os.Getenv("OPENBAO_CACERT"),
+			TransitMount: envString("OPENBAO_TRANSIT_MOUNT", "transit"),
+		})
+		if openBaoErr != nil {
+			return nil, fmt.Errorf("external OpenBao KMS client configuration: %w", openBaoErr)
+		}
+		return crypto.NewKMSKeyProvider(client, resolver), nil
+	case "aws":
+		awsCfg, awsErr := awsconfig.LoadDefaultConfig(ctx)
+		if awsErr != nil {
+			return nil, fmt.Errorf("external KMS client configuration: %w", awsErr)
+		}
+		return crypto.NewKMSKeyProvider(crypto.NewAWSKMSClient(awskms.NewFromConfig(awsCfg)), resolver), nil
+	default:
+		return nil, fmt.Errorf("external KMS provider %q is unsupported", provider)
 	}
-	return crypto.NewKMSKeyProvider(crypto.NewAWSKMSClient(awskms.NewFromConfig(awsCfg)), resolver), nil
 }
 
 func buildSigningStackWithProvider(ctx context.Context, pool *pgxpool.Pool, kp crypto.KeyProvider, logger *slog.Logger) (oidc.TokenIssuer, []crypto.Signer, *crypto.KeyRotator, error) {

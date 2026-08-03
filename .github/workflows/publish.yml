@@ -155,7 +155,7 @@ jobs:
             git push
           fi
 
-      # Make both container packages public so RKE2 can pull them without a
+      # Make both container packages public so K3s can pull them without a
       # pull secret. GITHUB_TOKEN cannot change package visibility (GitHub
       # limitation), so this step uses GH_TOKEN — a classic PAT with the
       # `write:packages` scope stored as a repository secret. Create it once:

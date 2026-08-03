@@ -30,6 +30,17 @@ spec:
         # resolution is fragile across CNIs, so pin the container port directly.
         - port: {{ .Values.mgmt.port }}
           protocol: TCP
+    {{- if .Values.mgmt.cloudIntegration.enabled }}
+    # Harbor Cloud reaches this pod only through the WireGuard-backed NodePort.
+    # A missing CIDR is rejected at template time below to avoid widening this
+    # rule accidentally.
+    - from:
+        - ipBlock:
+            cidr: {{ required "mgmt.cloudIntegration.allowedCIDR is required when cloudIntegration is enabled" .Values.mgmt.cloudIntegration.allowedCIDR | quote }}
+      ports:
+        - port: {{ .Values.mgmt.port }}
+          protocol: TCP
+    {{- end }}
   egress:
     # DNS resolution (kube-dns / CoreDNS). Both UDP and TCP on 53.
     - to:
