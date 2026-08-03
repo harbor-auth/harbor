@@ -9,10 +9,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -234,13 +237,25 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	mgmtServer.WithProductionAbuseProtection(recoveryAbuseProtection.endpoint, recoveryAbuseProtection.limiter)
 	mgmtServer.WithProductionAbuseProtection(enrollmentAbuseProtection.endpoint, enrollmentAbuseProtection.limiter)
 	mgmtServer.WithProductionAbuseProtection(registrationAbuseProtection.endpoint, registrationAbuseProtection.limiter)
+	// The WebAuthn ceremony endpoints sit directly behind the public signup/
+	// signin surface and, unlike /enroll, /register, /mfa/* and /recovery/*,
+	// have never had rate-limit coverage. webauthn.Handler is a separate,
+	// Server-less package (no abuseGate seam), so each route is wrapped
+	// individually below instead of going through WithProductionAbuseProtection.
+	webauthnRegisterBeginAbuseProtection := newMgmtLimiter(redisClient, "webauthn_register_begin", 20, time.Minute, logger)
+	webauthnRegisterFinishAbuseProtection := newMgmtLimiter(redisClient, "webauthn_register_finish", 20, time.Minute, logger)
+	webauthnLoginBeginAbuseProtection := newMgmtLimiter(redisClient, "webauthn_login_begin", 30, time.Minute, logger)
+	webauthnLoginFinishAbuseProtection := newMgmtLimiter(redisClient, "webauthn_login_finish", 30, time.Minute, logger)
 
 	mux := httpserver.NewHealthMux()
 	webauthnHandler, err := webauthn.NewHandler(webauthnService, enrollmentSessions)
 	if err != nil {
 		return fmt.Errorf("configure WebAuthn handler: %w", err)
 	}
-	webauthnHandler.RegisterRoutes(mux)
+	mux.Handle("POST /webauthn/register/begin", wrapPreSessionRoute(webauthnHandler.BeginRegistration, webauthnRegisterBeginAbuseProtection.limiter, maxWebauthnCeremonyBody))
+	mux.Handle("POST /webauthn/register/finish", wrapPreSessionRoute(webauthnHandler.FinishRegistration, webauthnRegisterFinishAbuseProtection.limiter, maxWebauthnCeremonyBody))
+	mux.Handle("POST /webauthn/login/begin", wrapPreSessionRoute(webauthnHandler.BeginLogin, webauthnLoginBeginAbuseProtection.limiter, maxWebauthnCeremonyBody))
+	mux.Handle("POST /webauthn/login/finish", wrapPreSessionRoute(webauthnHandler.FinishLogin, webauthnLoginFinishAbuseProtection.limiter, maxWebauthnCeremonyBody))
 	mgmtServer.Routes(mux)
 	dashboardHandler.Routes(mux)
 	if cloudIntegrationEnabled {
@@ -379,6 +394,47 @@ func newMgmtLimiter(client *redis.Client, endpoint string, limit int, window tim
 			Window:    window,
 		}, logger),
 	}
+}
+
+// maxWebauthnCeremonyBody bounds the request body of every WebAuthn ceremony
+// route the same way maxEnrollBody bounds POST /enroll (docs/DESIGN.md §6.5).
+// The begin endpoints read no body at all; the finish endpoints decode an
+// attestation/assertion response, which comfortably fits well under this cap.
+const maxWebauthnCeremonyBody = 16 * 1024
+
+// wrapPreSessionRoute applies the shared pre-session Origin/CSRF check
+// (bff.PreSessionCSRF), a per-route abuse limiter, and a bounded body to a
+// WebAuthn ceremony route. These routes run before the enrollment-session
+// cookie authenticates anything and, unlike the mgmtapi Server routes, have no
+// abuseGate seam of their own, so all three defenses are composed here at the
+// routing layer instead.
+func wrapPreSessionRoute(next http.HandlerFunc, limiter clients.RateLimiter, maxBody int64) http.Handler {
+	bounded := func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+		allowed, retryAfter, err := limiter.Allow(r.Context(), remoteAddrKey(r))
+		if err != nil || !allowed {
+			if retryAfter > 0 {
+				w.Header().Set("Retry-After", fmt.Sprintf("%d", int(retryAfter.Seconds())))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate_limited","message":"too many requests"}`))
+			return
+		}
+		next(w, r)
+	}
+	return bff.PreSessionCSRF(http.HandlerFunc(bounded))
+}
+
+// remoteAddrKey derives a rate-limit key from the caller's IP without storing
+// the IP itself in Redis (docs/DESIGN.md §6.5 — no PII at rest).
+func remoteAddrKey(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || host == "" {
+		host = r.RemoteAddr
+	}
+	digest := sha256.Sum256([]byte(host))
+	return hex.EncodeToString(digest[:])
 }
 
 func validateProductionURL(name, raw string) error {

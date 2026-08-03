@@ -248,3 +248,22 @@ func TestProductionGraphWiresOutageAwareAbuseProtection(t *testing.T) {
 		}
 	}
 }
+
+// TestProductionGraphWiresWebauthnCeremonyProtections is a source-level guard
+// proving the four WebAuthn ceremony routes — previously uncovered by any
+// rate limit — are each routed through wrapPreSessionRoute (Origin/CSRF check
+// + abuse limiter + bounded body), not through the bare handler.
+func TestProductionGraphWiresWebauthnCeremonyProtections(t *testing.T) {
+	productionAssembly := productionAssembly(t)
+
+	for _, required := range []string{
+		"wrapPreSessionRoute(webauthnHandler.BeginRegistration",
+		"wrapPreSessionRoute(webauthnHandler.FinishRegistration",
+		"wrapPreSessionRoute(webauthnHandler.BeginLogin",
+		"wrapPreSessionRoute(webauthnHandler.FinishLogin",
+	} {
+		if !strings.Contains(productionAssembly, required) {
+			t.Errorf("production graph does not wire %q", required)
+		}
+	}
+}
