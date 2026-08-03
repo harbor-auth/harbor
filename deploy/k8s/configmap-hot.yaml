@@ -19,3 +19,6 @@ data:
   LOGIN_URL: "https://auth.example.com/login"
   REGION: "EU"
   KMS_KEY_MAP: "EU=REPLACE_WITH_REGIONAL_KMS_KEY_ID"
+  # Raw example uses AWS. The production Helm overlay selects OpenBao and adds
+  # its provider-specific endpoint/auth settings.
+  KMS_PROVIDER: "aws"

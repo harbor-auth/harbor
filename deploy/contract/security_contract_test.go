@@ -176,7 +176,7 @@ func assertWorkloadContract(t *testing.T, variant string, objects []object) {
 				}
 			}
 			for port := range ports {
-				if port != 53 && port != 5432 && port != 6379 && port != 443 && port != 8080 && port != 8086 && port != 8090 {
+				if port != 53 && port != 5432 && port != 6379 && port != 443 && port != 8080 && port != 8086 && port != 8090 && port != 8200 {
 					t.Errorf("unexpected egress port %d", port)
 				}
 			}

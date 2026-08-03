@@ -12,8 +12,8 @@ const envelopeVersion = 1
 
 // Envelope size limits.
 const (
-	maxRegionLen   = 64  // AWS region names are typically <20 chars
-	maxKEKKeyIDLen = 256 // AWS KMS key ARNs are typically <128 chars
+	maxRegionLen   = 64  // Region identifiers are intentionally compact.
+	maxKEKKeyIDLen = 256 // Supports cloud KMS ARNs and OpenBao Transit key names.
 	minEnvelopeLen = 4   // version + region_len + kek_key_id_len + at least 1 byte ciphertext
 )
 

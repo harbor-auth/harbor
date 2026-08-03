@@ -19,8 +19,8 @@ import (
 // Decrypt unwraps ciphertext previously encrypted under keyID. The KEK itself
 // never leaves the KMS/HSM boundary.
 //
-// Production implementations will call AWS KMS, GCP Cloud KMS, or a hardware
-// HSM; tests use [FakeKMSClient] for hermetic, in-memory operation.
+// Production implementations call services such as AWS KMS or OpenBao Transit;
+// tests use [FakeKMSClient] for hermetic, in-memory operation.
 type KMSClient interface {
 	// Encrypt wraps plaintext under the KEK identified by keyID. The returned
 	// ciphertext is opaque and can only be decrypted by calling Decrypt with

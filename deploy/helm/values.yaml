@@ -95,7 +95,7 @@ hot:
     # Name of the Secret managed by External Secrets Operator that exposes
     # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for KMS access. Set to ""
     # to disable (if not using ESO / KMS).
-    kmsCredentialsSecret: "harbor-kms-credentials"
+    kmsCredentialsSecret: ""
     # postgres://… DSN. harbor-hot reads clients/grants/sessions/secrets here.
     databaseUrl: ""
     # redis://… URL. Required for distributed auth-code and abuse-control state.
@@ -104,6 +104,18 @@ hot:
     # POST /admin/revoke-jwt). FATAL if unset when DATABASE_URL is set.
     # Generate: openssl rand -hex 32
     adminApiToken: ""
+  # External envelope-encryption provider. AWS remains available for hosted
+  # deployments; the isolated single-node production cluster uses OpenBao
+  # Transit with a projected Kubernetes identity.
+  kms:
+    provider: aws
+    openbao:
+      address: ""
+      kubernetesRole: harbor-hot
+      transitMount: transit
+      caConfigMap: openbao-ca
+      tokenAudience: openbao
+      tokenExpirationSeconds: 600
 
 # ---------------------------------------------------------------------------
 # harbor-mgmt: the cold-path management binary (passkey ceremonies, user

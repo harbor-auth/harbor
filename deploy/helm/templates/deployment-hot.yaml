@@ -116,6 +116,31 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if eq (.Values.hot.kms.provider | default "aws") "openbao" }}
+            - name: openbao-token
+              mountPath: /var/run/secrets/openbao
+              readOnly: true
+            - name: openbao-ca
+              mountPath: /var/run/secrets/openbao/ca.crt
+              subPath: ca.crt
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if eq (.Values.hot.kms.provider | default "aws") "openbao" }}
+        - name: openbao-token
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  audience: {{ .Values.hot.kms.openbao.tokenAudience | default "openbao" | quote }}
+                  expirationSeconds: {{ .Values.hot.kms.openbao.tokenExpirationSeconds | default 600 }}
+        - name: openbao-ca
+          configMap:
+            name: {{ required "hot.kms.openbao.caConfigMap is required for OpenBao" .Values.hot.kms.openbao.caConfigMap }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
