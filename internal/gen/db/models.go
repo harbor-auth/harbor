@@ -31,6 +31,31 @@ type ByoDomain struct {
 	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
 }
 
+type CloudNamespace struct {
+	ID        string             `json:"id"`
+	Status    string             `json:"status"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt pgtype.Timestamptz `json:"updated_at"`
+	DeletedAt pgtype.Timestamptz `json:"deleted_at"`
+}
+
+type CloudOperation struct {
+	IdempotencyKey string             `json:"idempotency_key"`
+	Operation      string             `json:"operation"`
+	RequestHash    []byte             `json:"request_hash"`
+	ResponseBody   []byte             `json:"response_body"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+}
+
+type CloudSession struct {
+	SessionID   string             `json:"session_id"`
+	NamespaceID string             `json:"namespace_id"`
+	TokenHash   []byte             `json:"token_hash"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	ConsumedAt  pgtype.Timestamptz `json:"consumed_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type ConsentGrant struct {
 	ID        pgtype.UUID        `json:"id"`
 	UserID    pgtype.UUID        `json:"user_id"`

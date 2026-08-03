@@ -33,6 +33,31 @@ type Querier interface {
 	// globally unique, while reads by name are owner-scoped to avoid disclosing
 	// another user's registration.
 	CreateBYODomain(ctx context.Context, arg CreateBYODomainParams) (ByoDomain, error)
+	// Queries for the cloud_namespaces table (Harbor Cloud management API
+	// contract; openspec/changes/harbor-cloud-management-api-contract-2ee993ea).
+	// The query IS the contract (DESIGN §1.3): `sqlc generate` (via @codegen)
+	// produces typed Go — never hand-write DB types.
+	// Creates a new namespace provisioning record. The id is caller-supplied
+	// (Harbor Cloud mints it); a duplicate id violates the primary key and the
+	// caller maps that to 409 namespace_already_exists.
+	CreateCloudNamespace(ctx context.Context, arg CreateCloudNamespaceParams) (CloudNamespace, error)
+	// Queries for the cloud_operations table — the idempotency ledger shared by
+	// namespace create/delete and session minting (Harbor Cloud management API
+	// contract; openspec/changes/harbor-cloud-management-api-contract-2ee993ea).
+	// The query IS the contract (DESIGN §1.3): `sqlc generate` (via @codegen)
+	// produces typed Go — never hand-write DB types.
+	// Records the first response for a given (idempotency_key, operation) pair.
+	// A concurrent duplicate insert violates the primary key; the caller maps
+	// that race to the same "replay the existing row" path as a normal lookup.
+	CreateCloudOperation(ctx context.Context, arg CreateCloudOperationParams) (CloudOperation, error)
+	// Queries for the cloud_sessions table — short-lived, namespace-scoped
+	// provisioning credentials minted for Harbor Cloud (Harbor Cloud management
+	// API contract; openspec/changes/harbor-cloud-management-api-contract-2ee993ea).
+	// Not an OIDC/BFF session. The query IS the contract (DESIGN §1.3): `sqlc
+	// generate` (via @codegen) produces typed Go — never hand-write DB types.
+	// Mints a namespace-scoped session. Only token_hash is persisted; the
+	// plaintext bearer is returned once by the caller at mint time.
+	CreateCloudSession(ctx context.Context, arg CreateCloudSessionParams) (CloudSession, error)
 	// CreateCredential persists a newly-registered passkey. webauthn_cred_id is the
 	// opaque rawID from the authenticator (DESIGN §3.1); webauthn_pubkey is the COSE
 	// public key; webauthn_aaguid identifies the authenticator model.
@@ -138,6 +163,18 @@ type Querier interface {
 	// The partial unique index idx_signing_keys_one_active guarantees at most one.
 	GetActiveSigningKey(ctx context.Context) (SigningKey, error)
 	GetBYODomainByName(ctx context.Context, arg GetBYODomainByNameParams) (ByoDomain, error)
+	// Returns the namespace row regardless of deleted_at — the caller decides
+	// whether a soft-deleted row should be treated as not-found (mirrors the
+	// sessions store's "let the caller interpret lifecycle state" pattern).
+	GetCloudNamespace(ctx context.Context, id string) (CloudNamespace, error)
+	// Looks up a prior operation by its idempotency key and operation name. The
+	// caller compares request_hash to decide between replaying response_body
+	// (same hash) and 409 idempotency_key_reused (different hash).
+	GetCloudOperation(ctx context.Context, arg GetCloudOperationParams) (CloudOperation, error)
+	// Returns the session row regardless of expiry/consumption — the caller
+	// decides 410 session_expired / 403 cross_tenant_forbidden from the
+	// returned fields rather than have the store hide lifecycle state.
+	GetCloudSession(ctx context.Context, sessionID string) (CloudSession, error)
 	// Retrieves the active consent grant for a (user, client) pair.
 	// Returns NULL if no active grant exists (revoked grants are excluded).
 	GetConsentGrantByUserClient(ctx context.Context, arg GetConsentGrantByUserClientParams) (ConsentGrant, error)
@@ -301,6 +338,10 @@ type Querier interface {
 	// ownership of their custom domain.
 	SetRelayAddressBYODomain(ctx context.Context, id pgtype.UUID) error
 	SetUserStatus(ctx context.Context, arg SetUserStatusParams) error
+	// Marks a namespace deleted. Affects zero rows for an absent or
+	// already-deleted namespace — the caller's DELETE handler treats that as
+	// success (idempotent delete: 204, always).
+	SoftDeleteCloudNamespace(ctx context.Context, id string) error
 	UpdateBYODomainState(ctx context.Context, arg UpdateBYODomainStateParams) (ByoDomain, error)
 	// UpdateCredentialSignCount advances a passkey's signature counter after an
 	// assertion — a monotonically increasing counter is how WebAuthn detects a
