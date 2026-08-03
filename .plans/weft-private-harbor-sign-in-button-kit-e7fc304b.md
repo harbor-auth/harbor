@@ -82,3 +82,34 @@
    `code_challenge`/`code_challenge_method=S256` and sets the session
    cookie; `/auth/callback` with a bogus `state` returns a generic 400.
 6. Commit and push.
+
+# Task 6: Contract tests — links cannot bypass state/PKCE, deterministic assets
+
+1. Add `sdk/sign-in-button/examples/minimal-rp/security_test.go`: table-driven
+   `httptest` cases against `LoginHandler` (missing query params, repeated
+   requests, concurrent requests) asserting every redirect `Location` parses
+   with non-empty `state`, `code_challenge`, and `code_challenge_method=S256`,
+   and that `redirect_uri` always equals the configured `RedirectURI`
+   regardless of request input (query params, headers, path). Add a
+   `CallbackHandler` case proving a `state` mismatch is rejected with the
+   generic error and never reaches `exchangeCode` (assert via a token
+   endpoint stub that must NOT be hit).
+2. Add `sdk/sign-in-button/gen/determinism_test.go`: call `Generate` into two
+   fresh `t.TempDir()`s and diff byte-for-byte; call `Generate` into a third
+   temp dir and diff against the committed `sdk/sign-in-button/assets/` tree,
+   failing with a clear per-file diff message on drift (mirrors
+   `make generate-check`).
+3. Add `sdk/sign-in-button/react/SignInWithPrivateHarborButton.test.tsx`:
+   render every variant × size × disabled combination, assert accessible
+   name via `getByRole` is "Sign in with Private Harbor" (or the `ariaLabel`
+   override), and assert (via a `Expect<Equal<...>>`-style compile check or
+   runtime key-set check) the props type carries no `state`/`nonce`/
+   `code_challenge`/`code_verifier` field. No test runner exists yet in
+   `react/` — add `vitest` + `@testing-library/react` + `jsdom` as
+   devDependencies and a `test` script, using the unlinked npm at
+   `/usr/lib/node_modules/npm/bin/npm-cli.js` (aliased on PATH) discovered in
+   Task 4.
+4. Verify: `go test ./sdk/sign-in-button/...` green; deliberately revert one
+   security check in `login.go`/`callback.go` at a time and confirm the
+   corresponding test fails, then restore it; `npm test` in `react/` green.
+5. Commit and push.
