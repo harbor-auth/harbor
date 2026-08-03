@@ -44,37 +44,43 @@ export interface SignInWithPrivateHarborButtonProps {
 
 const DEFAULT_LABEL = "Sign in with Private Harbor";
 
-// Verbatim from the <style> block of each ../assets/button-<variant>-*.svg.
+// Verbatim from the <style> block of each ../assets/button-<variant>-*.svg,
+// including the `phb-btn-<variant>` class scoping. The class name is scoped
+// per variant (not a single shared "phb-btn") so that when multiple
+// instances of this component render different variants in the same
+// document, each instance's <style> block declares its own selectors —
+// an unscoped shared class name would let whichever instance's <style>
+// block is last in the DOM win the cascade for every instance's colors.
 // Only fill/stroke colors differ between variants; geometry is shared and
 // computed in the component below.
 const VARIANT_STYLE: Record<SignInWithPrivateHarborButtonVariant, string> = {
   light:
-    ".phb-btn-bg{fill:#FFFFFF;stroke:#D6D9DE;stroke-width:1;}" +
-    ".phb-btn-ring{fill:none;stroke:transparent;stroke-width:2;}" +
-    '.phb-btn-label,.phb-btn-icon{fill:#16181D;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}' +
-    ".phb-btn-label{font-size:14px;font-weight:600;}" +
-    ".phb-btn:hover .phb-btn-bg{fill:#F0F2F5;stroke:#C3C8D1;}" +
-    ".phb-btn:focus-visible .phb-btn-ring{stroke:#1857C4;}" +
-    '.phb-btn.phb-btn--disabled .phb-btn-bg,.phb-btn[aria-disabled="true"] .phb-btn-bg{fill:#F5F6F8;stroke:#E4E7EB;}' +
-    '.phb-btn.phb-btn--disabled .phb-btn-label,.phb-btn.phb-btn--disabled .phb-btn-icon,.phb-btn[aria-disabled="true"] .phb-btn-label,.phb-btn[aria-disabled="true"] .phb-btn-icon{fill:#9AA1AC;}',
+    ".phb-btn-light-bg{fill:#FFFFFF;stroke:#D6D9DE;stroke-width:1;}" +
+    ".phb-btn-light-ring{fill:none;stroke:transparent;stroke-width:2;}" +
+    '.phb-btn-light-label,.phb-btn-light-icon{fill:#16181D;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}' +
+    ".phb-btn-light-label{font-size:14px;font-weight:600;}" +
+    ".phb-btn-light:hover .phb-btn-light-bg{fill:#F0F2F5;stroke:#C3C8D1;}" +
+    ".phb-btn-light:focus-visible .phb-btn-light-ring{stroke:#1857C4;}" +
+    '.phb-btn-light.phb-btn-light--disabled .phb-btn-light-bg,.phb-btn-light[aria-disabled="true"] .phb-btn-light-bg{fill:#F5F6F8;stroke:#E4E7EB;}' +
+    '.phb-btn-light.phb-btn-light--disabled .phb-btn-light-label,.phb-btn-light.phb-btn-light--disabled .phb-btn-light-icon,.phb-btn-light[aria-disabled="true"] .phb-btn-light-label,.phb-btn-light[aria-disabled="true"] .phb-btn-light-icon{fill:#9AA1AC;}',
   dark:
-    ".phb-btn-bg{fill:#14161C;stroke:#3A3E47;stroke-width:1;}" +
-    ".phb-btn-ring{fill:none;stroke:transparent;stroke-width:2;}" +
-    '.phb-btn-label,.phb-btn-icon{fill:#FFFFFF;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}' +
-    ".phb-btn-label{font-size:14px;font-weight:600;}" +
-    ".phb-btn:hover .phb-btn-bg{fill:#1E212A;stroke:#4B4F5A;}" +
-    ".phb-btn:focus-visible .phb-btn-ring{stroke:#7EB2FF;}" +
-    '.phb-btn.phb-btn--disabled .phb-btn-bg,.phb-btn[aria-disabled="true"] .phb-btn-bg{fill:#1B1D24;stroke:#2A2D35;}' +
-    '.phb-btn.phb-btn--disabled .phb-btn-label,.phb-btn.phb-btn--disabled .phb-btn-icon,.phb-btn[aria-disabled="true"] .phb-btn-label,.phb-btn[aria-disabled="true"] .phb-btn-icon{fill:#6B6F79;}',
+    ".phb-btn-dark-bg{fill:#14161C;stroke:#3A3E47;stroke-width:1;}" +
+    ".phb-btn-dark-ring{fill:none;stroke:transparent;stroke-width:2;}" +
+    '.phb-btn-dark-label,.phb-btn-dark-icon{fill:#FFFFFF;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}' +
+    ".phb-btn-dark-label{font-size:14px;font-weight:600;}" +
+    ".phb-btn-dark:hover .phb-btn-dark-bg{fill:#1E212A;stroke:#4B4F5A;}" +
+    ".phb-btn-dark:focus-visible .phb-btn-dark-ring{stroke:#7EB2FF;}" +
+    '.phb-btn-dark.phb-btn-dark--disabled .phb-btn-dark-bg,.phb-btn-dark[aria-disabled="true"] .phb-btn-dark-bg{fill:#1B1D24;stroke:#2A2D35;}' +
+    '.phb-btn-dark.phb-btn-dark--disabled .phb-btn-dark-label,.phb-btn-dark.phb-btn-dark--disabled .phb-btn-dark-icon,.phb-btn-dark[aria-disabled="true"] .phb-btn-dark-label,.phb-btn-dark[aria-disabled="true"] .phb-btn-dark-icon{fill:#6B6F79;}',
   neutral:
-    ".phb-btn-bg{fill:#0B4F8A;stroke:#0B4F8A;stroke-width:1;}" +
-    ".phb-btn-ring{fill:none;stroke:transparent;stroke-width:2;}" +
-    '.phb-btn-label,.phb-btn-icon{fill:#FFFFFF;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}' +
-    ".phb-btn-label{font-size:14px;font-weight:600;}" +
-    ".phb-btn:hover .phb-btn-bg{fill:#0A4576;stroke:#0A4576;}" +
-    ".phb-btn:focus-visible .phb-btn-ring{stroke:#FFFFFF;}" +
-    '.phb-btn.phb-btn--disabled .phb-btn-bg,.phb-btn[aria-disabled="true"] .phb-btn-bg{fill:#8FA9BD;stroke:#8FA9BD;}' +
-    '.phb-btn.phb-btn--disabled .phb-btn-label,.phb-btn.phb-btn--disabled .phb-btn-icon,.phb-btn[aria-disabled="true"] .phb-btn-label,.phb-btn[aria-disabled="true"] .phb-btn-icon{fill:#E8EEF3;}',
+    ".phb-btn-neutral-bg{fill:#0B4F8A;stroke:#0B4F8A;stroke-width:1;}" +
+    ".phb-btn-neutral-ring{fill:none;stroke:transparent;stroke-width:2;}" +
+    '.phb-btn-neutral-label,.phb-btn-neutral-icon{fill:#FFFFFF;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}' +
+    ".phb-btn-neutral-label{font-size:14px;font-weight:600;}" +
+    ".phb-btn-neutral:hover .phb-btn-neutral-bg{fill:#0A4576;stroke:#0A4576;}" +
+    ".phb-btn-neutral:focus-visible .phb-btn-neutral-ring{stroke:#FFFFFF;}" +
+    '.phb-btn-neutral.phb-btn-neutral--disabled .phb-btn-neutral-bg,.phb-btn-neutral[aria-disabled="true"] .phb-btn-neutral-bg{fill:#8FA9BD;stroke:#8FA9BD;}' +
+    '.phb-btn-neutral.phb-btn-neutral--disabled .phb-btn-neutral-label,.phb-btn-neutral.phb-btn-neutral--disabled .phb-btn-neutral-icon,.phb-btn-neutral[aria-disabled="true"] .phb-btn-neutral-label,.phb-btn-neutral[aria-disabled="true"] .phb-btn-neutral-icon{fill:#E8EEF3;}',
 };
 
 const SIZE_DIMENSIONS: Record<SignInWithPrivateHarborButtonSize, { width: number; iconTranslateX: number }> = {
@@ -89,6 +95,7 @@ export function SignInWithPrivateHarborButton(
 ): React.ReactElement {
   const { href, variant = "light", size = "full", disabled = false, ariaLabel = DEFAULT_LABEL } = props;
   const { width, iconTranslateX } = SIZE_DIMENSIONS[size];
+  const btnClass = `phb-btn-${variant}`;
 
   const handleClick = (event: React.MouseEvent<HTMLAnchorElement>): void => {
     if (disabled) {
@@ -114,20 +121,20 @@ export function SignInWithPrivateHarborButton(
         aria-label={ariaLabel}
         aria-disabled={disabled ? "true" : undefined}
         focusable="false"
-        className="phb-btn"
+        className={btnClass}
       >
         <title>{ariaLabel}</title>
         <style>{VARIANT_STYLE[variant]}</style>
-        <rect className="phb-btn-bg" x={0.5} y={0.5} width={width - 1} height={HEIGHT - 1} rx={8} ry={8} />
-        <rect className="phb-btn-ring" x={3} y={3} width={width - 6} height={HEIGHT - 6} rx={5} ry={5} />
-        <g className="phb-btn-icon" transform={`translate(${iconTranslateX},10)`}>
+        <rect className={`${btnClass}-bg`} x={0.5} y={0.5} width={width - 1} height={HEIGHT - 1} rx={8} ry={8} />
+        <rect className={`${btnClass}-ring`} x={3} y={3} width={width - 6} height={HEIGHT - 6} rx={5} ry={5} />
+        <g className={`${btnClass}-icon`} transform={`translate(${iconTranslateX},10)`}>
           <rect x={2} y={8} width={3} height={8} />
           <rect x={8.5} y={4} width={3} height={12} />
           <rect x={15} y={10} width={3} height={6} />
           <rect x={1} y={16} width={18} height={2} rx={1} ry={1} />
         </g>
         {size === "full" && (
-          <text className="phb-btn-label" x={46} y={20} dominantBaseline="middle">
+          <text className={`${btnClass}-label`} x={46} y={20} dominantBaseline="middle">
             {DEFAULT_LABEL}
           </text>
         )}

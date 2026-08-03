@@ -170,7 +170,13 @@ func renderButton(v Variant) ([]byte, error) {
 	}
 
 	view := buttonView{
-		ClassName: "phb-btn",
+		// Scoped by color scheme (not just "phb-btn") so that when multiple
+		// variants' generated SVGs are embedded in the same HTML document,
+		// their <style> blocks don't declare the same selectors — an
+		// unscoped shared class name lets the last <style> block in the
+		// document win the cascade for every instance's fill/stroke colors,
+		// regardless of that instance's own variant.
+		ClassName: fmt.Sprintf("phb-btn-%s", v.Scheme),
 		AriaLabel: ButtonLabel,
 		Label:     ButtonLabel,
 		ShowLabel: geo.ShowLabel,

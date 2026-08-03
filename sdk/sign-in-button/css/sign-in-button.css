@@ -28,8 +28,11 @@
  * focusable="false" by design (the *link* is the focusable element, the
  * SVG is a decorative graphic), so this stylesheet forwards keyboard
  * focus from the wrapping link to the SVG's inset focus ring
- * (`.phb-btn-ring`). Ring colors below match
- * gen/tokens.go SchemePalette.FocusRing exactly.
+ * (`.phb-btn-<scheme>-ring`). The ring class is scoped per color scheme
+ * (not a single shared `.phb-btn-ring`) so that when multiple variants'
+ * SVGs are inlined in the same document, one variant's <style> block can't
+ * win the cascade for another variant's ring selector. Ring colors below
+ * match gen/tokens.go SchemePalette.FocusRing exactly.
  */
 
 .phb-button {
@@ -54,15 +57,15 @@
   outline: none;
 }
 
-.phb-button--light:focus-visible .phb-btn-ring {
+.phb-button--light:focus-visible .phb-btn-light-ring {
   stroke: #1857c4;
 }
 
-.phb-button--dark:focus-visible .phb-btn-ring {
+.phb-button--dark:focus-visible .phb-btn-dark-ring {
   stroke: #7eb2ff;
 }
 
-.phb-button--neutral:focus-visible .phb-btn-ring {
+.phb-button--neutral:focus-visible .phb-btn-neutral-ring {
   stroke: #ffffff;
 }
 
@@ -78,9 +81,9 @@
 
 /*
  * Disabled: set aria-disabled="true" on *both* the wrapping link and the
- * inlined <svg class="phb-btn">. The attribute on the SVG root activates
- * its own built-in disabled colors (see assets/*.svg); the rule below
- * makes the wrapping link itself inert.
+ * inlined <svg class="phb-btn-<scheme>">. The attribute on the SVG root
+ * activates its own built-in disabled colors (see assets/*.svg); the rule
+ * below makes the wrapping link itself inert.
  */
 .phb-button[aria-disabled="true"] {
   pointer-events: none;
