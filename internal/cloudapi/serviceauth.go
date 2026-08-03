@@ -271,23 +271,23 @@ func (v *ServiceAuthVerifier) Verify(ctx context.Context, bearer string) (Servic
 	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
 	if err != nil {
 		v.audit(ctx, "", "invalid_token")
-		return ServiceClaims{}, fmt.Errorf("%w: header decode: %v", ErrInvalidToken, err)
+		return ServiceClaims{}, fmt.Errorf("%w: header decode: %w", ErrInvalidToken, err)
 	}
 	payloadJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
 		v.audit(ctx, "", "invalid_token")
-		return ServiceClaims{}, fmt.Errorf("%w: payload decode: %v", ErrInvalidToken, err)
+		return ServiceClaims{}, fmt.Errorf("%w: payload decode: %w", ErrInvalidToken, err)
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil {
 		v.audit(ctx, "", "invalid_token")
-		return ServiceClaims{}, fmt.Errorf("%w: signature decode: %v", ErrInvalidToken, err)
+		return ServiceClaims{}, fmt.Errorf("%w: signature decode: %w", ErrInvalidToken, err)
 	}
 
 	var header serviceJWTHeader
 	if err := json.Unmarshal(headerJSON, &header); err != nil {
 		v.audit(ctx, "", "invalid_token")
-		return ServiceClaims{}, fmt.Errorf("%w: header parse: %v", ErrInvalidToken, err)
+		return ServiceClaims{}, fmt.Errorf("%w: header parse: %w", ErrInvalidToken, err)
 	}
 
 	signingInput := []byte(parts[0] + "." + parts[1])
@@ -299,7 +299,7 @@ func (v *ServiceAuthVerifier) Verify(ctx context.Context, bearer string) (Servic
 	var claims rawServiceClaims
 	if err := json.Unmarshal(payloadJSON, &claims); err != nil {
 		v.audit(ctx, "", "invalid_token")
-		return ServiceClaims{}, fmt.Errorf("%w: claims parse: %v", ErrInvalidToken, err)
+		return ServiceClaims{}, fmt.Errorf("%w: claims parse: %w", ErrInvalidToken, err)
 	}
 
 	if claims.Subject == "" || claims.JTI == "" || claims.Expiry <= 0 {
@@ -335,7 +335,7 @@ func (v *ServiceAuthVerifier) Verify(ctx context.Context, bearer string) (Servic
 	claimed, err := v.replayGuard.Claim(ctx, claims.JTI, expiresAt.Sub(now))
 	if err != nil {
 		v.audit(ctx, claims.Subject, "replay_guard_unavailable")
-		return ServiceClaims{}, fmt.Errorf("%w: %v", ErrReplayGuardUnavailable, err)
+		return ServiceClaims{}, fmt.Errorf("%w: %w", ErrReplayGuardUnavailable, err)
 	}
 	if !claimed {
 		v.audit(ctx, claims.Subject, "token_replayed")

@@ -79,7 +79,7 @@ func newTestEnv(t *testing.T) *testEnv {
 
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = client.Close() }) //nolint:errcheck // test cleanup
 
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 	verifier, err := NewServiceAuthVerifier(ServiceAuthVerifierConfig{
@@ -154,7 +154,7 @@ func TestServiceAuthVerifierEdDSA(t *testing.T) {
 	}
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = client.Close() }) //nolint:errcheck // test cleanup
 	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
 
 	verifier, err := NewServiceAuthVerifier(ServiceAuthVerifierConfig{
@@ -264,7 +264,7 @@ func TestServiceAuthVerifierReplayAllowedAfterExpiry(t *testing.T) {
 func TestServiceAuthVerifierUnconfiguredTrustAnchor(t *testing.T) {
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	t.Cleanup(func() { _ = client.Close() }) //nolint:errcheck // test cleanup
 
 	verifier, err := NewServiceAuthVerifier(ServiceAuthVerifierConfig{
 		ReplayGuard: NewRedisReplayGuard(client),

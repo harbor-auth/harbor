@@ -51,3 +51,36 @@
   `make agent-check`; filed as a follow-on task
   (`ftask_756c88f2-a5c0-4c2e-bf5a-f557efefee54`) rather than fixed here since
   those files are outside this task's scope.
+
+## Task 13: Fix golangci-lint findings in internal/cloudapi/serviceauth.go
+
+Ran `golangci-lint run ./internal/cloudapi/...` (v2.12.2, go1.25 — installed
+locally since the pinned toolchain version couldn't type-check go1.25
+modules) to get ground truth rather than trust the task's line numbers
+verbatim, since prior commits on this branch could have shifted them.
+
+- errcheck (serviceauth_test.go:82,157,267): `t.Cleanup(func() { _ =
+  client.Close() })` on a `*redis.Client`. `.golangci.yml` already lists
+  `(*...v9.Client).Close` in errcheck's `exclude-functions`, but that
+  exclusion doesn't suppress `check-blank: true` findings on blank
+  (`_ = `) assignments in this golangci-lint version. Matched the repo's
+  existing convention (`internal/bff/session_redis_test.go`,
+  `internal/webauthn/store_redis_test.go`, etc.): added
+  `//nolint:errcheck // test cleanup` to each line instead of relying on
+  the config exclusion.
+- errorlint (serviceauth.go): the task named lines 274/279/284 (header/
+  payload/signature decode), but the *same* `fmt.Errorf("%w: ...: %v",
+  Sentinel, err)` double-wrap pattern was also live at lines 290, 302, and
+  338 (header parse, claims parse, replay-guard error) — not mentioned in
+  the task but flagged by the actual linter run. Fixed all six to
+  `fmt.Errorf("%w: ...: %w", Sentinel, err)`, matching the repo's
+  established double-`%w` convention (`internal/relay/store.go`,
+  `internal/oidc/jwt_verifier.go`, `internal/region/resolve.go`).
+
+`golangci-lint run ./internal/cloudapi/...` now reports one remaining
+issue, `namespaces.go:281` (`json.Marshal` error unchecked) — pre-existing,
+outside this task's file scope (task 4's output), suggested as a follow-on
+task rather than fixed here.
+
+`go build ./...`, `go vet ./internal/cloudapi/...`, `go test
+./internal/cloudapi/...` all pass.
