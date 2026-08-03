@@ -8,7 +8,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: https://github.com/harbor-auth/harbor.git
+    repoURL: git@github.com:harbor-auth/harbor.git
     targetRevision: main
     path: deploy/platform
   destination:
