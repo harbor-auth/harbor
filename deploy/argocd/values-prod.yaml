@@ -12,6 +12,10 @@ global:
   image:
     registry: ghcr.io/harbor-auth/harbor
     pullPolicy: IfNotPresent
+  postgresTLS:
+    enabled: true
+    secretName: harbor-postgresql-tls
+    mountPath: /var/run/secrets/postgresql
 # Single-region dev/prod: binds the issuer / RP-origin hosts to a region so the
 # fail-closed region middleware resolves them instead of 400-rejecting.
 region: EU

@@ -1,0 +1,94 @@
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-production
+spec:
+  acme:
+    email: ops@harborauth.com
+    privateKeySecretRef:
+      name: letsencrypt-production-key
+    server: https://acme-v02.api.letsencrypt.org/directory
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: harbor-internal-selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: harbor-internal-root-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: Harbor Internal Root CA
+  secretName: harbor-internal-root-ca
+  duration: 43800h
+  renewBefore: 8760h
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: harbor-internal-selfsigned
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: harbor-internal-ca
+spec:
+  ca:
+    secretName: harbor-internal-root-ca
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: harbor-postgresql
+  namespace: harbor
+spec:
+  secretName: harbor-postgresql-tls
+  duration: 2160h
+  renewBefore: 720h
+  dnsNames:
+    - harbor-postgresql
+    - harbor-postgresql.harbor
+    - harbor-postgresql.harbor.svc
+    - harbor-postgresql.harbor.svc.cluster.local
+    - harbor-postgresql-hl
+    - harbor-postgresql-hl.harbor
+    - harbor-postgresql-hl.harbor.svc
+    - harbor-postgresql-hl.harbor.svc.cluster.local
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  usages:
+    - server auth
+  issuerRef:
+    name: harbor-internal-ca
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: harbor-public
+  namespace: harbor
+spec:
+  secretName: harbor-tls
+  duration: 2160h
+  renewBefore: 720h
+  dnsNames:
+    - auth.harborauth.com
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  issuerRef:
+    name: letsencrypt-production
+    kind: ClusterIssuer

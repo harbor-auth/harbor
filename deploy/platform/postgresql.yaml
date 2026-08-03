@@ -1,0 +1,182 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: harbor-postgresql
+  namespace: harbor
+  labels:
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/instance: harbor
+spec:
+  selector:
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/instance: harbor
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: harbor-postgresql-hl
+  namespace: harbor
+  labels:
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/instance: harbor
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/instance: harbor
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: harbor-postgresql
+  namespace: harbor
+  labels:
+    app.kubernetes.io/name: postgresql
+    app.kubernetes.io/instance: harbor
+spec:
+  serviceName: harbor-postgresql-hl
+  replicas: 1
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgresql
+      app.kubernetes.io/instance: harbor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgresql
+        app.kubernetes.io/instance: harbor
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgresql
+          image: postgres:16.14-bookworm@sha256:92620daddcd947f8d5ab5ba66e848702fe443d87fed30c4cea8e389fd78dfc55
+          imagePullPolicy: IfNotPresent
+          args:
+            - -c
+            - ssl=on
+            - -c
+            - ssl_cert_file=/etc/postgresql/tls/tls.crt
+            - -c
+            - ssl_key_file=/etc/postgresql/tls/tls.key
+            - -c
+            - ssl_ca_file=/etc/postgresql/tls/ca.crt
+            - -c
+            - password_encryption=scram-sha-256
+          env:
+            - name: POSTGRES_DB
+              value: harbor
+            - name: POSTGRES_USER
+              value: harbor
+            - name: POSTGRES_PASSWORD_FILE
+              value: /etc/postgresql/auth/password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgresql
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: [pg_isready, -U, harbor, -d, harbor]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: [pg_isready, -U, harbor, -d, harbor]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: auth
+              mountPath: /etc/postgresql/auth
+              readOnly: true
+            - name: tls
+              mountPath: /etc/postgresql/tls
+              readOnly: true
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: auth
+          secret:
+            secretName: harbor-postgresql-auth
+            defaultMode: 0440
+            items:
+              - key: password
+                path: password
+        - name: tls
+          secret:
+            secretName: harbor-postgresql-tls
+            defaultMode: 0440
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 20Gi
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: harbor-postgresql
+  namespace: harbor
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: postgresql
+      app.kubernetes.io/instance: harbor
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [harbor-hot, harbor-mgmt, harbor-migrate]
+      ports:
+        - port: 5432
+          protocol: TCP
+  egress: []

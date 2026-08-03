@@ -22,6 +22,11 @@ global:
     # The production hot/mgmt helpers require per-component sha256 digests.
     tag: development-only
     pullPolicy: IfNotPresent
+  postgresTLS:
+    # Mount the issuing CA so DATABASE_URL can use sslmode=verify-full.
+    enabled: false
+    secretName: harbor-postgresql-tls
+    mountPath: /var/run/secrets/postgresql
   # Shared 256-bit KEK used to wrap and unwrap per-user DEKs. Both harbor-hot
   # and harbor-mgmt MUST receive this exact value: management creates the
   # wrapped user secrets and hot unwraps them for PPID derivation.
@@ -322,6 +327,7 @@ ingress:
   # exist before the Ingress can terminate TLS.
   tlsSecretName: harbor-tls
   annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-production
     # Force TLS: an OIDC issuer over plaintext leaks codes/tokens.
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
     nginx.ingress.kubernetes.io/force-ssl-redirect: "true"

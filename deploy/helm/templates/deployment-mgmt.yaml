@@ -98,6 +98,19 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if .Values.global.postgresTLS.enabled }}
+            - name: postgresql-ca
+              mountPath: {{ .Values.global.postgresTLS.mountPath }}
+              readOnly: true
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if .Values.global.postgresTLS.enabled }}
+        - name: postgresql-ca
+          secret:
+            secretName: {{ required "global.postgresTLS.secretName is required when PostgreSQL TLS is enabled" .Values.global.postgresTLS.secretName }}
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
