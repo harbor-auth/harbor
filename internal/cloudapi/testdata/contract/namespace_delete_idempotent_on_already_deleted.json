@@ -1,0 +1,31 @@
+{
+  "name": "namespace_delete_idempotent_on_already_deleted",
+  "spec_scenario": "Delete is idempotent, including on an absent namespace",
+  "steps": [
+    {
+      "method": "POST",
+      "path": "/admin/v1/namespaces",
+      "auth": "valid",
+      "scope": "namespaces:write",
+      "idempotency_key": "ns-key-4",
+      "request_body": {"id": "contract-ns-4"},
+      "want_status": 201
+    },
+    {
+      "method": "DELETE",
+      "path": "/admin/v1/namespaces/contract-ns-4",
+      "auth": "valid",
+      "scope": "namespaces:write",
+      "idempotency_key": "del-key-4a",
+      "want_status": 204
+    },
+    {
+      "method": "DELETE",
+      "path": "/admin/v1/namespaces/contract-ns-4",
+      "auth": "valid",
+      "scope": "namespaces:write",
+      "idempotency_key": "del-key-4b",
+      "want_status": 204
+    }
+  ]
+}

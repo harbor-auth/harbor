@@ -1,0 +1,26 @@
+{
+  "name": "namespace_create_idempotent_retry",
+  "spec_scenario": "Namespace create is idempotent on retry",
+  "steps": [
+    {
+      "method": "POST",
+      "path": "/admin/v1/namespaces",
+      "auth": "valid",
+      "scope": "namespaces:write",
+      "idempotency_key": "ns-create-key-1",
+      "request_body": {"id": "contract-ns-1", "display_name": "Contract NS"},
+      "want_status": 201,
+      "want_body_contains": {"id": "contract-ns-1", "status": "active", "display_name": "Contract NS"}
+    },
+    {
+      "method": "POST",
+      "path": "/admin/v1/namespaces",
+      "auth": "valid",
+      "scope": "namespaces:write",
+      "idempotency_key": "ns-create-key-1",
+      "request_body": {"id": "contract-ns-1", "display_name": "Contract NS"},
+      "want_status": 201,
+      "want_same_body_as_step": 1
+    }
+  ]
+}

@@ -84,3 +84,74 @@ task rather than fixed here.
 
 `go build ./...`, `go vet ./internal/cloudapi/...`, `go test
 ./internal/cloudapi/...` all pass.
+
+## Task 8: Contract fixtures + cross-process integration/security test suite
+
+Started while task 7 ("Wire cloudapi into harbor-mgmt behind the
+cloudIntegration gate and deploy config") was still `in_progress` on the
+shared feature — `cmd/harbor-mgmt/main.go` has no `cloudapi` import yet, and
+per task 6's notes above, no production type satisfies
+`cloudopenapi.ServerInterface` yet (`Server`/`SessionsHandler`/`KeysHandler`
+are three separate types with three different method shapes).
+
+Rather than block on task 7, built a **test-only** reconciliation in
+`internal/cloudapi/contract_test.go`:
+- `contractAdapter` implements `cloudopenapi.ServerInterface` by delegating to
+  the real `Server`/`SessionsHandler`/`KeysHandler` — no production file
+  changed, nothing exported, not reachable from any `cmd/*` binary.
+- `requireServiceAuth` is the generic cloudServiceAuth middleware
+  namespaces.go's doc comment says is "wired in a later task" — it reads each
+  operation's required scope from the context value the generated
+  `ServerInterfaceWrapper` already attaches (`CloudServiceAuthScopes`), so it
+  needs no hand-maintained path->scope table. It skips `/admin/v1/keys/rotate`
+  deliberately: `KeysHandler.PostKeysRotate` already verifies+scope-checks
+  itself, and stacking a second `Verify` call on the same bearer would see a
+  fresh jti as already claimed and reject a legitimate first call.
+- `newContractRouter(store, verifier, hotBaseURL, proxyToken, hotClient)` is
+  the one router-builder shared by `contract_test.go` (in-process, miniredis)
+  and `integration_test.go` (`-tags=integration`, real Postgres/Redis, served
+  via `httptest.NewServer` for a genuine HTTP round trip).
+
+When task 7 lands its own production reconciliation in `cmd/harbor-mgmt`
+(likely nearly this same shape), this test harness does not need to change —
+it exercises the same underlying handlers task 7 will wire, just via a
+test-local composition instead of the production one. A future cleanup could
+point these tests at task 7's production router instead of duplicating the
+~30-line adapter/middleware here, but that's optional: the tests prove the
+same contract either way.
+
+Fixtures live under `internal/cloudapi/testdata/contract/*.json`, one file
+per `spec.md` "#### Scenario:" heading (`spec_scenario` field cross-references
+the exact heading text). Each fixture is a sequence of HTTP steps against the
+shared router; auth-outcome fixtures use `GET /admin/v1/namespaces/{id}`
+against a namespace that doesn't exist as a clean auth-only probe — that
+route never returns 401/403 from its own logic, so a 404 unambiguously proves
+"authorized, handler executed" and a 401/403 unambiguously proves "rejected
+before the handler ran," without needing idempotency-key or persisted-state
+setup. `TestContractAuditEventsEmitted` and `TestContractRateLimitFailsClosed`
+are hand-written (not fixture-driven) since they assert on the audit-log side
+channel and on 429 behavior under a real rate limiter, not just the HTTP
+response.
+
+Two `spec.md` scenarios (session `session_expired` / `cross_tenant_forbidden`)
+aren't reachable via this OpenAPI surface at all — no `/admin/v1/*` route
+consumes a *session* bearer, only `cloudServiceAuth` JWTs; those two
+scenarios are already covered directly against
+`SessionsHandler.VerifySessionBearer` in `sessions_test.go`
+(`TestVerifySessionBearerExpired`, `TestVerifySessionBearerCrossTenantMismatch`),
+so not duplicated here.
+
+`internal/oidcapi/router_test.go` gets a behavioral check that harbor-hot's
+real mux 404s every `/admin/v1/*` path; `internal/arch/arch_test.go` gets a
+`go list -deps`-based architecture fitness test (matching its existing
+`TestHotPathDoesNotImportMgmtPackages` pattern) proving `cmd/harbor-hot` never
+transitively imports `internal/cloudapi` at all — the stronger, structural
+version of "harbor-hot never exposes the contract."
+
+`integration_test.go`'s "harbor-mgmt returns 404 when cloudIntegration
+disabled" check is expressed against `httpserver.NewHealthMux()` with cloudapi
+simply never mounted (the actual disabled-state behavior, since an
+unregistered `net/http` pattern always 404s) rather than against
+`cmd/harbor-mgmt` directly — `cmd/harbor-mgmt` is a `main` package and can't
+be imported from `internal/cloudapi`, and task 7 owns the real gate wiring
+and its own tests there.

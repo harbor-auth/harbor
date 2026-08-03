@@ -1,0 +1,14 @@
+{
+  "name": "auth_expired_token_rejected",
+  "spec_scenario": "Expired token is rejected",
+  "steps": [
+    {
+      "method": "GET",
+      "path": "/admin/v1/namespaces/auth-check-ns",
+      "auth": "expired",
+      "scope": "namespaces:read",
+      "want_status": 401,
+      "want_error_code": "invalid_token"
+    }
+  ]
+}

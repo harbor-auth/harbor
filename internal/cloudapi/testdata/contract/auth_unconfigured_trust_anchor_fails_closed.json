@@ -1,0 +1,14 @@
+{
+  "name": "auth_unconfigured_trust_anchor_fails_closed",
+  "spec_scenario": "Fail-closed on unconfigured trust anchor",
+  "steps": [
+    {
+      "method": "GET",
+      "path": "/admin/v1/namespaces/auth-check-ns",
+      "auth": "unconfigured_trust_anchor",
+      "scope": "namespaces:read",
+      "want_status": 401,
+      "want_error_code": "invalid_token"
+    }
+  ]
+}

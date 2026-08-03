@@ -1,0 +1,14 @@
+{
+  "name": "auth_valid_token_accepted",
+  "spec_scenario": "Valid service token is accepted",
+  "steps": [
+    {
+      "method": "GET",
+      "path": "/admin/v1/namespaces/auth-check-ns",
+      "auth": "valid",
+      "scope": "namespaces:read",
+      "want_status": 404,
+      "want_error_code": "namespace_not_found"
+    }
+  ]
+}
