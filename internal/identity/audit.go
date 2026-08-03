@@ -44,6 +44,16 @@ const (
 	// erasure of the user's DEK, making all envelope-encrypted PII
 	// permanently unrecoverable.
 	EventComplianceEraseCompleted EventType = "compliance.erase_completed"
+
+	// EventSignupEnrolled records the creation of a new user account through
+	// the public self-service signup journey (POST /enroll).
+	EventSignupEnrolled EventType = "signup.enrolled"
+	// EventSignupPasskeyRegistered records the first passkey credential
+	// created during the public signup journey.
+	EventSignupPasskeyRegistered EventType = "signup.passkey_registered"
+	// EventSignupRecoveryCompleted records the completion of mandatory
+	// recovery setup during the public signup journey.
+	EventSignupRecoveryCompleted EventType = "signup.recovery_completed"
 )
 
 // AuditEventInserter is the narrow write interface AuditRecorder needs from

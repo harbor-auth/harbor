@@ -204,7 +204,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("configure dashboard handler: %w", err)
 	}
-	signupHandler, err := bff.NewSignupHandler(dashboardTemplates, logger)
+	signupHandler, err := bff.NewSignupHandler(dashboardTemplates, auditRecorder, splitAndTrim(os.Getenv("RETURN_TO_ALLOWLIST")), logger)
 	if err != nil {
 		return fmt.Errorf("configure signup handler: %w", err)
 	}

@@ -5,11 +5,33 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/harbor-auth/harbor/internal/identity"
 	"github.com/harbor-auth/harbor/internal/region"
 	"github.com/harbor-auth/harbor/web"
 )
+
+// fakeSignupAuditRecorder captures RecordAsync calls synchronously (no
+// goroutine) so tests can assert on them deterministically.
+type fakeSignupAuditRecorder struct {
+	mu     sync.Mutex
+	events []fakeSignupAuditEvent
+}
+
+type fakeSignupAuditEvent struct {
+	userID   string
+	et       identity.EventType
+	clientID *string
+	detail   any
+}
+
+func (f *fakeSignupAuditRecorder) RecordAsync(_ context.Context, userID string, et identity.EventType, clientID *string, detail any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, fakeSignupAuditEvent{userID: userID, et: et, clientID: clientID, detail: detail})
+}
 
 func newTestSignupHandler(t *testing.T) *SignupHandler {
 	t.Helper()
@@ -17,7 +39,20 @@ func newTestSignupHandler(t *testing.T) *SignupHandler {
 	if err != nil {
 		t.Fatalf("ParseDashboardTemplates: %v", err)
 	}
-	h, err := NewSignupHandler(tmpl, nil)
+	h, err := NewSignupHandler(tmpl, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewSignupHandler: %v", err)
+	}
+	return h
+}
+
+func newTestSignupHandlerWithAudit(t *testing.T, audit SignupAuditRecorder, returnToAllowlist []string) *SignupHandler {
+	t.Helper()
+	tmpl, err := web.ParseDashboardTemplates()
+	if err != nil {
+		t.Fatalf("ParseDashboardTemplates: %v", err)
+	}
+	h, err := NewSignupHandler(tmpl, audit, returnToAllowlist, nil)
 	if err != nil {
 		t.Fatalf("NewSignupHandler: %v", err)
 	}
@@ -25,7 +60,7 @@ func newTestSignupHandler(t *testing.T) *SignupHandler {
 }
 
 func TestNewSignupHandler_RejectsNilTemplate(t *testing.T) {
-	if _, err := NewSignupHandler(nil, nil); err == nil {
+	if _, err := NewSignupHandler(nil, nil, nil, nil); err == nil {
 		t.Fatal("NewSignupHandler(nil template) = nil error, want error")
 	}
 }
@@ -194,5 +229,175 @@ func TestSignupHandler_RecoveryRouteAllowsEnrollmentOnlyScope(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("GET /signup/recovery (enrollment-only scope) status = %d, want 200", w.Code)
+	}
+}
+
+// fullScopeSignupRequest builds a GET request carrying the context a real
+// full-scope BFF session (post-recovery) would inject — ContextWithUserID +
+// ContextWithSessionScope(SessionScopeFull) — exactly as bff.Middleware does.
+func fullScopeSignupRequest(target, userID string) *http.Request {
+	ctx := ContextWithUserID(context.Background(), userID)
+	ctx = ContextWithSessionScope(ctx, SessionScopeFull)
+	return httptest.NewRequest(http.MethodGet, target, nil).WithContext(ctx)
+}
+
+// TestSignupHandler_SuccessRoute_RequiresFullScope proves GET /signup/success
+// is unreachable without a full-scope session, mirroring
+// TestRequireFullScope_DeniesEnrollmentOnlyScope — a user who has not yet
+// completed recovery setup gets a 403, never the success page.
+func TestSignupHandler_SuccessRoute_RequiresFullScope(t *testing.T) {
+	h := newTestSignupHandler(t)
+	mux := http.NewServeMux()
+	h.Routes(mux)
+
+	ctx := ContextWithUserID(context.Background(), "user-1")
+	ctx = ContextWithSessionScope(ctx, SessionScopeEnrollmentOnly)
+	r := httptest.NewRequest(http.MethodGet, "/signup/success", nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("GET /signup/success (enrollment-only scope) status = %d, want 403", w.Code)
+	}
+}
+
+// TestSignupHandler_SuccessRoute_AllowsFullScope proves the counterpart: a
+// full-scope session reaches the page.
+func TestSignupHandler_SuccessRoute_AllowsFullScope(t *testing.T) {
+	h := newTestSignupHandler(t)
+	mux := http.NewServeMux()
+	h.Routes(mux)
+
+	r := fullScopeSignupRequest("/signup/success", "user-1")
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /signup/success (full scope) status = %d, want 200", w.Code)
+	}
+}
+
+// TestGetSignupSuccess_NoUserIDUnauthorized proves the handler itself
+// defends against a request with no authenticated identity even though
+// SessionScopeFromContext defaults to full when no scope is set at all
+// (e.g. no BFF session cookie was ever presented) — same defence-in-depth
+// every DashboardHandler read route applies.
+func TestGetSignupSuccess_NoUserIDUnauthorized(t *testing.T) {
+	h := newTestSignupHandler(t)
+
+	r := httptest.NewRequest(http.MethodGet, "/signup/success", nil)
+	w := httptest.NewRecorder()
+	h.GetSignupSuccess(w, r)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("GetSignupSuccess with no user ID status = %d, want 401", w.Code)
+	}
+}
+
+// TestGetSignupSuccess_ReturnToAllowlisted proves an absolute return_to on an
+// allowlisted host is rendered exactly as given.
+func TestGetSignupSuccess_ReturnToAllowlisted(t *testing.T) {
+	h := newTestSignupHandlerWithAudit(t, nil, []string{"marketing.example"})
+
+	r := fullScopeSignupRequest("/signup/success?return_to=https%3A%2F%2Fmarketing.example%2Fwelcome", "user-1")
+	w := httptest.NewRecorder()
+	h.GetSignupSuccess(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetSignupSuccess status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `href="https://marketing.example/welcome"`) {
+		t.Errorf("GetSignupSuccess body = %q, want a link to the allowlisted return_to", body)
+	}
+}
+
+// TestGetSignupSuccess_UnrecognizedReturnToFallsBackToDefault proves a
+// foreign, non-allowlisted host is never rendered — the response falls back
+// to the fixed same-origin default and the rejected value is never echoed.
+func TestGetSignupSuccess_UnrecognizedReturnToFallsBackToDefault(t *testing.T) {
+	h := newTestSignupHandlerWithAudit(t, nil, []string{"marketing.example"})
+
+	r := fullScopeSignupRequest("/signup/success?return_to=https%3A%2F%2Fevil.example%2Fphish", "user-1")
+	w := httptest.NewRecorder()
+	h.GetSignupSuccess(w, r)
+
+	body := w.Body.String()
+	if strings.Contains(body, "evil.example") {
+		t.Fatalf("GetSignupSuccess body echoed an unrecognized return_to host: %q", body)
+	}
+	if !strings.Contains(body, `href="/"`) {
+		t.Errorf("GetSignupSuccess body = %q, want a link to the fixed same-origin default", body)
+	}
+}
+
+// TestGetSignupSuccess_MissingReturnToFallsBackToDefault proves the absence
+// of a return_to parameter also falls back to the fixed default.
+func TestGetSignupSuccess_MissingReturnToFallsBackToDefault(t *testing.T) {
+	h := newTestSignupHandler(t)
+
+	r := fullScopeSignupRequest("/signup/success", "user-1")
+	w := httptest.NewRecorder()
+	h.GetSignupSuccess(w, r)
+
+	body := w.Body.String()
+	if !strings.Contains(body, `href="/"`) {
+		t.Errorf("GetSignupSuccess body = %q, want a link to the fixed same-origin default", body)
+	}
+}
+
+// TestGetSignupSuccess_EmitsAuditEvents proves all three signup-lifecycle
+// events are recorded for the completing user's own audit trail, with no RP
+// (clientID) context and no PII beyond the userID every other audit call
+// site already carries.
+func TestGetSignupSuccess_EmitsAuditEvents(t *testing.T) {
+	audit := &fakeSignupAuditRecorder{}
+	h := newTestSignupHandlerWithAudit(t, audit, nil)
+
+	r := fullScopeSignupRequest("/signup/success", "user-1")
+	w := httptest.NewRecorder()
+	h.GetSignupSuccess(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetSignupSuccess status = %d, want 200", w.Code)
+	}
+
+	wantEvents := []identity.EventType{
+		identity.EventSignupEnrolled,
+		identity.EventSignupPasskeyRegistered,
+		identity.EventSignupRecoveryCompleted,
+	}
+	if len(audit.events) != len(wantEvents) {
+		t.Fatalf("recorded %d audit events, want %d: %+v", len(audit.events), len(wantEvents), audit.events)
+	}
+	for i, want := range wantEvents {
+		got := audit.events[i]
+		if got.et != want {
+			t.Errorf("event[%d].et = %q, want %q", i, got.et, want)
+		}
+		if got.userID != "user-1" {
+			t.Errorf("event[%d].userID = %q, want %q", i, got.userID, "user-1")
+		}
+		if got.clientID != nil {
+			t.Errorf("event[%d].clientID = %v, want nil (no RP context at signup)", i, *got.clientID)
+		}
+		if got.detail != nil {
+			t.Errorf("event[%d].detail = %v, want nil (no PII beyond userID)", i, got.detail)
+		}
+	}
+}
+
+// TestGetSignupSuccess_NilAuditRecorderIsGraceful proves a nil audit
+// recorder (the default when audit isn't wired) never panics or blocks the
+// page render.
+func TestGetSignupSuccess_NilAuditRecorderIsGraceful(t *testing.T) {
+	h := newTestSignupHandler(t)
+
+	r := fullScopeSignupRequest("/signup/success", "user-1")
+	w := httptest.NewRecorder()
+	h.GetSignupSuccess(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetSignupSuccess with nil audit recorder status = %d, want 200", w.Code)
 	}
 }
