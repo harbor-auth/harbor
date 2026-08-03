@@ -1,6 +1,7 @@
 {{- if .Values.ingress.enabled }}
-# Ingress: exposes ONLY harbor-hot to the internet. harbor-mgmt is intentionally
-# absent — it must never be publicly routable.
+# Ingress: the shared public origin routes only the BFF login paths to
+# harbor-mgmt; every other path goes to harbor-hot. Other management APIs stay
+# unreachable because no public path selects them.
 #
 # The host here MUST match hot.issuer, or the OIDC discovery document will
 # advertise endpoints under a different origin than clients reach.
@@ -35,6 +36,13 @@ spec:
     - host: {{ .Values.ingress.host | quote }}
       http:
         paths:
+          - path: /login
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "harbor.fullname" . }}-mgmt
+                port:
+                  number: 80
           - path: /
             pathType: Prefix
             backend:

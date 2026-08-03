@@ -15,6 +15,9 @@
 # Global image settings (can be overridden per-component below).
 # ---------------------------------------------------------------------------
 global:
+  # Multi-zone installations spread across zones. Single-node installations
+  # override this with kubernetes.io/hostname, which every node carries.
+  topologyKey: topology.kubernetes.io/zone
   image:
     # Registry + repository prefix shared by both binaries.
     registry: ghcr.io/harbor-auth/harbor
