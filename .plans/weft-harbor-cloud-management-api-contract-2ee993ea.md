@@ -1,48 +1,53 @@
-# Implement idempotent namespace lifecycle handlers
+# Task 6: Key-rotation proxy handler with a second internal admin credential
 
-Task 4 of the harbor-cloud-management-api-contract feature.
+## Scope (per tasks.md §6 + assigned task)
 
-1. Read `api/openapi/harbor-cloud.yaml` (namespace paths + `Error`/idempotency
-   semantics), `openspec/changes/harbor-cloud-management-api-contract-2ee993ea/design.md`
-   §3 and `specs/harbor-cloud-management-api/spec.md`'s namespace-lifecycle
-   scenarios, and the generated `internal/gen/openapi/cloud/harbor_cloud.gen.go`
-   `ServerInterface` (`PostAdminV1Namespaces`, `GetAdminV1Namespace`,
-   `DeleteAdminV1Namespace`) to pin down exact signatures. Cross-check
-   `internal/cloudapi/store.go` (`Store.CreateNamespace/GetNamespace/SoftDeleteNamespace`,
-   `Store.CreateOperation/GetOperation`) and `internal/oidcapi/admin_keys.go` /
-   `internal/mgmtapi/register.go` for handler conventions (body size caps,
-   `writeError`-style JSON envelopes, credential/response minting patterns).
-2. Add `internal/cloudapi/namespaces.go`:
-   - `Server` struct wrapping `*Store` (`NewServer`), the type sibling tasks
-     (sessions.go, keys.go) will add more `ServerInterface` methods to.
-   - `PostAdminV1Namespaces`: validate `Idempotency-Key` + `id` pattern,
-     consult the `cloud_operations` ledger (hash of canonicalized request
-     body) — replay verbatim on a hash match, `409 idempotency_key_reused` on
-     a mismatch — then `CreateNamespace`, mapping `ErrNamespaceAlreadyExists`
-     to `409 namespace_already_exists`. `display_name` has no DB column; it's
-     echoed back in the create response only, never persisted.
-   - `GetAdminV1Namespace`: `404 namespace_not_found` for both absent and
-     soft-deleted rows.
-   - `DeleteAdminV1Namespace`: same idempotency-ledger pattern (hashing the
-     path `id`, since DELETE has no body), soft-delete via
-     `Store.SoftDeleteNamespace`, always `204` — including absent/already-deleted.
-   - Shared `storedResponse` JSON envelope (`status` + `body`) persisted in
-     `cloud_operations.response_body` so a replay reproduces the original
-     response verbatim, plus `writeCloudJSON`/`writeCloudError`/`writeInternalError`
-     helpers reused by later cloudapi handler files.
-3. Add `internal/cloudapi/namespaces_test.go`: a stateful `memQuerier` fake
-   (multi-call sequences needed for retry/duplicate/delete-twice scenarios,
-   unlike `store_test.go`'s per-call `fakeQuerier`) plus handler tests for
-   create/get/delete happy paths, idempotent retry (same key+body → identical
-   response, no second DB row), idempotency-key-reused (same key, different
-   body/target), duplicate-id-fresh-key, and delete-is-idempotent (absent,
-   already-deleted, and same-key replay all return 204 without re-deleting).
-4. `go build ./...`, `go vet ./...`, `go test ./internal/cloudapi/...`, then
-   the full `go test ./...` for regressions. Commit and push.
+1. `internal/oidcapi/admin_auth.go`: extend `AdminAuthConfig`/`AdminAuthMiddleware`
+   to accept a set of independently-labeled Bearer credentials instead of one
+   `Token`. Log which label matched on every accepted/rejected request.
+   Preserve constant-time comparison (compare against every configured
+   credential, no early exit) and fail-closed behavior (empty credential set
+   => always 401).
+2. `cmd/harbor-hot/main.go`: wire a second, optional `MGMT_HOT_PROXY_TOKEN`
+   credential (label "cloud-proxy") alongside the existing required
+   `ADMIN_API_TOKEN` (label "operator") — needed for the "operator vs
+   cloud-proxy" audit-log distinction to actually work end-to-end. Optional
+   because harbor-hot runs standalone without Harbor Cloud integration.
+3. `internal/cloudapi/keys.go`: `KeysHandler.PostKeysRotate` —
+   - verifies the caller's `cloudServiceAuth` bearer via `ServiceAuthVerifier`
+   - requires `keys:rotate` scope (403 `insufficient_scope` otherwise)
+   - proxies to harbor-hot's unmodified `POST /admin/keys/rotate` using
+     `MGMT_HOT_PROXY_TOKEN` (never `ADMIN_API_TOKEN`)
+   - relays harbor-hot's response status/body; maps transport failures to
+     500 `server_error` per `api/openapi/harbor-cloud.yaml`.
+4. Tests: `admin_auth_test.go` (multi-credential accept/reject + label
+   logging), `keys_test.go` (scope enforcement, correct credential used in
+   the proxy call, cross-package check that harbor-hot's
+   `AdminAuthMiddleware` logs `credential=cloud-proxy` vs `credential=operator`).
 
-Note: task 5 (session minting, `internal/cloudapi/sessions.go`) landed in
-parallel on this branch with its own self-contained `SessionsHandler` type
-rather than extending `Server` — the two don't collide at compile time, but
-task 7 (wiring `cloudapi` into `harbor-mgmt`) will need to reconcile
-`Server`/`SessionsHandler`/`keys.go`'s eventual type into one thing
-satisfying `cloudopenapi.ServerInterface`.
+## Out of scope
+
+- Binary wiring of `internal/cloudapi` into `cmd/harbor-mgmt` (task 7).
+- Namespace/session handler changes (tasks 4/5, other agents — task 4's
+  `namespaces.go` landed on this branch in parallel with its own `Server`
+  type; `sessions.go` (task 5) and `keys.go` (this task) are both
+  self-contained handler types instead. Reconciling `Server` /
+  `SessionsHandler` / `KeysHandler` into one type satisfying
+  `cloudopenapi.ServerInterface` is task 7's job, not this task's).
+- Helm/k8s deploy config (task 7).
+
+## Notes
+
+- No router.go exists yet wiring `cloudapi` handlers via the generated
+  `cloudopenapi.ServerInterface` — task 5's `sessions.go` establishes the
+  convention of hand-rolled request/response structs + plain
+  `http.HandlerFunc`-shaped methods, not the generated stubs. `keys.go`
+  follows the same convention.
+- `internal/gen/openapi/cloud/harbor_cloud.gen.go` has generated
+  `KeysRotateRequest`/`KeysRotateResponse` types but they aren't used by
+  `sessions.go` either — staying consistent, not introducing them here.
+- Pre-existing golangci-lint findings in `internal/cloudapi/serviceauth.go`/
+  `serviceauth_test.go` (task 3, already completed) block a clean
+  `make agent-check`; filed as a follow-on task
+  (`ftask_756c88f2-a5c0-4c2e-bf5a-f557efefee54`) rather than fixed here since
+  those files are outside this task's scope.
