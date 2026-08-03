@@ -113,3 +113,51 @@
    security check in `login.go`/`callback.go` at a time and confirm the
    corresponding test fails, then restore it; `npm test` in `react/` green.
 5. Commit and push.
+
+# Task 7: Integration and security documentation (REQ-006)
+
+1. Ground every protocol claim in the actual source of truth before writing
+   prose: read `internal/oidcapi/discovery.go` (exact discovery fields,
+   including that `token_endpoint_auth_methods_supported` currently
+   advertises only `["none"]`), `internal/oidc/errors.go` +
+   `docs/design/flows/error-cases.md` (exact wire error codes and which
+   channel each uses), `docs/design/protocol/tokens.md` (PKCE-mandatory,
+   refresh rotation, JWKS rotation policy incl. grace/overlap windows from
+   `internal/crypto/rotation.go`), `docs/design/protocol/ppid.md` (PPID
+   derivation/sector rules), `internal/oidcapi/end_session.go` (logout is
+   fully wired, not just planned), and `internal/oidc/auth_method.go` /
+   `internal/mgmtapi/register_validate.go` (public vs confidential client
+   auth is implemented at `/token`, `/introspect`, `/revoke` — the
+   `docs/plans/client-secret-auth.md` plan doc describing this as a stub is
+   stale).
+2. Add `sdk/sign-in-button/docs/INTEGRATION.md`: discovery document field
+   table, public/confidential client registration, PKCE S256-only mechanics,
+   scopes/consent, PPID `sub` (link `docs/design/protocol/ppid.md`), logout
+   (`/end_session` contract), refresh token rotation semantics (rotate,
+   reuse ⇒ theft signal), JWKS rotation (grace period/overlap window, re-fetch
+   on unknown `kid`), an error-code table a callback handler must map to
+   user messages, and a copy-paste CSP directive set for the vendored
+   SVG/CSS/React assets — no `unsafe-inline`, no third-party `script-src`.
+   The one wrinkle is the inline `<style>` block each SVG/React variant
+   carries for `:hover`/`:focus-visible`; used CSP hash sources instead of
+   `unsafe-inline`, computing exact `sha256-` values per variant (verified
+   `compact`/`full` share byte-identical style content per variant; the
+   React-rendered string hashes differently than the vendored SVG file
+   because it lacks the file's line breaks — documented both, plus the
+   recompute command).
+3. Add `sdk/sign-in-button/docs/SECURITY.md`: unqualified statement that the
+   button must target the RP's own login-initiation endpoint and must never
+   be wired to a hand-built `/authorize` URL, then each RP-owned
+   responsibility (state, nonce, PKCE, redirect-URI allowlisting, session
+   rotation, callback error handling) with a concrete risk explanation if
+   omitted, cross-referencing `examples/minimal-rp/` (already written in
+   Task 5, tested in Task 6) as the executable reference.
+4. Verify: every discovery field, error code, and endpoint path quoted in
+   both docs matches `internal/oidcapi/discovery.go` /
+   `internal/oidc/errors.go` / `docs/design/flows/error-cases.md` /
+   `docs/design/protocol/tokens.md` verbatim (manual cross-check, no
+   generated-doc tooling in this repo); independently recomputed the CSP
+   hashes with a second extraction method and confirmed they match; no Go
+   files touched by this task, so no `go test` run needed — this is a
+   docs-only change.
+5. Commit and push.
