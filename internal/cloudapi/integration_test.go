@@ -57,12 +57,16 @@ func requireIntegrationDeps(t *testing.T) integrationDeps {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
+	// DATABASE_URL is already confirmed non-empty above, so ConnectDB (which
+	// only returns a nil pool when the URL is empty) cannot return a nil pool
+	// here — a nil pool at this point would be a ConnectDB contract bug, not
+	// an environment we should silently skip.
 	pool, err := clients.ConnectDB(ctx, logger)
 	if err != nil {
 		t.Fatalf("connect database: %v", err)
 	}
 	if pool == nil {
-		t.Skip("DATABASE_URL is not set")
+		t.Fatal("clients.ConnectDB returned a nil pool despite a non-empty DATABASE_URL")
 	}
 	t.Cleanup(pool.Close)
 
@@ -70,17 +74,21 @@ func requireIntegrationDeps(t *testing.T) integrationDeps {
 }
 
 // newIntegrationReplayGuard connects a fresh Redis client for the replay
-// guard, skipping the test if REDIS_URL is unset or unreachable.
+// guard. Callers must call requireIntegrationDeps (or otherwise confirm
+// REDIS_URL is set) first.
 func newIntegrationReplayGuard(t *testing.T) ReplayGuard {
 	t.Helper()
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// REDIS_URL is already confirmed non-empty by the caller, so ConnectRedis
+	// (which only returns a nil client when the URL is empty) cannot return a
+	// nil client here — see requireIntegrationDeps's comment above.
 	redisClient, err := clients.ConnectRedis(ctx, logger)
 	if err != nil {
 		t.Fatalf("connect redis: %v", err)
 	}
 	if redisClient == nil {
-		t.Skip("REDIS_URL is not set")
+		t.Fatal("clients.ConnectRedis returned a nil client despite a non-empty REDIS_URL")
 	}
 	t.Cleanup(func() { _ = redisClient.Close() }) //nolint:errcheck // test cleanup
 	return NewRedisReplayGuard(redisClient)
