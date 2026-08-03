@@ -1,0 +1,109 @@
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Create your account — Harbor</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;color:#111;min-height:100vh}
+.nav{background:#1a1a2e;color:#fff;padding:1rem 2rem;display:flex;align-items:center;gap:1rem}
+.nav h1{font-size:1.1rem;font-weight:600;letter-spacing:.02em}
+.container{max-width:640px;margin:2rem auto;padding:0 1.5rem}
+.card{background:#fff;border-radius:8px;padding:2rem;margin-bottom:1.5rem;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.card h2{font-size:1.4rem;font-weight:700;margin-bottom:.75rem}
+.card p{color:#444;line-height:1.6;margin-bottom:.75rem}
+.promise{list-style:none;display:flex;flex-direction:column;gap:.5rem;margin:1rem 0}
+.promise li{color:#333;line-height:1.5;padding-left:1.5rem;position:relative}
+.promise li::before{content:"✓";position:absolute;left:0;color:#2a7a4f;font-weight:700}
+fieldset{border:1px solid #ddd;border-radius:6px;padding:1rem;margin:1.25rem 0}
+legend{font-weight:600;padding:0 .4rem}
+.hint{font-size:.85rem;color:#666;margin-bottom:.75rem}
+.region-option{display:flex;align-items:center;gap:.6rem;padding:.5rem 0;cursor:pointer}
+.region-option input{width:1.1rem;height:1.1rem}
+button[type=submit]{background:#1a1a2e;color:#fff;border:none;border-radius:6px;padding:.85rem 1.5rem;font-size:1rem;font-weight:600;cursor:pointer;width:100%}
+button[type=submit]:disabled{opacity:.6;cursor:not-allowed}
+button[type=submit]:focus-visible,.region-option input:focus-visible{outline:3px solid #7aa7ff;outline-offset:2px}
+.error{background:#fdecea;color:#7a1f16;border:1px solid #f3b7ae;border-radius:6px;padding:.75rem 1rem;margin-bottom:1rem}
+.signin-link{display:block;text-align:center;margin-top:1rem;font-size:.9rem;color:#333}
+noscript p{background:#fff3cd;color:#664d03;border:1px solid #ffe69c;border-radius:6px;padding:.75rem 1rem}
+</style>
+</head>
+<body>
+<nav class="nav"><h1>⚓ Harbor</h1></nav>
+<main class="container">
+  <noscript><p>Creating a Harbor account requires JavaScript, so your browser can create a passkey directly with your device.</p></noscript>
+  <section class="card">
+    <h2>Create your Harbor account</h2>
+    <p>Harbor signs you into the apps you choose without becoming a place that profiles you.</p>
+    <ul class="promise">
+      <li>We don't build a profile of you or sell your data.</li>
+      <li>Each app you connect gets its own separate identifier — never a shared account key those apps can compare notes with.</li>
+      <li>You only ever share the specific details an app asks for, and only after you consent.</li>
+      <li>Every connection is visible in your dashboard, where you can review or revoke it at any time.</li>
+    </ul>
+  </section>
+  <section class="card">
+    <form id="signup-form" novalidate>
+      <p id="signup-error" class="error" role="alert" hidden></p>
+      <fieldset>
+        <legend>Choose your region</legend>
+        <p class="hint">Your account data is stored in the region you choose and stays there.</p>
+        {{range .Regions}}
+        <label class="region-option">
+          <input type="radio" name="region" value="{{.Code}}" required>
+          <span>{{.Label}}</span>
+        </label>
+        {{end}}
+      </fieldset>
+      <button type="submit" id="signup-submit">Continue to create your passkey</button>
+    </form>
+    <a class="signin-link" href="/signin">Already have a Harbor account? Sign in</a>
+  </section>
+</main>
+<script>
+(function () {
+  "use strict";
+  var form = document.getElementById("signup-form");
+  var submitButton = document.getElementById("signup-submit");
+  var errorBox = document.getElementById("signup-error");
+
+  function showError(message) {
+    errorBox.textContent = message;
+    errorBox.hidden = false;
+  }
+
+  function hideError() {
+    errorBox.hidden = true;
+    errorBox.textContent = "";
+  }
+
+  form.addEventListener("submit", function (event) {
+    event.preventDefault();
+    hideError();
+
+    var selected = form.querySelector('input[name="region"]:checked');
+    if (!selected) {
+      showError("Please choose a region to continue.");
+      return;
+    }
+
+    submitButton.disabled = true;
+    fetch("/enroll", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ region: selected.value })
+    }).then(function (response) {
+      if (!response.ok) {
+        throw new Error("enroll failed");
+      }
+      window.location.assign("/signup/passkey");
+    }).catch(function () {
+      showError("We couldn't start your signup. Please try again.");
+      submitButton.disabled = false;
+    });
+  });
+})();
+</script>
+</body>
+</html>

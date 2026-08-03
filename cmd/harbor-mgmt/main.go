@@ -204,6 +204,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("configure dashboard handler: %w", err)
 	}
+	signupHandler, err := bff.NewSignupHandler(dashboardTemplates, logger)
+	if err != nil {
+		return fmt.Errorf("configure signup handler: %w", err)
+	}
 
 	initialAccessToken := os.Getenv("INITIAL_ACCESS_TOKEN")
 	if initialAccessToken == "" {
@@ -271,6 +275,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		cloudKeysHandler := cloudapi.NewKeysHandler(cloudVerifier, cloudHotInternalURL, cloudHotProxyToken, nil)
 		registerCloudAPIRoutes(mux, cloudVerifier, cloudStore, cloudKeysHandler, newCloudAPILimiters(redisClient, logger))
 	}
+	signupHandler.Routes(mux)
 	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(webauthnService), bff.DiscoverableUserResolver{}, authorizeCompleteURL)
 	mux.HandleFunc("GET /login", loginHandler.BeginLogin)
 	mux.HandleFunc("POST /login/complete", loginHandler.FinishLogin)
