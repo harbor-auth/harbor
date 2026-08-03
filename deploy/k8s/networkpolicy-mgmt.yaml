@@ -1,6 +1,6 @@
 # NetworkPolicy: defense-in-depth for harbor-mgmt (the PII-handling cold path).
-# Even though there's no Ingress for mgmt, this makes the isolation explicit and
-# enforced at the network layer rather than relying on the absence of a route.
+# Only the shared-origin BFF login route is exposed through ingress. This policy
+# admits that controller explicitly while keeping every other source scoped.
 #
 #   Ingress — ONLY from pods in the harbor namespace (podSelector: {}). Nothing
 #             outside the namespace (and by extension nothing from the internet)
@@ -30,6 +30,13 @@ spec:
       ports:
         # Numeric port (not the named 'http') — NetworkPolicy named-port
         # resolution is fragile across CNIs, so pin the container port directly.
+        - port: 8081
+          protocol: TCP
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
         - port: 8081
           protocol: TCP
   egress:

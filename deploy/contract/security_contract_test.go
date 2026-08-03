@@ -24,6 +24,7 @@ func TestRawSecurityContract(t *testing.T) {
 	objects := loadFiles(t, filepath.Join("..", "k8s", "*.yaml"))
 	assertWorkloadContract(t, "raw", objects)
 	assertRuntimeConfigurationContract(t, objects, true)
+	assertPublicLoginRoute(t, objects)
 }
 
 func TestHelmSecurityContract(t *testing.T) {
@@ -42,7 +43,8 @@ func TestHelmSecurityContract(t *testing.T) {
 		if !strings.Contains(text, "\nkind: Deployment\n") &&
 			!strings.Contains(text, "\nkind: ConfigMap\n") &&
 			!strings.Contains(text, "\nkind: Secret\n") &&
-			!strings.Contains(text, "\nkind: NetworkPolicy\n") {
+			!strings.Contains(text, "\nkind: NetworkPolicy\n") &&
+			!strings.Contains(text, "\nkind: Ingress\n") {
 			continue
 		}
 		objects = append(objects, decode(t, document)...)
@@ -52,6 +54,40 @@ func TestHelmSecurityContract(t *testing.T) {
 	// but the rendered Secret must expose every exact runtime key.
 	assertRuntimeConfigurationContract(t, objects, false)
 	assertEnvNameParity(t, loadFiles(t, filepath.Join("..", "k8s", "*.yaml")), objects)
+	assertPublicLoginRoute(t, objects)
+}
+
+func assertPublicLoginRoute(t *testing.T, objects []object) {
+	t.Helper()
+	ingress := find(t, objects, "Ingress", "harbor-hot")
+	rules := pathSlice(t, pathMap(t, ingress, "spec"), "rules")
+	if len(rules) != 1 {
+		t.Fatalf("public ingress rules = %d, want 1", len(rules))
+	}
+	rule, ok := asObject(rules[0])
+	if !ok {
+		t.Fatal("public ingress rule is not a map")
+	}
+	paths := pathSlice(t, pathMap(t, rule, "http"), "paths")
+	want := map[string]string{"/login": "harbor-mgmt", "/": "harbor-hot"}
+	for _, item := range paths {
+		path, ok := asObject(item)
+		if !ok {
+			t.Fatal("public ingress path is not a map")
+		}
+		name := pathString(t, path, "backend", "service", "name")
+		delete(want, matchingRoute(fmt.Sprint(path["path"]), name, want))
+	}
+	if len(want) != 0 {
+		t.Fatalf("public ingress routes missing or incorrect: %v", want)
+	}
+}
+
+func matchingRoute(path, service string, want map[string]string) string {
+	if want[path] == service {
+		return path
+	}
+	return ""
 }
 
 func assertHelmSourceSecurityContract(t *testing.T) {

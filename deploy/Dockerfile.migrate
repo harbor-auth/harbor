@@ -15,11 +15,12 @@ FROM --platform=$BUILDPLATFORM golang:1.26 AS build
 # Pin golang-migrate at a known-good release. Bump here to upgrade.
 ARG MIGRATE_VERSION=v4.18.1
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go install -trimpath -ldflags='-s -w' \
+    go install -tags 'postgres' -trimpath -ldflags='-s -w' \
     "github.com/golang-migrate/migrate/v4/cmd/migrate@${MIGRATE_VERSION}" \
     && mkdir /out \
     && find "$(go env GOPATH)/bin" -type f -name migrate -exec cp '{}' /out/migrate \; \
-    && test -x /out/migrate
+    && test -x /out/migrate \
+    && /out/migrate -help 2>&1 | grep -Eq 'Database drivers:.*postgres'
 
 FROM alpine:3.20
 # Non-root uid/gid matches the Deployment securityContext (runAsUser 65532).

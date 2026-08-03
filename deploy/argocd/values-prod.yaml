@@ -9,6 +9,8 @@
 # remains fail-closed until the first successful signed publish replaces them.
 
 global:
+  # The isolated core cluster is intentionally a single K3s node.
+  topologyKey: kubernetes.io/hostname
   image:
     registry: ghcr.io/harbor-auth/harbor
     pullPolicy: IfNotPresent

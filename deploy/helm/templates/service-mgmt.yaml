@@ -1,6 +1,5 @@
-# Service: harbor-mgmt. ClusterIP and DELIBERATELY cluster-internal only —
-# there is NO Ingress for mgmt. The NetworkPolicy additionally restricts which
-# pods may even open this port.
+# Service: harbor-mgmt remains ClusterIP-only. The shared public Ingress routes
+# only /login* to it; the NetworkPolicy restricts direct connections.
 apiVersion: v1
 kind: Service
 metadata:
