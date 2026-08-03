@@ -279,6 +279,11 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(webauthnService), bff.DiscoverableUserResolver{}, authorizeCompleteURL)
 	mux.HandleFunc("GET /login", loginHandler.BeginLogin)
 	mux.HandleFunc("POST /login/complete", loginHandler.FinishLogin)
+	signinHandler, err := bff.NewSigninHandler(bffStore, dashboardTemplates, bffSessionTTL, splitAndTrim(os.Getenv("RETURN_TO_ALLOWLIST")), logger)
+	if err != nil {
+		return fmt.Errorf("configure signin handler: %w", err)
+	}
+	mux.HandleFunc("GET /signin", signinHandler.ServeSignin)
 	handler := bff.Middleware(bffStore)(requireSensitiveManagementStepUp(bff.NewStepUpGate(bffStore, bff.DefaultStepUpTTL), mux))
 	regionName := os.Getenv("REGION")
 	if regionName == "" {
