@@ -169,7 +169,7 @@ func (s *Server) PostEnroll(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusInternalServerError, "server_error", "enrollment failed")
 			return
 		}
-		if err := s.sessions.Save(r.Context(), key, userHandle); err != nil {
+		if err := s.sessions.Save(r.Context(), key, userHandle, false); err != nil {
 			s.logger.ErrorContext(r.Context(), "save enrollment session failed", "error", err)
 			recordError(telemetry.EndpointEnroll, "server_error")
 			s.writeError(w, http.StatusInternalServerError, "server_error", "enrollment failed")

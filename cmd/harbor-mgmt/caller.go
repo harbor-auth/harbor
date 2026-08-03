@@ -59,7 +59,7 @@ func (i *recoverySessionIssuer) IssueEnrollmentSession(ctx context.Context, user
 	if err != nil {
 		return "", err
 	}
-	if err := i.enrollmentSessions.Save(ctx, token, handle); err != nil {
+	if err := i.enrollmentSessions.Save(ctx, token, handle, true); err != nil {
 		return "", fmt.Errorf("save recovery enrollment handoff: %w", err)
 	}
 	if err := i.bffSessions.Create(ctx, bff.BFFSessionRecord{
@@ -207,7 +207,7 @@ func wirePostRegistrationHandoff(next http.Handler, sessions mgmtapi.EnrollmentS
 			if cookieErr != nil || cookie.Value == "" || sessions == nil || issuer == nil {
 				return
 			}
-			handle, err := sessions.UserHandle(r.Context(), cookie.Value)
+			handle, _, err := sessions.UserHandle(r.Context(), cookie.Value)
 			if err != nil || len(handle) != 16 {
 				return
 			}

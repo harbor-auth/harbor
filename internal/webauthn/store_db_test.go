@@ -120,17 +120,20 @@ func newFakeDBStore(t *testing.T) (*DBStore, *fakeStoreQuerier, pgtype.UUID) {
 	return NewDBStore(q), q, uid
 }
 
+// uidBytes returns the raw 16-byte WebAuthn user handle for uid — the format
+// mgmtapi.parseUUIDToBytes and cmd/harbor-mgmt's recoveryUserHandle actually
+// produce and save into the enrollment session store (parseWebAuthnUserID
+// parses this with uuid.FromBytes, not the 36-char canonical string form).
 func uidBytes(uid pgtype.UUID) []byte {
-	u := uuid.UUID(uid.Bytes)
-	return []byte(u.String())
+	return uid.Bytes[:]
 }
 
 // --- tests ------------------------------------------------------------------
 
 func TestDBStore_GetUser_NotFound(t *testing.T) {
 	s := NewDBStore(newFakeStoreQuerier())
-	// A valid UUID string that doesn't exist in the store.
-	missing := []byte(uuid.New().String())
+	// A validly-formatted handle that doesn't exist in the store.
+	missing := uidBytes(pgUUID(uuid.New()))
 	if _, err := s.GetUser(context.Background(), missing); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("err = %v, want ErrUserNotFound", err)
 	}
@@ -141,6 +144,23 @@ func TestDBStore_GetUser_InvalidHandle(t *testing.T) {
 	// A non-UUID byte slice must also return ErrUserNotFound (not an internal error).
 	if _, err := s.GetUser(context.Background(), []byte("not-a-uuid")); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("err = %v, want ErrUserNotFound", err)
+	}
+}
+
+// TestDBStore_GetUser_ProductionHandleFormat reproduces the handle-format
+// mismatch flagged for this task: mgmtapi.parseUUIDToBytes (POST /enroll) and
+// cmd/harbor-mgmt's recoveryUserHandle (POST /recovery/complete) both save the
+// WebAuthn user handle as the RAW 16-byte UUID (uuid.Parse(s); id[:]) — see
+// cmd/harbor-mgmt/caller_test.go's TestRecoverySessionIssuerBindsBFFAndEnrollmentRecords,
+// which pins exactly that format. Every real (DB-backed) WebAuthn ceremony
+// therefore calls Store.GetUser with those raw bytes, never with the
+// 36-character canonical string form the rest of this file's fixtures
+// (uidBytes) use.
+func TestDBStore_GetUser_ProductionHandleFormat(t *testing.T) {
+	s, _, uid := newFakeDBStore(t)
+	rawHandle := uid.Bytes[:] // exactly what parseUUIDToBytes/recoveryUserHandle produce in production.
+	if _, err := s.GetUser(context.Background(), rawHandle); err != nil {
+		t.Fatalf("GetUser(raw 16-byte handle) = %v, want success — this is the handle format enrollment/recovery actually produce", err)
 	}
 }
 
@@ -184,7 +204,7 @@ func TestDBStore_AddCredential_OK(t *testing.T) {
 
 func TestDBStore_AddCredential_UnknownUser(t *testing.T) {
 	s := NewDBStore(newFakeStoreQuerier())
-	err := s.AddCredential(context.Background(), []byte(uuid.New().String()), gowebauthn.Credential{ID: []byte("c")})
+	err := s.AddCredential(context.Background(), uidBytes(pgUUID(uuid.New())), gowebauthn.Credential{ID: []byte("c")})
 	if !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("err = %v, want ErrUserNotFound", err)
 	}
@@ -229,13 +249,13 @@ func TestDBStore_UpdateCredential_CrossUserBlocked(t *testing.T) {
 	cred.Authenticator.SignCount = 1
 
 	// Enroll cred under user1.
-	if err := s.AddCredential(context.Background(), []byte(id1.String()), cred); err != nil {
+	if err := s.AddCredential(context.Background(), id1[:], cred); err != nil {
 		t.Fatalf("AddCredential: %v", err)
 	}
 
 	// User2 tries to update user1's credential.
 	cred.Authenticator.SignCount = 2
-	err := s.UpdateCredential(context.Background(), []byte(id2.String()), cred)
+	err := s.UpdateCredential(context.Background(), id2[:], cred)
 	if !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("cross-user update: err = %v, want ErrUserNotFound", err)
 	}
@@ -253,7 +273,7 @@ func TestDBStore_SetRecoveryComplete_OK(t *testing.T) {
 
 func TestDBStore_SetRecoveryComplete_UnknownUser(t *testing.T) {
 	s := NewDBStore(newFakeStoreQuerier())
-	err := s.SetRecoveryComplete(context.Background(), []byte(uuid.New().String()))
+	err := s.SetRecoveryComplete(context.Background(), uidBytes(pgUUID(uuid.New())))
 	if !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("err = %v, want ErrUserNotFound", err)
 	}

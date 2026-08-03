@@ -160,13 +160,16 @@ func TestRecoverySessionIssuerBindsBFFAndEnrollmentRecords(t *testing.T) {
 	if record.UserID != userID || !record.RecoveryRequired || record.SessionScope != bff.SessionScopeEnrollmentOnly {
 		t.Fatalf("BFF session = %+v, want enrollment-only recovery session for %q", record, userID)
 	}
-	handle, err := enrollmentSessions.UserHandle(ctx, token)
+	handle, recovery, err := enrollmentSessions.UserHandle(ctx, token)
 	if err != nil {
 		t.Fatalf("enrollment session UserHandle: %v", err)
 	}
 	wantHandle := uuid.MustParse(userID)
 	if !bytes.Equal(handle, wantHandle[:]) {
 		t.Fatalf("user handle = %x, want UUID bytes %x", handle, wantHandle[:])
+	}
+	if !recovery {
+		t.Fatal("enrollment session recovery = false, want true: register/finish must route through svc.FinishRecoveryRegistration")
 	}
 }
 
@@ -192,7 +195,7 @@ func TestPostRegistrationHandoffAndRecoveryGating_EndToEnd(t *testing.T) {
 
 	bffSessions := bfftest.NewInMemoryBFFSessionStore()
 	enrollmentSessions := mgmtapitest.NewInMemoryEnrollmentSessionStore()
-	if err := enrollmentSessions.Save(ctx, "enroll-key", handle[:]); err != nil {
+	if err := enrollmentSessions.Save(ctx, "enroll-key", handle[:], false); err != nil {
 		t.Fatalf("seed enrollment session: %v", err)
 	}
 	issuer := &recoverySessionIssuer{bffSessions: bffSessions, enrollmentSessions: enrollmentSessions}
@@ -343,7 +346,7 @@ func TestWirePostRegistrationHandoff_IssuesSessionOnlyOn200(t *testing.T) {
 
 	newHandoff := func(status int) (http.Handler, *mgmtapitest.InMemoryEnrollmentSessionStore, *recordingScopedSessionIssuer) {
 		sessions := mgmtapitest.NewInMemoryEnrollmentSessionStore()
-		if err := sessions.Save(context.Background(), "enroll-key", handle[:]); err != nil {
+		if err := sessions.Save(context.Background(), "enroll-key", handle[:], false); err != nil {
 			t.Fatalf("seed enrollment session: %v", err)
 		}
 		issuer := &recordingScopedSessionIssuer{token: "issued-token"}
@@ -411,7 +414,7 @@ func TestWirePostRegistrationHandoff_IssuesSessionOnlyOn200(t *testing.T) {
 
 	t.Run("issuer failure still returns the ceremony's own success", func(t *testing.T) {
 		sessions := mgmtapitest.NewInMemoryEnrollmentSessionStore()
-		if err := sessions.Save(context.Background(), "enroll-key", handle[:]); err != nil {
+		if err := sessions.Save(context.Background(), "enroll-key", handle[:], false); err != nil {
 			t.Fatalf("seed enrollment session: %v", err)
 		}
 		issuer := &recordingScopedSessionIssuer{err: errors.New("redis down")}

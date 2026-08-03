@@ -24,16 +24,24 @@ const EnrollmentSessionCookieName = "harbor_enrollment_session"
 const enrollmentSessionTTL = 10 * time.Minute
 
 // EnrollmentSessionStore maps a short-lived, opaque session key to the WebAuthn
-// user handle of a just-enrolled user. It bridges POST /enroll (which creates
-// the user) and the passkey registration ceremony (which must bind to that same
-// user WITHOUT a client-supplied, IDOR-prone user_id — docs/DESIGN.md §9, §11.1).
+// user handle of a just-enrolled (or recovering) user. It bridges POST /enroll
+// or POST /recovery/complete (which resolve/create the user) and the passkey
+// registration ceremony (which must bind to that same user WITHOUT a
+// client-supplied, IDOR-prone user_id — docs/DESIGN.md §9, §11.1).
 type EnrollmentSessionStore interface {
 	// Save associates key with the given user handle for the store's TTL.
-	Save(ctx context.Context, key string, userHandle []byte) error
-	// UserHandle returns the user handle for key, or ErrEnrollmentSessionNotFound.
-	// Unlike a WebAuthn ceremony session it is NOT one-time-use: both
-	// register/begin and register/finish read it within the same enrollment.
-	UserHandle(ctx context.Context, key string) ([]byte, error)
+	// recovery marks the session as originating from the lost-device recovery
+	// ceremony (POST /recovery/complete) rather than first-time enrollment
+	// (POST /enroll); see UserHandle for how it is used.
+	Save(ctx context.Context, key string, userHandle []byte, recovery bool) error
+	// UserHandle returns the user handle and recovery flag for key, or
+	// ErrEnrollmentSessionNotFound. The webauthn package's register/finish
+	// ceremony uses recovery to decide whether to activate a pending user
+	// (first passkey) or clear recovery_required on an already-active one
+	// (fresh passkey after a lost-device recovery). Unlike a WebAuthn ceremony
+	// session it is NOT one-time-use: both register/begin and register/finish
+	// read it within the same enrollment.
+	UserHandle(ctx context.Context, key string) (userHandle []byte, recovery bool, err error)
 }
 
 // NewEnrollmentSessionKey returns a 256-bit random, URL-safe opaque key.

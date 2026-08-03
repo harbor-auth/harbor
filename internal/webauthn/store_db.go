@@ -233,11 +233,14 @@ func rowToGoCredential(row db.Credential) gowebauthn.Credential {
 	return c
 }
 
-// parseWebAuthnUserID parses a WebAuthn user handle (UUID string in bytes) into
-// a pgtype.UUID. Harbor's WebAuthn user handles are UUID strings
-// (e.g. "550e8400-e29b-41d4-a716-446655440000").
+// parseWebAuthnUserID parses a WebAuthn user handle into a pgtype.UUID.
+// Harbor's WebAuthn user handles are the raw 16-byte binary form of a user's
+// UUID (uuid.Parse(s); id[:]), as produced by mgmtapi.parseUUIDToBytes (POST
+// /enroll) and cmd/harbor-mgmt's recoveryUserHandle (POST /recovery/complete)
+// — NOT the 36-character canonical string form, which uuid.ParseBytes expects
+// and which is a different, incompatible representation.
 func parseWebAuthnUserID(userID []byte) (pgtype.UUID, error) {
-	id, err := uuid.ParseBytes(userID)
+	id, err := uuid.FromBytes(userID)
 	if err != nil {
 		return pgtype.UUID{}, fmt.Errorf("webauthn/store_db: invalid user handle: %w", err)
 	}
