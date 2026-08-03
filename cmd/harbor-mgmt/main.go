@@ -217,6 +217,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("configure management API: %w", err)
 	}
+	// Shared by both PostRecoveryComplete (lost-device recovery) and the
+	// post-registration handoff below (first-time signup): the two entry
+	// points into the exact same enrollment-only BFF session type.
+	enrollmentSessionIssuer := &recoverySessionIssuer{bffSessions: bffStore, enrollmentSessions: enrollmentSessions}
 	mgmtServer.
 		WithCallerSource(bffCallerAdapter{}).
 		WithConsentStore(grantStore).
@@ -225,7 +229,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		WithInitialAccessToken(initialAccessToken).
 		RequireRegistrationAuthorization().
 		WithRecovery(recoveryManager, recoveryStore, recoveryService, recoveryCeremonies).
-		WithScopedSessionIssuer(&recoverySessionIssuer{bffSessions: bffStore, enrollmentSessions: enrollmentSessions}).
+		WithScopedSessionIssuer(enrollmentSessionIssuer).
+		WithRecoveryRequirementClearer(recoveryRequirementClearer{store: credentialStore}).
+		WithRecoverySessionRefresher(bffSessionScopeRefresher{bffSessions: bffStore}).
+		WithEnrollmentCallerSource(bffEnrollmentCallerAdapter{}).
 		WithMFA(mfaService).
 		WithMFASessionStamper(bffMFASessionStamper{store: bffStore}).
 		WithCompliance(complianceDeps).
@@ -257,7 +264,14 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("configure WebAuthn handler: %w", err)
 	}
 	mux.Handle("POST /webauthn/register/begin", wrapPreSessionRoute(webauthnHandler.BeginRegistration, webauthnRegisterBeginAbuseProtection.limiter, maxWebauthnCeremonyBody))
-	mux.Handle("POST /webauthn/register/finish", wrapPreSessionRoute(webauthnHandler.FinishRegistration, webauthnRegisterFinishAbuseProtection.limiter, maxWebauthnCeremonyBody))
+	// Post-registration handoff wraps the FULL existing CSRF+ratelimit+ceremony
+	// chain so a first successful passkey registration immediately lands the
+	// new user in the same enrollment-only BFF session type PostRecoveryComplete
+	// produces (see wirePostRegistrationHandoff, caller.go).
+	mux.Handle("POST /webauthn/register/finish", wirePostRegistrationHandoff(
+		wrapPreSessionRoute(webauthnHandler.FinishRegistration, webauthnRegisterFinishAbuseProtection.limiter, maxWebauthnCeremonyBody),
+		enrollmentSessions, enrollmentSessionIssuer, logger,
+	))
 	mux.Handle("POST /webauthn/login/begin", wrapPreSessionRoute(webauthnHandler.BeginLogin, webauthnLoginBeginAbuseProtection.limiter, maxWebauthnCeremonyBody))
 	mux.Handle("POST /webauthn/login/finish", wrapPreSessionRoute(webauthnHandler.FinishLogin, webauthnLoginFinishAbuseProtection.limiter, maxWebauthnCeremonyBody))
 	mgmtServer.Routes(mux)

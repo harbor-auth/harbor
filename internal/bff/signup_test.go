@@ -1,6 +1,7 @@
 package bff
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -142,12 +143,56 @@ func TestSignupHandler_Routes(t *testing.T) {
 	mux := http.NewServeMux()
 	h.Routes(mux)
 
-	for _, path := range []string{"/signup", "/signup/passkey"} {
+	for _, path := range []string{"/signup", "/signup/passkey", "/signup/recovery"} {
 		r := httptest.NewRequest(http.MethodGet, path, nil)
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, r)
 		if w.Code != http.StatusOK {
 			t.Errorf("GET %s status = %d, want 200", path, w.Code)
 		}
+	}
+}
+
+func TestGetSignupRecovery_RendersRecoveryStep(t *testing.T) {
+	h := newTestSignupHandler(t)
+
+	r := httptest.NewRequest(http.MethodGet, "/signup/recovery", nil)
+	w := httptest.NewRecorder()
+	h.GetSignupRecovery(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /signup/recovery status = %d, want 200", w.Code)
+	}
+	body := w.Body.String()
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type = %q, want text/html", ct)
+	}
+	if !strings.Contains(body, `/recovery/codes`) {
+		t.Error("GET /signup/recovery body does not drive /recovery/codes")
+	}
+	if !strings.Contains(body, `/recovery/acknowledge`) {
+		t.Error("GET /signup/recovery body does not drive /recovery/acknowledge")
+	}
+	if strings.Contains(body, "user_id") {
+		t.Error("GET /signup/recovery response references a client-supplied user_id")
+	}
+}
+
+// TestSignupHandler_RecoveryRouteAllowsEnrollmentOnlyScope proves GET
+// /signup/recovery is reachable under an enrollment-only session scope (the
+// scope the post-registration handoff and lost-device recovery ceremony both
+// establish) — it must not 403 the way bff.RequireFullScope routes do.
+func TestSignupHandler_RecoveryRouteAllowsEnrollmentOnlyScope(t *testing.T) {
+	h := newTestSignupHandler(t)
+	mux := http.NewServeMux()
+	h.Routes(mux)
+
+	ctx := ContextWithSessionScope(context.Background(), SessionScopeEnrollmentOnly)
+	r := httptest.NewRequest(http.MethodGet, "/signup/recovery", nil).WithContext(ctx)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /signup/recovery (enrollment-only scope) status = %d, want 200", w.Code)
 	}
 }

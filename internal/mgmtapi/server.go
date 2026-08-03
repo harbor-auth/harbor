@@ -108,6 +108,22 @@ type Server struct {
 	// recoveryLimiter, when non-nil, gates the recovery endpoints. Nil disables
 	// rate limiting.
 	recoveryLimiter RecoveryRateLimiter
+	// recoveryRequirementClearer, when non-nil, backs POST /recovery/acknowledge:
+	// it flips a user's recovery_required flag to false. Nil puts that endpoint
+	// into a 503 state.
+	recoveryRequirementClearer RecoveryRequirementClearer
+	// recoverySessionRefresher, when non-nil, refreshes the caller's own
+	// already-issued BFF session scope immediately after
+	// recoveryRequirementClearer clears recovery_required, so the SAME cookie
+	// passes RequireFullScope without a fresh sign-in. Nil skips the refresh
+	// (POST /recovery/acknowledge still clears the DB flag).
+	recoverySessionRefresher RecoverySessionRefresher
+	// enrollmentCallerSource resolves the authenticated caller for endpoints
+	// explicitly designed to run during BOTH full and enrollment-only session
+	// scope (bff.RequireEnrollmentAllowed's contract) — today, only POST
+	// /recovery/codes and POST /recovery/acknowledge via recoverySessionCaller.
+	// Nil leaves those two endpoints reachable only by full-scope sessions.
+	enrollmentCallerSource CallerSource
 
 	// mfa, when non-nil, backs the /mfa/* endpoints (TOTP enrollment,
 	// activation, step-up verification, recovery-code redemption, and factor
@@ -286,6 +302,34 @@ func (s *Server) WithRecoveryRateLimiter(limiter RecoveryRateLimiter) *Server {
 	return s
 }
 
+// WithRecoveryRequirementClearer attaches the clearer that backs POST
+// /recovery/acknowledge. A nil clearer puts that endpoint into a 503 state.
+// Returns s for chaining.
+func (s *Server) WithRecoveryRequirementClearer(clearer RecoveryRequirementClearer) *Server {
+	s.recoveryRequirementClearer = clearer
+	return s
+}
+
+// WithRecoverySessionRefresher attaches the refresher that updates the
+// caller's own BFF session scope immediately after POST /recovery/acknowledge
+// clears recovery_required. A nil refresher skips the refresh. Returns s for
+// chaining.
+func (s *Server) WithRecoverySessionRefresher(refresher RecoverySessionRefresher) *Server {
+	s.recoverySessionRefresher = refresher
+	return s
+}
+
+// WithEnrollmentCallerSource attaches the caller source used ONLY by
+// recoverySessionCaller's fallback (POST /recovery/codes, POST
+// /recovery/acknowledge) to resolve an enrollment-only session's caller.
+// Every other user-scoped endpoint keeps using callerSource alone. A nil
+// source leaves those two endpoints reachable only by full-scope sessions.
+// Returns s for chaining.
+func (s *Server) WithEnrollmentCallerSource(src CallerSource) *Server {
+	s.enrollmentCallerSource = src
+	return s
+}
+
 // WithMFA wires the TOTP second-factor endpoints (POST /mfa/enroll,
 // /mfa/activate, /mfa/verify, /mfa/verify-recovery; GET /mfa/factors; DELETE
 // /mfa/factors/{id}). A nil service puts those routes into a 503 state. Returns
@@ -329,6 +373,7 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /recovery/codes", s.PostRecoveryCodes)
 	mux.HandleFunc("POST /recovery/begin", s.PostRecoveryBegin)
 	mux.HandleFunc("POST /recovery/complete", s.PostRecoveryComplete)
+	mux.HandleFunc("POST /recovery/acknowledge", s.PostRecoveryAcknowledge)
 	mux.HandleFunc("GET /recovery/factors", s.ListCredentialsByUser)
 	mux.HandleFunc("POST /mfa/enroll", s.PostMFAEnroll)
 	mux.HandleFunc("POST /mfa/activate", s.PostMFAActivate)

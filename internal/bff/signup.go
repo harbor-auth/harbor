@@ -35,14 +35,23 @@ func NewSignupHandler(tmpl *template.Template, logger *slog.Logger) (*SignupHand
 	return &SignupHandler{tmpl: tmpl, logger: logger}, nil
 }
 
-// Routes registers the public signup routes on mux. Both are plain GETs with
-// no side effects, so — unlike the dashboard's mutating routes — neither needs
-// RequireFullScope or CSRF middleware; the state-changing requests they drive
-// (POST /enroll, POST /webauthn/register/begin|finish) already carry their
-// own PreSessionCSRF + rate-limit + body-size defenses at the routing layer.
+// Routes registers the public signup routes on mux. GET /signup and GET
+// /signup/passkey are plain GETs with no side effects, so — unlike the
+// dashboard's mutating routes — neither needs RequireFullScope or CSRF
+// middleware; the state-changing requests they drive (POST /enroll, POST
+// /webauthn/register/begin|finish) already carry their own PreSessionCSRF +
+// rate-limit + body-size defenses at the routing layer.
+//
+// GET /signup/recovery runs AFTER a BFF session exists (the post-registration
+// handoff or the lost-device recovery ceremony issues it), so it is served
+// under RequireEnrollmentAllowed: both full and enrollment-only sessions may
+// load the page; the mgmtapi endpoints its script drives (POST
+// /recovery/codes, POST /recovery/acknowledge) enforce the real
+// authentication and authorization.
 func (h *SignupHandler) Routes(mux *http.ServeMux) {
 	mux.Handle("GET /signup", http.HandlerFunc(h.GetSignup))
 	mux.Handle("GET /signup/passkey", http.HandlerFunc(h.GetSignupPasskey))
+	mux.Handle("GET /signup/recovery", RequireEnrollmentAllowed(http.HandlerFunc(h.GetSignupRecovery)))
 }
 
 // signupRegionOption is one option rendered in the region picker.
@@ -97,6 +106,18 @@ func (h *SignupHandler) GetSignup(w http.ResponseWriter, r *http.Request) {
 // §9: a client-supplied user_id would be an IDOR).
 func (h *SignupHandler) GetSignupPasskey(w http.ResponseWriter, r *http.Request) {
 	h.renderTemplate(w, r, "signup_passkey.html", nil)
+}
+
+// GetSignupRecovery renders the mandatory recovery-setup page. Its script
+// calls the existing POST /recovery/codes exactly once per page load to
+// generate and display the caller's recovery codes, then — only after an
+// explicit "I've saved my recovery codes" confirmation — POSTs
+// /recovery/acknowledge, the one call that actually clears recovery_required
+// (mgmtapi.PostRecoveryAcknowledge). There is no user_id or email parameter
+// here either: the caller is resolved entirely from the BFF session cookie
+// set by the post-registration handoff or the lost-device recovery ceremony.
+func (h *SignupHandler) GetSignupRecovery(w http.ResponseWriter, r *http.Request) {
+	h.renderTemplate(w, r, "signup_recovery.html", nil)
 }
 
 // renderTemplate executes a named template with data. On error it logs and

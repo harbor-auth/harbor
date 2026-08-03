@@ -39,6 +39,7 @@ var userScopedEndpoints = []struct {
 	{"GET", "/mfa/factors"},
 	{"DELETE", "/mfa/factors/factor-1"},
 	{"POST", "/recovery/codes"},
+	{"POST", "/recovery/acknowledge"},
 	{"GET", "/recovery/factors"},
 	{"POST", "/compliance/export"},
 	{"POST", "/compliance/erase"},
