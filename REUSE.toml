@@ -47,3 +47,10 @@ SPDX-License-Identifier = "MIT"
 path = "deploy/**"
 SPDX-FileCopyrightText = "2026 The Harbor Authors"
 SPDX-License-Identifier = "Apache-2.0"
+
+# "Sign in with Private Harbor" button + brand kit — permissive so external,
+# non-AGPL consumers (Harbor Cloud onboarding, harbor-dummy-app) can vendor it.
+[[annotations]]
+path = "sdk/**"
+SPDX-FileCopyrightText = "2026 The Harbor Authors"
+SPDX-License-Identifier = "Apache-2.0"
