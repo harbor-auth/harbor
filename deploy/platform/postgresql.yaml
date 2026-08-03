@@ -172,10 +172,14 @@ spec:
   ingress:
     - from:
         - podSelector:
-            matchExpressions:
-              - key: app.kubernetes.io/name
-                operator: In
-                values: [harbor-hot, harbor-mgmt, harbor-migrate]
+            matchLabels:
+              app.kubernetes.io/name: harbor-hot
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: harbor-mgmt
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: harbor-migrate
       ports:
         - port: 5432
           protocol: TCP

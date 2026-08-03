@@ -130,10 +130,11 @@ spec:
   ingress:
     - from:
         - podSelector:
-            matchExpressions:
-              - key: app.kubernetes.io/name
-                operator: In
-                values: [harbor-hot, harbor-mgmt]
+            matchLabels:
+              app.kubernetes.io/name: harbor-hot
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: harbor-mgmt
       ports:
         - port: 6379
           protocol: TCP
