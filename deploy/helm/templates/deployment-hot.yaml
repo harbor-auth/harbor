@@ -121,8 +121,7 @@ spec:
               mountPath: /var/run/secrets/openbao
               readOnly: true
             - name: openbao-ca
-              mountPath: /var/run/secrets/openbao/ca.crt
-              subPath: ca.crt
+              mountPath: /var/run/secrets/openbao-ca
               readOnly: true
             {{- end }}
       volumes:
