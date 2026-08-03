@@ -1,111 +1,19 @@
 package cloudapi
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgtype"
-
-	db "github.com/harbor-auth/harbor/internal/gen/db"
 	cloudopenapi "github.com/harbor-auth/harbor/internal/gen/openapi/cloud"
 )
 
-// memQuerier is a small stateful in-memory querier fake, distinct from
-// store_test.go's per-call fakeQuerier: the namespace handler tests need
-// realistic multi-call sequences (create then get, create then delete
-// twice, ...) that a single canned closure per method can't express.
-type memQuerier struct {
-	namespaces map[string]db.CloudNamespace
-	operations map[operationKey]db.CloudOperation
-
-	createNamespaceCalls int
-	softDeleteCalls      int
-}
-
-type operationKey struct {
-	idempotencyKey string
-	operation      string
-}
-
-func newMemQuerier() *memQuerier {
-	return &memQuerier{
-		namespaces: map[string]db.CloudNamespace{},
-		operations: map[operationKey]db.CloudOperation{},
-	}
-}
-
-func (m *memQuerier) CreateCloudNamespace(_ context.Context, arg db.CreateCloudNamespaceParams) (db.CloudNamespace, error) {
-	m.createNamespaceCalls++
-	if _, exists := m.namespaces[arg.ID]; exists {
-		return db.CloudNamespace{}, errUniqueViolation
-	}
-	ts := pgtype.Timestamptz{Time: time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC), Valid: true}
-	row := db.CloudNamespace{ID: arg.ID, Status: arg.Status, CreatedAt: ts, UpdatedAt: ts}
-	m.namespaces[arg.ID] = row
-	return row, nil
-}
-
-func (m *memQuerier) GetCloudNamespace(_ context.Context, id string) (db.CloudNamespace, error) {
-	row, ok := m.namespaces[id]
-	if !ok {
-		return db.CloudNamespace{}, pgx.ErrNoRows
-	}
-	return row, nil
-}
-
-func (m *memQuerier) SoftDeleteCloudNamespace(_ context.Context, id string) error {
-	m.softDeleteCalls++
-	row, ok := m.namespaces[id]
-	if !ok || row.DeletedAt.Valid {
-		// Mirrors the real UPDATE ... WHERE deleted_at IS NULL: affects zero
-		// rows, no error, whether id never existed or was already deleted.
-		return nil
-	}
-	ts := pgtype.Timestamptz{Time: time.Date(2026, 8, 3, 13, 0, 0, 0, time.UTC), Valid: true}
-	row.DeletedAt = ts
-	row.UpdatedAt = ts
-	m.namespaces[id] = row
-	return nil
-}
-
-func (m *memQuerier) CreateCloudOperation(_ context.Context, arg db.CreateCloudOperationParams) (db.CloudOperation, error) {
-	key := operationKey{arg.IdempotencyKey, arg.Operation}
-	if _, exists := m.operations[key]; exists {
-		return db.CloudOperation{}, errUniqueViolation
-	}
-	row := db.CloudOperation{
-		IdempotencyKey: arg.IdempotencyKey,
-		Operation:      arg.Operation,
-		RequestHash:    arg.RequestHash,
-		ResponseBody:   arg.ResponseBody,
-		CreatedAt:      pgtype.Timestamptz{Time: time.Date(2026, 8, 3, 12, 0, 0, 0, time.UTC), Valid: true},
-	}
-	m.operations[key] = row
-	return row, nil
-}
-
-func (m *memQuerier) GetCloudOperation(_ context.Context, arg db.GetCloudOperationParams) (db.CloudOperation, error) {
-	row, ok := m.operations[operationKey{arg.IdempotencyKey, arg.Operation}]
-	if !ok {
-		return db.CloudOperation{}, pgx.ErrNoRows
-	}
-	return row, nil
-}
-
-func (m *memQuerier) CreateCloudSession(context.Context, db.CreateCloudSessionParams) (db.CloudSession, error) {
-	panic("memQuerier: CreateCloudSession not used by namespace handler tests")
-}
-
-func (m *memQuerier) GetCloudSession(context.Context, string) (db.CloudSession, error) {
-	panic("memQuerier: GetCloudSession not used by namespace handler tests")
-}
-
+// newTestServer builds a Server over a fresh memQuerier-backed Store.
+// memQuerier (the stateful in-memory querier fake multi-call sequences like
+// idempotent retry need) is defined once, in sessions_test.go, and shared by
+// every *_test.go file in this package.
 func newTestServer() (*Server, *memQuerier) {
 	q := newMemQuerier()
 	return NewServer(NewStore(q)), q

@@ -22,11 +22,13 @@ import (
 // persistence across multiple calls (mint, then a retried mint; mint, then a
 // later verification) to exercise idempotent retry and session lookup.
 type memQuerier struct {
-	mu                 sync.Mutex
-	namespaces         map[string]db.CloudNamespace
-	operations         map[[2]string]db.CloudOperation
-	sessions           map[string]db.CloudSession
-	createSessionCalls int
+	mu                   sync.Mutex
+	namespaces           map[string]db.CloudNamespace
+	operations           map[[2]string]db.CloudOperation
+	sessions             map[string]db.CloudSession
+	createSessionCalls   int
+	createNamespaceCalls int
+	softDeleteCalls      int
 }
 
 func newMemQuerier() *memQuerier {
@@ -46,10 +48,12 @@ func (m *memQuerier) putNamespace(id, status string) {
 func (m *memQuerier) CreateCloudNamespace(_ context.Context, arg db.CreateCloudNamespaceParams) (db.CloudNamespace, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.createNamespaceCalls++
 	if _, exists := m.namespaces[arg.ID]; exists {
 		return db.CloudNamespace{}, &pgconn.PgError{Code: "23505"}
 	}
-	row := db.CloudNamespace{ID: arg.ID, Status: arg.Status}
+	ts := pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true}
+	row := db.CloudNamespace{ID: arg.ID, Status: arg.Status, CreatedAt: ts, UpdatedAt: ts}
 	m.namespaces[arg.ID] = row
 	return row, nil
 }
@@ -67,6 +71,7 @@ func (m *memQuerier) GetCloudNamespace(_ context.Context, id string) (db.CloudNa
 func (m *memQuerier) SoftDeleteCloudNamespace(_ context.Context, id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.softDeleteCalls++
 	row, ok := m.namespaces[id]
 	if !ok {
 		return nil
