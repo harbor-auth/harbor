@@ -213,6 +213,29 @@ func TestHotPathDoesNotImportMgmtPackages(t *testing.T) {
 	}
 }
 
+// TestHarborHotDoesNotImportCloudAPI enforces
+// openspec/changes/harbor-cloud-management-api-contract-2ee993ea/specs/harbor-cloud-management-api/spec.md's
+// "harbor-hot never exposes the contract" requirement at the strongest
+// possible level: internal/cloudapi (the Harbor Cloud management API —
+// session minting, namespace lifecycle, signing-key rotation) is wired only
+// into cmd/harbor-mgmt, behind the private mgmt.cloudIntegration gate
+// (internal/cloudapi/store.go's package doc). If cmd/harbor-hot ever
+// transitively imported it, the public listener could expose /admin/v1/* by
+// accident regardless of any runtime route-table check — see
+// internal/oidcapi's TestHarborHotRouteTableHasNoAdminV1Path for the runtime
+// half of this same invariant.
+func TestHarborHotDoesNotImportCloudAPI(t *testing.T) {
+	deps := transitiveImports(t, modulePath+"/cmd/harbor-hot")
+
+	if bad := containsMatching(deps,
+		modulePath+"/internal/cloudapi",
+	); bad != "" {
+		t.Errorf("cmd/harbor-hot transitively imports %q — the Harbor Cloud "+
+			"management API contract must be reachable only from cmd/harbor-mgmt "+
+			"behind mgmt.cloudIntegration, never from harbor-hot's public listener", bad)
+	}
+}
+
 // TestOIDCCoreDoesNotImportClients enforces the dependency inversion that keeps
 // internal/oidc a pure, independently-testable core (§1.7): the OIDC flow defines
 // its store INTERFACES (store.go) and must never depend on their DB-backed
