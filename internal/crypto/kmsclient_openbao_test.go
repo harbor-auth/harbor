@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -61,7 +62,7 @@ func TestOpenBaoKMSClientDecryptCollapsesErrors(t *testing.T) {
 	defer server.Close()
 
 	client := newTestOpenBaoClient(t, server)
-	if _, err := client.Decrypt(context.Background(), "harbor-eu", []byte("vault:v1:bad")); err != ErrKMSDecryptFailed {
+	if _, err := client.Decrypt(context.Background(), "harbor-eu", []byte("vault:v1:bad")); !errors.Is(err, ErrKMSDecryptFailed) {
 		t.Fatalf("Decrypt error = %v, want ErrKMSDecryptFailed", err)
 	}
 }

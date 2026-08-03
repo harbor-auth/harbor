@@ -243,7 +243,9 @@ func (c *OpenBaoKMSClient) post(ctx context.Context, path, token string, input, 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+		if _, err := io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20)); err != nil {
+			return resp.StatusCode, fmt.Errorf("OpenBao returned HTTP %d (reading response: %w)", resp.StatusCode, err)
+		}
 		return resp.StatusCode, fmt.Errorf("OpenBao returned HTTP %d", resp.StatusCode)
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(output); err != nil {
