@@ -1,0 +1,84 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>"Sign in with Private Harbor" — plain HTML example</title>
+<link rel="stylesheet" href="../css/sign-in-button.css">
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    max-width: 40rem;
+    margin: 4rem auto;
+    padding: 0 1.5rem;
+    color: #16181d;
+  }
+  p {
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+  <h1>"Sign in with Private Harbor" — copy-paste example</h1>
+  <p>
+    Press <kbd>Tab</kbd> to move keyboard focus onto the button below and
+    confirm the focus ring is visible.
+  </p>
+
+  <!--
+    This is the entire copy-paste snippet: the CSS link above, plus the
+    markup below. Everything needed to reproduce it lives in this repo
+    under sdk/sign-in-button/{css,assets}/.
+  -->
+
+  <!--
+    SECURITY: href MUST be a login-initiation path that this site itself
+    owns and serves (e.g. "/auth/login" below is a placeholder for that
+    endpoint). That endpoint is responsible for minting `state`, `nonce`,
+    and the PKCE `code_verifier`/`code_challenge` (S256) and then
+    redirecting to Harbor.
+
+    This href MUST NEVER be replaced with a hand-built Harbor
+    "/authorize?..." URL. Constructing that URL here, in static markup or
+    client-side script, would strip out state/nonce/PKCE and open the
+    integration to CSRF and authorization-code-injection attacks. See
+    ../docs/SECURITY.md.
+  -->
+  <a class="phb-button phb-button--light phb-button--full"
+     href="/auth/login"
+     aria-label="Sign in with Private Harbor">
+    <svg xmlns="http://www.w3.org/2000/svg" width="240" height="40" viewBox="0 0 240 40" role="img" aria-label="Sign in with Private Harbor" focusable="false" class="phb-btn">
+      <title>Sign in with Private Harbor</title>
+      <style>
+        .phb-btn-bg{fill:#FFFFFF;stroke:#D6D9DE;stroke-width:1;}
+        .phb-btn-ring{fill:none;stroke:transparent;stroke-width:2;}
+        .phb-btn-label,.phb-btn-icon{fill:#16181D;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+        .phb-btn-label{font-size:14px;font-weight:600;}
+        .phb-btn:hover .phb-btn-bg{fill:#F0F2F5;stroke:#C3C8D1;}
+        .phb-btn:focus-visible .phb-btn-ring{stroke:#1857C4;}
+        .phb-btn.phb-btn--disabled .phb-btn-bg,.phb-btn[aria-disabled="true"] .phb-btn-bg{fill:#F5F6F8;stroke:#E4E7EB;}
+        .phb-btn.phb-btn--disabled .phb-btn-label,.phb-btn.phb-btn--disabled .phb-btn-icon,.phb-btn[aria-disabled="true"] .phb-btn-label,.phb-btn[aria-disabled="true"] .phb-btn-icon{fill:#9AA1AC;}
+      </style>
+      <rect class="phb-btn-bg" x="0.5" y="0.5" width="239" height="39" rx="8" ry="8"/>
+      <rect class="phb-btn-ring" x="3" y="3" width="234" height="34" rx="5" ry="5"/>
+      <g class="phb-btn-icon" transform="translate(16,10)">
+        <rect x="2" y="8" width="3" height="8"/>
+        <rect x="8.5" y="4" width="3" height="12"/>
+        <rect x="15" y="10" width="3" height="6"/>
+        <rect x="1" y="16" width="18" height="2" rx="1" ry="1"/>
+      </g>
+      <text class="phb-btn-label" x="46" y="20" dominant-baseline="middle">Sign in with Private Harbor</text>
+    </svg>
+  </a>
+
+  <p>
+    The SVG pasted above is the unmodified content of
+    <code>../assets/button-light-full.svg</code>. To use a different
+    variant, swap in the contents of the corresponding file from
+    <code>../assets/</code> and change the <code>phb-button--*</code>
+    modifier classes to match (see the lookup table at the top of
+    <code>../css/sign-in-button.css</code>).
+  </p>
+</body>
+</html>
