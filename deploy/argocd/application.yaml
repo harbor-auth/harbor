@@ -18,7 +18,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: git@github.com:harbor-auth/harbor.git
+    repoURL: https://github.com/harbor-auth/harbor.git
     targetRevision: main
     path: deploy/helm
     helm:

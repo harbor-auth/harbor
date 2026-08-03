@@ -17,10 +17,10 @@ spec:
         releaseName: openbao
         valueFiles:
           - $values/deploy/openbao/values.yaml
-    - repoURL: git@github.com:harbor-auth/harbor.git
+    - repoURL: https://github.com/harbor-auth/harbor.git
       targetRevision: main
       ref: values
-    - repoURL: git@github.com:harbor-auth/harbor.git
+    - repoURL: https://github.com/harbor-auth/harbor.git
       targetRevision: main
       path: deploy/openbao/manifests
   destination:
