@@ -110,6 +110,16 @@ type BFFSessionRecord struct {
 	// ExpiresAt is the absolute time after which the session is invalid.
 	// Callers must enforce this; the store may also TTL-evict.
 	ExpiresAt time.Time
+
+	// ReturnTo is the return_to value validated once, at GET /signup
+	// (returnto.go's ValidateReturnTo), and carried from there as opaque
+	// server-side session state through the rest of the public signup journey
+	// (design.md Decision 5 / REQ-004): /signup -> /signup/passkey -> the
+	// WebAuthn ceremony -> the post-registration handoff -> /signup/recovery
+	// -> /signup/success. Empty when the journey never captured one (e.g. a
+	// lost-device recovery session, or a signup that skipped return_to
+	// entirely) — readers must fall back to the fixed same-origin default.
+	ReturnTo string
 }
 
 // BFFSessionStore persists BFF session records across the OIDC/passkey ceremony

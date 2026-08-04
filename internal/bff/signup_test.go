@@ -39,7 +39,7 @@ func newTestSignupHandler(t *testing.T) *SignupHandler {
 	if err != nil {
 		t.Fatalf("ParseDashboardTemplates: %v", err)
 	}
-	h, err := NewSignupHandler(tmpl, nil, nil, nil)
+	h, err := NewSignupHandler(tmpl, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewSignupHandler: %v", err)
 	}
@@ -52,7 +52,7 @@ func newTestSignupHandlerWithAudit(t *testing.T, audit SignupAuditRecorder, retu
 	if err != nil {
 		t.Fatalf("ParseDashboardTemplates: %v", err)
 	}
-	h, err := NewSignupHandler(tmpl, audit, returnToAllowlist, nil)
+	h, err := NewSignupHandler(tmpl, nil, audit, returnToAllowlist, nil)
 	if err != nil {
 		t.Fatalf("NewSignupHandler: %v", err)
 	}
@@ -60,7 +60,7 @@ func newTestSignupHandlerWithAudit(t *testing.T, audit SignupAuditRecorder, retu
 }
 
 func TestNewSignupHandler_RejectsNilTemplate(t *testing.T) {
-	if _, err := NewSignupHandler(nil, nil, nil, nil); err == nil {
+	if _, err := NewSignupHandler(nil, nil, nil, nil, nil); err == nil {
 		t.Fatal("NewSignupHandler(nil template) = nil error, want error")
 	}
 }
@@ -291,58 +291,6 @@ func TestGetSignupSuccess_NoUserIDUnauthorized(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("GetSignupSuccess with no user ID status = %d, want 401", w.Code)
-	}
-}
-
-// TestGetSignupSuccess_ReturnToAllowlisted proves an absolute return_to on an
-// allowlisted host is rendered exactly as given.
-func TestGetSignupSuccess_ReturnToAllowlisted(t *testing.T) {
-	h := newTestSignupHandlerWithAudit(t, nil, []string{"marketing.example"})
-
-	r := fullScopeSignupRequest("/signup/success?return_to=https%3A%2F%2Fmarketing.example%2Fwelcome", "user-1")
-	w := httptest.NewRecorder()
-	h.GetSignupSuccess(w, r)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("GetSignupSuccess status = %d, want 200", w.Code)
-	}
-	body := w.Body.String()
-	if !strings.Contains(body, `href="https://marketing.example/welcome"`) {
-		t.Errorf("GetSignupSuccess body = %q, want a link to the allowlisted return_to", body)
-	}
-}
-
-// TestGetSignupSuccess_UnrecognizedReturnToFallsBackToDefault proves a
-// foreign, non-allowlisted host is never rendered — the response falls back
-// to the fixed same-origin default and the rejected value is never echoed.
-func TestGetSignupSuccess_UnrecognizedReturnToFallsBackToDefault(t *testing.T) {
-	h := newTestSignupHandlerWithAudit(t, nil, []string{"marketing.example"})
-
-	r := fullScopeSignupRequest("/signup/success?return_to=https%3A%2F%2Fevil.example%2Fphish", "user-1")
-	w := httptest.NewRecorder()
-	h.GetSignupSuccess(w, r)
-
-	body := w.Body.String()
-	if strings.Contains(body, "evil.example") {
-		t.Fatalf("GetSignupSuccess body echoed an unrecognized return_to host: %q", body)
-	}
-	if !strings.Contains(body, `href="/"`) {
-		t.Errorf("GetSignupSuccess body = %q, want a link to the fixed same-origin default", body)
-	}
-}
-
-// TestGetSignupSuccess_MissingReturnToFallsBackToDefault proves the absence
-// of a return_to parameter also falls back to the fixed default.
-func TestGetSignupSuccess_MissingReturnToFallsBackToDefault(t *testing.T) {
-	h := newTestSignupHandler(t)
-
-	r := fullScopeSignupRequest("/signup/success", "user-1")
-	w := httptest.NewRecorder()
-	h.GetSignupSuccess(w, r)
-
-	body := w.Body.String()
-	if !strings.Contains(body, `href="/"`) {
-		t.Errorf("GetSignupSuccess body = %q, want a link to the fixed same-origin default", body)
 	}
 }
 

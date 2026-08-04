@@ -23,8 +23,13 @@ type EnrollmentSessionStore interface {
 	// /recovery/complete) rather than first-time enrollment (POST /enroll).
 	// FinishRegistration uses recovery to pick the correct completion path:
 	// activate a pending user (first passkey) vs. clear recovery_required on
-	// an already-active one (fresh passkey after losing a device).
-	UserHandle(ctx context.Context, key string) (userID []byte, recovery bool, err error)
+	// an already-active one (fresh passkey after losing a device). The
+	// returnTo value is unused here — it is read only by
+	// cmd/harbor-mgmt/caller.go's post-registration handoff, which resolves
+	// the same session separately — but must remain part of this signature so
+	// a single concrete store (mgmtapi.EnrollmentSessionStore) can satisfy
+	// both interfaces.
+	UserHandle(ctx context.Context, key string) (userID []byte, recovery bool, returnTo string, err error)
 }
 
 // enrollmentCookieName is the cookie carrying the enrollment session key. It
@@ -178,7 +183,7 @@ func (h *Handler) userIDFromRequest(w http.ResponseWriter, r *http.Request) ([]b
 // On failure it writes the response and returns ok=false.
 func (h *Handler) userIDAndRecoveryFromRequest(w http.ResponseWriter, r *http.Request) ([]byte, bool, bool) {
 	if c, err := r.Cookie(enrollmentCookieName); err == nil && c.Value != "" {
-		userID, recovery, err := h.enrollmentSessions.UserHandle(r.Context(), c.Value)
+		userID, recovery, _, err := h.enrollmentSessions.UserHandle(r.Context(), c.Value)
 		if err == nil && len(userID) > 0 {
 			return userID, recovery, true
 		}

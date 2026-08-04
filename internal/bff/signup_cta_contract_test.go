@@ -24,7 +24,7 @@ func TestSignupCTAContract_PublishedURLsReturn200HTML(t *testing.T) {
 		t.Fatalf("ParseDashboardTemplates: %v", err)
 	}
 
-	signupHandler, err := NewSignupHandler(tmpl, nil, []string{"marketing.example.com"}, nil)
+	signupHandler, err := NewSignupHandler(tmpl, nil, nil, []string{"marketing.example.com"}, nil)
 	if err != nil {
 		t.Fatalf("NewSignupHandler: %v", err)
 	}
@@ -82,13 +82,14 @@ func TestSignupCTAContract_PublishedURLsReturn200HTML(t *testing.T) {
 }
 
 // TestSignupCTAContract_SignupQueryParamsAreInert locks in the contract doc's
-// explicit claim that GET /signup's return_to and region query parameters are
-// currently accepted but not read: the rendered region list must be identical
-// whether or not those parameters are present, and the response must never
-// echo the return_to value anywhere (it is not a template field on this
-// page). This is the regression guard for the "Known gaps" section of the
-// contract doc — if this test ever needs to change, the doc's inert-parameter
-// language must be updated in the same commit.
+// claim that GET /signup's rendered BODY never varies based on its return_to
+// or region query parameters: region selection stays in-page (radio buttons),
+// and return_to — while now captured into a cookie for the rest of the
+// journey (see TestGetSignup_SetsValidatedReturnToCookie) — is not a template
+// field on this page and so is never echoed into the body. This is the
+// regression guard for the "Known gaps" section of the contract doc — if this
+// test ever needs to change, the doc's inert-parameter language must be
+// updated in the same commit.
 func TestSignupCTAContract_SignupQueryParamsAreInert(t *testing.T) {
 	h := newTestSignupHandler(t)
 

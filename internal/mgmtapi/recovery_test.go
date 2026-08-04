@@ -61,11 +61,13 @@ func (f *fakeRecoveryVerifier) ConsumeCode(_ context.Context, userID, code strin
 }
 
 type fakeScopedSessionIssuer struct {
-	token string
-	err   error
+	token       string
+	err         error
+	gotReturnTo string
 }
 
-func (f *fakeScopedSessionIssuer) IssueEnrollmentSession(_ context.Context, _ string) (string, error) {
+func (f *fakeScopedSessionIssuer) IssueEnrollmentSession(_ context.Context, _, returnTo string) (string, error) {
+	f.gotReturnTo = returnTo
 	if f.err != nil {
 		return "", f.err
 	}
@@ -589,6 +591,11 @@ func TestPostRecoveryComplete_Success(t *testing.T) {
 	}
 	if !foundBFF || !foundEnrollment {
 		t.Errorf("recovery cookies: BFF=%t enrollment=%t, want both", foundBFF, foundEnrollment)
+	}
+	// Lost-device recovery never runs through GET /signup, so there is no
+	// captured return_to to carry onto the issued session.
+	if issuer.gotReturnTo != "" {
+		t.Errorf("issuer got returnTo = %q, want empty for a lost-device recovery ceremony", issuer.gotReturnTo)
 	}
 }
 

@@ -279,3 +279,106 @@ what they already emit; only the shared parser now accepts both.
    `cmd/harbor-mgmt`/`internal/mgmtapi` suites). `go run ./tools/agentcheck` —
    same pre-existing `golangci-lint`-vs-Go-1.25-toolchain mismatch noted on
    every prior task on this branch, not introduced by this change.
+
+# Task 13: Thread return_to as real server-side session state through the full signup journey
+
+Investigation first: task 4's follow-on note pinned exactly what's missing —
+`GET /signup` never reads/validates its own `return_to`; `EnrollmentSessionStore`
+only stores raw WebAuthn user-handle bytes; `BFFSessionRecord` has no `ReturnTo`
+field; `ScopedSessionIssuer.IssueEnrollmentSession(ctx, userID)` has no
+`return_to` parameter. `POST /enroll` happens directly from the `/signup` page's
+own JS (before it ever navigates to `/signup/passkey`), and `web/templates/*`
+are outside this task's file list, so the validated value cannot be threaded by
+having the page's JS echo it into the `/enroll` request body. Chose a
+short-lived, `HttpOnly`/`Secure`/`SameSite=Strict` cookie
+(`mgmtapi.SignupReturnToCookieName`) as the bridge: `GET /signup` validates
+`return_to` exactly once (`ValidateReturnTo`) and sets the cookie to the
+*validated* output (never the raw value); the browser carries that cookie
+automatically to the same-origin `POST /enroll`, which folds it into the new
+enrollment session. `PostEnroll` does NOT re-validate the cookie against the
+allowlist — a forged cookie set directly on `POST /enroll` (bypassing `GET
+/signup`) can only ever affect the forger's own new enrollment session, never
+another browser's, since nothing here lets one cookie jar influence another's;
+the actual open-redirect boundary is closed once, where `ValidateReturnTo` first
+runs on GET /signup's query string.
+
+`RecoverySessionRefresher.RefreshSessionScope` — named in the task prompt as a
+candidate signature change — turned out NOT to need one: `PostRecoveryAcknowledge`
+calls it only to flip `UserID`/`RecoveryRequired`/`SessionScope` on an
+*already-existing* BFF session record via `SetUserWithRecoveryStatus`, whose
+Redis Lua script (`setUserWithRecoveryScript`) does a decode-mutate-three-fields-reencode
+round trip that already preserves every other JSON field, including the new
+`ReturnTo`, untouched. Confirmed by reading `internal/bff/session_redis.go`
+before changing anything — left it alone rather than adding a needless
+parameter.
+
+1. `internal/mgmtapi/session.go`: added `SignupReturnToCookieName` const; added
+   a `returnTo` parameter to `EnrollmentSessionStore.Save` and a `returnTo`
+   return value to `UserHandle`.
+2. `internal/mgmtapi/session_redis.go`: `redisEnrollmentSession` gained an
+   `rt,omitempty` JSON field; `RedisEnrollmentSessionStore.Save`/`UserHandle`
+   updated to match.
+3. `internal/mgmtapi/enroll.go`: `PostEnroll` reads `SignupReturnToCookieName`
+   (best-effort — absent cookie yields `""`, matching pre-existing behavior)
+   via new helper `signupReturnToFromCookie`, and passes it to `sessions.Save`.
+4. `internal/mgmtapi/recovery.go`: `ScopedSessionIssuer.IssueEnrollmentSession`
+   gained a `returnTo` parameter; `PostRecoveryComplete` (lost-device recovery,
+   which never runs through `GET /signup`) passes `""`.
+5. `internal/bff/session.go`: added `BFFSessionRecord.ReturnTo`.
+6. `internal/bff/signup.go`: `GetSignup` validates `return_to` and sets the
+   cookie unconditionally (even the default) so every downstream hop sees a
+   well-defined value. `SignupHandler`/`NewSignupHandler` gained an optional
+   `sessions BFFSessionStore` dependency; `GetSignupSuccess` now prefers its own
+   `return_to` query parameter when accepted (preserving the original
+   single-hop, direct-link contract) and otherwise falls back to
+   `sessionReturnTo` — a new helper resolving `SessionIDFromContext` ->
+   `sessions.Get` -> `record.ReturnTo` — so a value captured once at `GET
+   /signup` and carried the whole way through now reaches the completion page
+   even when never re-supplied on `/signup/success`'s own URL.
+7. `cmd/harbor-mgmt/caller.go`: `recoverySessionIssuer.IssueEnrollmentSession`
+   threads `returnTo` into both the fresh `EnrollmentSessionStore` entry and the
+   new `BFFSessionRecord.ReturnTo`; `wirePostRegistrationHandoff` reads the
+   4th `UserHandle` return value and forwards it to `IssueEnrollmentSession`.
+8. `cmd/harbor-mgmt/main.go`: passes the already-constructed `bffStore` into
+   `bff.NewSignupHandler`.
+9. Compile-forced ripple beyond the task's stated file list (Go interfaces
+   require every implementer to match a changed method signature — same
+   necessity task 12 hit adding the `recovery` flag): `internal/webauthn/handlers.go`
+   (its own duplicated `EnrollmentSessionStore` interface + `handlers_test.go`'s
+   fake), `internal/testsupport/mgmtapi/session.go` (`InMemoryEnrollmentSessionStore`),
+   and every test file constructing/calling the changed signatures
+   (`internal/mgmtapi/session_test.go`'s own duplicated in-memory fixture,
+   `internal/mgmtapi/recovery_test.go`'s `fakeScopedSessionIssuer`,
+   `cmd/harbor-mgmt/caller_test.go`'s `recordingScopedSessionIssuer`,
+   `internal/bff/signup_test.go` / `signup_cta_contract_test.go`'s
+   `NewSignupHandler` call sites).
+10. `docs/design/product/signup-cta-contract.md`: reconciled the "Known gaps"
+    section task 6 wrote — `return_to` on `GET /signup` is no longer inert as
+    session-state (it still has no visible effect on that page's own rendered
+    body, so `TestSignupCTAContract_SignupQueryParamsAreInert`'s body-equality
+    assertions are still correct and were left as-is, just re-scoped in its doc
+    comment).
+11. New tests: `internal/bff/signup_returnto_test.go` (split out of
+    `signup_test.go` once it crossed the 500-line `_test.go` budget — cookie
+    set/validated on `GET /signup`, session-carried fallback and its priority
+    order against an explicit query value on `/signup/success`, nil-sessions
+    graceful degradation); `internal/mgmtapi/enroll_test.go` (`PostEnroll` folds
+    the cookie into the saved session, and behaves unchanged with no cookie);
+    `internal/mgmtapi/session_test.go` / Redis-backed round-trip tests for the
+    new field; `cmd/harbor-mgmt/caller_test.go` (`IssueEnrollmentSession` binds
+    `ReturnTo` onto both records; the handoff wrapper copies it through from the
+    seeded enrollment session); `internal/mgmtapi/recovery_test.go` (lost-device
+    recovery issues with an empty `returnTo`).
+12. Verify: `go build ./...`, `go vet ./...`, `gofmt -l .` (all clean),
+    `go test ./...` (whole repo, all green), `go test -tags e2e ./e2e/... -run
+    TestSignup -v` (9/9 skip gracefully, unchanged from task 8 — the existing
+    e2e happy-path test still passes `return_to` directly on its own
+    `/signup/success` URL, which continues to take priority over the new
+    session-carried fallback, so no e2e test needed updating), `go mod tidy`
+    (no drift), `go run ./tools/lint/filesize` (no new violations — split
+    `signup_test.go`; `internal/mgmtapi/recovery_test.go` grew by ~7 lines on an
+    already pre-existing, already-over-its-frozen-baseline file — advisory-only
+    check, not attempting a full split of unrelated pre-existing debt here).
+    `-race` and `make agent-check`/`golangci-lint` unusable in this sandbox (no
+    `gcc`, no `make`/`nix` binary at all) — same pre-existing condition as every
+    prior task on this branch, now additionally missing `make` itself.

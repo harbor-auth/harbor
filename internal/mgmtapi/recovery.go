@@ -56,8 +56,12 @@ type RecoveryVerifier interface {
 // ScopedSessionIssuer establishes a scoped, enrollment-only session for a user
 // who has proven recovery and returns an opaque session token to set as a
 // cookie. The session may ONLY enroll a fresh passkey (docs/DESIGN.md §11.1).
+// returnTo is the already-validated return_to captured at GET /signup, copied
+// onto the issued session as opaque server-side state (design.md Decision 5 /
+// REQ-004); callers with no such value (e.g. the lost-device recovery
+// ceremony below, which never runs through GET /signup) pass "".
 type ScopedSessionIssuer interface {
-	IssueEnrollmentSession(ctx context.Context, userID string) (token string, err error)
+	IssueEnrollmentSession(ctx context.Context, userID, returnTo string) (token string, err error)
 }
 
 // RecoveryRequirementClearer flips a user's recovery_required flag to false.
@@ -530,7 +534,10 @@ func (s *Server) PostRecoveryComplete(w http.ResponseWriter, r *http.Request) {
 	// (dev-scaffold mode) skips the cookie; the caller still gets a 200 so the
 	// flow is testable without the full session stack.
 	if s.scopedSessions != nil {
-		token, err := s.scopedSessions.IssueEnrollmentSession(r.Context(), userID)
+		// Lost-device recovery never runs through GET /signup, so there is no
+		// captured return_to to carry — the resulting session simply falls back
+		// to the fixed same-origin default wherever ReturnTo is later read.
+		token, err := s.scopedSessions.IssueEnrollmentSession(r.Context(), userID, "")
 		if err != nil {
 			s.logger.ErrorContext(r.Context(), "mgmtapi: scoped session issue failed", "error", err)
 			s.writeError(w, http.StatusInternalServerError, "server_error", "failed to complete recovery")

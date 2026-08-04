@@ -59,11 +59,11 @@ type fakeEnrollmentSessionStore struct {
 	err        error
 }
 
-func (f *fakeEnrollmentSessionStore) UserHandle(_ context.Context, _ string) ([]byte, bool, error) {
+func (f *fakeEnrollmentSessionStore) UserHandle(_ context.Context, _ string) ([]byte, bool, string, error) {
 	if f.err != nil {
-		return nil, false, f.err
+		return nil, false, "", f.err
 	}
-	return f.userHandle, f.recovery, nil
+	return f.userHandle, f.recovery, "", nil
 }
 
 // enrollReq builds a ceremony request carrying the enrollment session cookie so

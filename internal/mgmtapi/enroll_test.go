@@ -64,6 +64,73 @@ func TestPostEnrollSuccess(t *testing.T) {
 	}
 }
 
+// TestPostEnroll_FoldsReturnToCookieIntoEnrollmentSession proves POST /enroll
+// reads the return_to GET /signup already validated and stashed in
+// SignupReturnToCookieName, and folds it into the new enrollment session —
+// the carrier design.md Decision 5 / REQ-004 requires so the value survives
+// the rest of the signup journey as server-side state.
+func TestPostEnroll_FoldsReturnToCookieIntoEnrollmentSession(t *testing.T) {
+	const userID = "550e8400-e29b-41d4-a716-446655440000"
+	fe := &fakeEnroller{result: identity.EnrollResult{UserID: userID, Region: "EU"}}
+	s := newTestServer(fe)
+
+	req := httptest.NewRequest(http.MethodPost, "/enroll", strings.NewReader(`{"region":"EU"}`))
+	req.AddCookie(&http.Cookie{Name: SignupReturnToCookieName, Value: "/dashboard/after-signup"})
+	rec := httptest.NewRecorder()
+	s.PostEnroll(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var enrollmentKey string
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == EnrollmentSessionCookieName {
+			enrollmentKey = c.Value
+		}
+	}
+	if enrollmentKey == "" {
+		t.Fatalf("PostEnroll set no %s cookie", EnrollmentSessionCookieName)
+	}
+	_, _, returnTo, err := s.sessions.UserHandle(context.Background(), enrollmentKey)
+	if err != nil {
+		t.Fatalf("UserHandle: %v", err)
+	}
+	if returnTo != "/dashboard/after-signup" {
+		t.Fatalf("enrollment session returnTo = %q, want %q", returnTo, "/dashboard/after-signup")
+	}
+}
+
+// TestPostEnroll_NoReturnToCookieYieldsEmptyReturnTo proves calling POST
+// /enroll without ever visiting GET /signup (no return_to cookie) still
+// succeeds, with no return_to captured — matching behavior before this
+// carrier existed.
+func TestPostEnroll_NoReturnToCookieYieldsEmptyReturnTo(t *testing.T) {
+	const userID = "550e8400-e29b-41d4-a716-446655440001"
+	fe := &fakeEnroller{result: identity.EnrollResult{UserID: userID, Region: "EU"}}
+	s := newTestServer(fe)
+
+	rec := doEnroll(t, s, `{"region":"EU"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	var enrollmentKey string
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == EnrollmentSessionCookieName {
+			enrollmentKey = c.Value
+		}
+	}
+	if enrollmentKey == "" {
+		t.Fatalf("PostEnroll set no %s cookie", EnrollmentSessionCookieName)
+	}
+	_, _, returnTo, err := s.sessions.UserHandle(context.Background(), enrollmentKey)
+	if err != nil {
+		t.Fatalf("UserHandle: %v", err)
+	}
+	if returnTo != "" {
+		t.Fatalf("enrollment session returnTo = %q, want empty with no GET /signup cookie", returnTo)
+	}
+}
+
 func TestPostEnrollInvalidRegion(t *testing.T) {
 	fe := &fakeEnroller{result: identity.EnrollResult{UserID: "x"}}
 	s := newTestServer(fe)

@@ -18,6 +18,20 @@ var ErrEnrollmentSessionNotFound = errors.New("mgmtapi: enrollment session not f
 // duplicated and kept in sync deliberately.
 const EnrollmentSessionCookieName = "harbor_enrollment_session"
 
+// SignupReturnToCookieName carries the return_to value bff.GetSignup already
+// validated (bff.ValidateReturnTo) through to POST /enroll, which folds it
+// into the new enrollment session as real server-side state — the opaque
+// carrier design.md Decision 5 / REQ-004 requires, rather than re-parsing a
+// client-controlled query string at every hop of the signup journey. Its
+// value is only ever the already-validated output of ValidateReturnTo: GET
+// /signup is the only handler that sets it, and it does so only after
+// validating. A caller who bypasses GET /signup and forges this cookie
+// directly can only ever affect their own enrollment session (nothing here
+// lets one browser's cookie influence another's), so PostEnroll trusts it
+// without a second allowlist check — the same trust level already extended to
+// this cookie's sibling, EnrollmentSessionCookieName.
+const SignupReturnToCookieName = "harbor_signup_return_to"
+
 // enrollmentSessionTTL bounds how long a just-enrolled user has to complete
 // passkey registration before the handoff session expires. It is short:
 // enrollment and first-passkey registration are a single, contiguous flow.
@@ -32,16 +46,20 @@ type EnrollmentSessionStore interface {
 	// Save associates key with the given user handle for the store's TTL.
 	// recovery marks the session as originating from the lost-device recovery
 	// ceremony (POST /recovery/complete) rather than first-time enrollment
-	// (POST /enroll); see UserHandle for how it is used.
-	Save(ctx context.Context, key string, userHandle []byte, recovery bool) error
-	// UserHandle returns the user handle and recovery flag for key, or
-	// ErrEnrollmentSessionNotFound. The webauthn package's register/finish
-	// ceremony uses recovery to decide whether to activate a pending user
-	// (first passkey) or clear recovery_required on an already-active one
-	// (fresh passkey after a lost-device recovery). Unlike a WebAuthn ceremony
-	// session it is NOT one-time-use: both register/begin and register/finish
-	// read it within the same enrollment.
-	UserHandle(ctx context.Context, key string) (userHandle []byte, recovery bool, err error)
+	// (POST /enroll); see UserHandle for how it is used. returnTo is the
+	// already-validated return_to captured at GET /signup (empty when none was
+	// set, e.g. a lost-device recovery session) — carried through so the
+	// post-registration handoff can copy it onto the BFF session it issues
+	// (design.md Decision 5 / REQ-004).
+	Save(ctx context.Context, key string, userHandle []byte, recovery bool, returnTo string) error
+	// UserHandle returns the user handle, recovery flag, and return_to for
+	// key, or ErrEnrollmentSessionNotFound. The webauthn package's
+	// register/finish ceremony uses recovery to decide whether to activate a
+	// pending user (first passkey) or clear recovery_required on an
+	// already-active one (fresh passkey after a lost-device recovery). Unlike
+	// a WebAuthn ceremony session it is NOT one-time-use: both register/begin
+	// and register/finish read it within the same enrollment.
+	UserHandle(ctx context.Context, key string) (userHandle []byte, recovery bool, returnTo string, err error)
 }
 
 // NewEnrollmentSessionKey returns a 256-bit random, URL-safe opaque key.

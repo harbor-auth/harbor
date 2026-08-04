@@ -149,7 +149,8 @@ func TestRecoverySessionIssuerBindsBFFAndEnrollmentRecords(t *testing.T) {
 	}
 
 	const userID = "550e8400-e29b-41d4-a716-446655440000"
-	token, err := issuer.IssueEnrollmentSession(ctx, userID)
+	const returnTo = "/dashboard/after-signup"
+	token, err := issuer.IssueEnrollmentSession(ctx, userID, returnTo)
 	if err != nil {
 		t.Fatalf("IssueEnrollmentSession: %v", err)
 	}
@@ -160,7 +161,10 @@ func TestRecoverySessionIssuerBindsBFFAndEnrollmentRecords(t *testing.T) {
 	if record.UserID != userID || !record.RecoveryRequired || record.SessionScope != bff.SessionScopeEnrollmentOnly {
 		t.Fatalf("BFF session = %+v, want enrollment-only recovery session for %q", record, userID)
 	}
-	handle, recovery, err := enrollmentSessions.UserHandle(ctx, token)
+	if record.ReturnTo != returnTo {
+		t.Fatalf("BFF session ReturnTo = %q, want %q", record.ReturnTo, returnTo)
+	}
+	handle, recovery, gotReturnTo, err := enrollmentSessions.UserHandle(ctx, token)
 	if err != nil {
 		t.Fatalf("enrollment session UserHandle: %v", err)
 	}
@@ -170,6 +174,9 @@ func TestRecoverySessionIssuerBindsBFFAndEnrollmentRecords(t *testing.T) {
 	}
 	if !recovery {
 		t.Fatal("enrollment session recovery = false, want true: register/finish must route through svc.FinishRecoveryRegistration")
+	}
+	if gotReturnTo != returnTo {
+		t.Fatalf("enrollment session ReturnTo = %q, want %q", gotReturnTo, returnTo)
 	}
 }
 
@@ -195,7 +202,7 @@ func TestPostRegistrationHandoffAndRecoveryGating_EndToEnd(t *testing.T) {
 
 	bffSessions := bfftest.NewInMemoryBFFSessionStore()
 	enrollmentSessions := mgmtapitest.NewInMemoryEnrollmentSessionStore()
-	if err := enrollmentSessions.Save(ctx, "enroll-key", handle[:], false); err != nil {
+	if err := enrollmentSessions.Save(ctx, "enroll-key", handle[:], false, ""); err != nil {
 		t.Fatalf("seed enrollment session: %v", err)
 	}
 	issuer := &recoverySessionIssuer{bffSessions: bffSessions, enrollmentSessions: enrollmentSessions}
@@ -447,7 +454,7 @@ func TestWirePostRegistrationHandoff_IssuesSessionOnlyOn200(t *testing.T) {
 
 	newHandoff := func(status int) (http.Handler, *mgmtapitest.InMemoryEnrollmentSessionStore, *recordingScopedSessionIssuer) {
 		sessions := mgmtapitest.NewInMemoryEnrollmentSessionStore()
-		if err := sessions.Save(context.Background(), "enroll-key", handle[:], false); err != nil {
+		if err := sessions.Save(context.Background(), "enroll-key", handle[:], false, "/dashboard/after-signup"); err != nil {
 			t.Fatalf("seed enrollment session: %v", err)
 		}
 		issuer := &recordingScopedSessionIssuer{token: "issued-token"}
@@ -468,6 +475,10 @@ func TestWirePostRegistrationHandoff_IssuesSessionOnlyOn200(t *testing.T) {
 		}
 		if issuer.gotUserID != userID {
 			t.Fatalf("issuer got userID = %q, want %q", issuer.gotUserID, userID)
+		}
+		if issuer.gotReturnTo != "/dashboard/after-signup" {
+			t.Fatalf("issuer got returnTo = %q, want %q — the enrollment session's return_to must be copied through the handoff",
+				issuer.gotReturnTo, "/dashboard/after-signup")
 		}
 		var sawScoped, sawEnrollment bool
 		for _, c := range rec.Result().Cookies() {
@@ -515,7 +526,7 @@ func TestWirePostRegistrationHandoff_IssuesSessionOnlyOn200(t *testing.T) {
 
 	t.Run("issuer failure still returns the ceremony's own success", func(t *testing.T) {
 		sessions := mgmtapitest.NewInMemoryEnrollmentSessionStore()
-		if err := sessions.Save(context.Background(), "enroll-key", handle[:], false); err != nil {
+		if err := sessions.Save(context.Background(), "enroll-key", handle[:], false, ""); err != nil {
 			t.Fatalf("seed enrollment session: %v", err)
 		}
 		issuer := &recordingScopedSessionIssuer{err: errors.New("redis down")}
@@ -540,17 +551,19 @@ func TestWirePostRegistrationHandoff_IssuesSessionOnlyOn200(t *testing.T) {
 }
 
 // recordingScopedSessionIssuer is a test-only mgmtapi.ScopedSessionIssuer that
-// records the userID it was called with.
+// records the userID and returnTo it was called with.
 type recordingScopedSessionIssuer struct {
-	token     string
-	err       error
-	called    bool
-	gotUserID string
+	token       string
+	err         error
+	called      bool
+	gotUserID   string
+	gotReturnTo string
 }
 
-func (r *recordingScopedSessionIssuer) IssueEnrollmentSession(_ context.Context, userID string) (string, error) {
+func (r *recordingScopedSessionIssuer) IssueEnrollmentSession(_ context.Context, userID, returnTo string) (string, error) {
 	r.called = true
 	r.gotUserID = userID
+	r.gotReturnTo = returnTo
 	if r.err != nil {
 		return "", r.err
 	}

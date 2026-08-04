@@ -6,8 +6,10 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/harbor-auth/harbor/internal/identity"
+	"github.com/harbor-auth/harbor/internal/mgmtapi"
 	"github.com/harbor-auth/harbor/internal/region"
 )
 
@@ -31,6 +33,7 @@ type SignupAuditRecorder interface {
 // endpoints (docs/DESIGN.md §9, §11.1).
 type SignupHandler struct {
 	tmpl              *template.Template
+	sessions          BFFSessionStore
 	audit             SignupAuditRecorder
 	returnToAllowlist []string
 	logger            *slog.Logger
@@ -38,24 +41,31 @@ type SignupHandler struct {
 
 // NewSignupHandler returns a handler ready to serve the public signup pages.
 // tmpl must be a parsed *html/template.Template containing "signup.html" and
-// "signup_passkey.html" (see web/templates/). audit may be nil, in which case
-// GET /signup/success skips audit emission (best-effort, graceful absence —
-// same convention as DashboardHandler's relay dependency). returnToAllowlist
-// is the set of hosts (e.g. the Harbor Cloud marketing site and demo)
-// ValidateReturnTo accepts for an absolute return_to on GET /signup/success; a
-// same-origin relative path is always accepted regardless of this list.
-func NewSignupHandler(tmpl *template.Template, audit SignupAuditRecorder, returnToAllowlist []string, logger *slog.Logger) (*SignupHandler, error) {
+// "signup_passkey.html" (see web/templates/). sessions may be nil, in which
+// case GET /signup/success falls back to honoring only a return_to supplied
+// directly on its own URL, exactly as before this journey-wide carrier
+// existed — it resolves the current BFF session (via SessionIDFromContext) to
+// read the ReturnTo captured earlier in the journey (design.md Decision 5 /
+// REQ-004). audit may be nil, in which case GET /signup/success skips audit
+// emission (best-effort, graceful absence — same convention as
+// DashboardHandler's relay dependency). returnToAllowlist is the set of hosts
+// (e.g. the Harbor Cloud marketing site and demo) ValidateReturnTo accepts
+// for an absolute return_to; a same-origin relative path is always accepted
+// regardless of this list.
+func NewSignupHandler(tmpl *template.Template, sessions BFFSessionStore, audit SignupAuditRecorder, returnToAllowlist []string, logger *slog.Logger) (*SignupHandler, error) {
 	if tmpl == nil {
 		return nil, errors.New("bff: signup templates are required")
 	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &SignupHandler{tmpl: tmpl, audit: audit, returnToAllowlist: returnToAllowlist, logger: logger}, nil
+	return &SignupHandler{tmpl: tmpl, sessions: sessions, audit: audit, returnToAllowlist: returnToAllowlist, logger: logger}, nil
 }
 
 // Routes registers the public signup routes on mux. GET /signup and GET
-// /signup/passkey are plain GETs with no side effects, so — unlike the
+// /signup/passkey mutate nothing server-side (GET /signup's only side effect
+// is a same-origin, allowlist-bounded return_to cookie a forced cross-site
+// GET cannot turn into anything unsafe — see GetSignup), so — unlike the
 // dashboard's mutating routes — neither needs RequireFullScope or CSRF
 // middleware; the state-changing requests they drive (POST /enroll, POST
 // /webauthn/register/begin|finish) already carry their own PreSessionCSRF +
@@ -114,11 +124,41 @@ type signupData struct {
 	Regions []signupRegionOption
 }
 
+// signupReturnToCookieTTL bounds how long the cookie carrying a validated
+// return_to survives between GET /signup and the POST /enroll it precedes.
+// The signup form POSTs immediately, so this only needs to outlive an
+// inattentive visitor reading the privacy promise before starting —
+// matching the enrollment session's own 10-minute handoff window
+// (mgmtapi.enrollmentSessionTTL) so neither carrier expires first.
+const signupReturnToCookieTTL = 10 * time.Minute
+
 // GetSignup renders the privacy promise and region picker. The form on this
 // page starts enrollment by POSTing JSON to the existing POST /enroll (task
 // 1's PreSessionCSRF-protected front door), then navigates to
 // GET /signup/passkey once an enrollment session cookie has been set.
+//
+// return_to is validated exactly once, here — returnto.go's "validate at the
+// point read from the client" contract — and the validated value (never the
+// raw one) is stashed in a short-lived cookie. PostEnroll reads that cookie
+// and folds it into the new enrollment session as real server-side state, so
+// it survives the rest of the journey (/signup/passkey -> the WebAuthn
+// ceremony -> the post-registration handoff -> /signup/recovery ->
+// /signup/success) without ever being echoed back through a query string
+// (design.md Decision 5 / REQ-004). The cookie is set unconditionally (even
+// the fixed default) so every downstream hop sees a well-defined value rather
+// than distinguishing "never visited /signup" from "visited with no
+// return_to".
 func (h *SignupHandler) GetSignup(w http.ResponseWriter, r *http.Request) {
+	returnTo, _ := ValidateReturnTo(r.URL.Query().Get("return_to"), h.returnToAllowlist)
+	http.SetCookie(w, &http.Cookie{
+		Name:     mgmtapi.SignupReturnToCookieName,
+		Value:    returnTo,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   int(signupReturnToCookieTTL.Seconds()),
+	})
 	h.renderTemplate(w, r, "signup.html", signupData{Regions: allowedSignupRegions()})
 }
 
@@ -160,13 +200,15 @@ type signupSuccessData struct {
 // defence-in-depth as every DashboardHandler read route) because
 // SessionScopeFromContext defaults to full when no BFF session exists at all.
 //
-// return_to is validated directly against the configured allowlist right
-// here — returnto.go's "validate exactly once, at the point read from the
-// client" contract, applied at this page's own entry since no earlier hop in
-// the signup journey carries a return_to value as session state today (see
-// the follow-on task filed for full end-to-end return_to threading). An
-// unrecognized or missing value silently falls back to the fixed same-origin
-// default and is never echoed.
+// return_to on this page's own URL, if present, is validated directly against
+// the configured allowlist — returnto.go's "validate exactly once, at the
+// point read from the client" contract — and takes priority (this is the
+// same single-hop behavior the page has always had, e.g. a link shared
+// directly to /signup/success?return_to=...). Otherwise the handler falls
+// back to the return_to captured once at GET /signup and carried as opaque
+// server-side session state through the rest of the journey (design.md
+// Decision 5 / REQ-004; see sessionReturnTo). Either way, an unrecognized or
+// missing value ends at the fixed same-origin default and is never echoed.
 func (h *SignupHandler) GetSignupSuccess(w http.ResponseWriter, r *http.Request) {
 	userID := UserIDFromContext(r.Context())
 	if userID == "" {
@@ -174,7 +216,12 @@ func (h *SignupHandler) GetSignupSuccess(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	returnTo, _ := ValidateReturnTo(r.URL.Query().Get("return_to"), h.returnToAllowlist)
+	returnTo, ok := ValidateReturnTo(r.URL.Query().Get("return_to"), h.returnToAllowlist)
+	if !ok {
+		if carried := h.sessionReturnTo(r); carried != "" {
+			returnTo = carried
+		}
+	}
 
 	// Best-effort audit emission: these three events mark the full signup
 	// journey's completion. RecordAsync is non-blocking and detaches from the
@@ -187,6 +234,27 @@ func (h *SignupHandler) GetSignupSuccess(w http.ResponseWriter, r *http.Request)
 	}
 
 	h.renderTemplate(w, r, "signup_success.html", signupSuccessData{ReturnTo: returnTo})
+}
+
+// sessionReturnTo resolves the return_to bound to the caller's current BFF
+// session (set once at GET /signup and copied through IssueEnrollmentSession
+// at the post-registration handoff / lost-device recovery), or "" if there is
+// none to fall back to — no sessions store wired, no session on the request
+// context (SessionIDFromContext), the session has since expired, or the
+// journey never captured a return_to at all.
+func (h *SignupHandler) sessionReturnTo(r *http.Request) string {
+	if h.sessions == nil {
+		return ""
+	}
+	sessionID := SessionIDFromContext(r.Context())
+	if sessionID == "" {
+		return ""
+	}
+	record, err := h.sessions.Get(r.Context(), sessionID)
+	if err != nil {
+		return ""
+	}
+	return record.ReturnTo
 }
 
 // renderTemplate executes a named template with data. On error it logs and

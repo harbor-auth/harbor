@@ -6,9 +6,9 @@
 |---|---|
 | Status | implemented |
 | Audience | external teams building the Harbor Cloud marketing site and demo |
-| Code | `internal/bff/signup.go`, `internal/bff/signin.go`, `internal/bff/returnto.go`, `cmd/harbor-mgmt/main.go` |
+| Code | `internal/bff/signup.go`, `internal/bff/signin.go`, `internal/bff/returnto.go`, `internal/bff/session.go`, `internal/mgmtapi/enroll.go`, `internal/mgmtapi/session.go`, `cmd/harbor-mgmt/caller.go`, `cmd/harbor-mgmt/main.go` |
 | Verified by | `internal/bff/signup_cta_contract_test.go` (`go test ./internal/bff/... -run TestSignupCTAContract`) |
-| Last reconciled | 2026-08-03 |
+| Last reconciled | 2026-08-04 |
 
 ## Purpose
 
@@ -43,22 +43,25 @@ harbor-mgmt-only hostname.
   server's own accepted region list (currently EU / US / APAC). Selecting a
   region and submitting the form on this page is what actually starts
   enrollment — it `POST`s JSON to the existing `POST /enroll` endpoint.
-- **Query parameters:** none are required, and none are read by the handler
-  today. A request such as `GET /signup?return_to=...&region=...` still
-  returns the same `200` page — the parameters are accepted (no error) but
-  are currently **inert**: the region is chosen in-page via the radio-button
-  form, not pre-selected from a `region` query value, and a `return_to` value
-  supplied here is **not** carried into the rest of the journey (there is no
-  session-state carrier wired yet — see [Known gaps](#known-gaps-follow-on-work)).
-  External callers may append these parameters for forward-compatibility but
-  must not depend on them having an effect yet.
+- **Query parameters:** neither is required. `region` remains **inert**: the
+  picker's in-page radio selection is authoritative, never a pre-selection
+  from the query string (see [Region parameter semantics](#region-parameter-semantics)).
+  `return_to` is validated once here, through the same `bff.ValidateReturnTo`
+  allowlist [signin](#3-get-signinreturn_tourl) uses, and — while it has no
+  visible effect on this page's own rendered body — is now carried as opaque
+  server-side session state through the rest of the journey (`/signup` ->
+  `/signup/passkey` -> the passkey ceremony -> the post-registration handoff
+  -> `/signup/recovery`) and honored at `GET /signup/success`'s completion
+  link, without ever being round-tripped through a later hop's URL. An
+  unrecognized or missing value falls back to the fixed same-origin default,
+  same as everywhere else `ValidateReturnTo` is used.
 
 ### 2. `GET /signup?return_to=<url>&region=<code>`
 
-Identical endpoint to (1) — documented as its own row only because it is the
-literal CTA shape marketing/demo links are expected to use once `return_to`/
-`region` threading ships. As of this writing it behaves exactly as described
-above: `200 text/html`, both parameters accepted and ignored.
+Identical endpoint to (1) — documented as its own row because it is the
+literal CTA shape marketing/demo links are expected to use. `return_to` is
+captured and threaded through the journey as described above; `region`
+remains inert, same as (1).
 
 ### 3. `GET /signin?return_to=<url>`
 
@@ -79,9 +82,15 @@ above: `200 text/html`, both parameters accepted and ignored.
 
 ## `return_to` allowlist semantics
 
-Both `GET /signin` and the post-completion `GET /signup/success` page (reached
-only after finishing signup, not itself a CTA target) validate `return_to`
-through the same function, `bff.ValidateReturnTo` (`internal/bff/returnto.go`):
+`GET /signin`, `GET /signup` (this page's own CTA-facing entry point), and the
+post-completion `GET /signup/success` page (reached only after finishing
+signup, not itself a CTA target) all validate `return_to` through the same
+function, `bff.ValidateReturnTo` (`internal/bff/returnto.go`). `GET /signup`
+validates once, at the point the value is first read from the client, and
+stashes the accepted value in a short-lived, `HttpOnly`/`Secure` cookie
+(`harbor_signup_return_to`) that `POST /enroll` folds into the enrollment
+session record — never re-parsed from a query string at any later hop
+(design.md Decision 5 / REQ-004):
 
 - A **same-origin relative path** starting with `/` (and not `//`, which
   browsers treat as protocol-relative to a foreign host) is always accepted.
@@ -115,11 +124,6 @@ it is **not** read from this page's query string (see above).
 
 ## Known gaps (follow-on work, not part of this contract yet)
 
-- `return_to` is not yet threaded as session state from `GET /signup` through
-  to `GET /signup/success` — only `GET /signin` and `GET /signup/success`
-  validate a `return_to` supplied directly on their own URL. Filed as a
-  follow-on feature task; this doc will be updated (and the "inert parameter"
-  language above removed) once that ships.
 - `region` on `GET /signup`'s query string has no effect; the picker's
   in-page radio selection is authoritative.
 

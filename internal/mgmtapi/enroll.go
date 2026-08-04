@@ -73,6 +73,21 @@ func checkPreSessionOrigin(r *http.Request) error {
 	return nil
 }
 
+// signupReturnToFromCookie reads the return_to value GET /signup already
+// validated and stashed in SignupReturnToCookieName, so it can be folded into
+// the new enrollment session as real server-side state (design.md Decision 5
+// / REQ-004). An absent or empty cookie (POST /enroll called without ever
+// visiting GET /signup) simply yields no return_to, matching today's
+// behavior; the destination falls back to the fixed same-origin default at
+// GET /signup/success.
+func signupReturnToFromCookie(r *http.Request) string {
+	c, err := r.Cookie(SignupReturnToCookieName)
+	if err != nil {
+		return ""
+	}
+	return c.Value
+}
+
 // enrollRequest is the POST /enroll JSON body.
 type enrollRequest struct {
 	Region string `json:"region"`
@@ -169,7 +184,7 @@ func (s *Server) PostEnroll(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusInternalServerError, "server_error", "enrollment failed")
 			return
 		}
-		if err := s.sessions.Save(r.Context(), key, userHandle, false); err != nil {
+		if err := s.sessions.Save(r.Context(), key, userHandle, false, signupReturnToFromCookie(r)); err != nil {
 			s.logger.ErrorContext(r.Context(), "save enrollment session failed", "error", err)
 			recordError(telemetry.EndpointEnroll, "server_error")
 			s.writeError(w, http.StatusInternalServerError, "server_error", "enrollment failed")

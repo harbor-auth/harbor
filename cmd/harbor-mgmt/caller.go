@@ -47,7 +47,7 @@ type recoverySessionIssuer struct {
 
 var _ mgmtapi.ScopedSessionIssuer = (*recoverySessionIssuer)(nil)
 
-func (i *recoverySessionIssuer) IssueEnrollmentSession(ctx context.Context, userID string) (string, error) {
+func (i *recoverySessionIssuer) IssueEnrollmentSession(ctx context.Context, userID, returnTo string) (string, error) {
 	if i == nil || i.bffSessions == nil || i.enrollmentSessions == nil {
 		return "", fmt.Errorf("recovery session issuer is not configured")
 	}
@@ -59,7 +59,7 @@ func (i *recoverySessionIssuer) IssueEnrollmentSession(ctx context.Context, user
 	if err != nil {
 		return "", err
 	}
-	if err := i.enrollmentSessions.Save(ctx, token, handle, true); err != nil {
+	if err := i.enrollmentSessions.Save(ctx, token, handle, true, returnTo); err != nil {
 		return "", fmt.Errorf("save recovery enrollment handoff: %w", err)
 	}
 	if err := i.bffSessions.Create(ctx, bff.BFFSessionRecord{
@@ -67,6 +67,7 @@ func (i *recoverySessionIssuer) IssueEnrollmentSession(ctx context.Context, user
 		UserID:           userID,
 		SessionScope:     bff.SessionScopeEnrollmentOnly,
 		RecoveryRequired: true,
+		ReturnTo:         returnTo,
 		ExpiresAt:        time.Now().Add(10 * time.Minute),
 	}); err != nil {
 		return "", fmt.Errorf("save scoped recovery session: %w", err)
@@ -223,7 +224,7 @@ func wirePostRegistrationHandoff(next http.Handler, sessions mgmtapi.EnrollmentS
 			if cookieErr != nil || cookie.Value == "" || sessions == nil {
 				return
 			}
-			handle, recovery, err := sessions.UserHandle(r.Context(), cookie.Value)
+			handle, recovery, returnTo, err := sessions.UserHandle(r.Context(), cookie.Value)
 			if err != nil || len(handle) != 16 {
 				return
 			}
@@ -245,7 +246,7 @@ func wirePostRegistrationHandoff(next http.Handler, sessions mgmtapi.EnrollmentS
 			if issuer == nil {
 				return
 			}
-			token, err := issuer.IssueEnrollmentSession(r.Context(), userID)
+			token, err := issuer.IssueEnrollmentSession(r.Context(), userID, returnTo)
 			if err != nil {
 				logger.ErrorContext(r.Context(), "post-registration handoff: issue enrollment session failed", "error", err)
 				return
