@@ -650,3 +650,88 @@ declared the correctly-valued `bffSessionCookieName` constant in `e2e/signup_tes
    e2e ./e2e/... -run TestRecovery -v` (4/4 skip gracefully — no live harbor-mgmt/DB
    in this sandbox — same as every prior task on this branch; confirms the file
    still compiles and the renamed references resolve).
+
+# Task 21: Keep passive conditional sign-in failures silent until explicit user action
+
+Blocking visual-QA finding (task ftask_944bb8cd-ec8c-5662-8c2b-b873b0f80447,
+attachment att_765c5040-6173-4c68-88bb-8ad6bcecb7ed): on `/signin`, browsers
+that report `isConditionalMediationAvailable() === true` but then resolve or
+reject `navigator.credentials.get({mediation:"conditional"})` with no usable
+credential (no credential enrolled, user dismissal, `NotAllowedError`, ...)
+immediately painted the same generic red "We couldn't sign you in with that
+passkey" failure `attemptSignin()` uses for an explicit, button-triggered
+attempt — before the user had touched anything. `attemptSignin()`'s `.catch()`
+already special-cased `AbortError` (a newer attempt superseding an older one)
+as silent, but treated every other rejection/no-credential outcome the same
+regardless of whether the attempt was the passive autofill probe or the
+explicit button click.
+
+1. `web/templates/signin.html`: gave `attemptSignin(mediation, explicit)` a
+   second parameter. The button's click handler passes `true`; the passive
+   `isConditionalMediationAvailable()` branch passes `false`. In the
+   `.catch()`, after the existing `AbortError` early-return, added an
+   `if (!explicit) return;` — a passive attempt's failure now silently leaves
+   the accessible button as the fallback, exactly like an aborted one,
+   instead of ever calling `setStatus(..., true)`. The explicit path is
+   unchanged: still collapses every failure to the one generic,
+   account-existence-safe message and re-enables the button.
+2. Test-first: confirmed the two new passive-silence tests (below) fail for
+   the expected reason — `statusEl.textContent` holds the generic error
+   string instead of `""` — by stashing the `signin.html` change and
+   rerunning; restored before finishing.
+3. `internal/bff/signin_beginlogin_script_test.go`: refactored the render/
+   extract-script and write/run-Node-harness logic the existing
+   `TestSigninHandler_BeginLoginScript_UnwrapsPublicKeyWrapper` inlined into
+   two reusable helpers (`extractSigninScript`, `runNodeHarness`, plus a
+   `requireNode` skip-guard used once instead of duplicated per-test) so new
+   scenarios don't re-copy the boilerplate. Added a parameterized
+   `signinScenarioHarness` (Go `text/template`) that renders the real
+   extracted script into a fuller browser-shaped Node environment than the
+   original harness: a `statusEl.classList.toggle` that actually records
+   error-class state, a controllable `navigator.credentials.get()` body, a
+   controllable `POST /login/complete` fetch branch, and an optional button
+   click — then asserts the resulting status text/error-class/button-disabled/
+   navigation state. Five new tests:
+   - `TestSigninHandler_SigninScript_PassiveNoCredentialStaysSilent` —
+     conditional mediation available, `get()` resolves `null` (the
+     `no_credential` throw path) — asserts no status text, no error class,
+     button stays enabled.
+   - `TestSigninHandler_SigninScript_PassiveCancellationStaysSilent` — same,
+     but `get()` rejects `NotAllowedError` (the real-browser cancellation/
+     no-match shape) instead of resolving null.
+   - `TestSigninHandler_SigninScript_ExplicitFailureShowsGenericError` —
+     conditional mediation unavailable, button clicked, `get()` rejects
+     `NotAllowedError` — asserts the existing generic error still shows and
+     the button re-enables (proves the fix is scoped to passive attempts
+     only).
+   - `TestSigninHandler_SigninScript_SuccessfulDiscoverableSigninNavigates` —
+     conditional mediation available, `get()` resolves a real credential
+     object, `POST /login/complete` returns an opaque-redirect shape —
+     asserts `window.location.assign` was called with the page's
+     `return_to` and the status/error state was never touched.
+   - `TestSigninHandler_SigninScript_ExplicitAttemptAbortsPassiveWithoutError`
+     — `get()` hangs until its `AbortSignal` fires; a button click while the
+     passive attempt is still in flight aborts it — asserts no error ever
+     flashes (the pre-existing `AbortError` branch, now regression-tested
+     directly rather than only incidentally).
+4. `internal/bff/signin_test.go`: no changes needed — its assertions only
+   check for the presence of `navigator.credentials.get`, `mediation`, and
+   `isConditionalMediationAvailable` markers in the rendered page, all still
+   present; the full package (`go test ./internal/bff/...`) stays green.
+5. Verify: `go build ./...`, `go vet ./...`, `go test ./...` (whole repo, all
+   green), `gofmt -l` clean on the touched Go file,
+   `go run ./tools/lint/testweakening` (only pre-existing branch drift
+   findings unrelated to this change — confirmed identical output with this
+   change stashed out), `go run ./tools/lint/piifields` and
+   `go run ./tools/lint/filesize` clean for the touched files. Attempted a
+   real-Chromium smoke test via the sandbox's global Playwright install
+   (`weft-agent qa-check --preflight` confirms a launchable Chromium exists
+   at `/ms-playwright`), but the npm `playwright` package version (1.60.0)
+   doesn't match the installed browser build's protocol, and it crashes on
+   launch (`chrome_crashpad_handler: --database is required` /
+   `Target page, context or browser has been closed`) — a sandbox tooling
+   mismatch, not something in scope for this task's file list. The real
+   Chromium desktop/mobile/focus QA pass belongs to task 7 (Visual QA
+   verification), which is blocked on and will rerun after this fix lands.
+   `make`/`gcc`/`nix` remain unavailable in this sandbox (same pre-existing
+   condition as every prior task on this branch).

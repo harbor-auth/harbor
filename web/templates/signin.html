@@ -140,8 +140,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 
   // Runs one full sign-in attempt. mediation is "conditional" for the
   // passive autofill picker, or undefined for the explicit modal picker
-  // triggered by the button.
-  function attemptSignin(mediation) {
+  // triggered by the button. explicit is true only for the latter — it
+  // gates whether a failure is ever shown to the user.
+  function attemptSignin(mediation, explicit) {
     if (activeController) {
       activeController.abort();
     }
@@ -165,6 +166,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
         // while conditional mediation was still pending) — not a failure.
         return;
       }
+      if (!explicit) {
+        // The passive conditional-mediation attempt found nothing to sign in
+        // with (no credential, user dismissed the browser's picker,
+        // NotAllowedError, ...) — expected outcomes the user never asked
+        // for. Stay silent and leave the accessible button as the fallback
+        // rather than greeting an unclicked page with a red error.
+        return;
+      }
       // Collapse every failure to one generic message — an unknown or
       // invalid credential must never reveal whether an account exists.
       setStatus("We couldn't sign you in with that passkey. Please try again.", true);
@@ -175,7 +184,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
   button.addEventListener("click", function () {
     button.disabled = true;
     setStatus("");
-    attemptSignin(undefined).then(function () {
+    attemptSignin(undefined, true).then(function () {
       button.disabled = false;
     });
   });
@@ -194,7 +203,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
   if (typeof PublicKeyCredential.isConditionalMediationAvailable === "function") {
     PublicKeyCredential.isConditionalMediationAvailable().then(function (available) {
       if (available) {
-        attemptSignin("conditional");
+        attemptSignin("conditional", false);
       }
     });
   }
