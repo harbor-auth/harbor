@@ -29,6 +29,19 @@ spec:
       ports:
         - port: 8080
           protocol: TCP
+    # harbor-mgmt, for the internal/cloudapi key-rotation proxy call
+    # (POST /admin/v1/keys/rotate -> harbor-hot's POST /admin/keys/rotate,
+    # authenticated with MGMT_HOT_PROXY_TOKEN). Only exploitable once
+    # CLOUD_INTEGRATION_ENABLED is "true" and MGMT_HOT_PROXY_TOKEN is set
+    # (harbor-mgmt-config.yaml / harbor-mgmt-secrets.yaml) — harbor-hot's
+    # AdminAuthMiddleware fails closed on every request until then.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: harbor-mgmt
+      ports:
+        - port: 8080
+          protocol: TCP
   egress:
     # DNS (kube-dns / CoreDNS).
     - to:

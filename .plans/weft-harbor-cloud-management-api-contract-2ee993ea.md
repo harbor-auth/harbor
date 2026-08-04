@@ -286,3 +286,54 @@ pre-existing since PR #102 and unrelated to this feature — it `t.Fatal`s
 instead of skipping when `DATABASE_URL` is unset), `golangci-lint run ./...`
 (v2.12.2 local, 0 issues), and `go run ./tools/lint/testweakening --base
 origin/main` (clean) — all green.
+
+## Task 15: Wire MGMT_HOT_PROXY_TOKEN into harbor-hot's deploy config and NetworkPolicy
+
+Task 7 added `mgmt.cloudIntegration.hotProxyToken` and projected it into
+harbor-mgmt's own Secret as `MGMT_HOT_PROXY_TOKEN` (the credential mgmt
+presents when proxying `POST /admin/v1/keys/rotate`), but left a TODO in its
+values.yaml comment: harbor-hot's side was never wired, so hot would 401 (or
+the connection would be refused at the NetworkPolicy layer) the moment
+`cloudIntegration.enabled` flips to true. This task closes that gap:
+
+- `secret-hot.yaml` (Helm + k8s mirror): added `MGMT_HOT_PROXY_TOKEN`,
+  sourced from the *same* `mgmt.cloudIntegration.hotProxyToken` values field
+  rather than a new duplicate `hot.secrets.*` field — mirrors the existing
+  `global.userDekKekSecret` pattern (one shared value referenced by both
+  component Secrets) rather than requiring operators to set an identical
+  value twice. Gated with `required`/inert-empty-string exactly like task 7's
+  `secret-mgmt.yaml` change. The k8s mirror got a matching `REPLACE_ME`
+  placeholder (same wording as `secret-mgmt.yaml`'s, to reinforce the two
+  must be identical) so `assertEnvNameParity` (deploy/contract) stays green.
+- `networkpolicy-hot.yaml` (Helm + k8s mirror): added an ingress rule
+  admitting `harbor-mgmt`'s podSelector on `hot.port`, gated in Helm by
+  `{{- if .Values.mgmt.cloudIntegration.enabled }}` (mirrors the egress rule
+  task 7 added to `networkpolicy-mgmt.yaml`'s Helm template for the same
+  call). The raw k8s manifest has no template conditionals, so — consistent
+  with how task 7 left `secret-mgmt.yaml`'s k8s mirror (placeholder values
+  always present, inert until `CLOUD_INTEGRATION_ENABLED` flips) — the rule
+  is unconditional there too, with a comment noting it's only exploitable
+  once cloud integration is enabled and a real token is set, since hot's
+  `AdminAuthMiddleware` still fails closed on every request until then. This
+  is the same trust model the pre-existing ingress-controller rule already
+  relies on (NetworkPolicy is L3/L4 only — it doesn't scope to `/admin/*` — so
+  reachability without a valid Bearer credential is already how the chart
+  treats the public ingress-controller path).
+- `values.yaml`: updated `mgmt.cloudIntegration.hotProxyToken`'s comment
+  (removed the "chart does not yet wire it into hot's Secret" TODO) and
+  `hot.secrets.existingSecret`'s comment to mention the new required key.
+
+Verified `deploy/contract`'s `TestRawSecurityContract` and
+`TestHelmSecurityContract` pass (`go test ./deploy/...`). No `helm` binary is
+available in this sandbox (not project-declared — CI only relies on it being
+preinstalled on `ubuntu-latest` runners), so I wrote a throwaway Go program
+(`text/template` + `gopkg.in/yaml.v3`, deleted afterward) reproducing the
+small subset of Sprig functions these two templates actually call
+(`include`, `nindent`, `required`, `quote`, `default`, `trunc`, `trimSuffix`,
+`trimPrefix`, `contains`, `replace`, `toYaml`) to render `secret-hot.yaml`
+and `networkpolicy-hot.yaml` against the real `values.yaml` — once with the
+shipped default (`cloudIntegration.enabled: false`, confirming both new
+blocks render as nothing / an inert empty string) and once with it forced to
+`true` plus a fake token (confirming the ingress rule and populated token
+render with correct indentation and both documents still parse as valid
+YAML). `go vet ./...` and `gofmt -l .` are clean.

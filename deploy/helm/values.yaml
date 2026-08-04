@@ -97,8 +97,10 @@ hot:
   secrets:
     # If set, the chart does NOT create a Secret and instead references this one
     # (which must expose DATABASE_URL / REDIS_URL / HARBOR_KMS_SECRET /
-    # ADMIN_API_TOKEN keys). When this is set, the external Secret must supply
-    # the same user-DEK KEK as the management Secret.
+    # ADMIN_API_TOKEN / MGMT_HOT_PROXY_TOKEN keys). When this is set, the
+    # external Secret must supply the same user-DEK KEK as the management
+    # Secret, and the same MGMT_HOT_PROXY_TOKEN as harbor-mgmt's Secret
+    # (mgmt.cloudIntegration.hotProxyToken).
     existingSecret: ""
     # Name of the Secret managed by External Secrets Operator that exposes
     # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for KMS access. Set to ""
@@ -196,11 +198,11 @@ mgmt:
     cloudServiceAuthPublicKey: ""
     # Second, distinct internal admin credential harbor-mgmt presents to
     # harbor-hot when proxying POST /admin/v1/keys/rotate — never the
-    # operator's ADMIN_API_TOKEN. harbor-hot independently reads this same
-    # value from its own MGMT_HOT_PROXY_TOKEN env var (internal/oidcapi's
-    # AdminAuthMiddleware, labeled "cloud-proxy") — this chart does not yet
-    # wire it into hot's Secret, so set it identically by hand on both sides
-    # until that follow-on lands.
+    # operator's ADMIN_API_TOKEN. This single value is projected into BOTH
+    # harbor-mgmt's and harbor-hot's Secrets as MGMT_HOT_PROXY_TOKEN (hot
+    # reads it via internal/oidcapi's AdminAuthMiddleware, labeled
+    # "cloud-proxy") — set it once here rather than duplicating it per
+    # component.
     # Generate: openssl rand -hex 32
     hotProxyToken: ""
   secrets:
