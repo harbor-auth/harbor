@@ -382,3 +382,60 @@ parameter.
     `-race` and `make agent-check`/`golangci-lint` unusable in this sandbox (no
     `gcc`, no `make`/`nix` binary at all) — same pre-existing condition as every
     prior task on this branch, now additionally missing `make` itself.
+
+# Task 17: Fix /signin discoverable sign-in — decodeAssertionOptions didn't unwrap {publicKey:...}
+
+`internal/bff/login.go`'s `BeginLogin` writes `options` (a
+`*protocol.CredentialAssertion`) straight to the JSON response body.
+go-webauthn's `protocol.CredentialAssertion` embeds its options under a
+`Response` field tagged `json:"publicKey"`, so the wire response is
+`{"publicKey": {"challenge": ..., "allowCredentials": ...}, "mediation": ...}`
+— but `web/templates/signin.html`'s `beginLogin()` passed the raw parsed body
+straight into `decodeAssertionOptions`, which reads `options.challenge` /
+`options.allowCredentials` off the top level. `options.challenge` was always
+`undefined`, so `base64urlToBuffer(undefined)` threw a `TypeError` inside the
+promise chain before `navigator.credentials.get()` was ever called; the
+generic `.catch()` in `attemptSignin()` swallowed it into "We couldn't sign
+you in with that passkey." This broke both the conditional-mediation autofill
+attempt (fires on page load) and the explicit modal button — there was no way
+to complete discoverable sign-in at all. The sibling `signup_passkey.html`
+already unwraps `beginData.publicKey` before decoding; `signin.html` was
+missing the equivalent unwrap.
+
+1. Test-first: added `TestSigninHandler_BeginLoginScript_UnwrapsPublicKeyWrapper`
+   (`internal/bff/signin_beginlogin_script_test.go`) — renders the real
+   `/signin` page via `ServeSignin`, extracts its inline `<script>` verbatim,
+   and runs it under Node (`os/exec`) against a `fetch` mock shaped exactly
+   like `BeginLogin`'s real wire response (`{"publicKey": {...}}`), a
+   `navigator.credentials.get` mock that records its call args, and minimal
+   `document`/`window`/`PublicKeyCredential` stubs. Fires the button's click
+   handler and asserts `navigator.credentials.get()` was actually reached with
+   a correctly base64url-decoded `ArrayBuffer` challenge and
+   `allowCredentials[0].id`. No JS test runner exists in this repo for
+   `web/templates/*.html` (they're plain server-rendered templates, not part
+   of the Next.js frontend `.agents/frontend-test.md` covers), so this test
+   executes the actual production script text rather than a reimplementation
+   — it would not have caught a bug in logic the harness reimplemented itself.
+   Confirmed it fails for the expected reason (`navigator.credentials.get()`
+   never called — the assertion's own message) by stashing the fix and
+   rerunning before restoring it.
+   - Pitfall hit while writing the harness: the first filename I used,
+     `signin_js_test.go`, was silently excluded from every build — Go's
+     filename-based build-constraint matching treats a `_js` suffix before
+     `_test.go` as an implicit `GOOS=js` constraint (`js` is a real, valid
+     `GOOS`), so `go list`/`go test` never even saw the file with no error of
+     any kind. Renamed to `signin_beginlogin_script_test.go`.
+   - Also hit: Node 22 exposes a read-only global `navigator` (its built-in
+     minimal polyfill), so `global.navigator = {...}` threw
+     `TypeError: Cannot set property navigator of #<Object> which has only a
+     getter`. Used `Object.defineProperty(global, "navigator", {configurable:
+     true, value: {...}})` instead.
+2. `web/templates/signin.html`: `beginLogin()` now resolves `body.publicKey`
+   into `decodeAssertionOptions` instead of the raw parsed body, matching
+   `signup_passkey.html`'s existing `decodeCreationOptions(beginData.publicKey)`
+   pattern. `attemptSignin()` is unchanged — it already wraps the object
+   `beginLogin()` resolves back into `{publicKey: ..., signal: ...}` for
+   `navigator.credentials.get()`, which is correct once `beginLogin()` returns
+   the unwrapped, decoded options rather than the still-wrapped raw body.
+3. Verify: `go build ./...`, `go test ./internal/bff/...` (all green,
+   including the new test and the full existing signin/login suites).

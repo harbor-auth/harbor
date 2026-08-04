@@ -110,7 +110,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
         throw new Error("begin_login_failed");
       }
       return res.json();
-    }).then(decodeAssertionOptions);
+    }).then(function (body) {
+      return decodeAssertionOptions(body.publicKey);
+    });
   }
 
   function finishLogin(credential) {
