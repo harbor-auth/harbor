@@ -234,13 +234,34 @@ func rowToGoCredential(row db.Credential) gowebauthn.Credential {
 }
 
 // parseWebAuthnUserID parses a WebAuthn user handle into a pgtype.UUID.
-// Harbor's WebAuthn user handles are the raw 16-byte binary form of a user's
-// UUID (uuid.Parse(s); id[:]), as produced by mgmtapi.parseUUIDToBytes (POST
-// /enroll) and cmd/harbor-mgmt's recoveryUserHandle (POST /recovery/complete)
-// — NOT the 36-character canonical string form, which uuid.ParseBytes expects
-// and which is a different, incompatible representation.
+// This method has two callers that legitimately pass two different byte
+// encodings of the same user ID:
+//
+//   - WebAuthn ceremonies (BeginRegistration/FinishRegistration/
+//     AddCredentialAndActivateUser) and GetUser/AddCredential/UpdateCredential
+//     in general all receive the raw 16-byte binary form of a user's UUID
+//     (uuid.Parse(s); id[:]), as produced by mgmtapi.parseUUIDToBytes (POST
+//     /enroll) and cmd/harbor-mgmt's recoveryUserHandle (POST
+//     /recovery/complete) — this is the actual WebAuthn "user handle" on the
+//     wire (github.com/go-webauthn/webauthn represents it as opaque bytes).
+//   - cmd/harbor-mgmt's recoveryRequirementClearer.ClearRecoveryRequired (POST
+//     /recovery/acknowledge) instead has only the canonical 36-character UUID
+//     TEXT form in hand (the mgmtapi CallerSource surface deals in strings,
+//     never raw WebAuthn handles) and passes it straight through to
+//     SetRecoveryComplete.
+//
+// A raw UUID is always exactly 16 bytes, and no valid text encoding
+// (canonical, hyphen-less, braced, or urn:uuid:) is ever 16 bytes long, so
+// dispatching on length unambiguously distinguishes the two.
 func parseWebAuthnUserID(userID []byte) (pgtype.UUID, error) {
-	id, err := uuid.FromBytes(userID)
+	if len(userID) == 16 {
+		id, err := uuid.FromBytes(userID)
+		if err != nil {
+			return pgtype.UUID{}, fmt.Errorf("webauthn/store_db: invalid user handle: %w", err)
+		}
+		return pgtype.UUID{Bytes: id, Valid: true}, nil
+	}
+	id, err := uuid.ParseBytes(userID)
 	if err != nil {
 		return pgtype.UUID{}, fmt.Errorf("webauthn/store_db: invalid user handle: %w", err)
 	}

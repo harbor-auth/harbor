@@ -222,3 +222,60 @@ cases was sitting right there, unused.
    noted in every prior task on this branch (confirmed identical, not
    introduced by this change). `-race` unavailable in this sandbox (no `gcc`),
    same pre-existing constraint.
+
+# Task 16: Fix WebAuthn user-handle format mismatch (POST /webauthn/register/begin 400s on every real signup)
+
+Investigation confirmed `internal/webauthn/store_db.go`'s `parseWebAuthnUserID`
+has exactly two callers passing two *legitimately different* byte encodings of
+"userID", not one bug with one correct fix:
+
+- Every ceremony path (`GetUser`/`AddCredential`/`AddCredentialAndActivateUser`/
+  `UpdateCredential`, and `SetRecoveryComplete` when called from
+  `Service.FinishRecoveryRegistration`) receives the raw 16-byte WebAuthn user
+  handle, as produced by `mgmtapi.parseUUIDToBytes` (POST /enroll) and
+  `cmd/harbor-mgmt`'s `recoveryUserHandle` (POST /recovery/complete) — this was
+  already fixed to `uuid.FromBytes` in Task 12 (commit `1e72d73`).
+- But Task 12's own doc comment on `cmd/harbor-mgmt/caller.go`'s
+  `recoveryRequirementClearer.ClearRecoveryRequired` (POST
+  /recovery/acknowledge) says its `userID` is "always the canonical UUID text
+  form" and is passed as `[]byte(userID)` straight into the SAME
+  `SetRecoveryComplete` → `parseWebAuthnUserID`. That path was never actually
+  exercised against the real `DBStore` — `TestRecoveryRequirementClearer_AdaptsSetRecoveryComplete`
+  (`caller_test.go`) only asserts against a hand-rolled fake that echoes bytes
+  back verbatim, so it couldn't catch a `uuid.FromBytes`-only parser rejecting
+  a 36-byte text string with "invalid UUID (got 36 bytes)".
+
+Fixed by making `parseWebAuthnUserID` dispatch on `len(userID) == 16` — a raw
+UUID is always exactly 16 bytes, and no valid text encoding (canonical,
+hyphen-less, braced, `urn:uuid:`) is ever 16 bytes, so this is unambiguous. 16
+bytes → `uuid.FromBytes` (ceremony/enrollment path); anything else →
+`uuid.ParseBytes` (canonical-text `recoveryRequirementClearer` path). No
+producer changed — both `mgmtapi.parseUUIDToBytes`/`recoveryUserHandle` (raw)
+and `recoveryRequirementClearer.ClearRecoveryRequired` (text) keep emitting
+what they already emit; only the shared parser now accepts both.
+
+1. Test-first: added `TestDBStore_SetRecoveryComplete_CanonicalTextForm` and
+   `TestDBStore_SetRecoveryComplete_BothEncodingsResolveSameUser`
+   (`internal/webauthn/store_db_test.go`) — the latter drives `SetRecoveryComplete`
+   with the raw 16-byte handle AND the canonical text form for the SAME
+   underlying user against the real `DBStore` (only the `dbStoreQuerier` is
+   faked; `parseWebAuthnUserID` itself is production code), asserting both
+   resolve and clear `recovery_required`. Confirmed both failed for the
+   expected reason (`webauthn: user not found`, from `uuid.FromBytes` rejecting
+   a 36-byte input) by stashing the fix and rerunning before restoring it.
+2. `internal/webauthn/store_db.go`: `parseWebAuthnUserID` now branches on
+   `len(userID)`; expanded its doc comment to name both callers and their
+   encodings explicitly instead of asserting a single "the" format.
+   `GetUser`/`AddCredential`/`AddCredentialAndActivateUser`/`UpdateCredential`
+   are unaffected in practice (their callers only ever pass 16-byte handles)
+   but now share the same dual-format-tolerant parser as `SetRecoveryComplete`
+   rather than a second bespoke one.
+3. Left `cmd/harbor-mgmt/caller.go`'s `recoveryRequirementClearer` doc comment
+   as-is — it already correctly describes its input as "the canonical UUID
+   text form" and that `parseWebAuthnUserID` now expects exactly that for
+   non-16-byte input; no producer-side change was needed or made.
+4. Verify: `go build ./...`, `go vet ./...`, `gofmt -l` (clean), `go test ./...`
+   (whole repo, all green, including the full `internal/webauthn` and
+   `cmd/harbor-mgmt`/`internal/mgmtapi` suites). `go run ./tools/agentcheck` —
+   same pre-existing `golangci-lint`-vs-Go-1.25-toolchain mismatch noted on
+   every prior task on this branch, not introduced by this change.

@@ -286,6 +286,53 @@ func TestDBStore_SetRecoveryComplete_InvalidHandle(t *testing.T) {
 	}
 }
 
+// TestDBStore_SetRecoveryComplete_CanonicalTextForm reproduces the
+// recoveryRequirementClearer path: cmd/harbor-mgmt/caller.go's
+// ClearRecoveryRequired (POST /recovery/acknowledge) calls SetRecoveryComplete
+// with the CANONICAL 36-CHARACTER UUID TEXT form (see caller.go's doc comment
+// on recoveryRequirementClearer: "the mgmtapi-side userID is always the
+// canonical UUID text form"), never the raw 16-byte WebAuthn handle that
+// FinishRecoveryRegistration passes for the SAME store method. Both encodings
+// must resolve to the same user.
+func TestDBStore_SetRecoveryComplete_CanonicalTextForm(t *testing.T) {
+	s, q, uid := newFakeDBStore(t)
+	textHandle := []byte(uuid.UUID(uid.Bytes).String())
+	if err := s.SetRecoveryComplete(context.Background(), textHandle); err != nil {
+		t.Fatalf("SetRecoveryComplete(canonical text handle) = %v, want success — this is the encoding recoveryRequirementClearer.ClearRecoveryRequired actually sends", err)
+	}
+	if !q.recoveryComplete[uid] {
+		t.Fatal("expected recovery_required to be cleared for the user")
+	}
+}
+
+// TestDBStore_SetRecoveryComplete_BothEncodingsResolveSameUser locks in that
+// the raw 16-byte WebAuthn handle (ceremony path, e.g.
+// FinishRecoveryRegistration) and the canonical UUID text form (mgmtapi
+// recoveryRequirementClearer path) are two encodings of the SAME identifier,
+// not two different ones — parseWebAuthnUserID must dispatch between them by
+// length rather than picking one and breaking the other caller.
+func TestDBStore_SetRecoveryComplete_BothEncodingsResolveSameUser(t *testing.T) {
+	s, q, uid := newFakeDBStore(t)
+	rawHandle := uid.Bytes[:]
+	textHandle := []byte(uuid.UUID(uid.Bytes).String())
+
+	if err := s.SetRecoveryComplete(context.Background(), rawHandle); err != nil {
+		t.Fatalf("SetRecoveryComplete(raw handle): %v", err)
+	}
+	if !q.recoveryComplete[uid] {
+		t.Fatal("raw-handle call did not clear recovery_required")
+	}
+
+	delete(q.recoveryComplete, uid)
+
+	if err := s.SetRecoveryComplete(context.Background(), textHandle); err != nil {
+		t.Fatalf("SetRecoveryComplete(text handle): %v", err)
+	}
+	if !q.recoveryComplete[uid] {
+		t.Fatal("text-handle call did not clear recovery_required for the same user")
+	}
+}
+
 func TestDBStore_UpdateCredential_SignCountRegression(t *testing.T) {
 	s, _, uid := newFakeDBStore(t)
 	cred := gowebauthn.Credential{ID: []byte("cred-regress"), PublicKey: []byte("pk")}
