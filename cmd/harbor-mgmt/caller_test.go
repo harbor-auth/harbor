@@ -321,7 +321,7 @@ func TestPostRegistrationHandoff_LostDeviceRecovery_DoesNotReArmRecoveryRequired
 	}); err != nil {
 		t.Fatalf("seed recovery-scoped BFF session: %v", err)
 	}
-	if err := enrollmentSessions.Save(ctx, recoveryToken, handle[:], true); err != nil {
+	if err := enrollmentSessions.Save(ctx, recoveryToken, handle[:], true, ""); err != nil {
 		t.Fatalf("seed recovery enrollment handoff: %v", err)
 	}
 
