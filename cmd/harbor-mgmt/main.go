@@ -221,6 +221,11 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// post-registration handoff below (first-time signup): the two entry
 	// points into the exact same enrollment-only BFF session type.
 	enrollmentSessionIssuer := &recoverySessionIssuer{bffSessions: bffStore, enrollmentSessions: enrollmentSessions}
+	// Shared by both PostRecoveryAcknowledge and the post-registration handoff
+	// below (lost-device recovery's own register/finish): both refresh an
+	// already-issued BFF session to full scope in place once recovery_required
+	// is cleared, instead of minting a competing session.
+	recoverySessionRefresher := bffSessionScopeRefresher{bffSessions: bffStore}
 	mgmtServer.
 		WithCallerSource(bffCallerAdapter{}).
 		WithConsentStore(grantStore).
@@ -231,7 +236,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		WithRecovery(recoveryManager, recoveryStore, recoveryService, recoveryCeremonies).
 		WithScopedSessionIssuer(enrollmentSessionIssuer).
 		WithRecoveryRequirementClearer(recoveryRequirementClearer{store: credentialStore}).
-		WithRecoverySessionRefresher(bffSessionScopeRefresher{bffSessions: bffStore}).
+		WithRecoverySessionRefresher(recoverySessionRefresher).
 		WithEnrollmentCallerSource(bffEnrollmentCallerAdapter{}).
 		WithMFA(mfaService).
 		WithMFASessionStamper(bffMFASessionStamper{store: bffStore}).
@@ -270,7 +275,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// produces (see wirePostRegistrationHandoff, caller.go).
 	mux.Handle("POST /webauthn/register/finish", wirePostRegistrationHandoff(
 		wrapPreSessionRoute(webauthnHandler.FinishRegistration, webauthnRegisterFinishAbuseProtection.limiter, maxWebauthnCeremonyBody),
-		enrollmentSessions, enrollmentSessionIssuer, logger,
+		enrollmentSessions, enrollmentSessionIssuer, recoverySessionRefresher, logger,
 	))
 	mux.Handle("POST /webauthn/login/begin", wrapPreSessionRoute(webauthnHandler.BeginLogin, webauthnLoginBeginAbuseProtection.limiter, maxWebauthnCeremonyBody))
 	mux.Handle("POST /webauthn/login/finish", wrapPreSessionRoute(webauthnHandler.FinishLogin, webauthnLoginFinishAbuseProtection.limiter, maxWebauthnCeremonyBody))

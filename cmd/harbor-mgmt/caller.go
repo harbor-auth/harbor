@@ -115,9 +115,11 @@ func (c recoveryRequirementClearer) ClearRecoveryRequired(ctx context.Context, u
 }
 
 // bffSessionScopeRefresher adapts bff.BFFSessionStore.SetUserWithRecoveryStatus
-// to mgmtapi.RecoverySessionRefresher, so POST /recovery/acknowledge can
-// refresh the caller's already-issued BFF session scope in place — the same
-// primitive the BFF session middleware already relies on to stamp scope.
+// to mgmtapi.RecoverySessionRefresher, so POST /recovery/acknowledge AND the
+// lost-device recovery register/finish path (wirePostRegistrationHandoff, when
+// the enrollment session's recovery flag is set) can each refresh the
+// caller's already-issued BFF session scope in place — the same primitive the
+// BFF session middleware already relies on to stamp scope.
 type bffSessionScopeRefresher struct {
 	bffSessions bff.BFFSessionStore
 }
@@ -192,26 +194,57 @@ func (w *postRegistrationHandoffWriter) Write(b []byte) (int, error) {
 // back in. It never adds a second session type: the resulting session is
 // indistinguishable from one the lost-device recovery ceremony would produce.
 //
+// register/finish also completes the LOST-DEVICE recovery ceremony itself
+// (Handler.FinishRegistration routes to svc.FinishRecoveryRegistration when
+// the enrollment session's recovery flag is set — internal/webauthn/handlers.go),
+// which clears users.recovery_required in the DB in the very same request.
+// For that case, unconditionally minting a fresh enrollment-only/
+// recovery-required session here would immediately re-arm the gate the
+// ceremony just cleared, sending the just-recovered user straight back into
+// mandatory recovery setup. So when the enrollment session says recovery=true,
+// this handler instead refreshes the SAME already-issued session (the one
+// POST /recovery/complete created) to full scope via refresher — the exact
+// mechanism POST /recovery/acknowledge uses (mgmtapi.RecoverySessionRefresher)
+// — rather than issuing a second, competing session.
+//
 // The user id comes from the SAME enrollment-session cookie the ceremony
 // itself reads to resolve who is registering (§9, §11.1) — this handler never
-// introduces a client-supplied identity. A handoff failure (issuer error,
-// missing/invalid cookie, store miss) never turns a successful ceremony into
-// an error response: the credential is already durably persisted by the time
-// onSuccess runs, so retrying the ceremony would only confuse the client. The
-// user simply needs a fresh sign-in if the handoff itself did not land.
-func wirePostRegistrationHandoff(next http.Handler, sessions mgmtapi.EnrollmentSessionStore, issuer mgmtapi.ScopedSessionIssuer, logger *slog.Logger) http.Handler {
+// introduces a client-supplied identity. A handoff failure (issuer/refresher
+// error, missing/invalid cookie, store miss) never turns a successful
+// ceremony into an error response: the credential is already durably
+// persisted by the time onSuccess runs, so retrying the ceremony would only
+// confuse the client. The user simply needs a fresh sign-in if the handoff
+// itself did not land.
+func wirePostRegistrationHandoff(next http.Handler, sessions mgmtapi.EnrollmentSessionStore, issuer mgmtapi.ScopedSessionIssuer, refresher mgmtapi.RecoverySessionRefresher, logger *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cookie, cookieErr := r.Cookie(mgmtapi.EnrollmentSessionCookieName)
 		wrapped := &postRegistrationHandoffWriter{ResponseWriter: w}
 		wrapped.onSuccess = func() {
-			if cookieErr != nil || cookie.Value == "" || sessions == nil || issuer == nil {
+			if cookieErr != nil || cookie.Value == "" || sessions == nil {
 				return
 			}
-			handle, _, err := sessions.UserHandle(r.Context(), cookie.Value)
+			handle, recovery, err := sessions.UserHandle(r.Context(), cookie.Value)
 			if err != nil || len(handle) != 16 {
 				return
 			}
 			userID := uuid.UUID(handle).String()
+			if recovery {
+				if refresher == nil {
+					return
+				}
+				sessionID := bff.SessionIDFromContext(r.Context())
+				if sessionID == "" {
+					logger.ErrorContext(r.Context(), "post-registration handoff: lost-device recovery register/finish has no BFF session to refresh")
+					return
+				}
+				if err := refresher.RefreshSessionScope(r.Context(), sessionID, userID, false); err != nil {
+					logger.ErrorContext(r.Context(), "post-registration handoff: refresh recovery session scope failed", "error", err)
+				}
+				return
+			}
+			if issuer == nil {
+				return
+			}
 			token, err := issuer.IssueEnrollmentSession(r.Context(), userID)
 			if err != nil {
 				logger.ErrorContext(r.Context(), "post-registration handoff: issue enrollment session failed", "error", err)

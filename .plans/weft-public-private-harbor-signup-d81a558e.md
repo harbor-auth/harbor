@@ -157,3 +157,68 @@ already documented in `deploy/README.md`'s BFF Topology section and
    to render `HELM_RENDERED` and exercise the CI-only rendered-manifest path;
    `assertHelmSourceSecurityContract` (source-scan fallback) covers the Helm
    template directly and passed.
+
+# Task 15: Post-registration handoff must not re-arm recovery_required after a lost-device recovery clears it
+
+Investigation confirmed the bug is real, not intentional: `wirePostRegistrationHandoff`
+(`cmd/harbor-mgmt/caller.go`) fired `ScopedSessionIssuer.IssueEnrollmentSession`
+unconditionally on every 200 from `POST /webauthn/register/finish` — first-time
+signup AND lost-device recovery alike — and that issuer always mints a BRAND
+NEW `SessionScopeEnrollmentOnly`/`RecoveryRequired=true` BFF session. For a
+recovery ceremony's own `register/finish` (`Handler.FinishRegistration` routes
+to `svc.FinishRecoveryRegistration` when the enrollment session's `recovery`
+flag is set — Task 12), that DB-clearing request immediately re-armed the gate
+for the very session the browser was holding, sending the just-recovered user
+straight back into `/signup/recovery`. This directly contradicts the
+product/design intent already on record: `openspec/.../public-private-harbor-signup-d81a558e/specs/core/spec.md`
+REQ-003's scenario ("`users.recovery_required` becomes `false`... and a later
+`RequireFullScope` route succeeds for that user") and
+`openspec/changes/user-account-recovery/specs/core/spec.md` REQ-003 ("deny
+every other authenticated surface... until `recovery_required` is cleared" —
+implying access resumes once it is). The `wirePostRegistrationHandoff`
+code was already discarding the `recovery` bool `sessions.UserHandle` returns
+(`handle, _, err := ...`) — the exact signal needed to distinguish the two
+cases was sitting right there, unused.
+
+1. Test-first: added `TestPostRegistrationHandoff_LostDeviceRecovery_DoesNotReArmRecoveryRequired`
+   (`cmd/harbor-mgmt/caller_test.go`) — seeds the same enrollment-only/
+   recovery-required BFF + enrollment-session pair `POST /recovery/complete`
+   leaves behind (`recovery=true`), drives a simulated successful
+   `register/finish` through the real `wirePostRegistrationHandoff` wired
+   behind `bff.Middleware` (mirroring `TestPostRegistrationHandoffAndRecoveryGating_EndToEnd`'s
+   "wired mux" pattern), and asserts the issuer is never called, no cookie is
+   overwritten, and the ORIGINAL cookie passes `bff.RequireFullScope`
+   immediately. Confirmed it failed for the right reason against the
+   unmodified code (issuer called, dashboard route stayed 403) before fixing.
+2. `cmd/harbor-mgmt/caller.go`: `wirePostRegistrationHandoff` now takes a
+   `refresher mgmtapi.RecoverySessionRefresher` param and reads the `recovery`
+   flag from `sessions.UserHandle`. When `recovery == true`, it calls
+   `refresher.RefreshSessionScope(ctx, bff.SessionIDFromContext(ctx), userID, false)`
+   — the SAME mechanism `PostRecoveryAcknowledge` already uses — to flip the
+   EXISTING session (the one `POST /recovery/complete` created) to full scope
+   in place, instead of minting a competing enrollment-only session. The
+   first-time-signup path (`recovery == false`) is unchanged: it still calls
+   `issuer.IssueEnrollmentSession` and sets the handoff cookie pair. A missing
+   BFF session id (context not populated) or a refresher error is logged and
+   swallowed, matching the existing "never turn a successful ceremony into an
+   error response" contract.
+3. `cmd/harbor-mgmt/main.go`: hoisted a shared `recoverySessionRefresher :=
+   bffSessionScopeRefresher{bffSessions: bffStore}` (previously constructed
+   inline only for `WithRecoverySessionRefresher`) and passed it to both
+   `WithRecoverySessionRefresher` and the `wirePostRegistrationHandoff(...)`
+   call — one instance, two callers, no new session-refresh mechanism.
+   Updated `bffSessionScopeRefresher`'s doc comment (now has two callers, not
+   one).
+4. Updated the four other `wirePostRegistrationHandoff` call sites for the new
+   parameter: `TestPostRegistrationHandoffAndRecoveryGating_EndToEnd` and
+   `TestWirePostRegistrationHandoff_IssuesSessionOnlyOn200`'s subtests (all
+   `recovery=false` paths, so `nil`/an unused refresher is correct there).
+5. `internal/mgmtapi/recovery.go`: no functional change — `RecoverySessionRefresher`
+   already existed as exactly the right seam; only reused, not extended.
+6. Verify: `go build ./...`, `go vet ./...`, `gofmt -l` (clean), `go test ./...`
+   (whole repo, all green), `go build -tags e2e ./e2e/...` / `go vet -tags e2e ./e2e/...`
+   (clean, unaffected). `go run ./tools/agentcheck` — every check passes
+   except the same pre-existing `golangci-lint`-vs-Go-1.25-toolchain mismatch
+   noted in every prior task on this branch (confirmed identical, not
+   introduced by this change). `-race` unavailable in this sandbox (no `gcc`),
+   same pre-existing constraint.
