@@ -60,7 +60,31 @@ function renderedStyleText(variant: SignInWithPrivateHarborButtonVariant): strin
   return styleEl!.textContent ?? "";
 }
 
-describe("React component focus-visible ring is self-contained (standalone/zero-bundler)", () => {
+describe("React component's own base .phb-button layout is self-contained (standalone/zero-bundler)", () => {
+  for (const variant of VARIANTS) {
+    it(`variant=${variant}: embeds the base .phb-button layout rule (display/line-height/border-radius/text-decoration), without importing css/sign-in-button.css`, () => {
+      // Regression coverage: without this rule, a standalone consumer's
+      // wrapping <a> falls back to default inline layout — its own
+      // getBoundingClientRect() height comes out ~17px (the browser default
+      // line-height for a 14px label) instead of the visually-painted 40px,
+      // because nothing makes the anchor an inline-flex container sized to
+      // its SVG child. The SVG still paints its full 40px (SVGs aren't
+      // clipped by an undersized inline parent box) and click hit-testing
+      // still works (DOM event bubbling doesn't require geometric box
+      // containment), so this box-model inconsistency doesn't reproduce as
+      // a visible defect — only as a wrong answer from the anchor's own
+      // bounding box (e.g. code positioning a tooltip/overlay off it).
+      const styleText = renderedStyleText(variant);
+
+      expect(
+        styleText,
+        `variant=${variant} style is missing the base .phb-button layout rule`,
+      ).toContain(
+        `.phb-button--${variant}{display:inline-flex;line-height:0;border-radius:8px;text-decoration:none;}`,
+      );
+    });
+  }
+
   for (const variant of VARIANTS) {
     it(`variant=${variant}: embeds its own outline-suppression + ring-forwarding rule, without importing css/sign-in-button.css`, () => {
       const styleText = renderedStyleText(variant);

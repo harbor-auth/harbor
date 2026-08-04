@@ -288,3 +288,40 @@ Fix:
    (all 12 checks pass, `"overall": "pass"`) and `openspec validate ...
    --strict` (valid) once more after the fix — all green.
 9. Commit and push.
+
+# Task 15: React button: embed base .phb-button layout rules for standalone use
+
+Rerun QA (Playwright-confirmed) found the React component's zero-CSS
+standalone claim was still incomplete: `VARIANT_STYLE` embedded color/
+hover/disabled/focus-visible rules but not the base `.phb-button` layout
+rule (`display:inline-flex;line-height:0;border-radius:8px;
+text-decoration:none`), which only lived in `css/sign-in-button.css`. With
+no external CSS, the wrapping `<a>`'s own `getBoundingClientRect()` height
+came out ~17px (default inline line-height for the 14px label) instead of
+the visually-painted 40px, because the anchor fell back to default inline
+layout instead of an inline-flex box sized to its SVG child. This didn't
+reproduce as a visible defect (the SVG still paints its full 40px; DOM
+event bubbling doesn't need geometric box containment for click
+hit-testing), only as a wrong answer from the anchor's own bounding box.
+
+Fix (test-first, following Task 14's established pattern):
+
+1. `react/disabled-and-focus.test.tsx`: added a failing-first test per
+   variant asserting the rendered `<style>` contains
+   `.phb-button--<variant>{display:inline-flex;line-height:0;border-radius:8px;text-decoration:none;}`.
+   Ran it before the fix to confirm it failed for the expected reason
+   (rule absent from the rendered style text).
+2. `react/SignInWithPrivateHarborButton.tsx`: prepended that rule (scoped
+   per variant, matching the existing focus-forwarding rule's
+   `.phb-button--<variant>` scoping convention already used in this file)
+   to each of the three `VARIANT_STYLE` entries. Updated the module doc
+   comment to describe both embedded rule families (base layout +
+   focus-visible forwarding).
+3. `docs/INTEGRATION.md`: recomputed the React column of the CSP
+   `sha256-` hash table for all three variants (rendered `<style>` content
+   changed; the vendored-SVG-file column is untouched since `gen/` wasn't
+   touched).
+4. Verify: `npm test` (40/40 passing, including the 3 new tests) and
+   `npm run typecheck` clean in `react/`; `go build ./sdk/... && go vet
+   ./sdk/... && go test ./sdk/...` clean (no Go files touched).
+5. Commit and push.

@@ -54,20 +54,36 @@ const DEFAULT_LABEL = "Sign in with Private Harbor";
 // Only fill/stroke colors differ between variants; geometry is shared and
 // computed in the component below.
 //
-// Unlike the vendored SVG files, this also embeds the anchor-level
-// focus-visible forwarding rule that ../css/sign-in-button.css provides
-// separately (`.phb-button--<variant>:focus-visible .phb-btn-<variant>-ring`
-// plus the default-outline suppression it replaces). The SVG root is
-// `focusable="false"` by design — the wrapping <a> below is what actually
-// receives focus — so without this rule a standalone consumer of this
-// component (per this file's zero-bundler design, see the module doc
-// comment above) would show only the browser's default focus outline
-// instead of the intended >=3:1 ring, or no visible indicator at all if a
-// page's own reset already suppresses outlines and doesn't import
-// ../css/sign-in-button.css. Embedding it here means the component needs no
-// external stylesheet for focus-visible to be correct in every variant.
+// Unlike the vendored SVG files, this also embeds two rule families that
+// ../css/sign-in-button.css otherwise provides separately, both targeting
+// the wrapping <a> (below) rather than the SVG itself:
+//
+// - The base `.phb-button` layout rule (display/line-height/border-radius/
+//   text-decoration). Without it, a standalone consumer's anchor falls back
+//   to default inline layout: its own getBoundingClientRect() height comes
+//   out ~17px (the browser default line-height for the 14px label) instead
+//   of the visually-painted 40px, because nothing makes the anchor an
+//   inline-flex container sized to its SVG child. The SVG still paints its
+//   full 40px (SVGs aren't clipped by an undersized inline parent box) and
+//   click hit-testing still works (event bubbling doesn't require geometric
+//   box containment), so this box-model inconsistency doesn't reproduce as
+//   a visible defect — only as a wrong answer from the anchor's own
+//   bounding box (e.g. code positioning a tooltip/overlay off it).
+// - The focus-visible forwarding rule
+//   (`.phb-button--<variant>:focus-visible .phb-btn-<variant>-ring` plus
+//   the default-outline suppression it replaces). The SVG root is
+//   `focusable="false"` by design — the wrapping <a> is what actually
+//   receives focus — so without this rule a standalone consumer would show
+//   only the browser's default focus outline instead of the intended
+//   >=3:1 ring, or no visible indicator at all if a page's own reset
+//   already suppresses outlines and doesn't import
+//   ../css/sign-in-button.css.
+//
+// Embedding both here means the component needs no external stylesheet to
+// render and behave correctly in every variant.
 const VARIANT_STYLE: Record<SignInWithPrivateHarborButtonVariant, string> = {
   light:
+    ".phb-button--light{display:inline-flex;line-height:0;border-radius:8px;text-decoration:none;}" +
     ".phb-btn-light-bg{fill:#FFFFFF;stroke:#D6D9DE;stroke-width:1;}" +
     ".phb-btn-light-ring{fill:none;stroke:transparent;stroke-width:2;}" +
     '.phb-btn-light-label,.phb-btn-light-icon{fill:#16181D;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}' +
@@ -79,6 +95,7 @@ const VARIANT_STYLE: Record<SignInWithPrivateHarborButtonVariant, string> = {
     '.phb-btn-light.phb-btn-light--disabled .phb-btn-light-bg,.phb-btn-light[aria-disabled="true"] .phb-btn-light-bg{fill:#F5F6F8;stroke:#E4E7EB;}' +
     '.phb-btn-light.phb-btn-light--disabled .phb-btn-light-label,.phb-btn-light.phb-btn-light--disabled .phb-btn-light-icon,.phb-btn-light[aria-disabled="true"] .phb-btn-light-label,.phb-btn-light[aria-disabled="true"] .phb-btn-light-icon{fill:#9AA1AC;}',
   dark:
+    ".phb-button--dark{display:inline-flex;line-height:0;border-radius:8px;text-decoration:none;}" +
     ".phb-btn-dark-bg{fill:#14161C;stroke:#3A3E47;stroke-width:1;}" +
     ".phb-btn-dark-ring{fill:none;stroke:transparent;stroke-width:2;}" +
     '.phb-btn-dark-label,.phb-btn-dark-icon{fill:#FFFFFF;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}' +
@@ -90,6 +107,7 @@ const VARIANT_STYLE: Record<SignInWithPrivateHarborButtonVariant, string> = {
     '.phb-btn-dark.phb-btn-dark--disabled .phb-btn-dark-bg,.phb-btn-dark[aria-disabled="true"] .phb-btn-dark-bg{fill:#1B1D24;stroke:#2A2D35;}' +
     '.phb-btn-dark.phb-btn-dark--disabled .phb-btn-dark-label,.phb-btn-dark.phb-btn-dark--disabled .phb-btn-dark-icon,.phb-btn-dark[aria-disabled="true"] .phb-btn-dark-label,.phb-btn-dark[aria-disabled="true"] .phb-btn-dark-icon{fill:#6B6F79;}',
   neutral:
+    ".phb-button--neutral{display:inline-flex;line-height:0;border-radius:8px;text-decoration:none;}" +
     ".phb-btn-neutral-bg{fill:#0B4F8A;stroke:#0B4F8A;stroke-width:1;}" +
     ".phb-btn-neutral-ring{fill:none;stroke:transparent;stroke-width:2;}" +
     '.phb-btn-neutral-label,.phb-btn-neutral-icon{fill:#FFFFFF;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}' +
