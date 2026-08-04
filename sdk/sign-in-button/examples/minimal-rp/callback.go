@@ -129,7 +129,7 @@ func (h *CallbackHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 
-	fmt.Fprintf(w, "signed in as %s\n", claims.Subject)
+	_, _ = fmt.Fprintf(w, "signed in as %s\n", claims.Subject) //nolint:errcheck // best-effort response body write; client already has the session cookie
 }
 
 // tokenResponse is the subset of a Token Endpoint response (RFC 6749 §5.1,

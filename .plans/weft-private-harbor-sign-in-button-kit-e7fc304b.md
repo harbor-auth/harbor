@@ -227,3 +227,64 @@ Fix:
    diffs byte-identical against committed `assets/` (generation parity);
    `go vet`/`gofmt -l` clean.
 5. Commit and push.
+
+# Task 10: Run OpenSpec verification
+
+1. `openspec validate private-harbor-sign-in-button-kit-e7fc304b --type
+   change --strict --no-interactive`: valid.
+2. `go build ./... && go vet ./... && go test ./...`: green across the
+   whole repo, including `sdk/sign-in-button/...`.
+3. `react/`: no `pnpm` binary in this container (matches Task 4/6's
+   discovery); used `npm install && npm run typecheck && npm test` instead
+   — `tsc --noEmit` clean, 37/37 vitest tests passing. No `lint` script
+   exists in `react/package.json` and no eslint config exists anywhere in
+   the repo (checked); the package deliberately carries no eslint
+   devDependency to stay dependency-light, consistent with how Tasks 4/6
+   scoped it, so there is no JS lint step to run here — `make agent-check`'s
+   Go-side `golangci-lint` is the repo's only wired lint gate and it does
+   cover this feature's Go files.
+4. `make agent-check`: this container has no `make` binary and no `nix`,
+   and `apt-get install make` fails closed (no root, no dpkg lock, no
+   package lists — `apt-get update` itself is permission-denied). Rather
+   than blocking, read `agent-check`'s Makefile recipe
+   (`go run ./tools/agentcheck --out check-results.json` — a plain Go
+   binary, no shell script) and ran that directly; it's the exact same
+   command `make agent-check` would invoke.
+5. First `agent-check` run: 11/12 checks passed; `golangci-lint` failed
+   with `the Go language version (go1.24) used to build golangci-lint is
+   lower than the targeted Go version (1.25.0)` — the preinstalled
+   `golangci-lint` binary (v2.1.6, built with go1.24.2) predates this
+   feature and predates `go.mod`'s `go 1.25.0` line (confirmed via `git
+   diff main...HEAD -- go.mod`: no diff), so this was pre-existing
+   environment drift, not something this feature introduced.
+6. Installed a current `golangci-lint` per the Makefile's own documented
+   fallback (`validate` target: `go install
+   github.com/golangci/golangci-lint/cmd/golangci-lint@latest`). That
+   installed v1.64.8, which then failed differently: `.golangci.yml` is a
+   v2-schema config and v1 can't read it. The `v1` install target is a
+   stale major version pin in the module path — golangci-lint v2 lives at
+   the `/v2` module path (`go list -m -versions
+   github.com/golangci/golangci-lint/v2` — versions up to v2.12.2 exist).
+   Installed `github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest`
+   (v2.12.2, built with go1.25.0) instead; that's the same binary CI/nix
+   would resolve to, just fetched directly since `nix develop` isn't
+   available here.
+7. Second `agent-check` run surfaced two real findings, both pre-existing
+   in this feature's own code (not environment noise):
+   - `sdk/sign-in-button/examples/minimal-rp/callback.go`: unchecked
+     `fmt.Fprintf(w, ...)` return (errcheck). Fixed with `_, _ =
+     fmt.Fprintf(...) //nolint:errcheck // ...` — the same pattern already
+     used repo-wide (e.g. `internal/oidcapi/ratelimit.go`,
+     `internal/webauthn/store_db.go`) for best-effort writes whose error
+     isn't actionable.
+   - `sdk/sign-in-button/examples/minimal-rp/security_test.go`:
+     `TestNoExportedHelperBypassesStatePKCE` used `parser.ParseDir`,
+     deprecated since Go 1.25 (staticcheck SA1019). Replaced with a manual
+     `os.ReadDir` + per-file `parser.ParseFile` loop that filters to
+     non-test `.go` files in package `main` — same behavior, no deprecated
+     API. Dropped the now-unused `io/fs` import.
+8. Re-ran `go build ./sdk/... && go vet ./sdk/... && go test ./sdk/...`
+   (clean) and the full `go run ./tools/agentcheck --out check-results.json`
+   (all 12 checks pass, `"overall": "pass"`) and `openspec validate ...
+   --strict` (valid) once more after the fix — all green.
+9. Commit and push.

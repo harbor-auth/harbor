@@ -6,7 +6,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -339,20 +338,31 @@ func TestLoginHandler_RedirectURIAlwaysConfiguredValue(t *testing.T) {
 // the authorize URL are inseparable, not split across a public helper.
 func TestNoExportedHelperBypassesStatePKCE(t *testing.T) {
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, parser.ParseComments)
+	entries, err := os.ReadDir(".")
 	if err != nil {
-		t.Fatalf("parsing package: %v", err)
+		t.Fatalf("reading package directory: %v", err)
 	}
 
-	pkg, ok := pkgs["main"]
-	if !ok {
+	var files []*ast.File
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, parser.ParseComments)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		if file.Name.Name == "main" {
+			files = append(files, file)
+		}
+	}
+	if len(files) == 0 {
 		t.Fatalf("package %q not found in parsed sources", "main")
 	}
 
 	var mintingFuncs []string
-	for _, file := range pkg.Files {
+	for _, file := range files {
 		src := fset.File(file.Pos())
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
