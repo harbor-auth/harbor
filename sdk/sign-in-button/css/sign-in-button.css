@@ -82,8 +82,19 @@
 /*
  * Disabled: set aria-disabled="true" on *both* the wrapping link and the
  * inlined <svg class="phb-btn-<scheme>">. The attribute on the SVG root
- * activates its own built-in disabled colors (see assets/*.svg); the rule
- * below makes the wrapping link itself inert.
+ * activates its own built-in disabled colors (see assets/*.svg).
+ *
+ * pointer-events:none below blocks pointer/mouse activation and gives the
+ * "not-allowed" cursor, but on its own it does NOT remove the element from
+ * the Tab order and does NOT stop a native <a href> from navigating on
+ * Enter once focused — pointer-events only affects pointer events, not
+ * keyboard activation. Genuine inertness additionally requires the
+ * *markup* to omit `href` entirely (nothing to navigate to, and an <a>
+ * without `href` is not part of the default Tab order) and set
+ * `tabindex="-1"` (belt-and-suspenders against the same element gaining an
+ * `href` later), plus `role="link"` to keep the accessible role an <a>
+ * without `href` would otherwise lose. See the disabled example in
+ * ../html/example.html.
  */
 .phb-button[aria-disabled="true"] {
   pointer-events: none;

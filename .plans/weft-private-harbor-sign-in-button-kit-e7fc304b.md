@@ -161,3 +161,69 @@
    files touched by this task, so no `go test` run needed — this is a
    docs-only change.
 5. Commit and push.
+
+# Task 14: Make disabled HTML buttons inert and preserve React focus styling
+
+Rerun QA found two accessibility defects with browser evidence:
+
+1. **Plain HTML/CSS disabled anchor not inert.** `aria-disabled="true"` +
+   `pointer-events: none` blocks mouse clicks but `pointer-events` doesn't
+   touch keyboard: the anchor stayed in the default Tab order and a native
+   `<a href>` still navigates on Enter once focused.
+2. **React focus ring not standalone.** The component's module doc claims
+   zero-bundler/standalone use, but the anchor→ring `:focus-visible`
+   forwarding rule (the wrapping `<a>` is the focusable element; the inline
+   SVG is `focusable="false"`) only existed in `css/sign-in-button.css`,
+   which the component neither imports nor requires. Standalone light fell
+   back to the browser default outline; dark/neutral measured ~1.05:1/2.26:1
+   contrast instead of the intended >=3:1 ring.
+
+Fix:
+
+1. `html/example.html`: added a second, explicitly disabled example anchor
+   that omits `href` entirely (nothing to navigate to, and an `<a>` without
+   `href` isn't part of the default Tab order), sets `tabindex="-1"` as
+   belt-and-suspenders, and adds `role="link"` (dropping `href` also drops
+   the implicit ARIA link role, which `aria-disabled="true"` needs to be
+   announced as a *disabled link*). `css/sign-in-button.css`'s comment above
+   `.phb-button[aria-disabled="true"]` now explains why `pointer-events`
+   alone is insufficient and points at this markup pattern.
+2. `react/SignInWithPrivateHarborButton.tsx`: appended the anchor-scoped
+   `:focus`/`:focus-visible` outline-suppression and ring-forwarding rules
+   (matching `css/sign-in-button.css`'s colors, sourced from
+   `gen/tokens.go` `SchemePalette.FocusRing`) to each variant's own
+   `VARIANT_STYLE` entry, so the component needs no external stylesheet.
+   Recomputed the React CSP `sha256-` hashes in `docs/INTEGRATION.md`'s
+   table for all three variants (the SVG-file column is untouched since
+   `gen/generate.go`'s template wasn't touched — only the React string
+   changed).
+3. Tests (both new, in `react/`, reusing the existing vitest+jsdom setup):
+   - `disabled-and-focus.test.tsx`: asserts each variant's rendered
+     `<style>` contains the new forwarding rules; locks the CSP hash table
+     to the actual rendered content so it can't silently drift; and — using
+     `@testing-library/user-event` (added as a devDependency) for faithful
+     Tab-order and Enter-activation simulation — proves disabled buttons are
+     skipped by `Tab` and that a direct-focus Enter dispatches a `click`
+     whose `defaultPrevented` is `true`, while enabled buttons behave the
+     opposite way.
+   - `html-example-disabled.test.tsx`: loads the real committed
+     `html/example.html` + `css/sign-in-button.css` through
+     `DOMParser`/jsdom (no hand-copied fixture) and asserts the disabled
+     anchor has no `href`, `tabindex="-1"`, `role="link"`; that `Tab`
+     genuinely skips it; that Enter on it dispatches no `click` at all
+     (`user-event` only synthesizes Enter→click for an `<a>` that actually
+     has an `href`, matching real browsers); and that the CSS file's
+     existing focus-forwarding rules are present for all three variants.
+   - Learned mid-implementation: a same-target native `click` listener
+     added directly to the `<a>` fires *before* React's delegated `onClick`
+     (attached on an ancestor container) during the bubble phase — reading
+     `event.defaultPrevented` inside that listener races ahead of React's
+     `preventDefault()`. Fixed by capturing the `Event` object reference and
+     reading `.defaultPrevented` only after `await user.keyboard(...)`
+     resolves, once the whole synchronous dispatch chain has finished.
+4. Verify: `npm test` (37/37 passing) and `npm run typecheck` clean in
+   `react/`; `go test ./sdk/sign-in-button/...` clean (generator/assets
+   untouched); `go run ./sdk/sign-in-button/gen` into a scratch dir still
+   diffs byte-identical against committed `assets/` (generation parity);
+   `go vet`/`gofmt -l` clean.
+5. Commit and push.

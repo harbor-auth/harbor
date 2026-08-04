@@ -305,9 +305,9 @@ path(s) you actually use:
 
 | Variant | Vendored SVG file (`assets/button-<variant>-{compact,full}.svg`) | React component (`react/SignInWithPrivateHarborButton.tsx`) |
 |---|---|---|
-| `light` | `sha256-62XpGooscRy5iN+MLPJz6N2S3OWLWOcAXSeLLTBNC/k=` | `sha256-4S1/HyusT/zkBtWf6qtskXcllqF+IRlKjMUK7U5Ot3U=` |
-| `dark` | `sha256-AtfPZaHn0+2SmjDPgYp9wV2Bdp0NGZDplGdaz0ySFsA=` | `sha256-pfsVDN/v7MVZW6A1p7FKLyen8wSrUVa3Ik8VUpKwF0Q=` |
-| `neutral` | `sha256-Wxuqml9i+e72cPYx6h6qvQAsy4zsNtMWzHvzKNST1Cc=` | `sha256-X+Z88WRYmWX2eV0zXG+ytnbvw5dagnwA3zfG1rcf+kQ=` |
+| `light` | `sha256-62XpGooscRy5iN+MLPJz6N2S3OWLWOcAXSeLLTBNC/k=` | `sha256-qQXhbh4m5ALDBcWD93+oNM5YOPn90h0CV4VH+MCvvRE=` |
+| `dark` | `sha256-AtfPZaHn0+2SmjDPgYp9wV2Bdp0NGZDplGdaz0ySFsA=` | `sha256-UwP82ZrQdeipjKOXKsSgh4i4Myv589W8wjzkHO6sfXM=` |
+| `neutral` | `sha256-Wxuqml9i+e72cPYx6h6qvQAsy4zsNtMWzHvzKNST1Cc=` | `sha256-Bu5LSOcjx+IwmWC4EKxN1Sz+2sz8NuXfTfxuJrrBvEk=` |
 
 (The `compact` and `full` SVG files for a given variant share byte-identical
 `<style>` content, so one hash per variant covers both sizes.)

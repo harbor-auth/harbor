@@ -44,7 +44,7 @@ export interface SignInWithPrivateHarborButtonProps {
 
 const DEFAULT_LABEL = "Sign in with Private Harbor";
 
-// Verbatim from the <style> block of each ../assets/button-<variant>-*.svg,
+// Based on the <style> block of each ../assets/button-<variant>-*.svg,
 // including the `phb-btn-<variant>` class scoping. The class name is scoped
 // per variant (not a single shared "phb-btn") so that when multiple
 // instances of this component render different variants in the same
@@ -53,6 +53,19 @@ const DEFAULT_LABEL = "Sign in with Private Harbor";
 // block is last in the DOM win the cascade for every instance's colors.
 // Only fill/stroke colors differ between variants; geometry is shared and
 // computed in the component below.
+//
+// Unlike the vendored SVG files, this also embeds the anchor-level
+// focus-visible forwarding rule that ../css/sign-in-button.css provides
+// separately (`.phb-button--<variant>:focus-visible .phb-btn-<variant>-ring`
+// plus the default-outline suppression it replaces). The SVG root is
+// `focusable="false"` by design — the wrapping <a> below is what actually
+// receives focus — so without this rule a standalone consumer of this
+// component (per this file's zero-bundler design, see the module doc
+// comment above) would show only the browser's default focus outline
+// instead of the intended >=3:1 ring, or no visible indicator at all if a
+// page's own reset already suppresses outlines and doesn't import
+// ../css/sign-in-button.css. Embedding it here means the component needs no
+// external stylesheet for focus-visible to be correct in every variant.
 const VARIANT_STYLE: Record<SignInWithPrivateHarborButtonVariant, string> = {
   light:
     ".phb-btn-light-bg{fill:#FFFFFF;stroke:#D6D9DE;stroke-width:1;}" +
@@ -61,6 +74,8 @@ const VARIANT_STYLE: Record<SignInWithPrivateHarborButtonVariant, string> = {
     ".phb-btn-light-label{font-size:14px;font-weight:600;}" +
     ".phb-btn-light:hover .phb-btn-light-bg{fill:#F0F2F5;stroke:#C3C8D1;}" +
     ".phb-btn-light:focus-visible .phb-btn-light-ring{stroke:#1857C4;}" +
+    ".phb-button--light:focus,.phb-button--light:focus-visible{outline:none;}" +
+    ".phb-button--light:focus-visible .phb-btn-light-ring{stroke:#1857C4;}" +
     '.phb-btn-light.phb-btn-light--disabled .phb-btn-light-bg,.phb-btn-light[aria-disabled="true"] .phb-btn-light-bg{fill:#F5F6F8;stroke:#E4E7EB;}' +
     '.phb-btn-light.phb-btn-light--disabled .phb-btn-light-label,.phb-btn-light.phb-btn-light--disabled .phb-btn-light-icon,.phb-btn-light[aria-disabled="true"] .phb-btn-light-label,.phb-btn-light[aria-disabled="true"] .phb-btn-light-icon{fill:#9AA1AC;}',
   dark:
@@ -70,6 +85,8 @@ const VARIANT_STYLE: Record<SignInWithPrivateHarborButtonVariant, string> = {
     ".phb-btn-dark-label{font-size:14px;font-weight:600;}" +
     ".phb-btn-dark:hover .phb-btn-dark-bg{fill:#1E212A;stroke:#4B4F5A;}" +
     ".phb-btn-dark:focus-visible .phb-btn-dark-ring{stroke:#7EB2FF;}" +
+    ".phb-button--dark:focus,.phb-button--dark:focus-visible{outline:none;}" +
+    ".phb-button--dark:focus-visible .phb-btn-dark-ring{stroke:#7EB2FF;}" +
     '.phb-btn-dark.phb-btn-dark--disabled .phb-btn-dark-bg,.phb-btn-dark[aria-disabled="true"] .phb-btn-dark-bg{fill:#1B1D24;stroke:#2A2D35;}' +
     '.phb-btn-dark.phb-btn-dark--disabled .phb-btn-dark-label,.phb-btn-dark.phb-btn-dark--disabled .phb-btn-dark-icon,.phb-btn-dark[aria-disabled="true"] .phb-btn-dark-label,.phb-btn-dark[aria-disabled="true"] .phb-btn-dark-icon{fill:#6B6F79;}',
   neutral:
@@ -79,6 +96,8 @@ const VARIANT_STYLE: Record<SignInWithPrivateHarborButtonVariant, string> = {
     ".phb-btn-neutral-label{font-size:14px;font-weight:600;}" +
     ".phb-btn-neutral:hover .phb-btn-neutral-bg{fill:#0A4576;stroke:#0A4576;}" +
     ".phb-btn-neutral:focus-visible .phb-btn-neutral-ring{stroke:#FFFFFF;}" +
+    ".phb-button--neutral:focus,.phb-button--neutral:focus-visible{outline:none;}" +
+    ".phb-button--neutral:focus-visible .phb-btn-neutral-ring{stroke:#FFFFFF;}" +
     '.phb-btn-neutral.phb-btn-neutral--disabled .phb-btn-neutral-bg,.phb-btn-neutral[aria-disabled="true"] .phb-btn-neutral-bg{fill:#8FA9BD;stroke:#8FA9BD;}' +
     '.phb-btn-neutral.phb-btn-neutral--disabled .phb-btn-neutral-label,.phb-btn-neutral.phb-btn-neutral--disabled .phb-btn-neutral-icon,.phb-btn-neutral[aria-disabled="true"] .phb-btn-neutral-label,.phb-btn-neutral[aria-disabled="true"] .phb-btn-neutral-icon{fill:#E8EEF3;}',
 };
