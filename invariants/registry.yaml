@@ -297,3 +297,15 @@ invariants:
     design_refs: [§6.5, §6.5.7]
     description: "Even an allow-listed label can be a quasi-identifier, so the metrics facade MUST carry a small-n suppression mechanism (observability-metrics REQ-005, design Decision 5): a small-count floor and the suppressor that buckets rare quasi-identifier combinations so no series is emitted at a deanonymising count of one. This structural invariant fails if that machinery (the smallCountFloor const and the suppressor type in internal/telemetry) is ever removed, so the aggregate-only guarantee cannot silently regress into per-user rows."
     enforced_by: [internal/arch:TestMetricSmallNSuppressionEnforced]
+
+  - id: INV-CLOUDAPI-SERVICE-AUTH
+    title: "cloudapi requires a scoped service JWT; operator/initial-access tokens are never accepted"
+    design_refs: [openspec/changes/harbor-cloud-management-api-contract-2ee993ea/design.md §2]
+    description: "Every /admin/v1/* route (internal/cloudapi) requires a valid cloudServiceAuth bearer JWT that verifies against the configured CLOUD_SERVICE_AUTH_PUBLIC_KEY trust anchor, carries aud=harbor-mgmt-cloudapi, and has a non-empty scope claim covering the route's required scope. ServiceAuthVerifier.Verify has no code path that reads ADMIN_API_TOKEN (harbor-hot's operator credential) or the RFC 7591 initial-access token (internal/mgmtapi/register.go) — a static credential presented as the bearer is rejected as invalid_token because it never parses as three JWT segments, and an unconfigured trust anchor fails closed (every request 401) rather than allowing an unauthenticated caller through."
+    enforced_by: [internal/cloudapi:TestContractFixtures]
+
+  - id: INV-CLOUDAPI-REPLAY-RESISTANT
+    title: "cloudapi service JWTs are single-use: a replayed jti is rejected"
+    design_refs: [openspec/changes/harbor-cloud-management-api-contract-2ee993ea/design.md §2]
+    description: "ServiceAuthVerifier.Verify claims each token's jti via a Redis SETNX-backed ReplayGuard (RedisReplayGuard) before accepting it, with the claim's TTL bounded by the token's own remaining lifetime so a jti record never outlives the token it guards. A jti presented a second time before it naturally expires is rejected as token_replayed (ErrReplayed). A ReplayGuard that cannot make a determination — nil guard or a backend error (e.g. Redis unreachable) — fails closed with ErrReplayGuardUnavailable rather than treating an unanswerable check as an implicit pass."
+    enforced_by: [internal/cloudapi:TestServiceAuthVerifierReplayed]

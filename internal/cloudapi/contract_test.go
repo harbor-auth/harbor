@@ -458,7 +458,14 @@ func validErrorCode(code cloudopenapi.ErrorCode) bool {
 // Server/SessionsHandler/KeysHandler), proving handler behavior matches
 // api/openapi/harbor-cloud.yaml and every scenario in spec.md — without
 // importing any harbor-cloud code (fixtures are plain JSON; the only Go
-// dependency is this repo's own generated cloudopenapi package).
+// dependency is this repo's own generated cloudopenapi package). Among the
+// scenarios it drives is auth_static_token_never_accepted, which proves a
+// raw non-JWT bearer (standing in for ADMIN_API_TOKEN or an RFC 7591
+// initial-access token) is rejected on this surface, and
+// auth_missing_scope_rejected / keys_rotate_missing_scope_rejected, which
+// prove a scoped JWT is required per route.
+//
+//harbor:invariant INV-CLOUDAPI-SERVICE-AUTH
 func TestContractFixtures(t *testing.T) {
 	fixtures := loadContractFixtures(t, filepath.Join("testdata", "contract"))
 	for _, f := range fixtures {

@@ -225,6 +225,7 @@ func TestServiceAuthVerifierExpired(t *testing.T) {
 	}
 }
 
+//harbor:invariant INV-CLOUDAPI-REPLAY-RESISTANT
 func TestServiceAuthVerifierReplayed(t *testing.T) {
 	env := newTestEnv(t)
 	token := env.sign(t, env.validClaims())

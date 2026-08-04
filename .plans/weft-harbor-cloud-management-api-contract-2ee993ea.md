@@ -377,3 +377,87 @@ Host) and `TestRegionMiddlewareDoesNotExemptUnrelatedAdminPaths` (`/admin`,
 `TestRegionMiddlewareExemptsHealthz` pattern. `go build ./...`, `go vet
 ./...`, and `go test ./internal/mgmtapi/... ./cmd/harbor-mgmt/...` are all
 green.
+
+## Task 9: Add invariant tags and deploy/architecture documentation
+
+### Scope (per tasks.md §9 + assigned task)
+
+1. `invariants/registry.yaml`: added two new entries —
+   `INV-CLOUDAPI-SERVICE-AUTH` (scoped `cloudServiceAuth` JWT required;
+   `ADMIN_API_TOKEN`/the RFC 7591 initial-access token are never accepted on
+   `/admin/v1/*`) and `INV-CLOUDAPI-REPLAY-RESISTANT` (a token's `jti` is
+   single-use; the Redis-backed replay guard fails closed when it cannot
+   answer). `design_refs` point at the openspec change's `design.md §2`
+   (Decision 2 covers both the service-JWT contract and the replay-guard
+   mechanism) — `invariants/registry_test.go` only requires `design_refs` to
+   be non-empty, it doesn't validate them against `docs/DESIGN.md`'s § map
+   (that's a separate check scoped to `docs/features/*.md` frontmatter, see
+   below), so an openspec-path ref is consistent with the registry's own
+   contract.
+2. Tagged the enforcing tests directly in `internal/cloudapi`:
+   `TestContractFixtures` (`contract_test.go`) for
+   `INV-CLOUDAPI-SERVICE-AUTH` — it drives the `auth_static_token_never_accepted`,
+   `auth_missing_scope_rejected`, and `keys_rotate_missing_scope_rejected`
+   fixtures, which are exactly the "scoped JWT required" and "operator/
+   initial-access token never accepted" scenarios — and
+   `TestServiceAuthVerifierReplayed` (`serviceauth_test.go`) for
+   `INV-CLOUDAPI-REPLAY-RESISTANT`, a focused unit test that mints one token,
+   verifies it twice, and asserts the second call returns `ErrReplayed`.
+   `go test ./invariants/...` (the registry meta-test) passes, confirming
+   both entries are structurally valid, the tagged tests exist under
+   `internal/cloudapi`, and the `//harbor:invariant` comment tags are found.
+3. `deploy/README.md`: added a "Harbor Cloud management API" section
+   documenting (a) private-path-only reachability — the dedicated
+   `cloudIntegration.nodePort` Service plus the NetworkPolicy CIDR allow-list
+   that only opens when `cloudIntegration.enabled` is true, defense-in-depth
+   under the application-level JWT check — and (b) the two independently
+   rotatable internal credentials, `ADMIN_API_TOKEN` (operator, consumed by
+   harbor-hot's `AdminAuthMiddleware` directly) vs `MGMT_HOT_PROXY_TOKEN`
+   (the mgmt-to-hot proxy hop `cloudapi.KeysHandler` makes on Harbor Cloud's
+   behalf), cross-referencing the existing "Admin Endpoint Access" section
+   rather than duplicating it.
+4. `docs/ARCHITECTURE.md`: added a "Harbor Cloud management API (optional,
+   private path only)" section with a small ASCII diagram of the
+   Harbor-Cloud → harbor-mgmt → harbor-hot key-rotation proxy hop, explaining
+   why rotation is proxied (reuse harbor-hot's tested state machine) rather
+   than reimplemented, and linking to the new `deploy/README.md` anchors.
+5. `docs/README.md`: added a `harbor-cloud-management-api` row to the
+   Features table. Since no feature doc existed yet for this change and the
+   repo's own template (`docs/_templates/feature.md`) and `@docs reconcile`
+   convention require a linked doc (an unlinked row would be dangling-link
+   drift), added a minimal `docs/features/harbor-cloud-management-api.md`
+   using the current frontmatter convention (seen in newer docs like
+   `bloom-filter-revocation.md`), summarizing behavior, endpoints, code map,
+   the two new invariants, test coverage, and the two still-open follow-on
+   tasks (wiring `MGMT_HOT_PROXY_TOKEN` into harbor-hot's own chart, and
+   exempting `/admin/v1/*` from mgmt's host-based region gate) as "Known
+   gaps". This file is additive relative to the task's stated file list but
+   necessary to keep the added `docs/README.md` row non-dangling.
+
+### Verification
+
+- `python3 tools/check-design-refs.py`: initially failed because the new
+  feature doc's frontmatter `design_refs` used the openspec path instead of
+  a `docs/DESIGN.md` § — that field IS validated against the § → file map
+  (unlike `invariants/registry.yaml`'s `design_refs`, a different schema).
+  Fixed by using `[§4, §7.1, §10]` (architecture overview, security overview,
+  data model — the three DESIGN.md areas this feature actually extends).
+  Reran clean: 71 design_refs checked, all resolve.
+- `python3 tools/check-doc-links.py`: 296 relative links across 127
+  markdown files in `docs/`, all resolve.
+- `go build ./...`, `go vet ./...`, `go test ./...`: all pass repo-wide.
+- `gofmt -l internal/cloudapi/contract_test.go internal/cloudapi/serviceauth_test.go`:
+  clean.
+- `golangci-lint` could not run in this environment (pinned binary predates
+  the module's go1.25 toolchain requirement — same pre-existing mismatch
+  noted in task 13's section above); the two edits in this task are
+  doc-comment-only additions to existing test functions, so this is not a
+  new gap.
+
+Note: tasks 15/16 (MGMT_HOT_PROXY_TOKEN wiring into harbor-hot's chart +
+NetworkPolicy, and the region-gate exemption for `/admin/v1/*`) landed on
+the shared branch concurrently with this task, so the "Known gaps" section
+originally drafted for `docs/features/harbor-cloud-management-api.md`
+(listing both items as outstanding) would have been stale on arrival.
+Rewrote that section — while resolving this rebase — to describe both as
+resolved instead, per tasks 15/16's own notes above.
