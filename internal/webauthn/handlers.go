@@ -14,10 +14,22 @@ import (
 const sessionCookieName = "harbor_webauthn_session"
 
 // EnrollmentSessionStore resolves the user handle from the enrollment session
-// cookie set by POST /enroll. It is injected from internal/mgmtapi so this
-// package stays decoupled from the enrollment implementation.
+// cookie set by POST /enroll or POST /recovery/complete. It is injected from
+// internal/mgmtapi so this package stays decoupled from the enrollment
+// implementation.
 type EnrollmentSessionStore interface {
-	UserHandle(ctx context.Context, key string) ([]byte, error)
+	// UserHandle returns the ceremony's user handle plus whether the session
+	// originated from the lost-device recovery ceremony (POST
+	// /recovery/complete) rather than first-time enrollment (POST /enroll).
+	// FinishRegistration uses recovery to pick the correct completion path:
+	// activate a pending user (first passkey) vs. clear recovery_required on
+	// an already-active one (fresh passkey after losing a device). The
+	// returnTo value is unused here — it is read only by
+	// cmd/harbor-mgmt/caller.go's post-registration handoff, which resolves
+	// the same session separately — but must remain part of this signature so
+	// a single concrete store (mgmtapi.EnrollmentSessionStore) can satisfy
+	// both interfaces.
+	UserHandle(ctx context.Context, key string) (userID []byte, recovery bool, returnTo string, err error)
 }
 
 // enrollmentCookieName is the cookie carrying the enrollment session key. It
@@ -88,9 +100,14 @@ func (h *Handler) BeginRegistration(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, options)
 }
 
-// FinishRegistration handles POST /webauthn/register/finish.
+// FinishRegistration handles POST /webauthn/register/finish. When the
+// enrollment session originated from the lost-device recovery ceremony (POST
+// /recovery/complete) it completes via svc.FinishRecoveryRegistration, which
+// clears recovery_required instead of activating a pending user — otherwise a
+// user who recovered their account can never leave the enrollment-only scope
+// (REQ-005, docs/DESIGN.md §11.1).
 func (h *Handler) FinishRegistration(w http.ResponseWriter, r *http.Request) {
-	userID, ok := h.userIDFromRequest(w, r)
+	userID, recovery, ok := h.userIDAndRecoveryFromRequest(w, r)
 	if !ok {
 		return
 	}
@@ -99,7 +116,11 @@ func (h *Handler) FinishRegistration(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusBadRequest, "session_expired", "missing or invalid session")
 		return
 	}
-	if _, err := h.svc.FinishRegistration(r.Context(), userID, key, r.Body); err != nil {
+	finish := h.svc.FinishRegistration
+	if recovery {
+		finish = h.svc.FinishRecoveryRegistration
+	}
+	if _, err := finish(r.Context(), userID, key, r.Body); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -133,7 +154,7 @@ func (h *Handler) FinishLogin(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusBadRequest, "session_expired", "missing or invalid session")
 		return
 	}
-	if _, err := h.svc.FinishLogin(r.Context(), userID, key, r.Body); err != nil {
+	if _, _, err := h.svc.FinishLogin(r.Context(), userID, key, r.Body); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -142,23 +163,34 @@ func (h *Handler) FinishLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 // userIDFromRequest extracts the WebAuthn user handle for a ceremony from the
-// enrollment session cookie (harbor_enrollment_session) set by POST /enroll —
-// the only supported path (§11.1). There is deliberately NO client-supplied
-// user_id: letting a caller name the ceremony's user is an IDOR (docs/DESIGN.md
-// §9). When no valid enrollment session is present the request is refused with
-// 501 Not Implemented, since no other authenticated seam exists yet.
+// enrollment session cookie (harbor_enrollment_session) set by POST /enroll or
+// POST /recovery/complete — the only supported path (§11.1). There is
+// deliberately NO client-supplied user_id: letting a caller name the
+// ceremony's user is an IDOR (docs/DESIGN.md §9). When no valid enrollment
+// session is present the request is refused with 501 Not Implemented, since no
+// other authenticated seam exists yet.
 //
 // On failure it writes the response and returns ok=false.
 func (h *Handler) userIDFromRequest(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	userID, _, ok := h.userIDAndRecoveryFromRequest(w, r)
+	return userID, ok
+}
+
+// userIDAndRecoveryFromRequest is userIDFromRequest plus the recovery flag
+// FinishRegistration needs to pick its completion path. See
+// EnrollmentSessionStore.UserHandle for what recovery means.
+//
+// On failure it writes the response and returns ok=false.
+func (h *Handler) userIDAndRecoveryFromRequest(w http.ResponseWriter, r *http.Request) ([]byte, bool, bool) {
 	if c, err := r.Cookie(enrollmentCookieName); err == nil && c.Value != "" {
-		userID, err := h.enrollmentSessions.UserHandle(r.Context(), c.Value)
+		userID, recovery, _, err := h.enrollmentSessions.UserHandle(r.Context(), c.Value)
 		if err == nil && len(userID) > 0 {
-			return userID, true
+			return userID, recovery, true
 		}
 	}
 	writeErrorCode(w, http.StatusNotImplemented, "not_implemented",
 		"passkey ceremonies require an authenticated session")
-	return nil, false
+	return nil, false, false
 }
 
 // --- response helpers -------------------------------------------------------

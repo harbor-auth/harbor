@@ -1,0 +1,213 @@
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign in — Harbor</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;color:#111;min-height:100vh}
+.nav{background:#1a1a2e;color:#fff;padding:1rem 2rem;display:flex;align-items:center;gap:1rem}
+.nav h1{font-size:1.1rem;font-weight:600;letter-spacing:.02em}
+.container{max-width:420px;margin:3rem auto;padding:0 1.5rem}
+.card{background:#fff;border-radius:8px;padding:2rem;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.card h2{font-size:1.4rem;font-weight:700;margin-bottom:.5rem}
+.card p{color:#555;line-height:1.6;margin-bottom:1.5rem}
+.button{display:inline-flex;align-items:center;justify-content:center;gap:.5rem;width:100%;padding:.75rem 1rem;border-radius:6px;border:2px solid transparent;background:#1a1a2e;color:#fff;font-size:1rem;font-weight:600;cursor:pointer}
+.button:focus-visible{outline:3px solid #4d7cff;outline-offset:2px}
+.button:disabled{opacity:.6;cursor:default}
+#signin-status{min-height:1.5rem;color:#555;font-size:.9rem;margin-top:1rem}
+#signin-status.error{color:#b3261e}
+</style>
+</head>
+<body>
+<nav class="nav">
+  <h1>⚓ Harbor</h1>
+</nav>
+<main class="container">
+  <div class="card">
+    <h2>Sign in</h2>
+    <p>Use your passkey to sign in. No password, no username — just the device you already registered with.</p>
+    <button id="signin-button" type="button" class="button">Sign in with a passkey</button>
+    <p id="signin-status" role="status" aria-live="polite"></p>
+  </div>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var DATA = {
+    requestId: "{{.RequestID}}",
+    returnTo: "{{.ReturnTo}}"
+  };
+
+  var statusEl = document.getElementById("signin-status");
+  var button = document.getElementById("signin-button");
+  var activeController = null;
+
+  function setStatus(message, isError) {
+    statusEl.textContent = message;
+    statusEl.classList.toggle("error", Boolean(isError));
+  }
+
+  function base64urlToBuffer(value) {
+    var normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+    var padLength = (4 - (normalized.length % 4)) % 4;
+    normalized += "=".repeat(padLength);
+    var binary = window.atob(normalized);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes.buffer;
+  }
+
+  function bufferToBase64url(buffer) {
+    var bytes = new Uint8Array(buffer);
+    var binary = "";
+    for (var i = 0; i < bytes.byteLength; i++) {
+      binary += String.fromCharCode(bytes[i]);
+    }
+    return window.btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  // Decodes the base64url-encoded challenge/credential IDs the server sends
+  // into the ArrayBuffers navigator.credentials.get() requires.
+  function decodeAssertionOptions(options) {
+    options.challenge = base64urlToBuffer(options.challenge);
+    if (Array.isArray(options.allowCredentials)) {
+      options.allowCredentials = options.allowCredentials.map(function (entry) {
+        return Object.assign({}, entry, { id: base64urlToBuffer(entry.id) });
+      });
+    }
+    return options;
+  }
+
+  // Encodes a resolved assertion credential back into the JSON body shape
+  // POST /login/complete expects (protocol.ParseCredentialRequestResponseBody).
+  function encodeAssertionResponse(credential) {
+    var response = credential.response;
+    return {
+      id: credential.id,
+      rawId: bufferToBase64url(credential.rawId),
+      type: credential.type,
+      response: {
+        clientDataJSON: bufferToBase64url(response.clientDataJSON),
+        authenticatorData: bufferToBase64url(response.authenticatorData),
+        signature: bufferToBase64url(response.signature),
+        userHandle: response.userHandle ? bufferToBase64url(response.userHandle) : null
+      }
+    };
+  }
+
+  // Fetches fresh discoverable-login assertion options. No identifier of any
+  // kind is ever sent — only the opaque request_id minted for this page load.
+  function beginLogin() {
+    return fetch("/login?request_id=" + encodeURIComponent(DATA.requestId), {
+      method: "GET",
+      credentials: "same-origin"
+    }).then(function (res) {
+      if (!res.ok) {
+        throw new Error("begin_login_failed");
+      }
+      return res.json();
+    }).then(function (body) {
+      return decodeAssertionOptions(body.publicKey);
+    });
+  }
+
+  function finishLogin(credential) {
+    return fetch("/login/complete", {
+      method: "POST",
+      credentials: "same-origin",
+      redirect: "manual",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(encodeAssertionResponse(credential))
+    }).then(function (res) {
+      // internal/bff/login.go's FinishLoginWithParsedData always responds with
+      // a 302 redirect on success and a plain JSON error on any failure (bad
+      // credential, expired session, ...) — never the reverse. With
+      // redirect: "manual" a same-origin 302 surfaces as an opaque redirect
+      // response, so that alone is the success signal; its destination is
+      // irrelevant here because we navigate to the already-validated
+      // return_to ourselves instead of following it.
+      if (res.type === "opaqueredirect" || res.status === 0) {
+        window.location.assign(DATA.returnTo);
+        return;
+      }
+      throw new Error("finish_login_failed");
+    });
+  }
+
+  // Runs one full sign-in attempt. mediation is "conditional" for the
+  // passive autofill picker, or undefined for the explicit modal picker
+  // triggered by the button. explicit is true only for the latter — it
+  // gates whether a failure is ever shown to the user.
+  function attemptSignin(mediation, explicit) {
+    if (activeController) {
+      activeController.abort();
+    }
+    var controller = new AbortController();
+    activeController = controller;
+
+    return beginLogin().then(function (publicKey) {
+      var options = { publicKey: publicKey, signal: controller.signal };
+      if (mediation) {
+        options.mediation = mediation;
+      }
+      return navigator.credentials.get(options);
+    }).then(function (credential) {
+      if (!credential) {
+        throw new Error("no_credential");
+      }
+      return finishLogin(credential);
+    }).catch(function (err) {
+      if (err && err.name === "AbortError") {
+        // Superseded by a newer attempt (e.g. the user clicked the button
+        // while conditional mediation was still pending) — not a failure.
+        return;
+      }
+      if (!explicit) {
+        // The passive conditional-mediation attempt found nothing to sign in
+        // with (no credential, user dismissed the browser's picker,
+        // NotAllowedError, ...) — expected outcomes the user never asked
+        // for. Stay silent and leave the accessible button as the fallback
+        // rather than greeting an unclicked page with a red error.
+        return;
+      }
+      // Collapse every failure to one generic message — an unknown or
+      // invalid credential must never reveal whether an account exists.
+      setStatus("We couldn't sign you in with that passkey. Please try again.", true);
+      button.disabled = false;
+    });
+  }
+
+  button.addEventListener("click", function () {
+    button.disabled = true;
+    setStatus("");
+    attemptSignin(undefined, true).then(function () {
+      button.disabled = false;
+    });
+  });
+
+  if (!window.PublicKeyCredential) {
+    setStatus("This browser does not support passkeys. Try a recent version of Chrome, Safari, or Edge.", true);
+    button.disabled = true;
+    return;
+  }
+
+  // Conditional mediation shows passkeys passively (autofill-style) as soon
+  // as the browser is ready; the button above always remains the accessible,
+  // keyboard-operable fallback — including when the browser reports
+  // conditional mediation as available but has no visible UI to attach it to,
+  // since this page deliberately has no identifier field to anchor it.
+  if (typeof PublicKeyCredential.isConditionalMediationAvailable === "function") {
+    PublicKeyCredential.isConditionalMediationAvailable().then(function (available) {
+      if (available) {
+        attemptSignin("conditional", false);
+      }
+    });
+  }
+})();
+</script>
+</body>
+</html>

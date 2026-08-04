@@ -22,6 +22,23 @@ import (
 //     deny on mismatch or opaque ("null") origin.
 //  3. Both absent → pass through; SameSite=Strict remains the active guard.
 func DashboardCSRF(next http.Handler) http.Handler {
+	return requireSameOriginPOST(next)
+}
+
+// PreSessionCSRF applies the identical Origin/Sec-Fetch-Site decision tree as
+// DashboardCSRF (see checkDashboardCSRF) to POST routes that run before any
+// session cookie exists — enrollment, signup, and WebAuthn ceremony
+// begin/finish endpoints. Unlike DashboardCSRF, this is not a *second* defence
+// layer: these routes have no SameSite=Strict cookie yet, so this check is
+// their only CSRF defence.
+func PreSessionCSRF(next http.Handler) http.Handler {
+	return requireSameOriginPOST(next)
+}
+
+// requireSameOriginPOST is the shared middleware wrapper behind both
+// DashboardCSRF and PreSessionCSRF; only the doc comment (and therefore the
+// caller's intent) differs between the two.
+func requireSameOriginPOST(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost {
 			if err := checkDashboardCSRF(r); err != nil {

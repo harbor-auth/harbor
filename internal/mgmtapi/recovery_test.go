@@ -17,9 +17,11 @@ import (
 type fakeRecoveryCodeGenerator struct {
 	codes []identity.RecoveryCode
 	err   error
+	calls int
 }
 
 func (f *fakeRecoveryCodeGenerator) GenerateCodes(n int) ([]identity.RecoveryCode, error) {
+	f.calls++
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -61,11 +63,13 @@ func (f *fakeRecoveryVerifier) ConsumeCode(_ context.Context, userID, code strin
 }
 
 type fakeScopedSessionIssuer struct {
-	token string
-	err   error
+	token       string
+	err         error
+	gotReturnTo string
 }
 
-func (f *fakeScopedSessionIssuer) IssueEnrollmentSession(_ context.Context, _ string) (string, error) {
+func (f *fakeScopedSessionIssuer) IssueEnrollmentSession(_ context.Context, _, returnTo string) (string, error) {
+	f.gotReturnTo = returnTo
 	if f.err != nil {
 		return "", f.err
 	}
@@ -77,6 +81,77 @@ type fakeRecoveryLimiter struct {
 }
 
 func (f *fakeRecoveryLimiter) Allow(_ string) bool { return f.allow }
+
+// fakeRecoveryStatusChecker is a test-only RecoveryStatusChecker. required is
+// the value IsRecoveryRequired returns absent err; gotUserID captures the
+// last userID it was asked about.
+type fakeRecoveryStatusChecker struct {
+	required  bool
+	err       error
+	gotUserID string
+}
+
+func (f *fakeRecoveryStatusChecker) IsRecoveryRequired(_ context.Context, userID string) (bool, error) {
+	f.gotUserID = userID
+	if f.err != nil {
+		return false, f.err
+	}
+	return f.required, nil
+}
+
+// fakeEnrollmentCallerSource is a test-only CallerSessionSource standing in
+// for bffEnrollmentCallerAdapter: unlike fakeCallerSource it always reports a
+// sessionID, so tests can drive recoverySessionCaller's fallback path.
+type fakeEnrollmentCallerSource struct {
+	userID    string
+	sessionID string
+}
+
+func (f fakeEnrollmentCallerSource) CallerID(_ context.Context) string { return f.userID }
+func (f fakeEnrollmentCallerSource) SessionID(_ context.Context) string {
+	return f.sessionID
+}
+
+// fakeCallerSessionSource wraps fakeCallerSource with a fixed SessionID so
+// tests can exercise the CallerSessionSource type assertion in
+// recoverySessionCaller for the ordinary full-scope path too.
+type fakeCallerSessionSource struct {
+	fakeCallerSource
+	sessionID string
+}
+
+func (f fakeCallerSessionSource) SessionID(_ context.Context) string { return f.sessionID }
+
+type fakeRecoveryRequirementClearer struct {
+	err          error
+	gotUserID    string
+	clearedCount int
+}
+
+func (f *fakeRecoveryRequirementClearer) ClearRecoveryRequired(_ context.Context, userID string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.gotUserID = userID
+	f.clearedCount++
+	return nil
+}
+
+type fakeRecoverySessionRefresher struct {
+	err                 error
+	gotSessionID        string
+	gotUserID           string
+	gotRecoveryRequired bool
+	called              bool
+}
+
+func (f *fakeRecoverySessionRefresher) RefreshSessionScope(_ context.Context, sessionID, userID string, recoveryRequired bool) error {
+	f.called = true
+	f.gotSessionID = sessionID
+	f.gotUserID = userID
+	f.gotRecoveryRequired = recoveryRequired
+	return f.err
+}
 
 type fakeRecoveryFactorLister struct {
 	factors []RecoveryFactor
@@ -207,6 +282,313 @@ func TestPostRecoveryCodes_StoreError(t *testing.T) {
 	}
 }
 
+// TestPostRecoveryCodes_EnrollmentOnlySessionSucceedsViaFallback proves the
+// mandatory recovery-setup step can call POST /recovery/codes with only an
+// enrollment-only session (the scope the post-registration handoff and
+// lost-device recovery ceremony both establish) — callerSource alone (unset
+// here) would 401, but enrollmentCallerSource resolves the caller instead.
+func TestPostRecoveryCodes_EnrollmentOnlySessionSucceedsViaFallback(t *testing.T) {
+	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s = s.WithEnrollmentCallerSource(fakeEnrollmentCallerSource{userID: "user-1"})
+
+	req := httptest.NewRequest(http.MethodPost, "/recovery/codes", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryCodes(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPostRecoveryCodes_FullScopeCallerSourcePreferredOverFallback proves the
+// fallback never overrides a resolved full-scope caller: if callerSource
+// resolves a userID, enrollmentCallerSource must not even be consulted.
+func TestPostRecoveryCodes_FullScopeCallerSourcePreferredOverFallback(t *testing.T) {
+	store := &fakeRecoveryCodeStore{}
+	s, _ := newRecoveryServer(&fakeRecoveryCodeGenerator{}, store, &fakeRecoveryVerifier{})
+	s = s.WithCallerSource(fakeCallerSource{userID: "full-scope-user"}).
+		WithEnrollmentCallerSource(fakeEnrollmentCallerSource{userID: "should-not-be-used"})
+
+	req := httptest.NewRequest(http.MethodPost, "/recovery/codes", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryCodes(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPostRecoveryCodes_AlreadyAcknowledged_Refuses proves that once a user's
+// recovery_required flag has cleared (they already saved a set of codes via
+// POST /recovery/acknowledge), a later call to POST /recovery/codes — e.g. the
+// browser back button landing on GET /signup/recovery again while the BFF
+// session cookie is still live — is refused with 409 rather than silently
+// generating and persisting a brand new, different set of codes that would
+// invalidate the set the user already saved.
+func TestPostRecoveryCodes_AlreadyAcknowledged_Refuses(t *testing.T) {
+	gen := &fakeRecoveryCodeGenerator{}
+	store := &fakeRecoveryCodeStore{}
+	s, _ := newRecoveryServer(gen, store, &fakeRecoveryVerifier{})
+	checker := &fakeRecoveryStatusChecker{required: false}
+	s = s.WithRecoveryStatusChecker(checker).WithCallerSource(fakeCallerSource{userID: "user-1"})
+
+	req := httptest.NewRequest(http.MethodPost, "/recovery/codes", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryCodes(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp errorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Error != "recovery_already_complete" {
+		t.Errorf("error code = %q, want recovery_already_complete", resp.Error)
+	}
+	if checker.gotUserID != "user-1" {
+		t.Errorf("checker got userID = %q, want user-1", checker.gotUserID)
+	}
+	if gen.calls != 0 {
+		t.Errorf("GenerateCodes called %d times, want 0 (must never reissue)", gen.calls)
+	}
+	if store.stored != nil {
+		t.Errorf("StoreRecoveryCodes stored %+v, want nothing persisted", store.stored)
+	}
+}
+
+// TestPostRecoveryCodes_StillRequired_Generates proves the guard does not
+// block the legitimate first-time case: while recovery_required is still
+// true, codes generate normally.
+func TestPostRecoveryCodes_StillRequired_Generates(t *testing.T) {
+	gen := &fakeRecoveryCodeGenerator{}
+	s, _ := newRecoveryServer(gen, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s = s.WithRecoveryStatusChecker(&fakeRecoveryStatusChecker{required: true}).
+		WithCallerSource(fakeCallerSource{userID: "user-1"})
+
+	req := httptest.NewRequest(http.MethodPost, "/recovery/codes", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryCodes(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if gen.calls != 1 {
+		t.Errorf("GenerateCodes called %d times, want 1", gen.calls)
+	}
+}
+
+// TestPostRecoveryCodes_NoStatusCheckerWired_PreservesOldBehavior proves an
+// unconfigured checker (nil, e.g. dev-scaffold mode) leaves the endpoint free
+// to generate codes exactly as it did before this guard existed.
+func TestPostRecoveryCodes_NoStatusCheckerWired_PreservesOldBehavior(t *testing.T) {
+	gen := &fakeRecoveryCodeGenerator{}
+	s, _ := newRecoveryServer(gen, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s = s.WithCallerSource(fakeCallerSource{userID: "user-1"})
+
+	req := httptest.NewRequest(http.MethodPost, "/recovery/codes", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryCodes(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if gen.calls != 1 {
+		t.Errorf("GenerateCodes called %d times, want 1", gen.calls)
+	}
+}
+
+// TestPostRecoveryCodes_StatusCheckError_FailsOpen proves a checker error
+// (e.g. a transient DB lookup failure) never turns into a harder failure than
+// the pre-guard behavior: generation still proceeds rather than the request
+// failing outright.
+func TestPostRecoveryCodes_StatusCheckError_FailsOpen(t *testing.T) {
+	gen := &fakeRecoveryCodeGenerator{}
+	s, _ := newRecoveryServer(gen, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s = s.WithRecoveryStatusChecker(&fakeRecoveryStatusChecker{err: errors.New("db down")}).
+		WithCallerSource(fakeCallerSource{userID: "user-1"})
+
+	req := httptest.NewRequest(http.MethodPost, "/recovery/codes", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryCodes(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if gen.calls != 1 {
+		t.Errorf("GenerateCodes called %d times, want 1", gen.calls)
+	}
+}
+
+// --- POST /recovery/acknowledge ---
+
+func newAcknowledgeServer() (*Server, *fakeRecoveryRequirementClearer, *fakeRecoverySessionRefresher) {
+	clearer := &fakeRecoveryRequirementClearer{}
+	refresher := &fakeRecoverySessionRefresher{}
+	s := newTestServer(nil).
+		WithRecoveryRequirementClearer(clearer).
+		WithRecoverySessionRefresher(refresher)
+	return s, clearer, refresher
+}
+
+func TestPostRecoveryAcknowledge_Success(t *testing.T) {
+	s, clearer, refresher := newAcknowledgeServer()
+	s = s.WithCallerSource(fakeCallerSessionSource{fakeCallerSource: fakeCallerSource{userID: "user-1"}, sessionID: "sess-1"})
+
+	req := httptest.NewRequest(http.MethodPost, "/recovery/acknowledge", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryAcknowledge(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp recoveryAcknowledgeResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Status != "complete" {
+		t.Errorf("status field = %q, want complete", resp.Status)
+	}
+	if clearer.gotUserID != "user-1" || clearer.clearedCount != 1 {
+		t.Errorf("clearer = %+v, want cleared once for user-1", clearer)
+	}
+	if !refresher.called || refresher.gotSessionID != "sess-1" || refresher.gotUserID != "user-1" || refresher.gotRecoveryRequired {
+		t.Errorf("refresher = %+v, want called with sess-1/user-1/recoveryRequired=false", refresher)
+	}
+}
+
+// TestPostRecoveryAcknowledge_EnrollmentOnlySessionSucceeds proves this
+// endpoint — like POST /recovery/codes — works for an enrollment-only
+// session via enrollmentCallerSource, not just a full-scope session.
+func TestPostRecoveryAcknowledge_EnrollmentOnlySessionSucceeds(t *testing.T) {
+	s, clearer, refresher := newAcknowledgeServer()
+	s = s.WithEnrollmentCallerSource(fakeEnrollmentCallerSource{userID: "user-1", sessionID: "sess-enroll"})
+
+	req := httptest.NewRequest(http.MethodPost, "/recovery/acknowledge", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryAcknowledge(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if clearer.gotUserID != "user-1" {
+		t.Errorf("clearer got userID = %q, want user-1", clearer.gotUserID)
+	}
+	if refresher.gotSessionID != "sess-enroll" {
+		t.Errorf("refresher got sessionID = %q, want sess-enroll", refresher.gotSessionID)
+	}
+}
+
+func TestPostRecoveryAcknowledge_Unauthorized(t *testing.T) {
+	s, _, _ := newAcknowledgeServer()
+	req := httptest.NewRequest(http.MethodPost, "/recovery/acknowledge", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryAcknowledge(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestPostRecoveryAcknowledge_Unavailable(t *testing.T) {
+	s := newTestServer(nil).WithCallerSource(fakeCallerSource{userID: "user-1"}) // no clearer wired
+	req := httptest.NewRequest(http.MethodPost, "/recovery/acknowledge", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryAcknowledge(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+}
+
+func TestPostRecoveryAcknowledge_RateLimited(t *testing.T) {
+	s, _, _ := newAcknowledgeServer()
+	s.WithRecoveryRateLimiter(&fakeRecoveryLimiter{allow: false})
+	s = s.WithCallerSource(fakeCallerSource{userID: "user-1"})
+	req := httptest.NewRequest(http.MethodPost, "/recovery/acknowledge", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryAcknowledge(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429", rec.Code)
+	}
+}
+
+// TestPostRecoveryAcknowledge_ClearerErrorDoesNotRefreshSession proves a
+// failed DB write never triggers the session-scope refresh — the user must
+// stay fenced to enrollment-only if recovery_required was not actually cleared.
+func TestPostRecoveryAcknowledge_ClearerErrorDoesNotRefreshSession(t *testing.T) {
+	s, _, refresher := newAcknowledgeServer()
+	s.recoveryRequirementClearer = &fakeRecoveryRequirementClearer{err: errors.New("db down")}
+	s = s.WithCallerSource(fakeCallerSource{userID: "user-1"})
+
+	req := httptest.NewRequest(http.MethodPost, "/recovery/acknowledge", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryAcknowledge(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if refresher.called {
+		t.Error("session refresher must not run when recovery_required was not cleared")
+	}
+}
+
+// TestPostRecoveryAcknowledge_RefresherErrorStillReturns500 proves a failure
+// to refresh the live BFF session surfaces as an error even though the DB
+// flag was already durably cleared — the client must know to reload/retry
+// rather than believe it now has full scope.
+func TestPostRecoveryAcknowledge_RefresherErrorStillReturns500(t *testing.T) {
+	s, clearer, _ := newAcknowledgeServer()
+	s.recoverySessionRefresher = &fakeRecoverySessionRefresher{err: errors.New("redis down")}
+	s = s.WithCallerSource(fakeCallerSessionSource{fakeCallerSource: fakeCallerSource{userID: "user-1"}, sessionID: "sess-1"})
+
+	req := httptest.NewRequest(http.MethodPost, "/recovery/acknowledge", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryAcknowledge(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if clearer.clearedCount != 1 {
+		t.Errorf("clearer called %d times, want 1 (DB flag must already be cleared)", clearer.clearedCount)
+	}
+}
+
+// TestPostRecoveryAcknowledge_MissingSessionIDFailsClosed proves that when a
+// refresher is wired but the caller source cannot resolve a session id (a
+// plain CallerSource, not a CallerSessionSource), the request fails closed
+// with 500 rather than silently skipping the refresh.
+func TestPostRecoveryAcknowledge_MissingSessionIDFailsClosed(t *testing.T) {
+	s, clearer, refresher := newAcknowledgeServer()
+	s = s.WithCallerSource(fakeCallerSource{userID: "user-1"}) // no SessionID method
+
+	req := httptest.NewRequest(http.MethodPost, "/recovery/acknowledge", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryAcknowledge(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	if refresher.called {
+		t.Error("session refresher must not run without a resolved session id")
+	}
+	if clearer.clearedCount != 1 {
+		t.Errorf("clearer called %d times, want 1 (DB flag must already be cleared before the session-id check)", clearer.clearedCount)
+	}
+}
+
+func TestPostRecoveryAcknowledge_Routed(t *testing.T) {
+	s, _, _ := newAcknowledgeServer()
+	s = s.WithCallerSource(fakeCallerSessionSource{fakeCallerSource: fakeCallerSource{userID: "user-1"}, sessionID: "sess-1"})
+	mux := http.NewServeMux()
+	s.Routes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/recovery/acknowledge", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("routed status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // --- POST /recovery/begin ---
 
 func TestPostRecoveryBegin_Success(t *testing.T) {
@@ -330,6 +712,11 @@ func TestPostRecoveryComplete_Success(t *testing.T) {
 	}
 	if !foundBFF || !foundEnrollment {
 		t.Errorf("recovery cookies: BFF=%t enrollment=%t, want both", foundBFF, foundEnrollment)
+	}
+	// Lost-device recovery never runs through GET /signup, so there is no
+	// captured return_to to carry onto the issued session.
+	if issuer.gotReturnTo != "" {
+		t.Errorf("issuer got returnTo = %q, want empty for a lost-device recovery ceremony", issuer.gotReturnTo)
 	}
 }
 

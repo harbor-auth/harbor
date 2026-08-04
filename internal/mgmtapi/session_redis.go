@@ -25,24 +25,47 @@ func NewRedisEnrollmentSessionStore(client *redis.Client) *RedisEnrollmentSessio
 	return &RedisEnrollmentSessionStore{client: client}
 }
 
-func (s *RedisEnrollmentSessionStore) Save(ctx context.Context, key string, userHandle []byte) error {
-	value := base64.RawURLEncoding.EncodeToString(userHandle)
+// redisEnrollmentSession is the JSON envelope stored under an enrollment
+// session key. Recovery is carried alongside the handle so register/finish
+// can tell a lost-device recovery session apart from first-time enrollment
+// without a second round trip. ReturnTo carries the return_to value validated
+// once at GET /signup as real server-side session state (design.md Decision
+// 5 / REQ-004), rather than round-tripping it through the URL at every hop.
+type redisEnrollmentSession struct {
+	Handle   string `json:"h"`
+	Recovery bool   `json:"r,omitempty"`
+	ReturnTo string `json:"rt,omitempty"`
+}
+
+func (s *RedisEnrollmentSessionStore) Save(ctx context.Context, key string, userHandle []byte, recovery bool, returnTo string) error {
+	value, err := json.Marshal(redisEnrollmentSession{
+		Handle:   base64.RawURLEncoding.EncodeToString(userHandle),
+		Recovery: recovery,
+		ReturnTo: returnTo,
+	})
+	if err != nil {
+		return err
+	}
 	return s.client.Set(ctx, enrollmentSessionPrefix+key, value, enrollmentSessionTTL).Err()
 }
 
-func (s *RedisEnrollmentSessionStore) UserHandle(ctx context.Context, key string) ([]byte, error) {
-	value, err := s.client.Get(ctx, enrollmentSessionPrefix+key).Result()
+func (s *RedisEnrollmentSessionStore) UserHandle(ctx context.Context, key string) ([]byte, bool, string, error) {
+	value, err := s.client.Get(ctx, enrollmentSessionPrefix+key).Bytes()
 	if errors.Is(err, redis.Nil) {
-		return nil, ErrEnrollmentSessionNotFound
+		return nil, false, "", ErrEnrollmentSessionNotFound
 	}
 	if err != nil {
-		return nil, err
+		return nil, false, "", err
 	}
-	handle, err := base64.RawURLEncoding.DecodeString(value)
+	var session redisEnrollmentSession
+	if err := json.Unmarshal(value, &session); err != nil {
+		return nil, false, "", ErrEnrollmentSessionNotFound
+	}
+	handle, err := base64.RawURLEncoding.DecodeString(session.Handle)
 	if err != nil {
-		return nil, ErrEnrollmentSessionNotFound
+		return nil, false, "", ErrEnrollmentSessionNotFound
 	}
-	return handle, nil
+	return handle, session.Recovery, session.ReturnTo, nil
 }
 
 // RedisRecoveryCeremonyStore shares recovery ceremonies between replicas.

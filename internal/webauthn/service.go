@@ -184,63 +184,73 @@ func (s *Service) BeginDiscoverableLogin(ctx context.Context) (*protocol.Credent
 // FinishDiscoverableLogin verifies the authenticator's discoverable assertion
 // response. The authenticator supplies the userHandle so no prior user identity
 // is needed. On success it persists the advanced signature counter and returns
-// the base64url-encoded userHandle as the resolved userID.
+// the base64url-encoded userHandle as the resolved userID, plus the resolved
+// user's recovery_required flag (docs/DESIGN.md §11.1) so callers can scope the
+// resulting session correctly instead of defaulting to full access.
 //
 // Unknown/invalid user handles fail closed with a generic error (§6.5).
 // Clone detection (sign-count regression) is preserved: CloneWarning triggers
 // ErrClonedAuthenticator and the counter is NOT updated.
-func (s *Service) FinishDiscoverableLogin(ctx context.Context, sessionKey string, body io.Reader) (userID string, cred *gowebauthn.Credential, err error) {
+func (s *Service) FinishDiscoverableLogin(ctx context.Context, sessionKey string, body io.Reader) (userID string, recoveryRequired bool, cred *gowebauthn.Credential, err error) {
 	session, err := s.sessions.Take(ctx, sessionKey)
 	if err != nil {
-		return "", nil, err
+		return "", false, nil, err
 	}
 	parsed, err := protocol.ParseCredentialRequestResponseBody(body)
 	if err != nil {
-		return "", nil, err
+		return "", false, nil, err
 	}
+	var resolved User
 	handler := func(rawID, userHandle []byte) (gowebauthn.User, error) {
-		return s.store.GetUser(ctx, userHandle)
+		u, err := s.store.GetUser(ctx, userHandle)
+		if err != nil {
+			return nil, err
+		}
+		resolved = u
+		return u, nil
 	}
 	user, credential, err := s.wa.ValidatePasskeyLogin(handler, session, parsed)
 	if err != nil {
-		return "", nil, err
+		return "", false, nil, err
 	}
 	if credential.Authenticator.CloneWarning {
-		return "", nil, ErrClonedAuthenticator
+		return "", false, nil, ErrClonedAuthenticator
 	}
 	if err := s.store.UpdateCredential(ctx, user.WebAuthnID(), *credential); err != nil {
-		return "", nil, err
+		return "", false, nil, err
 	}
-	return base64.RawURLEncoding.EncodeToString(user.WebAuthnID()), credential, nil
+	return base64.RawURLEncoding.EncodeToString(user.WebAuthnID()), resolved.RecoveryRequired(), credential, nil
 }
 
 // FinishLogin verifies the authenticator's assertion response. On success it
-// persists the advanced signature counter; if the counter regressed it fails
-// closed with ErrClonedAuthenticator and does NOT update the stored counter.
-func (s *Service) FinishLogin(ctx context.Context, userID []byte, sessionKey string, body io.Reader) (*gowebauthn.Credential, error) {
+// persists the advanced signature counter and returns the user's
+// recovery_required flag alongside the credential; if the counter regressed it
+// fails closed with ErrClonedAuthenticator and does NOT update the stored
+// counter.
+func (s *Service) FinishLogin(ctx context.Context, userID []byte, sessionKey string, body io.Reader) (cred *gowebauthn.Credential, recoveryRequired bool, err error) {
 	user, err := s.store.GetUser(ctx, userID)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	session, err := s.sessions.Take(ctx, sessionKey)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	parsed, err := protocol.ParseCredentialRequestResponseBody(body)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	cred, err := s.wa.ValidateLogin(user, session, parsed)
+	assertedCred, err := s.wa.ValidateLogin(user, session, parsed)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	if cred.Authenticator.CloneWarning {
-		return nil, ErrClonedAuthenticator
+	if assertedCred.Authenticator.CloneWarning {
+		return nil, false, ErrClonedAuthenticator
 	}
-	if err := s.store.UpdateCredential(ctx, userID, *cred); err != nil {
-		return nil, err
+	if err := s.store.UpdateCredential(ctx, userID, *assertedCred); err != nil {
+		return nil, false, err
 	}
-	return cred, nil
+	return assertedCred, user.RecoveryRequired(), nil
 }
 
 // persistSession stores the registration session under a fresh key and returns

@@ -19,16 +19,19 @@ type WebAuthnService interface {
 	BeginLogin(ctx context.Context, userID []byte) (*protocol.CredentialAssertion, string, error)
 	// FinishLogin completes the assertion ceremony. The sessionKey is the opaque
 	// key returned by BeginLogin (echoed via cookie). Returns the authenticated
-	// user's internal ID on success.
-	FinishLogin(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (userID string, err error)
+	// user's internal ID and their current recovery_required status on success,
+	// so the caller can scope the resulting BFF session correctly instead of
+	// defaulting to full access.
+	FinishLogin(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (userID string, recoveryRequired bool, err error)
 	// BeginDiscoverableLogin starts a discoverable (passkey/usernameless) assertion
 	// ceremony. No user identity is required — the authenticator returns the
 	// userHandle in its response. Returns assertion options and a session key.
 	BeginDiscoverableLogin(ctx context.Context) (*protocol.CredentialAssertion, string, error)
 	// FinishDiscoverableLogin completes a discoverable assertion ceremony. The
 	// userHandle from the authenticator response is used to identify the user;
-	// no prior user identity is needed. Returns the resolved userID.
-	FinishDiscoverableLogin(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (userID string, err error)
+	// no prior user identity is needed. Returns the resolved userID and their
+	// current recovery_required status (see FinishLogin).
+	FinishDiscoverableLogin(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (userID string, recoveryRequired bool, err error)
 }
 
 // UserResolver looks up a user's WebAuthn user handle ([]byte) from the BFF
@@ -307,11 +310,12 @@ func (h *LoginHandler) FinishLoginWithParsedData(w http.ResponseWriter, r *http.
 	// (the authenticator identifies the user via userHandle); known-user path uses
 	// FinishLogin as before.
 	var userID string
+	var recoveryRequired bool
 	var err error
 	if _, ok := h.userResolver.(DiscoverableUserResolver); ok {
-		userID, err = h.webauthn.FinishDiscoverableLogin(r.Context(), sessionKey, parsedResponse)
+		userID, recoveryRequired, err = h.webauthn.FinishDiscoverableLogin(r.Context(), sessionKey, parsedResponse)
 	} else {
-		userID, err = h.webauthn.FinishLogin(r.Context(), sessionKey, parsedResponse)
+		userID, recoveryRequired, err = h.webauthn.FinishLogin(r.Context(), sessionKey, parsedResponse)
 	}
 	if err != nil {
 		// Don't leak details — collapse to generic error
@@ -319,8 +323,15 @@ func (h *LoginHandler) FinishLoginWithParsedData(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Write the authenticated user_id to the BFF session
-	if err := h.sessions.SetUser(r.Context(), requestID, userID); err != nil {
+	// Write the authenticated user_id AND the real recovery_required status to
+	// the BFF session in one atomic update. Using the plain SetUser here would
+	// leave SessionScope at its Go zero value (""), which never equals
+	// SessionScopeFull — every returning user would then fail RequireFullScope
+	// on every full-scope-gated route regardless of their actual recovery
+	// status. SetUserWithRecoveryStatus stamps SessionScope from the ceremony's
+	// own recovery_required lookup instead, matching the scope every other
+	// session-issuing path in this package already produces.
+	if err := h.sessions.SetUserWithRecoveryStatus(r.Context(), requestID, userID, recoveryRequired); err != nil {
 		writeLoginError(w, http.StatusInternalServerError, "server_error", "could not update session")
 		return
 	}

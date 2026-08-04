@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-08-03
+goal: Ship a public, passkey-first /signup and /signin entry point at
+  auth.harborauth.com by composing already-shipped enrollment, WebAuthn, BFF
+  session-binding, consent, recovery-required, and discoverable-login
+  primitives — no parallel identity system, no revived user_id parameter.

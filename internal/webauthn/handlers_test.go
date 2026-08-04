@@ -2,6 +2,7 @@ package webauthn
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -50,17 +51,19 @@ const testEnrollKey = "test-enroll-key"
 
 // fakeEnrollmentSessionStore is an in-memory enrollment session store for tests.
 // It resolves every key to userHandle (or returns err, simulating an expired or
-// unknown session).
+// unknown session). recovery mirrors what a POST /recovery/complete session
+// would report, letting tests exercise the register/finish recovery branch.
 type fakeEnrollmentSessionStore struct {
 	userHandle []byte
+	recovery   bool
 	err        error
 }
 
-func (f *fakeEnrollmentSessionStore) UserHandle(_ context.Context, _ string) ([]byte, error) {
+func (f *fakeEnrollmentSessionStore) UserHandle(_ context.Context, _ string) ([]byte, bool, string, error) {
 	if f.err != nil {
-		return nil, f.err
+		return nil, false, "", f.err
 	}
-	return f.userHandle, nil
+	return f.userHandle, f.recovery, "", nil
 }
 
 // enrollReq builds a ceremony request carrying the enrollment session cookie so
@@ -317,6 +320,63 @@ func TestHandler_EnrollmentSession_ReadsUserHandle(t *testing.T) {
 
 	if rec.Result().StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Result().StatusCode, rec.Body.String())
+	}
+}
+
+// TestHandler_FinishRegistration_RecoverySession_ClearsRecoveryRequired proves
+// that register/finish routes a recovery-flagged enrollment session (the
+// handoff set by POST /recovery/complete) through svc.FinishRecoveryRegistration
+// rather than svc.FinishRegistration. Before this routing existed,
+// FinishRecoveryRegistration was dead code and a user who completed the
+// lost-device recovery ceremony could never clear recovery_required, so this
+// drives a full ceremony (real go-webauthn challenge/signature verification,
+// forged authenticator response) and asserts the store observed the
+// recovery-clearing call, not just a 200 status (which both paths would return).
+func TestHandler_FinishRegistration_RecoverySession_ClearsRecoveryRequired(t *testing.T) {
+	const handle = "recovering-user"
+	store := NewInMemoryStore()
+	store.PutUser(NewUser([]byte(handle), "user@example.com", "User", nil))
+	sessions := NewInMemorySessionStore()
+	svc, err := NewService(testConfig(), store, sessions)
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+
+	handler := mustNewHandler(svc, &fakeEnrollmentSessionStore{userHandle: []byte(handle), recovery: true})
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+
+	beginRec := httptest.NewRecorder()
+	mux.ServeHTTP(beginRec, enrollReq(http.MethodPost, "/webauthn/register/begin", nil))
+	if beginRec.Result().StatusCode != http.StatusOK {
+		t.Fatalf("begin status = %d, want 200; body=%s", beginRec.Result().StatusCode, beginRec.Body.String())
+	}
+	var opts struct {
+		PublicKey struct {
+			Challenge string `json:"challenge"`
+		} `json:"publicKey"`
+	}
+	if err := json.Unmarshal(beginRec.Body.Bytes(), &opts); err != nil {
+		t.Fatalf("parse begin response: %v", err)
+	}
+
+	body, err := forgeAttestationBody(testConfig().RPID, testConfig().RPOrigins[0], opts.PublicKey.Challenge)
+	if err != nil {
+		t.Fatalf("forge attestation: %v", err)
+	}
+
+	finishReq := enrollReq(http.MethodPost, "/webauthn/register/finish", body)
+	for _, c := range beginRec.Result().Cookies() {
+		finishReq.AddCookie(c)
+	}
+	finishRec := httptest.NewRecorder()
+	mux.ServeHTTP(finishRec, finishReq)
+
+	if finishRec.Result().StatusCode != http.StatusOK {
+		t.Fatalf("finish status = %d, want 200; body=%s", finishRec.Result().StatusCode, finishRec.Body.String())
+	}
+	if !store.RecoveryCleared([]byte(handle)) {
+		t.Fatal("recovery_required was not cleared: register/finish must call svc.FinishRecoveryRegistration for a recovery session")
 	}
 }
 

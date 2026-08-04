@@ -69,7 +69,15 @@ func assertPublicLoginRoute(t *testing.T, objects []object) {
 		t.Fatal("public ingress rule is not a map")
 	}
 	paths := pathSlice(t, pathMap(t, rule, "http"), "paths")
-	want := map[string]string{"/login": "harbor-mgmt", "/": "harbor-hot"}
+	want := map[string]string{
+		"/login":    "harbor-mgmt",
+		"/signup":   "harbor-mgmt",
+		"/signin":   "harbor-mgmt",
+		"/enroll":   "harbor-mgmt",
+		"/webauthn": "harbor-mgmt",
+		"/recovery": "harbor-mgmt",
+		"/":         "harbor-hot",
+	}
 	for _, item := range paths {
 		path, ok := asObject(item)
 		if !ok {

@@ -18,9 +18,9 @@ import (
 // mockWebAuthnService implements WebAuthnService for testing.
 type mockWebAuthnService struct {
 	beginLoginFunc             func(ctx context.Context, userID []byte) (*protocol.CredentialAssertion, string, error)
-	finishLoginFunc            func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, error)
+	finishLoginFunc            func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, bool, error)
 	beginDiscoverableLoginFunc func(ctx context.Context) (*protocol.CredentialAssertion, string, error)
-	finishDiscoverableFunc     func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, error)
+	finishDiscoverableFunc     func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, bool, error)
 }
 
 func (m *mockWebAuthnService) BeginLogin(ctx context.Context, userID []byte) (*protocol.CredentialAssertion, string, error) {
@@ -34,11 +34,11 @@ func (m *mockWebAuthnService) BeginLogin(ctx context.Context, userID []byte) (*p
 	}, "test-session-key", nil
 }
 
-func (m *mockWebAuthnService) FinishLogin(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, error) {
+func (m *mockWebAuthnService) FinishLogin(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, bool, error) {
 	if m.finishLoginFunc != nil {
 		return m.finishLoginFunc(ctx, sessionKey, response)
 	}
-	return "authenticated-user-id", nil
+	return "authenticated-user-id", false, nil
 }
 
 func (m *mockWebAuthnService) BeginDiscoverableLogin(ctx context.Context) (*protocol.CredentialAssertion, string, error) {
@@ -52,11 +52,11 @@ func (m *mockWebAuthnService) BeginDiscoverableLogin(ctx context.Context) (*prot
 	}, "discoverable-session-key", nil
 }
 
-func (m *mockWebAuthnService) FinishDiscoverableLogin(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, error) {
+func (m *mockWebAuthnService) FinishDiscoverableLogin(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, bool, error) {
 	if m.finishDiscoverableFunc != nil {
 		return m.finishDiscoverableFunc(ctx, sessionKey, response)
 	}
-	return "discoverable-user-id", nil
+	return "discoverable-user-id", false, nil
 }
 
 // mockUserResolver implements UserResolver for testing.
@@ -513,9 +513,9 @@ func TestLoginHandler_FinishLoginWithParsedData_MissingBrowserNonceHash(t *testi
 
 	var finishLoginCalled bool
 	webauthn := &mockWebAuthnService{
-		finishLoginFunc: func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, error) {
+		finishLoginFunc: func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, bool, error) {
 			finishLoginCalled = true
-			return "authenticated-user-id", nil
+			return "authenticated-user-id", false, nil
 		},
 	}
 	handler := NewLoginHandler(store, webauthn, &mockUserResolver{}, "http://localhost:8080/authorize/complete")
@@ -626,6 +626,9 @@ func TestLoginHandler_FinishLogin_HappyPath(t *testing.T) {
 	}
 	if updatedSession.AuthMethod != oidc.AuthMethodWebAuthn {
 		t.Errorf("session.AuthMethod = %q, want %q", updatedSession.AuthMethod, oidc.AuthMethodWebAuthn)
+	}
+	if updatedSession.SessionScope != SessionScopeFull {
+		t.Errorf("session.SessionScope = %q, want %q", updatedSession.SessionScope, SessionScopeFull)
 	}
 }
 
@@ -772,10 +775,10 @@ func TestLoginHandler_FinishLogin_Discoverable_HappyPath(t *testing.T) {
 	var finishDiscoverableCalled bool
 	var gotSessionKey string
 	webauthn := &mockWebAuthnService{
-		finishDiscoverableFunc: func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, error) {
+		finishDiscoverableFunc: func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, bool, error) {
 			finishDiscoverableCalled = true
 			gotSessionKey = sessionKey
-			return "discoverable-resolved-user", nil
+			return "discoverable-resolved-user", false, nil
 		},
 	}
 
@@ -810,6 +813,16 @@ func TestLoginHandler_FinishLogin_Discoverable_HappyPath(t *testing.T) {
 	if updatedSession.AuthMethod != oidc.AuthMethodWebAuthn {
 		t.Errorf("session.AuthMethod = %q, want %q", updatedSession.AuthMethod, oidc.AuthMethodWebAuthn)
 	}
+	// A returning user with no pending recovery requirement must land in
+	// SessionScopeFull — not the Go zero value "" — or every RequireFullScope
+	// route (dashboard, /signup/success, ...) rejects them despite having no
+	// recovery gate pending (task 19 regression).
+	if updatedSession.SessionScope != SessionScopeFull {
+		t.Errorf("session.SessionScope = %q, want %q", updatedSession.SessionScope, SessionScopeFull)
+	}
+	if updatedSession.RecoveryRequired {
+		t.Error("session.RecoveryRequired = true, want false")
+	}
 
 	// WebAuthn session cookie must be cleared.
 	for _, c := range rec.Result().Cookies() {
@@ -839,8 +852,8 @@ func TestLoginHandler_FinishLogin_Discoverable_Failure(t *testing.T) {
 	}
 
 	webauthn := &mockWebAuthnService{
-		finishDiscoverableFunc: func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, error) {
-			return "", errors.New("unknown userHandle")
+		finishDiscoverableFunc: func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, bool, error) {
+			return "", false, errors.New("unknown userHandle")
 		},
 	}
 
@@ -886,9 +899,9 @@ func TestLoginHandler_FinishLogin_Discoverable_NotCalledForKnownUser(t *testing.
 
 	var finishDiscoverableCalled bool
 	webauthn := &mockWebAuthnService{
-		finishDiscoverableFunc: func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, error) {
+		finishDiscoverableFunc: func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, bool, error) {
 			finishDiscoverableCalled = true
-			return "should-not-be-called", nil
+			return "should-not-be-called", false, nil
 		},
 	}
 
@@ -927,8 +940,8 @@ func TestLoginHandler_FinishLogin_WebAuthnFailure(t *testing.T) {
 	}
 
 	webauthn := &mockWebAuthnService{
-		finishLoginFunc: func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, error) {
-			return "", errors.New("verification failed")
+		finishLoginFunc: func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, bool, error) {
+			return "", false, errors.New("verification failed")
 		},
 	}
 

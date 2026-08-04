@@ -9,10 +9,13 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -201,6 +204,10 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("configure dashboard handler: %w", err)
 	}
+	signupHandler, err := bff.NewSignupHandler(dashboardTemplates, bffStore, auditRecorder, splitAndTrim(os.Getenv("RETURN_TO_ALLOWLIST")), logger)
+	if err != nil {
+		return fmt.Errorf("configure signup handler: %w", err)
+	}
 
 	initialAccessToken := os.Getenv("INITIAL_ACCESS_TOKEN")
 	if initialAccessToken == "" {
@@ -210,6 +217,15 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("configure management API: %w", err)
 	}
+	// Shared by both PostRecoveryComplete (lost-device recovery) and the
+	// post-registration handoff below (first-time signup): the two entry
+	// points into the exact same enrollment-only BFF session type.
+	enrollmentSessionIssuer := &recoverySessionIssuer{bffSessions: bffStore, enrollmentSessions: enrollmentSessions}
+	// Shared by both PostRecoveryAcknowledge and the post-registration handoff
+	// below (lost-device recovery's own register/finish): both refresh an
+	// already-issued BFF session to full scope in place once recovery_required
+	// is cleared, instead of minting a competing session.
+	recoverySessionRefresher := bffSessionScopeRefresher{bffSessions: bffStore}
 	mgmtServer.
 		WithCallerSource(bffCallerAdapter{}).
 		WithConsentStore(grantStore).
@@ -218,7 +234,11 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		WithInitialAccessToken(initialAccessToken).
 		RequireRegistrationAuthorization().
 		WithRecovery(recoveryManager, recoveryStore, recoveryService, recoveryCeremonies).
-		WithScopedSessionIssuer(&recoverySessionIssuer{bffSessions: bffStore, enrollmentSessions: enrollmentSessions}).
+		WithScopedSessionIssuer(enrollmentSessionIssuer).
+		WithRecoveryRequirementClearer(recoveryRequirementClearer{store: credentialStore}).
+		WithRecoveryStatusChecker(recoveryStatusChecker{q: q}).
+		WithRecoverySessionRefresher(recoverySessionRefresher).
+		WithEnrollmentCallerSource(bffEnrollmentCallerAdapter{}).
 		WithMFA(mfaService).
 		WithMFASessionStamper(bffMFASessionStamper{store: bffStore}).
 		WithCompliance(complianceDeps).
@@ -234,13 +254,32 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	mgmtServer.WithProductionAbuseProtection(recoveryAbuseProtection.endpoint, recoveryAbuseProtection.limiter)
 	mgmtServer.WithProductionAbuseProtection(enrollmentAbuseProtection.endpoint, enrollmentAbuseProtection.limiter)
 	mgmtServer.WithProductionAbuseProtection(registrationAbuseProtection.endpoint, registrationAbuseProtection.limiter)
+	// The WebAuthn ceremony endpoints sit directly behind the public signup/
+	// signin surface and, unlike /enroll, /register, /mfa/* and /recovery/*,
+	// have never had rate-limit coverage. webauthn.Handler is a separate,
+	// Server-less package (no abuseGate seam), so each route is wrapped
+	// individually below instead of going through WithProductionAbuseProtection.
+	webauthnRegisterBeginAbuseProtection := newMgmtLimiter(redisClient, "webauthn_register_begin", 20, time.Minute, logger)
+	webauthnRegisterFinishAbuseProtection := newMgmtLimiter(redisClient, "webauthn_register_finish", 20, time.Minute, logger)
+	webauthnLoginBeginAbuseProtection := newMgmtLimiter(redisClient, "webauthn_login_begin", 30, time.Minute, logger)
+	webauthnLoginFinishAbuseProtection := newMgmtLimiter(redisClient, "webauthn_login_finish", 30, time.Minute, logger)
 
 	mux := httpserver.NewHealthMux()
 	webauthnHandler, err := webauthn.NewHandler(webauthnService, enrollmentSessions)
 	if err != nil {
 		return fmt.Errorf("configure WebAuthn handler: %w", err)
 	}
-	webauthnHandler.RegisterRoutes(mux)
+	mux.Handle("POST /webauthn/register/begin", wrapPreSessionRoute(webauthnHandler.BeginRegistration, webauthnRegisterBeginAbuseProtection.limiter, maxWebauthnCeremonyBody))
+	// Post-registration handoff wraps the FULL existing CSRF+ratelimit+ceremony
+	// chain so a first successful passkey registration immediately lands the
+	// new user in the same enrollment-only BFF session type PostRecoveryComplete
+	// produces (see wirePostRegistrationHandoff, caller.go).
+	mux.Handle("POST /webauthn/register/finish", wirePostRegistrationHandoff(
+		wrapPreSessionRoute(webauthnHandler.FinishRegistration, webauthnRegisterFinishAbuseProtection.limiter, maxWebauthnCeremonyBody),
+		enrollmentSessions, enrollmentSessionIssuer, recoverySessionRefresher, logger,
+	))
+	mux.Handle("POST /webauthn/login/begin", wrapPreSessionRoute(webauthnHandler.BeginLogin, webauthnLoginBeginAbuseProtection.limiter, maxWebauthnCeremonyBody))
+	mux.Handle("POST /webauthn/login/finish", wrapPreSessionRoute(webauthnHandler.FinishLogin, webauthnLoginFinishAbuseProtection.limiter, maxWebauthnCeremonyBody))
 	mgmtServer.Routes(mux)
 	dashboardHandler.Routes(mux)
 	if cloudIntegrationEnabled {
@@ -256,9 +295,15 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		cloudKeysHandler := cloudapi.NewKeysHandler(cloudVerifier, cloudHotInternalURL, cloudHotProxyToken, nil)
 		registerCloudAPIRoutes(mux, cloudVerifier, cloudStore, cloudKeysHandler, newCloudAPILimiters(redisClient, logger))
 	}
+	signupHandler.Routes(mux)
 	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(webauthnService), bff.DiscoverableUserResolver{}, authorizeCompleteURL)
 	mux.HandleFunc("GET /login", loginHandler.BeginLogin)
 	mux.HandleFunc("POST /login/complete", loginHandler.FinishLogin)
+	signinHandler, err := bff.NewSigninHandler(bffStore, dashboardTemplates, bffSessionTTL, splitAndTrim(os.Getenv("RETURN_TO_ALLOWLIST")), logger)
+	if err != nil {
+		return fmt.Errorf("configure signin handler: %w", err)
+	}
+	mux.HandleFunc("GET /signin", signinHandler.ServeSignin)
 	handler := bff.Middleware(bffStore)(requireSensitiveManagementStepUp(bff.NewStepUpGate(bffStore, bff.DefaultStepUpTTL), mux))
 	regionName := os.Getenv("REGION")
 	if regionName == "" {
@@ -379,6 +424,47 @@ func newMgmtLimiter(client *redis.Client, endpoint string, limit int, window tim
 			Window:    window,
 		}, logger),
 	}
+}
+
+// maxWebauthnCeremonyBody bounds the request body of every WebAuthn ceremony
+// route the same way maxEnrollBody bounds POST /enroll (docs/DESIGN.md §6.5).
+// The begin endpoints read no body at all; the finish endpoints decode an
+// attestation/assertion response, which comfortably fits well under this cap.
+const maxWebauthnCeremonyBody = 16 * 1024
+
+// wrapPreSessionRoute applies the shared pre-session Origin/CSRF check
+// (bff.PreSessionCSRF), a per-route abuse limiter, and a bounded body to a
+// WebAuthn ceremony route. These routes run before the enrollment-session
+// cookie authenticates anything and, unlike the mgmtapi Server routes, have no
+// abuseGate seam of their own, so all three defenses are composed here at the
+// routing layer instead.
+func wrapPreSessionRoute(next http.HandlerFunc, limiter clients.RateLimiter, maxBody int64) http.Handler {
+	bounded := func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
+		allowed, retryAfter, err := limiter.Allow(r.Context(), remoteAddrKey(r))
+		if err != nil || !allowed {
+			if retryAfter > 0 {
+				w.Header().Set("Retry-After", fmt.Sprintf("%d", int(retryAfter.Seconds())))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":"rate_limited","message":"too many requests"}`))
+			return
+		}
+		next(w, r)
+	}
+	return bff.PreSessionCSRF(http.HandlerFunc(bounded))
+}
+
+// remoteAddrKey derives a rate-limit key from the caller's IP without storing
+// the IP itself in Redis (docs/DESIGN.md §6.5 — no PII at rest).
+func remoteAddrKey(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || host == "" {
+		host = r.RemoteAddr
+	}
+	digest := sha256.Sum256([]byte(host))
+	return hex.EncodeToString(digest[:])
 }
 
 func validateProductionURL(name, raw string) error {

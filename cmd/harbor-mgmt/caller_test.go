@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,8 +14,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
+
 	"github.com/harbor-auth/harbor/internal/bff"
 	"github.com/harbor-auth/harbor/internal/clients"
+	"github.com/harbor-auth/harbor/internal/gen/db"
 	"github.com/harbor-auth/harbor/internal/identity"
 	"github.com/harbor-auth/harbor/internal/mgmtapi"
 	bfftest "github.com/harbor-auth/harbor/internal/testsupport/bff"
@@ -146,7 +152,8 @@ func TestRecoverySessionIssuerBindsBFFAndEnrollmentRecords(t *testing.T) {
 	}
 
 	const userID = "550e8400-e29b-41d4-a716-446655440000"
-	token, err := issuer.IssueEnrollmentSession(ctx, userID)
+	const returnTo = "/dashboard/after-signup"
+	token, err := issuer.IssueEnrollmentSession(ctx, userID, returnTo)
 	if err != nil {
 		t.Fatalf("IssueEnrollmentSession: %v", err)
 	}
@@ -157,7 +164,10 @@ func TestRecoverySessionIssuerBindsBFFAndEnrollmentRecords(t *testing.T) {
 	if record.UserID != userID || !record.RecoveryRequired || record.SessionScope != bff.SessionScopeEnrollmentOnly {
 		t.Fatalf("BFF session = %+v, want enrollment-only recovery session for %q", record, userID)
 	}
-	handle, err := enrollmentSessions.UserHandle(ctx, token)
+	if record.ReturnTo != returnTo {
+		t.Fatalf("BFF session ReturnTo = %q, want %q", record.ReturnTo, returnTo)
+	}
+	handle, recovery, gotReturnTo, err := enrollmentSessions.UserHandle(ctx, token)
 	if err != nil {
 		t.Fatalf("enrollment session UserHandle: %v", err)
 	}
@@ -165,6 +175,485 @@ func TestRecoverySessionIssuerBindsBFFAndEnrollmentRecords(t *testing.T) {
 	if !bytes.Equal(handle, wantHandle[:]) {
 		t.Fatalf("user handle = %x, want UUID bytes %x", handle, wantHandle[:])
 	}
+	if !recovery {
+		t.Fatal("enrollment session recovery = false, want true: register/finish must route through svc.FinishRecoveryRegistration")
+	}
+	if gotReturnTo != returnTo {
+		t.Fatalf("enrollment session ReturnTo = %q, want %q", gotReturnTo, returnTo)
+	}
+}
+
+// TestPostRegistrationHandoffAndRecoveryGating_EndToEnd is the composed
+// regression test for Task 3's "Done when" criteria: it wires the SAME
+// collaborators main.go wires (bff.Middleware, wirePostRegistrationHandoff,
+// mgmtapi.Server with the new recovery-completion pieces) against in-memory
+// stores and drives the full journey a browser would:
+//
+//  1. POST /webauthn/register/finish succeeds (simulated) → the
+//     post-registration handoff lands the caller in an enrollment-only BFF
+//     session, mirroring PostRecoveryComplete.
+//  2. That session is refused by a bff.RequireFullScope route with the
+//     existing generic 403 — recovery setup is not done yet.
+//  3. POST /recovery/acknowledge (available under enrollment-only scope via
+//     bffEnrollmentCallerAdapter) succeeds.
+//  4. The SAME cookie now passes the bff.RequireFullScope route — no fresh
+//     sign-in required.
+func TestPostRegistrationHandoffAndRecoveryGating_EndToEnd(t *testing.T) {
+	ctx := context.Background()
+	const userID = "550e8400-e29b-41d4-a716-446655440000"
+	handle := uuid.MustParse(userID)
+
+	bffSessions := bfftest.NewInMemoryBFFSessionStore()
+	enrollmentSessions := mgmtapitest.NewInMemoryEnrollmentSessionStore()
+	if err := enrollmentSessions.Save(ctx, "enroll-key", handle[:], false, ""); err != nil {
+		t.Fatalf("seed enrollment session: %v", err)
+	}
+	issuer := &recoverySessionIssuer{bffSessions: bffSessions, enrollmentSessions: enrollmentSessions}
+	refresher := bffSessionScopeRefresher{bffSessions: bffSessions}
+
+	fakeFinish := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"registered"}`))
+	})
+	finishRoute := wirePostRegistrationHandoff(fakeFinish, enrollmentSessions, issuer, refresher, discardLogger())
+
+	mgmtServer := newCallerTestServer(t)
+	mgmtServer.
+		WithCallerSource(bffCallerAdapter{}).
+		WithRecoveryRequirementClearer(recoveryRequirementClearer{store: &fakeRecoveryCompleteStore{}}).
+		WithRecoverySessionRefresher(bffSessionScopeRefresher{bffSessions: bffSessions}).
+		WithEnrollmentCallerSource(bffEnrollmentCallerAdapter{})
+
+	mux := http.NewServeMux()
+	mux.Handle("POST /webauthn/register/finish", finishRoute)
+	mgmtServer.Routes(mux)
+	mux.Handle("GET /dashboard-ish", bff.RequireFullScope(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+	handler := bff.Middleware(bffSessions)(mux)
+
+	// Step 1: first successful passkey registration.
+	req := httptest.NewRequest(http.MethodPost, "/webauthn/register/finish", nil)
+	req.AddCookie(&http.Cookie{Name: mgmtapi.EnrollmentSessionCookieName, Value: "enroll-key"})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("register/finish status = %d, want 200", rec.Code)
+	}
+	var bffCookie *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == bff.CookieName {
+			bffCookie = c
+		}
+	}
+	if bffCookie == nil {
+		t.Fatalf("register/finish response set no %s cookie; got %+v", bff.CookieName, rec.Result().Cookies())
+	}
+
+	// Step 2: the enrollment-only session is refused by RequireFullScope.
+	req = httptest.NewRequest(http.MethodGet, "/dashboard-ish", nil)
+	req.AddCookie(bffCookie)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("RequireFullScope before recovery setup: status = %d, want 403", rec.Code)
+	}
+
+	// Step 3: complete the mandatory recovery step.
+	req = httptest.NewRequest(http.MethodPost, "/recovery/acknowledge", strings.NewReader("{}"))
+	req.AddCookie(bffCookie)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /recovery/acknowledge status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Step 4: the SAME cookie now passes RequireFullScope.
+	req = httptest.NewRequest(http.MethodGet, "/dashboard-ish", nil)
+	req.AddCookie(bffCookie)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("RequireFullScope after recovery setup: status = %d, want 200", rec.Code)
+	}
+}
+
+// TestPostRegistrationHandoff_LostDeviceRecovery_DoesNotReArmRecoveryRequired
+// is the regression test for the interaction between Task 3's post-
+// registration handoff and Task 12's fix routing a lost-device recovery
+// ceremony's register/finish through svc.FinishRecoveryRegistration.
+//
+// wirePostRegistrationHandoff fires on EVERY successful register/finish, first
+// signup and lost-device recovery alike. Before this fix it always called
+// ScopedSessionIssuer.IssueEnrollmentSession, which unconditionally mints a
+// BRAND NEW SessionScopeEnrollmentOnly/RecoveryRequired=true BFF session —
+// even when the request that just completed IS the lost-device recovery
+// ceremony that cleared users.recovery_required moments earlier. That defeats
+// the DB clear for the session the browser is actually holding: the same
+// request that proved recovery re-arms the enrollment-only gate, sending the
+// user straight back into /signup/recovery.
+//
+// This test seeds the SAME enrollment-only/recovery-required BFF+enrollment
+// session pair POST /recovery/complete produces (recovery=true), drives a
+// simulated successful register/finish through the real wirePostRegistrationHandoff,
+// and asserts the ORIGINAL cookie — not a freshly minted one — passes
+// bff.RequireFullScope immediately afterward, matching REQ-003's spec
+// scenario ("a later RequireFullScope route succeeds for that user") and
+// user-account-recovery's REQ-003 ("deny every other surface... until
+// recovery_required is cleared" — implying access resumes once it is).
+func TestPostRegistrationHandoff_LostDeviceRecovery_DoesNotReArmRecoveryRequired(t *testing.T) {
+	ctx := context.Background()
+	const userID = "550e8400-e29b-41d4-a716-446655440000"
+	handle := uuid.MustParse(userID)
+	const recoveryToken = "recovery-scoped-token"
+
+	bffSessions := bfftest.NewInMemoryBFFSessionStore()
+	enrollmentSessions := mgmtapitest.NewInMemoryEnrollmentSessionStore()
+
+	// Seed exactly what a prior, successful POST /recovery/complete leaves
+	// behind: an enrollment-only/recovery-required BFF session AND an
+	// enrollment-session handoff record with recovery=true, both keyed by the
+	// same opaque token (recoverySessionIssuer.IssueEnrollmentSession's
+	// contract).
+	if err := bffSessions.Create(ctx, bff.BFFSessionRecord{
+		RequestID:        recoveryToken,
+		UserID:           userID,
+		SessionScope:     bff.SessionScopeEnrollmentOnly,
+		RecoveryRequired: true,
+		ExpiresAt:        time.Now().Add(10 * time.Minute),
+	}); err != nil {
+		t.Fatalf("seed recovery-scoped BFF session: %v", err)
+	}
+	if err := enrollmentSessions.Save(ctx, recoveryToken, handle[:], true, ""); err != nil {
+		t.Fatalf("seed recovery enrollment handoff: %v", err)
+	}
+
+	// The wrapped ceremony handler simulates a successful register/finish that
+	// routed to svc.FinishRecoveryRegistration (Task 12): it reports 200 and,
+	// in production, users.recovery_required is now false in the DB.
+	fakeFinish := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"registered"}`))
+	})
+	issuer := &recordingScopedSessionIssuer{token: "should-not-be-issued"}
+	refresher := bffSessionScopeRefresher{bffSessions: bffSessions}
+	finishRoute := wirePostRegistrationHandoff(fakeFinish, enrollmentSessions, issuer, refresher, discardLogger())
+
+	mux := http.NewServeMux()
+	mux.Handle("POST /webauthn/register/finish", finishRoute)
+	mux.Handle("GET /dashboard-ish", bff.RequireFullScope(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})))
+	handler := bff.Middleware(bffSessions)(mux)
+
+	// Drive the recovery ceremony's register/finish carrying the recovery-
+	// scoped cookie pair a browser would present at this point.
+	req := httptest.NewRequest(http.MethodPost, "/webauthn/register/finish", nil)
+	req.AddCookie(&http.Cookie{Name: mgmtapi.EnrollmentSessionCookieName, Value: recoveryToken})
+	req.AddCookie(&http.Cookie{Name: bff.CookieName, Value: recoveryToken})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("register/finish status = %d, want 200", rec.Code)
+	}
+
+	if issuer.called {
+		t.Error("a lost-device recovery register/finish must not mint a brand new enrollment-only session — it must refresh the existing one in place")
+	}
+	for _, c := range rec.Result().Cookies() {
+		if (c.Name == mgmtapi.RecoveryScopedSessionCookieName || c.Name == mgmtapi.EnrollmentSessionCookieName) && c.Value != recoveryToken {
+			t.Errorf("register/finish set %s=%q, want no cookie overwrite (still %q, the existing recovery session's own token)", c.Name, c.Value, recoveryToken)
+		}
+	}
+
+	// The ORIGINAL cookie (no fresh sign-in, no newly minted token) must now
+	// pass RequireFullScope: the recovery ceremony that just cleared
+	// recovery_required must not have re-armed it for this same session.
+	req = httptest.NewRequest(http.MethodGet, "/dashboard-ish", nil)
+	req.AddCookie(&http.Cookie{Name: bff.CookieName, Value: recoveryToken})
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("RequireFullScope after lost-device recovery register/finish: status = %d, want 200 (recovery_required must not be re-armed)", rec.Code)
+	}
+}
+
+func TestRecoveryRequirementClearer_AdaptsSetRecoveryComplete(t *testing.T) {
+	store := &fakeRecoveryCompleteStore{}
+	c := recoveryRequirementClearer{store: store}
+
+	const userID = "550e8400-e29b-41d4-a716-446655440000"
+	if err := c.ClearRecoveryRequired(context.Background(), userID); err != nil {
+		t.Fatalf("ClearRecoveryRequired: %v", err)
+	}
+	if string(store.gotUserID) != userID {
+		t.Fatalf("SetRecoveryComplete called with %q, want the canonical UUID text %q unchanged", store.gotUserID, userID)
+	}
+}
+
+type fakeRecoveryCompleteStore struct {
+	gotUserID []byte
+	err       error
+}
+
+func (f *fakeRecoveryCompleteStore) SetRecoveryComplete(_ context.Context, userID []byte) error {
+	f.gotUserID = userID
+	return f.err
+}
+
+// fakeRecoveryStatusQuerier is a test-only recoveryStatusQuerier standing in
+// for *db.Queries.
+type fakeRecoveryStatusQuerier struct {
+	user   db.User
+	err    error
+	gotID  pgtype.UUID
+	called bool
+}
+
+func (f *fakeRecoveryStatusQuerier) GetUser(_ context.Context, id pgtype.UUID) (db.User, error) {
+	f.called = true
+	f.gotID = id
+	if f.err != nil {
+		return db.User{}, f.err
+	}
+	return f.user, nil
+}
+
+// TestRecoveryStatusChecker_ReadsUserRecoveryRequired proves the adapter reads
+// recovery_required straight from the users table row — the same row
+// recoveryRequirementClearer's SetRecoveryComplete writes — for both the
+// still-required and already-cleared cases.
+func TestRecoveryStatusChecker_ReadsUserRecoveryRequired(t *testing.T) {
+	const userID = "550e8400-e29b-41d4-a716-446655440000"
+
+	for _, tc := range []struct {
+		name     string
+		required bool
+	}{
+		{name: "still required", required: true},
+		{name: "already cleared", required: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := &fakeRecoveryStatusQuerier{user: db.User{RecoveryRequired: tc.required}}
+			c := recoveryStatusChecker{q: q}
+
+			got, err := c.IsRecoveryRequired(context.Background(), userID)
+			if err != nil {
+				t.Fatalf("IsRecoveryRequired: %v", err)
+			}
+			if got != tc.required {
+				t.Errorf("IsRecoveryRequired = %t, want %t", got, tc.required)
+			}
+			if !q.called {
+				t.Error("GetUser was not called")
+			}
+			if q.gotID.String() != "550e8400-e29b-41d4-a716-446655440000" {
+				t.Errorf("GetUser called with id = %v, want the parsed canonical UUID", q.gotID)
+			}
+		})
+	}
+}
+
+// TestRecoveryStatusChecker_PropagatesQueryError proves a lookup failure
+// propagates as-is (no partial/default answer) so callers can decide how to
+// fail (PostRecoveryCodes fails open, logging the error).
+func TestRecoveryStatusChecker_PropagatesQueryError(t *testing.T) {
+	q := &fakeRecoveryStatusQuerier{err: errors.New("db down")}
+	c := recoveryStatusChecker{q: q}
+
+	if _, err := c.IsRecoveryRequired(context.Background(), "550e8400-e29b-41d4-a716-446655440000"); err == nil {
+		t.Fatal("IsRecoveryRequired: expected an error, got nil")
+	}
+}
+
+// TestRecoveryStatusChecker_InvalidUserID proves a malformed userID is
+// rejected before ever reaching the querier.
+func TestRecoveryStatusChecker_InvalidUserID(t *testing.T) {
+	q := &fakeRecoveryStatusQuerier{}
+	c := recoveryStatusChecker{q: q}
+
+	if _, err := c.IsRecoveryRequired(context.Background(), "not-a-uuid"); err == nil {
+		t.Fatal("IsRecoveryRequired: expected an error for a malformed user id, got nil")
+	}
+	if q.called {
+		t.Error("GetUser must not be called for a malformed user id")
+	}
+}
+
+func TestBFFSessionScopeRefresher_UpdatesRecoveryStatus(t *testing.T) {
+	store := bfftest.NewInMemoryBFFSessionStore()
+	ctx := context.Background()
+	if err := store.Create(ctx, bff.BFFSessionRecord{
+		RequestID:        "sess-1",
+		UserID:           "user-1",
+		SessionScope:     bff.SessionScopeEnrollmentOnly,
+		RecoveryRequired: true,
+		ExpiresAt:        time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	r := bffSessionScopeRefresher{bffSessions: store}
+	if err := r.RefreshSessionScope(ctx, "sess-1", "user-1", false); err != nil {
+		t.Fatalf("RefreshSessionScope: %v", err)
+	}
+
+	record, err := store.Get(ctx, "sess-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if record.RecoveryRequired || record.SessionScope != bff.SessionScopeFull {
+		t.Fatalf("session = %+v, want RecoveryRequired=false SessionScope=full", record)
+	}
+}
+
+func TestBFFSessionScopeRefresher_MissingSessionIDFailsClosed(t *testing.T) {
+	r := bffSessionScopeRefresher{bffSessions: bfftest.NewInMemoryBFFSessionStore()}
+	if err := r.RefreshSessionScope(context.Background(), "", "user-1", false); err == nil {
+		t.Fatal("RefreshSessionScope(empty sessionID) = nil error, want error")
+	}
+}
+
+// TestBffEnrollmentCallerAdapter_ResolvesEnrollmentOnlySession proves the
+// enrollment-scoped adapter — unlike bffCallerAdapter — resolves the caller
+// even under SessionScopeEnrollmentOnly, since it is wired ONLY to the two
+// recovery-setup endpoints that are explicitly safe under that scope.
+func TestBffEnrollmentCallerAdapter_ResolvesEnrollmentOnlySession(t *testing.T) {
+	ctx := bff.ContextWithUserID(context.Background(), "recovering-user")
+	ctx = bff.ContextWithSessionScope(ctx, bff.SessionScopeEnrollmentOnly)
+	if got := (bffEnrollmentCallerAdapter{}).CallerID(ctx); got != "recovering-user" {
+		t.Fatalf("CallerID(enrollment-only session) = %q, want %q", got, "recovering-user")
+	}
+}
+
+// TestWirePostRegistrationHandoff_IssuesSessionOnlyOn200 proves the handoff
+// wrapper fires ScopedSessionIssuer.IssueEnrollmentSession exactly when the
+// wrapped ceremony handler reports success, resolving the user id from the
+// SAME enrollment-session cookie the ceremony itself reads.
+func TestWirePostRegistrationHandoff_IssuesSessionOnlyOn200(t *testing.T) {
+	const userID = "550e8400-e29b-41d4-a716-446655440000"
+	handle := uuid.MustParse(userID)
+
+	newHandoff := func(status int) (http.Handler, *mgmtapitest.InMemoryEnrollmentSessionStore, *recordingScopedSessionIssuer) {
+		sessions := mgmtapitest.NewInMemoryEnrollmentSessionStore()
+		if err := sessions.Save(context.Background(), "enroll-key", handle[:], false, "/dashboard/after-signup"); err != nil {
+			t.Fatalf("seed enrollment session: %v", err)
+		}
+		issuer := &recordingScopedSessionIssuer{token: "issued-token"}
+		next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(status) })
+		h := wirePostRegistrationHandoff(next, sessions, issuer, nil, discardLogger())
+		return h, sessions, issuer
+	}
+
+	t.Run("200 issues the enrollment session and cookies", func(t *testing.T) {
+		h, _, issuer := newHandoff(http.StatusOK)
+		req := httptest.NewRequest(http.MethodPost, "/webauthn/register/finish", nil)
+		req.AddCookie(&http.Cookie{Name: mgmtapi.EnrollmentSessionCookieName, Value: "enroll-key"})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if issuer.gotUserID != userID {
+			t.Fatalf("issuer got userID = %q, want %q", issuer.gotUserID, userID)
+		}
+		if issuer.gotReturnTo != "/dashboard/after-signup" {
+			t.Fatalf("issuer got returnTo = %q, want %q — the enrollment session's return_to must be copied through the handoff",
+				issuer.gotReturnTo, "/dashboard/after-signup")
+		}
+		var sawScoped, sawEnrollment bool
+		for _, c := range rec.Result().Cookies() {
+			switch c.Name {
+			case mgmtapi.RecoveryScopedSessionCookieName:
+				sawScoped = c.Value == "issued-token"
+			case mgmtapi.EnrollmentSessionCookieName:
+				sawEnrollment = c.Value == "issued-token"
+			}
+		}
+		if !sawScoped || !sawEnrollment {
+			t.Fatalf("cookies = %+v, want both %s and %s set to the issued token",
+				rec.Result().Cookies(), mgmtapi.RecoveryScopedSessionCookieName, mgmtapi.EnrollmentSessionCookieName)
+		}
+	})
+
+	t.Run("non-200 never issues a session", func(t *testing.T) {
+		h, _, issuer := newHandoff(http.StatusBadRequest)
+		req := httptest.NewRequest(http.MethodPost, "/webauthn/register/finish", nil)
+		req.AddCookie(&http.Cookie{Name: mgmtapi.EnrollmentSessionCookieName, Value: "enroll-key"})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400", rec.Code)
+		}
+		if issuer.called {
+			t.Error("issuer must not be called for a non-200 ceremony response")
+		}
+	})
+
+	t.Run("missing enrollment cookie never issues a session", func(t *testing.T) {
+		h, _, issuer := newHandoff(http.StatusOK)
+		req := httptest.NewRequest(http.MethodPost, "/webauthn/register/finish", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		if issuer.called {
+			t.Error("issuer must not be called without an enrollment-session cookie")
+		}
+	})
+
+	t.Run("issuer failure still returns the ceremony's own success", func(t *testing.T) {
+		sessions := mgmtapitest.NewInMemoryEnrollmentSessionStore()
+		if err := sessions.Save(context.Background(), "enroll-key", handle[:], false, ""); err != nil {
+			t.Fatalf("seed enrollment session: %v", err)
+		}
+		issuer := &recordingScopedSessionIssuer{err: errors.New("redis down")}
+		next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"registered"}`))
+		})
+		h := wirePostRegistrationHandoff(next, sessions, issuer, nil, discardLogger())
+
+		req := httptest.NewRequest(http.MethodPost, "/webauthn/register/finish", nil)
+		req.AddCookie(&http.Cookie{Name: mgmtapi.EnrollmentSessionCookieName, Value: "enroll-key"})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 even though the handoff itself failed", rec.Code)
+		}
+		if rec.Body.String() != `{"status":"registered"}` {
+			t.Fatalf("body = %q, want the ceremony handler's own untouched body", rec.Body.String())
+		}
+	})
+}
+
+// recordingScopedSessionIssuer is a test-only mgmtapi.ScopedSessionIssuer that
+// records the userID and returnTo it was called with.
+type recordingScopedSessionIssuer struct {
+	token       string
+	err         error
+	called      bool
+	gotUserID   string
+	gotReturnTo string
+}
+
+func (r *recordingScopedSessionIssuer) IssueEnrollmentSession(_ context.Context, userID, returnTo string) (string, error) {
+	r.called = true
+	r.gotUserID = userID
+	r.gotReturnTo = returnTo
+	if r.err != nil {
+		return "", r.err
+	}
+	return r.token, nil
+}
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 // TestProductionRoutesExposeOneEnrollmentFrontDoor guards the composition

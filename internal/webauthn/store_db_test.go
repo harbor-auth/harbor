@@ -120,17 +120,20 @@ func newFakeDBStore(t *testing.T) (*DBStore, *fakeStoreQuerier, pgtype.UUID) {
 	return NewDBStore(q), q, uid
 }
 
+// uidBytes returns the raw 16-byte WebAuthn user handle for uid — the format
+// mgmtapi.parseUUIDToBytes and cmd/harbor-mgmt's recoveryUserHandle actually
+// produce and save into the enrollment session store (parseWebAuthnUserID
+// parses this with uuid.FromBytes, not the 36-char canonical string form).
 func uidBytes(uid pgtype.UUID) []byte {
-	u := uuid.UUID(uid.Bytes)
-	return []byte(u.String())
+	return uid.Bytes[:]
 }
 
 // --- tests ------------------------------------------------------------------
 
 func TestDBStore_GetUser_NotFound(t *testing.T) {
 	s := NewDBStore(newFakeStoreQuerier())
-	// A valid UUID string that doesn't exist in the store.
-	missing := []byte(uuid.New().String())
+	// A validly-formatted handle that doesn't exist in the store.
+	missing := uidBytes(pgUUID(uuid.New()))
 	if _, err := s.GetUser(context.Background(), missing); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("err = %v, want ErrUserNotFound", err)
 	}
@@ -141,6 +144,23 @@ func TestDBStore_GetUser_InvalidHandle(t *testing.T) {
 	// A non-UUID byte slice must also return ErrUserNotFound (not an internal error).
 	if _, err := s.GetUser(context.Background(), []byte("not-a-uuid")); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("err = %v, want ErrUserNotFound", err)
+	}
+}
+
+// TestDBStore_GetUser_ProductionHandleFormat reproduces the handle-format
+// mismatch flagged for this task: mgmtapi.parseUUIDToBytes (POST /enroll) and
+// cmd/harbor-mgmt's recoveryUserHandle (POST /recovery/complete) both save the
+// WebAuthn user handle as the RAW 16-byte UUID (uuid.Parse(s); id[:]) — see
+// cmd/harbor-mgmt/caller_test.go's TestRecoverySessionIssuerBindsBFFAndEnrollmentRecords,
+// which pins exactly that format. Every real (DB-backed) WebAuthn ceremony
+// therefore calls Store.GetUser with those raw bytes, never with the
+// 36-character canonical string form the rest of this file's fixtures
+// (uidBytes) use.
+func TestDBStore_GetUser_ProductionHandleFormat(t *testing.T) {
+	s, _, uid := newFakeDBStore(t)
+	rawHandle := uid.Bytes[:] // exactly what parseUUIDToBytes/recoveryUserHandle produce in production.
+	if _, err := s.GetUser(context.Background(), rawHandle); err != nil {
+		t.Fatalf("GetUser(raw 16-byte handle) = %v, want success — this is the handle format enrollment/recovery actually produce", err)
 	}
 }
 
@@ -155,6 +175,33 @@ func TestDBStore_GetUser_OK(t *testing.T) {
 	}
 	if len(u.WebAuthnCredentials()) != 0 {
 		t.Fatalf("want 0 credentials, got %d", len(u.WebAuthnCredentials()))
+	}
+}
+
+// TestDBStore_GetUser_CarriesRecoveryRequired proves the users.recovery_required
+// column (already fetched into db.User by the underlying query) survives into
+// the returned webauthn.User instead of being silently discarded — the login
+// ceremony (Service.FinishLogin / FinishDiscoverableLogin) relies on this to
+// tell bff.LoginHandler whether a returning user's session must stay fenced to
+// enrollment-only scope (task 19).
+func TestDBStore_GetUser_CarriesRecoveryRequired(t *testing.T) {
+	q := newFakeStoreQuerier()
+	id := uuid.New()
+	uid := pgUUID(id)
+	q.users[uid] = db.User{
+		ID:               uid,
+		Region:           "EU",
+		Status:           "active",
+		RecoveryRequired: true,
+	}
+	s := NewDBStore(q)
+
+	u, err := s.GetUser(context.Background(), uidBytes(uid))
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if !u.RecoveryRequired() {
+		t.Error("u.RecoveryRequired() = false, want true (users.recovery_required was true)")
 	}
 }
 
@@ -184,7 +231,7 @@ func TestDBStore_AddCredential_OK(t *testing.T) {
 
 func TestDBStore_AddCredential_UnknownUser(t *testing.T) {
 	s := NewDBStore(newFakeStoreQuerier())
-	err := s.AddCredential(context.Background(), []byte(uuid.New().String()), gowebauthn.Credential{ID: []byte("c")})
+	err := s.AddCredential(context.Background(), uidBytes(pgUUID(uuid.New())), gowebauthn.Credential{ID: []byte("c")})
 	if !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("err = %v, want ErrUserNotFound", err)
 	}
@@ -229,13 +276,13 @@ func TestDBStore_UpdateCredential_CrossUserBlocked(t *testing.T) {
 	cred.Authenticator.SignCount = 1
 
 	// Enroll cred under user1.
-	if err := s.AddCredential(context.Background(), []byte(id1.String()), cred); err != nil {
+	if err := s.AddCredential(context.Background(), id1[:], cred); err != nil {
 		t.Fatalf("AddCredential: %v", err)
 	}
 
 	// User2 tries to update user1's credential.
 	cred.Authenticator.SignCount = 2
-	err := s.UpdateCredential(context.Background(), []byte(id2.String()), cred)
+	err := s.UpdateCredential(context.Background(), id2[:], cred)
 	if !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("cross-user update: err = %v, want ErrUserNotFound", err)
 	}
@@ -253,7 +300,7 @@ func TestDBStore_SetRecoveryComplete_OK(t *testing.T) {
 
 func TestDBStore_SetRecoveryComplete_UnknownUser(t *testing.T) {
 	s := NewDBStore(newFakeStoreQuerier())
-	err := s.SetRecoveryComplete(context.Background(), []byte(uuid.New().String()))
+	err := s.SetRecoveryComplete(context.Background(), uidBytes(pgUUID(uuid.New())))
 	if !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("err = %v, want ErrUserNotFound", err)
 	}
@@ -263,6 +310,53 @@ func TestDBStore_SetRecoveryComplete_InvalidHandle(t *testing.T) {
 	s := NewDBStore(newFakeStoreQuerier())
 	if err := s.SetRecoveryComplete(context.Background(), []byte("not-a-uuid")); !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("err = %v, want ErrUserNotFound", err)
+	}
+}
+
+// TestDBStore_SetRecoveryComplete_CanonicalTextForm reproduces the
+// recoveryRequirementClearer path: cmd/harbor-mgmt/caller.go's
+// ClearRecoveryRequired (POST /recovery/acknowledge) calls SetRecoveryComplete
+// with the CANONICAL 36-CHARACTER UUID TEXT form (see caller.go's doc comment
+// on recoveryRequirementClearer: "the mgmtapi-side userID is always the
+// canonical UUID text form"), never the raw 16-byte WebAuthn handle that
+// FinishRecoveryRegistration passes for the SAME store method. Both encodings
+// must resolve to the same user.
+func TestDBStore_SetRecoveryComplete_CanonicalTextForm(t *testing.T) {
+	s, q, uid := newFakeDBStore(t)
+	textHandle := []byte(uuid.UUID(uid.Bytes).String())
+	if err := s.SetRecoveryComplete(context.Background(), textHandle); err != nil {
+		t.Fatalf("SetRecoveryComplete(canonical text handle) = %v, want success — this is the encoding recoveryRequirementClearer.ClearRecoveryRequired actually sends", err)
+	}
+	if !q.recoveryComplete[uid] {
+		t.Fatal("expected recovery_required to be cleared for the user")
+	}
+}
+
+// TestDBStore_SetRecoveryComplete_BothEncodingsResolveSameUser locks in that
+// the raw 16-byte WebAuthn handle (ceremony path, e.g.
+// FinishRecoveryRegistration) and the canonical UUID text form (mgmtapi
+// recoveryRequirementClearer path) are two encodings of the SAME identifier,
+// not two different ones — parseWebAuthnUserID must dispatch between them by
+// length rather than picking one and breaking the other caller.
+func TestDBStore_SetRecoveryComplete_BothEncodingsResolveSameUser(t *testing.T) {
+	s, q, uid := newFakeDBStore(t)
+	rawHandle := uid.Bytes[:]
+	textHandle := []byte(uuid.UUID(uid.Bytes).String())
+
+	if err := s.SetRecoveryComplete(context.Background(), rawHandle); err != nil {
+		t.Fatalf("SetRecoveryComplete(raw handle): %v", err)
+	}
+	if !q.recoveryComplete[uid] {
+		t.Fatal("raw-handle call did not clear recovery_required")
+	}
+
+	delete(q.recoveryComplete, uid)
+
+	if err := s.SetRecoveryComplete(context.Background(), textHandle); err != nil {
+		t.Fatalf("SetRecoveryComplete(text handle): %v", err)
+	}
+	if !q.recoveryComplete[uid] {
+		t.Fatal("text-handle call did not clear recovery_required for the same user")
 	}
 }
 

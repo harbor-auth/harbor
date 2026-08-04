@@ -48,12 +48,7 @@ const (
 	recoveryBeginPath    = "/recovery/begin"
 	recoveryCompletePath = "/recovery/complete"
 	recoveryFactorsPath  = "/recovery/factors"
-
-	// recoveryScopedSessionCookie is the enrollment-only session cookie minted by
-	// a successful POST /recovery/complete. It must ONLY permit enrolling a fresh
-	// passkey until recovery_required is cleared.
-	recoveryScopedSessionCookie = "harbor_recovery_session"
-	mfaVerifyPath               = "/mfa/verify"
+	mfaVerifyPath        = "/mfa/verify"
 )
 
 // generateRecoveryCodes calls POST /recovery/codes and returns the plaintext
@@ -236,8 +231,8 @@ func TestRecoveryCeremonyEndToEnd(t *testing.T) {
 		}
 		t.Fatalf("POST /recovery/complete = %d, want 200\n%s", completeResp.StatusCode, raw)
 	}
-	if !hasCookie(completeResp, recoveryScopedSessionCookie) {
-		t.Fatalf("successful recovery did not set the %q scoped-session cookie", recoveryScopedSessionCookie)
+	if !hasCookie(completeResp, bffSessionCookieName) {
+		t.Fatalf("successful recovery did not set the %q scoped-session cookie", bffSessionCookieName)
 	}
 
 	// recovery_required must STILL be set immediately after recovery — it is
@@ -324,7 +319,7 @@ func TestRecoveryInvalidCodeFailsClosed(t *testing.T) {
 		}
 		t.Fatalf("invalid-code /recovery/complete = %d, want 401 (fail closed)\n%s", resp.StatusCode, raw)
 	}
-	if hasCookie(resp, recoveryScopedSessionCookie) {
+	if hasCookie(resp, bffSessionCookieName) {
 		t.Error("a failed recovery must NOT set the scoped-session cookie")
 	}
 }
@@ -349,7 +344,7 @@ func TestRecoveryScopedSessionDeniesNonEnrollment(t *testing.T) {
 	requestID := beginRecovery(t, recoverClient, userID)
 	resp := completeRecovery(t, recoverClient, requestID, codes[0])
 	status := resp.StatusCode
-	gotCookie := hasCookie(resp, recoveryScopedSessionCookie)
+	gotCookie := hasCookie(resp, bffSessionCookieName)
 	_ = resp.Body.Close()
 	if status != http.StatusOK {
 		t.Skipf("/recovery/complete = %d (recovery not fully wired) — skipping scope assertion", status)

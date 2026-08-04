@@ -56,8 +56,35 @@ type RecoveryVerifier interface {
 // ScopedSessionIssuer establishes a scoped, enrollment-only session for a user
 // who has proven recovery and returns an opaque session token to set as a
 // cookie. The session may ONLY enroll a fresh passkey (docs/DESIGN.md §11.1).
+// returnTo is the already-validated return_to captured at GET /signup, copied
+// onto the issued session as opaque server-side state (design.md Decision 5 /
+// REQ-004); callers with no such value (e.g. the lost-device recovery
+// ceremony below, which never runs through GET /signup) pass "".
 type ScopedSessionIssuer interface {
-	IssueEnrollmentSession(ctx context.Context, userID string) (token string, err error)
+	IssueEnrollmentSession(ctx context.Context, userID, returnTo string) (token string, err error)
+}
+
+// RecoveryRequirementClearer flips a user's recovery_required flag to false.
+// It is satisfied by a thin adapter over webauthn.DBStore.SetRecoveryComplete
+// — the SAME store method internal/webauthn/service.go's
+// FinishRecoveryRegistration calls after a lost-device recovery ceremony
+// re-enrolls a passkey. There is only ever one mechanism that clears
+// recovery_required; this interface lets the mandatory post-signup recovery
+// step (POST /recovery/acknowledge) reuse it without mgmtapi importing
+// internal/webauthn (mgmtapi cannot import bff, and bff already imports
+// mgmtapi, so an equivalent cycle risk applies to any new package edge here).
+type RecoveryRequirementClearer interface {
+	ClearRecoveryRequired(ctx context.Context, userID string) error
+}
+
+// RecoverySessionRefresher updates the CALLER's already-issued BFF session in
+// place after recovery_required is cleared, so a subsequent
+// bff.RequireFullScope route succeeds immediately with the SAME cookie —
+// without it, the user would stay fenced to enrollment-only until a fresh
+// sign-in. It adapts bff.BFFSessionStore.SetUserWithRecoveryStatus, the same
+// primitive the BFF session middleware already relies on to stamp scope.
+type RecoverySessionRefresher interface {
+	RefreshSessionScope(ctx context.Context, sessionID, userID string, recoveryRequired bool) error
 }
 
 // RecoveryFactor is PII-free metadata describing a single registered recovery
@@ -76,6 +103,17 @@ type RecoveryFactor struct {
 	// Empty when the authenticator did not report one. It is model-level, not
 	// user-level, so it carries no PII.
 	AAGUID string `json:"aaguid,omitempty"`
+}
+
+// RecoveryStatusChecker reports whether a user still has recovery_required=true
+// (i.e., they have not yet acknowledged a set of recovery codes via POST
+// /recovery/acknowledge). PostRecoveryCodes uses it to refuse silently
+// reissuing a fresh set of codes — which would invalidate a set the user was
+// already told to save — once that flag has cleared. It is satisfied by a
+// thin adapter over the same users table SetRecoveryComplete/ClearRecoveryRequired
+// write (docs/DESIGN.md §11.1).
+type RecoveryStatusChecker interface {
+	IsRecoveryRequired(ctx context.Context, userID string) (bool, error)
 }
 
 // RecoveryFactorLister lists the recovery factors (passkeys / hardware keys)
@@ -241,16 +279,32 @@ type recoveryCodesResponse struct {
 	Count int      `json:"count"`
 }
 
-// PostRecoveryCodes handles POST /recovery/codes — it generates (or
-// regenerates) the authenticated user's single-use recovery codes, stores their
-// salted hashes, and returns the plaintext codes exactly once. The user id
-// comes from the authenticated BFF session context; this endpoint is for an
-// already-authenticated user setting up recovery, so it is distinct from the
-// unauthenticated begin/complete ceremony below.
+// PostRecoveryCodes handles POST /recovery/codes — it generates the
+// authenticated user's single-use recovery codes, stores their salted hashes,
+// and returns the plaintext codes exactly once. The user id comes from the
+// authenticated BFF session context (via recoverySessionCaller, so both a
+// full-scope dashboard session AND an enrollment-only session mid mandatory
+// recovery setup can call it); this endpoint is for an already-authenticated
+// user setting up recovery, so it is distinct from the unauthenticated
+// begin/complete ceremony below.
+//
+// It refuses to REISSUE codes once the user has already acknowledged a set via
+// POST /recovery/acknowledge (recovery_required cleared): the plaintext codes
+// render legibly exactly once (task spec for GET /signup/recovery), so
+// generating a second set on a later visit — a stale bookmark, the browser
+// back button, or re-clicking an old link while the BFF session cookie is
+// still live — would silently invalidate the set the user was already told to
+// save, with no warning anything changed. A nil recoveryStatus checker (not
+// wired) skips this guard entirely, preserving the endpoint's original
+// generate-or-regenerate behavior; a checker error is logged and does NOT
+// block generation (best-effort, matching this file's other optional-signal
+// conventions) so a transient lookup failure can never turn into a harder
+// failure than "codes were regenerated" already was.
 //
 // Responses:
 //   - 201 Created             on success ({codes, count})
 //   - 401 Unauthorized        missing authenticated user
+//   - 409 Conflict            recovery codes already acknowledged; not reissued
 //   - 429 Too Many Requests   rate limited
 //   - 503 Service Unavailable recovery not wired
 //   - 500 Internal Server Error generation or persistence failure
@@ -259,10 +313,7 @@ func (s *Server) PostRecoveryCodes(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
 		return
 	}
-	var userID string
-	if s.callerSource != nil {
-		userID = s.callerSource.CallerID(r.Context())
-	}
+	userID, _ := s.recoverySessionCaller(r.Context())
 	if userID == "" {
 		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
 		return
@@ -278,6 +329,16 @@ func (s *Server) PostRecoveryCodes(w http.ResponseWriter, r *http.Request) {
 	if s.recoveryLimiter != nil && !s.recoveryLimiter.Allow("codes:"+userID) {
 		s.writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
 		return
+	}
+
+	if s.recoveryStatus != nil {
+		required, err := s.recoveryStatus.IsRecoveryRequired(r.Context(), userID)
+		if err != nil {
+			s.logger.WarnContext(r.Context(), "mgmtapi: recovery status check failed", "error", err)
+		} else if !required {
+			s.writeError(w, http.StatusConflict, "recovery_already_complete", "recovery codes were already saved; they cannot be regenerated from this page")
+			return
+		}
 	}
 
 	codes, err := s.recoveryCodes.GenerateCodes(identity.DefaultCodeCount)
@@ -508,7 +569,10 @@ func (s *Server) PostRecoveryComplete(w http.ResponseWriter, r *http.Request) {
 	// (dev-scaffold mode) skips the cookie; the caller still gets a 200 so the
 	// flow is testable without the full session stack.
 	if s.scopedSessions != nil {
-		token, err := s.scopedSessions.IssueEnrollmentSession(r.Context(), userID)
+		// Lost-device recovery never runs through GET /signup, so there is no
+		// captured return_to to carry — the resulting session simply falls back
+		// to the fixed same-origin default wherever ReturnTo is later read.
+		token, err := s.scopedSessions.IssueEnrollmentSession(r.Context(), userID, "")
 		if err != nil {
 			s.logger.ErrorContext(r.Context(), "mgmtapi: scoped session issue failed", "error", err)
 			s.writeError(w, http.StatusInternalServerError, "server_error", "failed to complete recovery")
@@ -612,4 +676,113 @@ func (s *Server) ListCredentialsByUser(w http.ResponseWriter, r *http.Request) {
 		factors = []RecoveryFactor{}
 	}
 	s.writeJSON(w, http.StatusOK, recoveryFactorsResponse{Factors: factors, Count: len(factors)})
+}
+
+// --- POST /recovery/acknowledge ---
+
+// recoveryAcknowledgeResponse is the POST /recovery/acknowledge success body.
+type recoveryAcknowledgeResponse struct {
+	Status string `json:"status"`
+}
+
+// recoverySessionCaller resolves the userID and BFF session id for the two
+// endpoints that must work under BOTH full and enrollment-only session scope:
+// POST /recovery/codes and POST /recovery/acknowledge. It tries the ordinary
+// full-scope callerSource first and falls back to enrollmentCallerSource only
+// when that resolves to no caller at all — an unauthenticated request (no BFF
+// session) still resolves to "" from both, so this never widens access beyond
+// "any authenticated session, full or enrollment-only".
+//
+// Every OTHER user-scoped endpoint MUST keep using callerSource alone; this
+// fallback exists only for the mandatory recovery-setup step itself, which is
+// the one part of the enrollment-only session's "may ONLY enroll a fresh
+// passkey" fence (docs/DESIGN.md §11.1) explicitly designed to be usable
+// during that scope.
+func (s *Server) recoverySessionCaller(ctx context.Context) (userID, sessionID string) {
+	if s.callerSource != nil {
+		if userID = s.callerSource.CallerID(ctx); userID != "" {
+			if src, ok := s.callerSource.(CallerSessionSource); ok {
+				sessionID = src.SessionID(ctx)
+			}
+			return userID, sessionID
+		}
+	}
+	if s.enrollmentCallerSource != nil {
+		if userID = s.enrollmentCallerSource.CallerID(ctx); userID != "" {
+			if src, ok := s.enrollmentCallerSource.(CallerSessionSource); ok {
+				sessionID = src.SessionID(ctx)
+			}
+		}
+	}
+	return userID, sessionID
+}
+
+// PostRecoveryAcknowledge handles POST /recovery/acknowledge — the completion
+// step of mandatory recovery setup. The caller has already fetched and (per
+// the /signup/recovery and lost-device-recovery UI) explicitly confirmed
+// their recovery codes via POST /recovery/codes; this call clears
+// recovery_required through the exact same mechanism
+// webauthn.Service.FinishRecoveryRegistration uses (SetRecoveryComplete, via
+// recoveryRequirementClearer) — there is no second, parallel mechanism — and
+// then refreshes the caller's OWN already-issued BFF session so a following
+// bff.RequireFullScope route succeeds immediately, without a fresh sign-in.
+//
+// Like PostRecoveryCodes, the caller may hold EITHER a full-scope session
+// (re-confirming recovery from the dashboard) or an enrollment-only session
+// (completing mandatory setup right after signup or lost-device recovery) —
+// see recoverySessionCaller.
+//
+// Responses:
+//   - 200 OK                  recovery setup complete ({status:"complete"})
+//   - 401 Unauthorized        no authenticated (full or enrollment-only) session
+//   - 429 Too Many Requests   rate limited
+//   - 503 Service Unavailable recovery not wired
+//   - 500 Internal Server Error DB write or session-scope refresh failure
+func (s *Server) PostRecoveryAcknowledge(w http.ResponseWriter, r *http.Request) {
+	if s.abuseGate != nil && !s.abuseGate.Check(r.Context(), "recovery", r.RemoteAddr) {
+		s.writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
+		return
+	}
+	userID, sessionID := s.recoverySessionCaller(r.Context())
+	if userID == "" {
+		s.writeError(w, http.StatusUnauthorized, "unauthorized", "user authentication required")
+		return
+	}
+
+	if s.recoveryRequirementClearer == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "recovery service not configured")
+		return
+	}
+
+	// Rate-limit per authenticated user, matching every other recovery endpoint.
+	if s.recoveryLimiter != nil && !s.recoveryLimiter.Allow("acknowledge:"+userID) {
+		s.writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
+		return
+	}
+
+	if err := s.recoveryRequirementClearer.ClearRecoveryRequired(r.Context(), userID); err != nil {
+		s.logger.ErrorContext(r.Context(), "mgmtapi: clear recovery_required failed", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "server_error", "failed to complete recovery setup")
+		return
+	}
+
+	// The DB flag is now durably cleared. Refresh the CURRENT BFF session in
+	// place so this exact cookie clears RequireFullScope on the very next
+	// request — the whole point of doing this synchronously here rather than
+	// waiting for a fresh sign-in to pick up the new DB state.
+	if s.recoverySessionRefresher != nil {
+		if sessionID == "" {
+			s.logger.ErrorContext(r.Context(), "mgmtapi: recovery acknowledge missing BFF session id")
+			s.writeError(w, http.StatusInternalServerError, "server_error", "failed to complete recovery setup")
+			return
+		}
+		if err := s.recoverySessionRefresher.RefreshSessionScope(r.Context(), sessionID, userID, false); err != nil {
+			s.logger.ErrorContext(r.Context(), "mgmtapi: refresh session scope failed", "error", err)
+			s.writeError(w, http.StatusInternalServerError, "server_error", "failed to complete recovery setup")
+			return
+		}
+	}
+
+	s.logRecoveryEvent(r.Context(), userID, recoveryRegion(r), auditRecoverySucceeded)
+	s.writeJSON(w, http.StatusOK, recoveryAcknowledgeResponse{Status: "complete"})
 }

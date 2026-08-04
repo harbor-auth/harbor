@@ -1,0 +1,132 @@
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Save your recovery codes — Harbor</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f5f5;color:#111;min-height:100vh}
+.nav{background:#1a1a2e;color:#fff;padding:1rem 2rem;display:flex;align-items:center;gap:1rem}
+.nav h1{font-size:1.1rem;font-weight:600;letter-spacing:.02em}
+.container{max-width:640px;margin:2rem auto;padding:0 1.5rem}
+.card{background:#fff;border-radius:8px;padding:2rem;margin-bottom:1.5rem;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.card h2{font-size:1.4rem;font-weight:700;margin-bottom:.75rem}
+.card p{color:#444;line-height:1.6;margin-bottom:.75rem}
+.codes{list-style:none;display:grid;grid-template-columns:1fr 1fr;gap:.5rem;background:#f5f5f5;border-radius:6px;padding:1rem;margin:1rem 0;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.95rem;letter-spacing:.02em}
+.confirm{display:flex;align-items:flex-start;gap:.6rem;margin:1.25rem 0}
+.confirm input{margin-top:.2rem;width:1.1rem;height:1.1rem}
+.confirm label{color:#444;line-height:1.5}
+button#continue-button{background:#1a1a2e;color:#fff;border:none;border-radius:6px;padding:.85rem 1.5rem;font-size:1rem;font-weight:600;cursor:pointer;width:100%}
+button#continue-button:disabled{opacity:.6;cursor:not-allowed}
+button#continue-button:focus-visible{outline:3px solid #7aa7ff;outline-offset:2px}
+.status{border-radius:6px;padding:.75rem 1rem;margin-bottom:1rem}
+.status.error{background:#fdecea;color:#7a1f16;border:1px solid #f3b7ae}
+.status.info{background:#eef4ff;color:#173a70;border:1px solid #bcd4ff}
+noscript p{background:#fff3cd;color:#664d03;border:1px solid #ffe69c;border-radius:6px;padding:.75rem 1rem}
+</style>
+</head>
+<body>
+<nav class="nav"><h1>⚓ Harbor</h1></nav>
+<main class="container">
+  <noscript><p>Saving your recovery codes requires JavaScript.</p></noscript>
+  <section class="card">
+    <h2>Save your recovery codes</h2>
+    <p>These one-time codes are the only way back into your account if you ever lose access to your passkey. Harbor cannot recover them for you — write them down, save them in a password manager, or print them, and keep them somewhere safe.</p>
+    <p id="recovery-status" class="status info" role="status" aria-live="polite" hidden></p>
+    <ul id="recovery-codes" class="codes" hidden></ul>
+    <div class="confirm">
+      <input type="checkbox" id="confirm-saved" disabled>
+      <label for="confirm-saved">I've saved my recovery codes in a safe place.</label>
+    </div>
+    <button type="button" id="continue-button" disabled>Continue</button>
+  </section>
+</main>
+<script>
+(function () {
+  "use strict";
+
+  var statusBox = document.getElementById("recovery-status");
+  var codesList = document.getElementById("recovery-codes");
+  var confirmBox = document.getElementById("confirm-saved");
+  var continueButton = document.getElementById("continue-button");
+  var codesReady = false;
+
+  function showStatus(message, isError) {
+    statusBox.textContent = message;
+    statusBox.className = "status " + (isError ? "error" : "info");
+    statusBox.hidden = false;
+  }
+
+  function updateContinueEnabled() {
+    continueButton.disabled = !(codesReady && confirmBox.checked);
+  }
+
+  function renderCodes(codes) {
+    codesList.innerHTML = "";
+    codes.forEach(function (code) {
+      var item = document.createElement("li");
+      item.textContent = code;
+      codesList.appendChild(item);
+    });
+    codesList.hidden = false;
+  }
+
+  async function loadCodes() {
+    showStatus("Generating your recovery codes…", false);
+    try {
+      var response = await fetch("/recovery/codes", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: "{}"
+      });
+      if (response.status === 409) {
+        // Codes were already generated and acknowledged on an earlier visit —
+        // reissuing now would silently invalidate the set the user was told
+        // to save. Send them on to the completion page instead of showing a
+        // new, different set.
+        window.location.assign("/signup/success");
+        return;
+      }
+      if (!response.ok) {
+        throw new Error("codes failed");
+      }
+      var data = await response.json();
+      renderCodes(data.codes || []);
+      statusBox.hidden = true;
+      codesReady = true;
+      confirmBox.disabled = false;
+      updateContinueEnabled();
+    } catch (err) {
+      showStatus("We couldn't generate your recovery codes. Please reload this page to try again.", true);
+    }
+  }
+
+  async function acknowledgeAndContinue() {
+    continueButton.disabled = true;
+    showStatus("Finishing setup…", false);
+    try {
+      var response = await fetch("/recovery/acknowledge", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: "{}"
+      });
+      if (!response.ok) {
+        throw new Error("acknowledge failed");
+      }
+      window.location.assign("/signup/success");
+    } catch (err) {
+      showStatus("We couldn't finish setting up recovery. Please try again.", true);
+      updateContinueEnabled();
+    }
+  }
+
+  confirmBox.addEventListener("change", updateContinueEnabled);
+  continueButton.addEventListener("click", acknowledgeAndContinue);
+
+  loadCodes();
+})();
+</script>
+</body>
+</html>

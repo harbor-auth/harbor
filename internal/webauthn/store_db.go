@@ -67,7 +67,8 @@ func (s *DBStore) GetUser(ctx context.Context, userID []byte) (User, error) {
 	if err != nil {
 		return User{}, ErrUserNotFound
 	}
-	if _, err = s.q.GetUser(ctx, uid); err != nil {
+	row, err := s.q.GetUser(ctx, uid)
+	if err != nil {
 		return User{}, ErrUserNotFound
 	}
 	creds, err := s.q.ListCredentialsByUser(ctx, uid)
@@ -81,7 +82,7 @@ func (s *DBStore) GetUser(ctx context.Context, userID []byte) (User, error) {
 	// name and displayName are display-only; Harbor stores no profile PII in the
 	// users table, so the opaque user ID string serves as both.
 	uidStr := string(userID)
-	return NewUser(userID, uidStr, uidStr, goCreds), nil
+	return NewUser(userID, uidStr, uidStr, goCreds).WithRecoveryRequired(row.RecoveryRequired), nil
 }
 
 // AddCredential implements Store: persists a newly-registered passkey.
@@ -233,10 +234,34 @@ func rowToGoCredential(row db.Credential) gowebauthn.Credential {
 	return c
 }
 
-// parseWebAuthnUserID parses a WebAuthn user handle (UUID string in bytes) into
-// a pgtype.UUID. Harbor's WebAuthn user handles are UUID strings
-// (e.g. "550e8400-e29b-41d4-a716-446655440000").
+// parseWebAuthnUserID parses a WebAuthn user handle into a pgtype.UUID.
+// This method has two callers that legitimately pass two different byte
+// encodings of the same user ID:
+//
+//   - WebAuthn ceremonies (BeginRegistration/FinishRegistration/
+//     AddCredentialAndActivateUser) and GetUser/AddCredential/UpdateCredential
+//     in general all receive the raw 16-byte binary form of a user's UUID
+//     (uuid.Parse(s); id[:]), as produced by mgmtapi.parseUUIDToBytes (POST
+//     /enroll) and cmd/harbor-mgmt's recoveryUserHandle (POST
+//     /recovery/complete) — this is the actual WebAuthn "user handle" on the
+//     wire (github.com/go-webauthn/webauthn represents it as opaque bytes).
+//   - cmd/harbor-mgmt's recoveryRequirementClearer.ClearRecoveryRequired (POST
+//     /recovery/acknowledge) instead has only the canonical 36-character UUID
+//     TEXT form in hand (the mgmtapi CallerSource surface deals in strings,
+//     never raw WebAuthn handles) and passes it straight through to
+//     SetRecoveryComplete.
+//
+// A raw UUID is always exactly 16 bytes, and no valid text encoding
+// (canonical, hyphen-less, braced, or urn:uuid:) is ever 16 bytes long, so
+// dispatching on length unambiguously distinguishes the two.
 func parseWebAuthnUserID(userID []byte) (pgtype.UUID, error) {
+	if len(userID) == 16 {
+		id, err := uuid.FromBytes(userID)
+		if err != nil {
+			return pgtype.UUID{}, fmt.Errorf("webauthn/store_db: invalid user handle: %w", err)
+		}
+		return pgtype.UUID{Bytes: id, Valid: true}, nil
+	}
 	id, err := uuid.ParseBytes(userID)
 	if err != nil {
 		return pgtype.UUID{}, fmt.Errorf("webauthn/store_db: invalid user handle: %w", err)

@@ -119,6 +119,65 @@ func TestDashboardCSRF_NoHeadersAllowed(t *testing.T) {
 	}
 }
 
+// --- PreSessionCSRF middleware tests ---
+
+func TestPreSessionCSRF_GetPassesThrough(t *testing.T) {
+	h := PreSessionCSRF(okHandler)
+	r := httptest.NewRequest(http.MethodGet, "/webauthn/register/begin", nil)
+	r.Header.Set("Sec-Fetch-Site", "cross-site") // even cross-site GETs pass
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET cross-site: status = %d, want 200 (GETs not gated)", rec.Code)
+	}
+}
+
+func TestPreSessionCSRF_CrossSitePostRejected(t *testing.T) {
+	h := PreSessionCSRF(okHandler)
+	r := httptest.NewRequest(http.MethodPost, "/enroll", nil)
+	r.Header.Set("Sec-Fetch-Site", "cross-site")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("POST cross-site Sec-Fetch-Site: status = %d, want 403", rec.Code)
+	}
+}
+
+func TestPreSessionCSRF_CrossOriginOriginHeaderRejected(t *testing.T) {
+	h := PreSessionCSRF(okHandler)
+	r := httptest.NewRequest(http.MethodPost, "/webauthn/register/begin", nil)
+	r.Header.Set("Origin", "https://evil.example.com")
+	r.Host = "harbor.example.com"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("cross-origin Origin header: status = %d, want 403", rec.Code)
+	}
+}
+
+func TestPreSessionCSRF_SameOriginPostAllowed(t *testing.T) {
+	h := PreSessionCSRF(okHandler)
+	r := httptest.NewRequest(http.MethodPost, "/enroll", nil)
+	r.Header.Set("Sec-Fetch-Site", "same-origin")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Errorf("POST same-origin Sec-Fetch-Site: status = %d, want 200", rec.Code)
+	}
+}
+
+func TestPreSessionCSRF_NoHeadersAllowed(t *testing.T) {
+	// No SameSite=Strict cookie exists yet on a pre-session route, but absent
+	// Fetch Metadata / Origin still is not itself a cross-site signal.
+	h := PreSessionCSRF(okHandler)
+	r := httptest.NewRequest(http.MethodPost, "/webauthn/login/begin", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Errorf("POST no headers: status = %d, want 200", rec.Code)
+	}
+}
+
 // --- Route-level integration tests: cross-site POST => 403 on each mutating route ---
 
 // newFullTestDashHandler returns a ServeMux with all dashboard routes registered

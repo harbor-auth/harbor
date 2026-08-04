@@ -2,7 +2,9 @@ package mgmtapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,6 +33,61 @@ const maxEnrollBody = 4 * 1024
 // the enrollment API reports "pending" until that second step lands.
 const statusPending = "pending"
 
+// checkPreSessionOrigin applies the Origin/Sec-Fetch-Site decision tree to
+// POST /enroll, the first pre-session write in the public signup journey
+// (docs/DESIGN.md §9). It duplicates internal/bff's checkDashboardCSRF /
+// PreSessionCSRF logic rather than importing it: internal/bff already imports
+// internal/mgmtapi (for the dashboard handler), so mgmtapi cannot import bff
+// without a cycle — the same constraint that makes internal/webauthn
+// duplicate enrollmentCookieName instead of importing mgmtapi. Keep this in
+// sync with bff.checkDashboardCSRF if that check ever changes.
+func checkPreSessionOrigin(r *http.Request) error {
+	sfs := r.Header.Get("Sec-Fetch-Site")
+	if sfs != "" {
+		if sfs == "cross-site" {
+			return errors.New("csrf: Sec-Fetch-Site: cross-site")
+		}
+		return nil
+	}
+
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return nil
+	}
+	if origin == "null" {
+		return errors.New("csrf: opaque origin")
+	}
+
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" {
+		return errors.New("csrf: malformed Origin header")
+	}
+
+	requestHost := r.Host
+	if requestHost == "" {
+		requestHost = r.URL.Host
+	}
+	if parsed.Host != requestHost {
+		return errors.New("csrf: Origin/Host mismatch")
+	}
+	return nil
+}
+
+// signupReturnToFromCookie reads the return_to value GET /signup already
+// validated and stashed in SignupReturnToCookieName, so it can be folded into
+// the new enrollment session as real server-side state (design.md Decision 5
+// / REQ-004). An absent or empty cookie (POST /enroll called without ever
+// visiting GET /signup) simply yields no return_to, matching today's
+// behavior; the destination falls back to the fixed same-origin default at
+// GET /signup/success.
+func signupReturnToFromCookie(r *http.Request) string {
+	c, err := r.Cookie(SignupReturnToCookieName)
+	if err != nil {
+		return ""
+	}
+	return c.Value
+}
+
 // enrollRequest is the POST /enroll JSON body.
 type enrollRequest struct {
 	Region string `json:"region"`
@@ -52,9 +109,15 @@ type enrollResponse struct {
 // Responses:
 //   - 201 Created             on success ({user_id, region, status:"pending"})
 //   - 400 Bad Request         malformed body or unknown region
+//   - 403 Forbidden           cross-site POST (see checkPreSessionOrigin)
+//   - 429 Too Many Requests   abuse-gate limit exceeded
 //   - 503 Service Unavailable enrollment not wired (no DB / KEK)
 //   - 500 Internal Server Error any other enrollment failure
 func (s *Server) PostEnroll(w http.ResponseWriter, r *http.Request) {
+	if err := checkPreSessionOrigin(r); err != nil {
+		s.writeError(w, http.StatusForbidden, "forbidden", "cross-site request rejected")
+		return
+	}
 	if s.abuseGate != nil && !s.abuseGate.Check(r.Context(), "enroll", abuseSource(r)) {
 		s.writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
 		return
@@ -121,7 +184,7 @@ func (s *Server) PostEnroll(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusInternalServerError, "server_error", "enrollment failed")
 			return
 		}
-		if err := s.sessions.Save(r.Context(), key, userHandle); err != nil {
+		if err := s.sessions.Save(r.Context(), key, userHandle, false, signupReturnToFromCookie(r)); err != nil {
 			s.logger.ErrorContext(r.Context(), "save enrollment session failed", "error", err)
 			recordError(telemetry.EndpointEnroll, "server_error")
 			s.writeError(w, http.StatusInternalServerError, "server_error", "enrollment failed")

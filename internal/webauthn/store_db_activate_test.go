@@ -66,9 +66,11 @@ func (f *activateFakeQuerier) SetRecoveryComplete(_ context.Context, _ pgtype.UU
 	return nil
 }
 
-// handleBytes returns a UUID's canonical string form as bytes — Harbor's
-// WebAuthn user handle format (parseWebAuthnUserID uses uuid.ParseBytes).
-func handleBytes(u uuid.UUID) []byte { return []byte(u.String()) }
+// handleBytes returns a UUID's raw 16-byte form — Harbor's WebAuthn user
+// handle format (parseWebAuthnUserID uses uuid.FromBytes; see
+// mgmtapi.parseUUIDToBytes and cmd/harbor-mgmt's recoveryUserHandle, which
+// produce exactly this).
+func handleBytes(u uuid.UUID) []byte { return u[:] }
 
 func TestDBStore_AddCredentialAndActivateUser_CreatesAndActivates(t *testing.T) {
 	u := uuid.New()
