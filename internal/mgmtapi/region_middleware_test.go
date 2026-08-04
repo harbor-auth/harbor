@@ -146,6 +146,74 @@ func TestRegionMiddlewareExemptsHealthz(t *testing.T) {
 	}
 }
 
+// TestRegionMiddlewareExemptsCloudAPIPrefix asserts that requests under
+// /admin/v1/* (internal/cloudapi's namespace/session/key-rotation
+// provisioning routes) are NOT rejected with 400 when the Host does not map
+// to a known region — Harbor Cloud reaches these routes over the separate
+// mgmt-cloud WireGuard NodePort, which need not present a region-bound Host.
+// This covers both an exact route and a variable-segment route
+// (/admin/v1/namespaces/{id}), which an exact-match regionExemptPaths entry
+// could not enumerate.
+func TestRegionMiddlewareExemptsCloudAPIPrefix(t *testing.T) {
+	for _, path := range []string{
+		"/admin/v1/sessions",
+		"/admin/v1/namespaces",
+		"/admin/v1/namespaces/ns-123",
+		"/admin/v1/keys/rotate",
+	} {
+		t.Run(path, func(t *testing.T) {
+			called := false
+			next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusOK)
+			})
+			h := RegionMiddleware(telemetry.New(nil))(next)
+
+			// Simulate the mgmt-cloud NodePort: Host does not map to any region.
+			req := httptest.NewRequest(http.MethodPost, path, nil)
+			req.Host = "mgmt-cloud.internal.svc.cluster.local:9443"
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if !called {
+				t.Fatalf("next handler not called for %q on unknown host; cloudapi routes must not be region-gated", path)
+			}
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 for %q", rec.Code, path)
+			}
+		})
+	}
+}
+
+// TestRegionMiddlewareDoesNotExemptUnrelatedAdminPaths asserts that the
+// /admin/v1/ prefix exemption is narrow: paths that merely share the
+// "/admin" prefix without the versioned cloudapi segment remain region-gated.
+func TestRegionMiddlewareDoesNotExemptUnrelatedAdminPaths(t *testing.T) {
+	for _, path := range []string{"/admin", "/admin/", "/admin/v2/namespaces", "/administer"} {
+		t.Run(path, func(t *testing.T) {
+			called := false
+			next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				called = true
+			})
+			h := RegionMiddleware(telemetry.New(nil))(next)
+
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			req.Host = "unknown.example"
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+
+			if called {
+				t.Fatalf("next handler was called for %q on unknown host; must remain region-gated", path)
+			}
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d for %q", rec.Code, http.StatusBadRequest, path)
+			}
+		})
+	}
+}
+
 // TestRegionMiddlewareResolvesIssuerStyleHost confirms an issuer-style host
 // with a port still resolves, matching region.Resolve's normalisation.
 func TestRegionMiddlewareResolvesIssuerStyleHost(t *testing.T) {

@@ -337,3 +337,43 @@ blocks render as nothing / an inert empty string) and once with it forced to
 `true` plus a fake token (confirming the ingress rule and populated token
 render with correct indentation and both documents still parse as valid
 YAML). `go vet ./...` and `gofmt -l .` are clean.
+
+## Task 16: Exempt /admin/v1/* cloudapi routes from harbor-mgmt's host-based region gate
+
+`internal/mgmtapi.RegionMiddleware` wraps harbor-mgmt's entire handler
+(`cmd/harbor-mgmt/main.go`) and 400s any request whose `Host` doesn't
+resolve to a region bound via `region.BindIssuerHost` (the
+`WEBAUTHN_RP_ORIGINS` host). Task 7 wired cloudapi's `/admin/v1/*` routes
+into the same mux, but Harbor Cloud reaches them over the separate
+`mgmt-cloud` WireGuard NodePort (`deploy/helm/templates/service-mgmt.yaml`),
+which presents a Host header that has no reason to resolve to the
+region-bound RP origin — so those requests were 400ing before ever reaching
+cloudapi's own scoped-JWT auth/scope checks.
+
+`regionExemptPaths` (`internal/mgmtapi/region_middleware.go`) was an
+exact-match `map[string]struct{}`, but `/admin/v1/namespaces/{id}` has a
+variable path segment an exact-match entry can't enumerate. Added a sibling
+`regionExemptPrefixes []string` (currently just `"/admin/v1/"`) and a
+`regionExempt(path string) bool` helper checking both the exact-match map and
+the prefix list; `RegionMiddleware`'s unresolved-host branch now calls
+`regionExempt` instead of indexing `regionExemptPaths` directly. Confirmed
+`internal/cloudapi` never calls `region.FromContext` (grepped `region\.` across
+`internal/cloudapi/*.go` and `cmd/harbor-mgmt/cloudapi.go` — the only hit is
+an unrelated comment), so exempting the whole `/admin/v1/*` subtree from
+region *pinning* doesn't leave any downstream cloudapi handler expecting a
+pinned region that will now be absent.
+
+Exemption only takes effect on the already-existing "host didn't resolve"
+branch — a request whose Host *does* happen to resolve to a known region
+still gets pinned as before (harmless no-op for cloudapi, which ignores it);
+this keeps the change minimal instead of restructuring the total-resolution
+invariant for user-data routes.
+
+Added `TestRegionMiddlewareExemptsCloudAPIPrefix` (exact and
+variable-segment `/admin/v1/*` paths pass through un-pinned on an unknown
+Host) and `TestRegionMiddlewareDoesNotExemptUnrelatedAdminPaths` (`/admin`,
+`/admin/`, `/admin/v2/namespaces`, `/administer` all still 400) to
+`internal/mgmtapi/region_middleware_test.go`, following the existing
+`TestRegionMiddlewareExemptsHealthz` pattern. `go build ./...`, `go vet
+./...`, and `go test ./internal/mgmtapi/... ./cmd/harbor-mgmt/...` are all
+green.
