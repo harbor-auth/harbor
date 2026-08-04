@@ -80,6 +80,14 @@ noscript p{background:#fff3cd;color:#664d03;border:1px solid #ffe69c;border-radi
         headers: { "Content-Type": "application/json" },
         body: "{}"
       });
+      if (response.status === 409) {
+        // Codes were already generated and acknowledged on an earlier visit —
+        // reissuing now would silently invalidate the set the user was told
+        // to save. Send them on to the completion page instead of showing a
+        // new, different set.
+        window.location.assign("/signup/success");
+        return;
+      }
       if (!response.ok) {
         throw new Error("codes failed");
       }

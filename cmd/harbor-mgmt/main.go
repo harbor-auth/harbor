@@ -236,6 +236,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		WithRecovery(recoveryManager, recoveryStore, recoveryService, recoveryCeremonies).
 		WithScopedSessionIssuer(enrollmentSessionIssuer).
 		WithRecoveryRequirementClearer(recoveryRequirementClearer{store: credentialStore}).
+		WithRecoveryStatusChecker(recoveryStatusChecker{q: q}).
 		WithRecoverySessionRefresher(recoverySessionRefresher).
 		WithEnrollmentCallerSource(bffEnrollmentCallerAdapter{}).
 		WithMFA(mfaService).

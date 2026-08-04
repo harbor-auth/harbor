@@ -14,8 +14,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
+
 	"github.com/harbor-auth/harbor/internal/bff"
 	"github.com/harbor-auth/harbor/internal/clients"
+	"github.com/harbor-auth/harbor/internal/gen/db"
 	"github.com/harbor-auth/harbor/internal/identity"
 	"github.com/harbor-auth/harbor/internal/mgmtapi"
 	bfftest "github.com/harbor-auth/harbor/internal/testsupport/bff"
@@ -396,6 +399,85 @@ type fakeRecoveryCompleteStore struct {
 func (f *fakeRecoveryCompleteStore) SetRecoveryComplete(_ context.Context, userID []byte) error {
 	f.gotUserID = userID
 	return f.err
+}
+
+// fakeRecoveryStatusQuerier is a test-only recoveryStatusQuerier standing in
+// for *db.Queries.
+type fakeRecoveryStatusQuerier struct {
+	user   db.User
+	err    error
+	gotID  pgtype.UUID
+	called bool
+}
+
+func (f *fakeRecoveryStatusQuerier) GetUser(_ context.Context, id pgtype.UUID) (db.User, error) {
+	f.called = true
+	f.gotID = id
+	if f.err != nil {
+		return db.User{}, f.err
+	}
+	return f.user, nil
+}
+
+// TestRecoveryStatusChecker_ReadsUserRecoveryRequired proves the adapter reads
+// recovery_required straight from the users table row — the same row
+// recoveryRequirementClearer's SetRecoveryComplete writes — for both the
+// still-required and already-cleared cases.
+func TestRecoveryStatusChecker_ReadsUserRecoveryRequired(t *testing.T) {
+	const userID = "550e8400-e29b-41d4-a716-446655440000"
+
+	for _, tc := range []struct {
+		name     string
+		required bool
+	}{
+		{name: "still required", required: true},
+		{name: "already cleared", required: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q := &fakeRecoveryStatusQuerier{user: db.User{RecoveryRequired: tc.required}}
+			c := recoveryStatusChecker{q: q}
+
+			got, err := c.IsRecoveryRequired(context.Background(), userID)
+			if err != nil {
+				t.Fatalf("IsRecoveryRequired: %v", err)
+			}
+			if got != tc.required {
+				t.Errorf("IsRecoveryRequired = %t, want %t", got, tc.required)
+			}
+			if !q.called {
+				t.Error("GetUser was not called")
+			}
+			if q.gotID.String() != "550e8400-e29b-41d4-a716-446655440000" {
+				t.Errorf("GetUser called with id = %v, want the parsed canonical UUID", q.gotID)
+			}
+		})
+	}
+}
+
+// TestRecoveryStatusChecker_PropagatesQueryError proves a lookup failure
+// propagates as-is (no partial/default answer) so callers can decide how to
+// fail (PostRecoveryCodes fails open, logging the error).
+func TestRecoveryStatusChecker_PropagatesQueryError(t *testing.T) {
+	q := &fakeRecoveryStatusQuerier{err: errors.New("db down")}
+	c := recoveryStatusChecker{q: q}
+
+	if _, err := c.IsRecoveryRequired(context.Background(), "550e8400-e29b-41d4-a716-446655440000"); err == nil {
+		t.Fatal("IsRecoveryRequired: expected an error, got nil")
+	}
+}
+
+// TestRecoveryStatusChecker_InvalidUserID proves a malformed userID is
+// rejected before ever reaching the querier.
+func TestRecoveryStatusChecker_InvalidUserID(t *testing.T) {
+	q := &fakeRecoveryStatusQuerier{}
+	c := recoveryStatusChecker{q: q}
+
+	if _, err := c.IsRecoveryRequired(context.Background(), "not-a-uuid"); err == nil {
+		t.Fatal("IsRecoveryRequired: expected an error for a malformed user id, got nil")
+	}
+	if q.called {
+		t.Error("GetUser must not be called for a malformed user id")
+	}
 }
 
 func TestBFFSessionScopeRefresher_UpdatesRecoveryStatus(t *testing.T) {

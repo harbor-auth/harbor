@@ -9,7 +9,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgtype"
+
 	"github.com/harbor-auth/harbor/internal/bff"
+	"github.com/harbor-auth/harbor/internal/gen/db"
 	"github.com/harbor-auth/harbor/internal/mgmtapi"
 )
 
@@ -113,6 +116,38 @@ var _ mgmtapi.RecoveryRequirementClearer = recoveryRequirementClearer{}
 
 func (c recoveryRequirementClearer) ClearRecoveryRequired(ctx context.Context, userID string) error {
 	return c.store.SetRecoveryComplete(ctx, []byte(userID))
+}
+
+// recoveryStatusQuerier is the narrow sqlc surface recoveryStatusChecker needs
+// to read a user's CURRENT recovery_required flag directly from the users
+// table — the same row recoveryRequirementClearer's SetRecoveryComplete
+// writes and PersistUser's initial insert always sets true.
+type recoveryStatusQuerier interface {
+	GetUser(ctx context.Context, id pgtype.UUID) (db.User, error)
+}
+
+// recoveryStatusChecker adapts recoveryStatusQuerier to
+// mgmtapi.RecoveryStatusChecker, so PostRecoveryCodes can refuse to reissue
+// recovery codes once recovery_required has already cleared instead of
+// silently invalidating a set the user was already told to save (see
+// PostRecoveryCodes' doc comment). The mgmtapi-side userID is always the
+// canonical UUID text form — same as recoveryRequirementClearer above.
+type recoveryStatusChecker struct {
+	q recoveryStatusQuerier
+}
+
+var _ mgmtapi.RecoveryStatusChecker = recoveryStatusChecker{}
+
+func (c recoveryStatusChecker) IsRecoveryRequired(ctx context.Context, userID string) (bool, error) {
+	var id pgtype.UUID
+	if err := id.Scan(userID); err != nil {
+		return false, fmt.Errorf("recovery status check: parse user id: %w", err)
+	}
+	user, err := c.q.GetUser(ctx, id)
+	if err != nil {
+		return false, fmt.Errorf("recovery status check: get user: %w", err)
+	}
+	return user.RecoveryRequired, nil
 }
 
 // bffSessionScopeRefresher adapts bff.BFFSessionStore.SetUserWithRecoveryStatus

@@ -112,6 +112,10 @@ type Server struct {
 	// it flips a user's recovery_required flag to false. Nil puts that endpoint
 	// into a 503 state.
 	recoveryRequirementClearer RecoveryRequirementClearer
+	// recoveryStatus, when non-nil, backs PostRecoveryCodes' guard against
+	// reissuing already-acknowledged recovery codes. Nil skips the guard
+	// entirely (dev-scaffold mode / not wired).
+	recoveryStatus RecoveryStatusChecker
 	// recoverySessionRefresher, when non-nil, refreshes the caller's own
 	// already-issued BFF session scope immediately after
 	// recoveryRequirementClearer clears recovery_required, so the SAME cookie
@@ -316,6 +320,15 @@ func (s *Server) WithRecoveryRequirementClearer(clearer RecoveryRequirementClear
 // chaining.
 func (s *Server) WithRecoverySessionRefresher(refresher RecoverySessionRefresher) *Server {
 	s.recoverySessionRefresher = refresher
+	return s
+}
+
+// WithRecoveryStatusChecker attaches the checker PostRecoveryCodes uses to
+// refuse reissuing recovery codes once the user already acknowledged a set
+// (recovery_required cleared). A nil checker skips the guard. Returns s for
+// chaining.
+func (s *Server) WithRecoveryStatusChecker(checker RecoveryStatusChecker) *Server {
+	s.recoveryStatus = checker
 	return s
 }
 

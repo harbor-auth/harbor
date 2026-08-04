@@ -439,3 +439,96 @@ missing the equivalent unwrap.
    the unwrapped, decoded options rather than the still-wrapped raw body.
 3. Verify: `go build ./...`, `go test ./internal/bff/...` (all green,
    including the new test and the full existing signin/login suites).
+
+# Task 18: GET /signup/recovery silently regenerates recovery codes on every revisit
+
+Bug: `PostRecoveryCodes` (POST /recovery/codes) unconditionally generated a
+FRESH set of 10 recovery codes and overwrote the stored hashes on every call —
+including a call made after the user already confirmed/saved a set via POST
+/recovery/acknowledge. `web/templates/signup_recovery.html`'s `loadCodes()`
+calls POST /recovery/codes unconditionally on page load, so any revisit to GET
+/signup/recovery while the BFF session cookie is still live (browser back
+button, a stale bookmark, re-clicking an old link) silently displayed a
+completely different set of codes with no warning the first set was now
+invalid — violating the "recovery codes render legibly exactly once" property.
+
+Fix: added a guard, not a route redirect (kept the change scoped to the two
+files the bug report named plus the minimal wiring a Go interface requires):
+
+1. `internal/mgmtapi/recovery.go`: new `RecoveryStatusChecker` interface
+   (`IsRecoveryRequired(ctx, userID) (bool, error)`) and a `recoveryStatus`
+   Server field. `PostRecoveryCodes` now calls it (when wired) right after the
+   rate-limit check and BEFORE `GenerateCodes`/`StoreRecoveryCodes`: if the
+   user's `recovery_required` has already cleared, it returns 409
+   `recovery_already_complete` and never touches the code generator/store — the
+   old (now stale) codes stay valid. A nil checker (not wired) skips the guard
+   entirely, preserving the pre-existing generate-or-regenerate behavior — and
+   a checker error is logged (WarnContext) and treated as fail-OPEN (generation
+   proceeds) rather than turning a transient DB hiccup into a harder failure
+   than "codes got regenerated" already was; this is a UX safety net against a
+   known bad ordering, not a security boundary the way e.g. the
+   uniform-failure /recovery/complete responses are.
+2. `internal/mgmtapi/server.go`: `recoveryStatus RecoveryStatusChecker` field
+   + `WithRecoveryStatusChecker` setter, following the exact pattern of the
+   adjacent `recoveryRequirementClearer`/`WithRecoveryRequirementClearer`.
+3. `cmd/harbor-mgmt/caller.go`: new `recoveryStatusChecker` adapter (+ narrow
+   `recoveryStatusQuerier` interface over `*db.Queries.GetUser`) satisfying
+   `mgmtapi.RecoveryStatusChecker` by reading `recovery_required` straight off
+   the SAME `users` row `recoveryRequirementClearer`'s `SetRecoveryComplete`
+   writes — there is still only one mechanism that clears the flag, this just
+   adds a read path next to the existing write path. mgmtapi cannot import
+   `internal/webauthn` or `internal/bff` (cycle risk, documented at the top of
+   `recoveryRequirementClearer`), and `webauthn.Store.GetUser` doesn't expose
+   `recovery_required` on its `User` type anyway, so this reads through
+   `*db.Queries` directly (same `GetUser` query `clients.DBSecretLoader` /
+   `DBMFAKeyResolver` already use for other per-user reads) rather than
+   introducing a new webauthn.Store method.
+4. `cmd/harbor-mgmt/main.go`: wires
+   `.WithRecoveryStatusChecker(recoveryStatusChecker{q: q})` next to the
+   existing `.WithRecoveryRequirementClearer(...)` call.
+5. `web/templates/signup_recovery.html`: `loadCodes()` now checks for a 409
+   response before the generic `!response.ok` branch and, on 409, navigates to
+   `/signup/success` instead of rendering a (nonexistent) new code set or
+   showing the generic "couldn't generate" error — matching the task's
+   suggested fix direction ("redirect straight to /signup/success").
+
+Considered and rejected: gating at `bff.GetSignupRecovery` (checking
+`bff.RecoveryRequiredFromContext`) instead of/in addition to the mgmtapi guard.
+Rejected because `RecoveryRequiredFromContext` defaults to `false` ("not
+required") when the context carries no BFF-session-derived value at all — the
+same default `SessionScopeFromContext` uses for "no session ⇒ full scope".
+Gating the PAGE render on that flag would misfire for a plain unauthenticated
+GET (no session, flag defaults false) — it would need to be conditioned on
+`SessionIDFromContext(ctx) != ""` too, which is exactly the authenticated-caller
+resolution `PostRecoveryCodes` already does more precisely via
+`recoverySessionCaller`. Guarding once at the API layer that owns the mutation
+(and that the task's own file list points at) avoids duplicating that logic in
+two layers with two different default-safety arguments to keep in sync.
+
+New tests:
+- `internal/mgmtapi/recovery_test.go`: `TestPostRecoveryCodes_AlreadyAcknowledged_Refuses`
+  (409, `GenerateCodes`/`StoreRecoveryCodes` never called — the core
+  regression test, written first and confirmed to fail to even COMPILE without
+  `WithRecoveryStatusChecker` existing), `TestPostRecoveryCodes_StillRequired_Generates`
+  (guard doesn't block the legitimate first-time case),
+  `TestPostRecoveryCodes_NoStatusCheckerWired_PreservesOldBehavior`,
+  `TestPostRecoveryCodes_StatusCheckError_FailsOpen`.
+- `cmd/harbor-mgmt/caller_test.go`: `TestRecoveryStatusChecker_ReadsUserRecoveryRequired`
+  (table: still-required / already-cleared), `TestRecoveryStatusChecker_PropagatesQueryError`,
+  `TestRecoveryStatusChecker_InvalidUserID` (malformed id rejected before the
+  querier is ever called).
+
+Verify: `go build ./...`, `go vet ./...`, `gofmt -l .` (clean), `go test ./...`
+(whole repo, all green), `go test -tags e2e ./e2e/... -run TestSignup -v`
+(same graceful DB-unavailable skips as every prior task on this branch — no
+`HARBOR_E2E_DATABASE_URL` in this sandbox), `go mod tidy` (no drift),
+`go run ./tools/lint/filesize` (advisory-only; `internal/mgmtapi/recovery.go`
+and `recovery_test.go` were ALREADY over their frozen §1.10 baselines before
+this task touched them — same pre-existing, unrelated debt task 13 already
+noted and declined to fix here; `cmd/harbor-mgmt/caller_test.go` was likewise
+already at 589 lines, over the (non-frozen-baselined) 500-line test-file limit,
+before this task's +82 lines — not splitting an unrelated, already-oversized
+file for a narrowly-scoped bug fix). `golangci-lint` is present in this sandbox
+this time but errors immediately on a pre-existing Go-toolchain-version
+mismatch (built with go1.24, repo targets go1.25) unrelated to this change;
+`make`/`-race` remain unavailable as in every prior task on this branch.

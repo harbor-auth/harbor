@@ -17,9 +17,11 @@ import (
 type fakeRecoveryCodeGenerator struct {
 	codes []identity.RecoveryCode
 	err   error
+	calls int
 }
 
 func (f *fakeRecoveryCodeGenerator) GenerateCodes(n int) ([]identity.RecoveryCode, error) {
+	f.calls++
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -79,6 +81,23 @@ type fakeRecoveryLimiter struct {
 }
 
 func (f *fakeRecoveryLimiter) Allow(_ string) bool { return f.allow }
+
+// fakeRecoveryStatusChecker is a test-only RecoveryStatusChecker. required is
+// the value IsRecoveryRequired returns absent err; gotUserID captures the
+// last userID it was asked about.
+type fakeRecoveryStatusChecker struct {
+	required  bool
+	err       error
+	gotUserID string
+}
+
+func (f *fakeRecoveryStatusChecker) IsRecoveryRequired(_ context.Context, userID string) (bool, error) {
+	f.gotUserID = userID
+	if f.err != nil {
+		return false, f.err
+	}
+	return f.required, nil
+}
 
 // fakeEnrollmentCallerSource is a test-only CallerSessionSource standing in
 // for bffEnrollmentCallerAdapter: unlike fakeCallerSource it always reports a
@@ -296,6 +315,108 @@ func TestPostRecoveryCodes_FullScopeCallerSourcePreferredOverFallback(t *testing
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPostRecoveryCodes_AlreadyAcknowledged_Refuses proves that once a user's
+// recovery_required flag has cleared (they already saved a set of codes via
+// POST /recovery/acknowledge), a later call to POST /recovery/codes — e.g. the
+// browser back button landing on GET /signup/recovery again while the BFF
+// session cookie is still live — is refused with 409 rather than silently
+// generating and persisting a brand new, different set of codes that would
+// invalidate the set the user already saved.
+func TestPostRecoveryCodes_AlreadyAcknowledged_Refuses(t *testing.T) {
+	gen := &fakeRecoveryCodeGenerator{}
+	store := &fakeRecoveryCodeStore{}
+	s, _ := newRecoveryServer(gen, store, &fakeRecoveryVerifier{})
+	checker := &fakeRecoveryStatusChecker{required: false}
+	s = s.WithRecoveryStatusChecker(checker).WithCallerSource(fakeCallerSource{userID: "user-1"})
+
+	req := httptest.NewRequest(http.MethodPost, "/recovery/codes", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryCodes(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp errorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Error != "recovery_already_complete" {
+		t.Errorf("error code = %q, want recovery_already_complete", resp.Error)
+	}
+	if checker.gotUserID != "user-1" {
+		t.Errorf("checker got userID = %q, want user-1", checker.gotUserID)
+	}
+	if gen.calls != 0 {
+		t.Errorf("GenerateCodes called %d times, want 0 (must never reissue)", gen.calls)
+	}
+	if store.stored != nil {
+		t.Errorf("StoreRecoveryCodes stored %+v, want nothing persisted", store.stored)
+	}
+}
+
+// TestPostRecoveryCodes_StillRequired_Generates proves the guard does not
+// block the legitimate first-time case: while recovery_required is still
+// true, codes generate normally.
+func TestPostRecoveryCodes_StillRequired_Generates(t *testing.T) {
+	gen := &fakeRecoveryCodeGenerator{}
+	s, _ := newRecoveryServer(gen, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s = s.WithRecoveryStatusChecker(&fakeRecoveryStatusChecker{required: true}).
+		WithCallerSource(fakeCallerSource{userID: "user-1"})
+
+	req := httptest.NewRequest(http.MethodPost, "/recovery/codes", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryCodes(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if gen.calls != 1 {
+		t.Errorf("GenerateCodes called %d times, want 1", gen.calls)
+	}
+}
+
+// TestPostRecoveryCodes_NoStatusCheckerWired_PreservesOldBehavior proves an
+// unconfigured checker (nil, e.g. dev-scaffold mode) leaves the endpoint free
+// to generate codes exactly as it did before this guard existed.
+func TestPostRecoveryCodes_NoStatusCheckerWired_PreservesOldBehavior(t *testing.T) {
+	gen := &fakeRecoveryCodeGenerator{}
+	s, _ := newRecoveryServer(gen, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s = s.WithCallerSource(fakeCallerSource{userID: "user-1"})
+
+	req := httptest.NewRequest(http.MethodPost, "/recovery/codes", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryCodes(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if gen.calls != 1 {
+		t.Errorf("GenerateCodes called %d times, want 1", gen.calls)
+	}
+}
+
+// TestPostRecoveryCodes_StatusCheckError_FailsOpen proves a checker error
+// (e.g. a transient DB lookup failure) never turns into a harder failure than
+// the pre-guard behavior: generation still proceeds rather than the request
+// failing outright.
+func TestPostRecoveryCodes_StatusCheckError_FailsOpen(t *testing.T) {
+	gen := &fakeRecoveryCodeGenerator{}
+	s, _ := newRecoveryServer(gen, &fakeRecoveryCodeStore{}, &fakeRecoveryVerifier{})
+	s = s.WithRecoveryStatusChecker(&fakeRecoveryStatusChecker{err: errors.New("db down")}).
+		WithCallerSource(fakeCallerSource{userID: "user-1"})
+
+	req := httptest.NewRequest(http.MethodPost, "/recovery/codes", strings.NewReader("{}"))
+	rec := httptest.NewRecorder()
+	s.PostRecoveryCodes(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if gen.calls != 1 {
+		t.Errorf("GenerateCodes called %d times, want 1", gen.calls)
 	}
 }
 
