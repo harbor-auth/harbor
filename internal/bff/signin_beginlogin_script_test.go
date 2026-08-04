@@ -31,12 +31,15 @@ func TestSigninHandler_BeginLoginScript_UnwrapsPublicKeyWrapper(t *testing.T) {
 	runNodeHarness(t, signinScriptTestHarness(script))
 }
 
-// requireNode skips the calling test when no Node.js binary is available to
-// run the extracted inline script under.
+// requireNode fails the calling test closed when no Node.js binary is
+// available to run the extracted inline script under. Node is a pinned
+// member of the hermetic dev shell (flake.nix), so its absence here means the
+// toolchain isn't the one CI/`make test` expect — surface that loudly rather
+// than silently skipping real signin-script coverage (Foundation F3).
 func requireNode(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("node"); err != nil {
-		t.Skip("node not available in PATH")
+		t.Fatalf("node not available in PATH (required by the pinned dev shell — run under `nix develop`): %v", err)
 	}
 }
 
@@ -73,7 +76,7 @@ func runNodeHarness(t *testing.T, source string) {
 	t.Helper()
 	nodePath, err := exec.LookPath("node")
 	if err != nil {
-		t.Fatalf("node not available in PATH (requireNode(t) should have skipped already): %v", err)
+		t.Fatalf("node not available in PATH (requireNode(t) should have failed already): %v", err)
 	}
 
 	dir := t.TempDir()

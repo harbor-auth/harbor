@@ -223,7 +223,10 @@ func httpAcknowledgeRecovery(client *http.Client) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
+		raw, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("POST %s = %d (body unreadable: %w)", recoveryAcknowledgePath, resp.StatusCode, readErr)
+		}
 		return fmt.Errorf("POST %s = %d: %s", recoveryAcknowledgePath, resp.StatusCode, raw)
 	}
 	return nil
@@ -271,7 +274,10 @@ func httpCompleteRecovery(client *http.Client, requestID, code string) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
+		raw, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("POST %s = %d (body unreadable: %w)", recoveryCompletePath, resp.StatusCode, readErr)
+		}
 		return fmt.Errorf("POST %s = %d: %s", recoveryCompletePath, resp.StatusCode, raw)
 	}
 	return nil
