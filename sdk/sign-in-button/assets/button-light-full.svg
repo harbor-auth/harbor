@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- GENERATED FILE. DO NOT EDIT.
+     Source: sdk/sign-in-button/gen (tokens.go, generate.go). Regenerate
+     with `go run ./sdk/sign-in-button/gen` from the repository root. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="240" height="40" viewBox="0 0 240 40" role="img" aria-label="Sign in with Private Harbor" focusable="false" class="phb-btn-light">
+<title>Sign in with Private Harbor</title>
+<style>
+.phb-btn-light-bg{fill:#FFFFFF;stroke:#D6D9DE;stroke-width:1;}
+.phb-btn-light-ring{fill:none;stroke:transparent;stroke-width:2;}
+.phb-btn-light-label,.phb-btn-light-icon{fill:#16181D;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+.phb-btn-light-label{font-size:14px;font-weight:600;}
+.phb-btn-light:hover .phb-btn-light-bg{fill:#F0F2F5;stroke:#C3C8D1;}
+.phb-btn-light:focus-visible .phb-btn-light-ring{stroke:#1857C4;}
+.phb-btn-light.phb-btn-light--disabled .phb-btn-light-bg,.phb-btn-light[aria-disabled="true"] .phb-btn-light-bg{fill:#F5F6F8;stroke:#E4E7EB;}
+.phb-btn-light.phb-btn-light--disabled .phb-btn-light-label,.phb-btn-light.phb-btn-light--disabled .phb-btn-light-icon,.phb-btn-light[aria-disabled="true"] .phb-btn-light-label,.phb-btn-light[aria-disabled="true"] .phb-btn-light-icon{fill:#9AA1AC;}
+</style>
+<rect class="phb-btn-light-bg" x="0.5" y="0.5" width="239" height="39" rx="8" ry="8"/>
+<rect class="phb-btn-light-ring" x="3" y="3" width="234" height="34" rx="5" ry="5"/>
+<g class="phb-btn-light-icon" transform="translate(16,10)">
+<rect x="2" y="8" width="3" height="8"/>
+<rect x="8.5" y="4" width="3" height="12"/>
+<rect x="15" y="10" width="3" height="6"/>
+<rect x="1" y="16" width="18" height="2" rx="1" ry="1"/>
+</g>
+<text class="phb-btn-light-label" x="46" y="20" dominant-baseline="middle">Sign in with Private Harbor</text>
+</svg>

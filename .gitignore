@@ -17,6 +17,9 @@ coverage.html
 # Go
 vendor/
 
+# Node (sdk/sign-in-button/react and any future JS/TS packages)
+node_modules/
+
 # OIDF conformance harness (cloned upstream suite + run artifacts / evidence)
 conformance/.suite/
 conformance/out/

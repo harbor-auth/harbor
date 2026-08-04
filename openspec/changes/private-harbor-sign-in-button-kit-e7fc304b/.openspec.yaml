@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-08-03
+goal: Ship the official "Sign in with Private Harbor" button/brand kit — accessible SVG assets, copy-paste HTML/CSS/React, a dependency-light integration example, and security/brand documentation — as a permissively-licensed, standalone package relying parties (incl. Harbor Cloud onboarding and harbor-dummy-app) can vendor without crossing the AGPL boundary.
