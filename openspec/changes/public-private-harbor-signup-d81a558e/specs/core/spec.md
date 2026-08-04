@@ -71,7 +71,7 @@ already implement.
 ```go
 // Existing seam, reused (not reinvented) for the post-registration handoff:
 type ScopedSessionIssuer interface {
-    IssueEnrollmentSession(ctx context.Context, userID string) (string, error)
+    IssueEnrollmentSession(ctx context.Context, userID, returnTo string) (string, error)
 }
 ```
 
