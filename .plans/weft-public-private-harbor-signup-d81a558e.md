@@ -128,3 +128,32 @@ Investigation first: read every signup/signin/recovery handler and its wiring li
 7. No live `docker compose`/Postgres/Redis available in this execution environment (confirmed: no `docker`, `pg_isready`, or `redis-cli` binary, and ports 5432/6379 closed) — every new test was verified to *compile* (`go build -tags e2e ./e2e/...`, `go vet -tags e2e ./e2e/...`) and to *skip gracefully* (`go test -tags e2e ./e2e/... -run TestSignup -v`, all 9 `SKIP` with the expected "unreachable"/"DB unavailable" reasons, matching the existing package's convention) rather than being run green end-to-end against a live stack. Correctness of the HTTP/DB contracts was cross-verified by reading the actual handler/service/store source for every status code and JSON field name asserted (documented per-test in code comments with file references), not assumed from the task prompt.
 8. Verify: `gofmt -l e2e/*.go` (clean), `go vet -tags e2e ./e2e/...` (clean), `go build -tags e2e ./e2e/...` (clean), `go test -tags e2e ./e2e/... -run TestSignup -v` (9/9 skip gracefully, expected reasons), `go test ./...` (whole repo, unaffected, all green), `go run ./tools/lint/filesize` (no new violations). Pre-existing `e2e` package failures (`flow_test.go`'s `TestJWKSSignatureVerification` et al., connection-refused against harbor-hot) reproduced identically on `git stash` (file is new/untracked so stash was a no-op, confirmed via `git status`) — not introduced by this change. `golangci-lint` unusable in this sandbox (Go-1.24-built binary vs module's Go 1.25), same pre-existing condition noted in every prior task on this branch.
 9. Follow-ons suggested (out of scope, filed via `weft-agent tasks suggest`): (a) `internal/bff/signin.go`'s `ServeSignin` creates a `BFFSessionRecord` with no `SessionScope` set, and `LoginHandler.FinishLogin` calls `sessions.SetUser` (not `SetUserWithRecoveryStatus`) — the resulting session's `SessionScope` stays the Go zero value `""`, which fails `RequireFullScope`'s `scope != SessionScopeFull` check, so a plain returning-user sign-in via `/signin` may never reach a full-scope-gated route without an unrelated fix; (b) `e2e/recovery_test.go`'s `recoveryScopedSessionCookie` constant is wrong (see investigation note above) — low real-world impact today since the tests that use it already skip in CI, but worth fixing for when `HARBOR_E2E_DATABASE_URL` is eventually wired into `make e2e`.
+
+# Task 14: Broaden ingress path routing for public signup/sign-in surface
+
+`deploy/k8s/ingress.yaml` and `deploy/helm/templates/ingress.yaml` previously
+routed only `/login` to `harbor-mgmt`, predating the public signup/sign-in
+journey — everything else (`/signup*`, `/signin`, `/enroll`, `/webauthn/*`,
+`/recovery/*`) fell through to harbor-hot's catch-all `/` and would 404, a gap
+already documented in `deploy/README.md`'s BFF Topology section and
+`docs/design/product/signup-cta-contract.md`.
+
+1. Added five `pathType: Prefix` entries (`/signup`, `/signin`, `/enroll`,
+   `/webauthn`, `/recovery`), each routed to `harbor-mgmt`, ahead of the
+   existing catch-all `/` → `harbor-hot` rule in both `deploy/k8s/ingress.yaml`
+   and `deploy/helm/templates/ingress.yaml`. Updated the top-of-file comment
+   in both to describe the broadened route set instead of "only the BFF login
+   paths".
+2. Updated `deploy/contract/security_contract_test.go`'s `assertPublicLoginRoute`
+   `want` map (shared by both `TestRawSecurityContract` and
+   `TestHelmSecurityContract`) to require all six prefixes → `harbor-mgmt`/`harbor-hot`
+   mappings instead of just `/login`/`/`.
+3. `deploy/README.md`: removed the "Known gap" callout under BFF Topology —
+   the example manifests now match the documented required prefix list, so
+   the gap is closed.
+4. Verify: `go build ./...`, `go vet ./...`, `gofmt -l` (clean), `go test ./...`
+   (whole repo, all green, including `deploy/contract`'s raw and
+   Helm-source-fallback variants). No `helm` binary available in this sandbox
+   to render `HELM_RENDERED` and exercise the CI-only rendered-manifest path;
+   `assertHelmSourceSecurityContract` (source-scan fallback) covers the Helm
+   template directly and passed.

@@ -46,13 +46,10 @@ path-routing ingress (see `deploy/helm/templates/ingress.yaml` and
 `deploy/k8s/ingress.yaml` for a starting point) or place both services behind a
 reverse proxy on a shared hostname.
 
-> **Known gap:** the example manifests referenced above (`deploy/k8s/ingress.yaml`,
-> `deploy/helm/templates/ingress.yaml`) currently route only the `/login`
-> prefix to `harbor-mgmt`, predating the public signup/sign-in surface — they
-> need broadening to the full prefix list above before `/signup`, `/signin`,
-> `/enroll`, `/webauthn/*`, and `/recovery/*` will actually resolve through
-> them. This doc describes the required topology; updating the example
-> manifests themselves is tracked as follow-on infra work, not done here.
+The example manifests referenced above (`deploy/k8s/ingress.yaml`,
+`deploy/helm/templates/ingress.yaml`) route the full prefix list above —
+`/login`, `/signup`, `/signin`, `/enroll`, `/webauthn`, and `/recovery` — to
+`harbor-mgmt`, with everything else falling through to `harbor-hot`.
 
 ### AUTHORIZE_COMPLETE_URL
 
