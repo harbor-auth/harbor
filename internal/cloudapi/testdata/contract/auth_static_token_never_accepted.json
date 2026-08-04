@@ -1,0 +1,14 @@
+{
+  "name": "auth_static_token_never_accepted",
+  "spec_scenario": "Operator or initial-access tokens are never accepted",
+  "steps": [
+    {
+      "method": "GET",
+      "path": "/admin/v1/namespaces/auth-check-ns",
+      "auth": "raw",
+      "raw_bearer": "static-admin-api-token-value-not-a-jwt",
+      "want_status": 401,
+      "want_error_code": "invalid_token"
+    }
+  ]
+}

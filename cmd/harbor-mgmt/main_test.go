@@ -182,6 +182,59 @@ func TestValidateProductionHostAllowsWebAuthnLocalhostOnly(t *testing.T) {
 	}
 }
 
+// TestCloudIntegrationGateRequiresItsConfigBeforeListen mirrors
+// TestStartupRejectsMissingProductionConfigurationBeforeListen for the three
+// cloudapi env vars: these are conditionally required (only when
+// CLOUD_INTEGRATION_ENABLED is set), so they live outside the always-required
+// map above, but the same "checked before the HTTP listen boundary" contract
+// applies.
+func TestCloudIntegrationGateRequiresItsConfigBeforeListen(t *testing.T) {
+	startup := productionAssembly(t)
+	listen := strings.Index(startup, "httpserver.Run(")
+	if listen < 0 {
+		t.Fatal("harbor-mgmt startup does not contain the HTTP listen boundary")
+	}
+
+	for name, marker := range map[string]string{
+		"trust-anchor public key": `requires CLOUD_SERVICE_AUTH_PUBLIC_KEY when CLOUD_INTEGRATION_ENABLED is set`,
+		"hot proxy token":         `requires MGMT_HOT_PROXY_TOKEN when CLOUD_INTEGRATION_ENABLED is set`,
+		"hot internal URL":        `validateInternalURL("HARBOR_HOT_INTERNAL_URL"`,
+	} {
+		check := strings.Index(startup, marker)
+		if check < 0 {
+			t.Errorf("harbor-mgmt startup does not reject missing %s (want %q)", name, marker)
+			continue
+		}
+		if check > listen {
+			t.Errorf("harbor-mgmt checks %s after its HTTP listen boundary", name)
+		}
+	}
+}
+
+// TestProductionGraphWiresCloudAPIRoutesBehindGate is the same source-level
+// guard as TestProductionLiveGraphRequiresDurableDependencies, scoped to the
+// cloudapi wiring: the gate variable must guard route registration, and
+// registration must use the durable Redis/DB-backed dependencies already in
+// the graph — never a standalone/in-memory substitute.
+func TestProductionGraphWiresCloudAPIRoutesBehindGate(t *testing.T) {
+	assembly := productionAssembly(t)
+
+	if !strings.Contains(assembly, "if cloudIntegrationEnabled {") {
+		t.Error("production harbor-mgmt graph does not gate cloudapi route registration on cloudIntegrationEnabled")
+	}
+	for _, required := range []string{
+		"cloudapi.NewServiceAuthVerifier(",
+		"cloudapi.NewRedisReplayGuard(redisClient)",
+		"cloudapi.NewStore(q)",
+		"cloudapi.NewKeysHandler(",
+		"registerCloudAPIRoutes(mux,",
+	} {
+		if !strings.Contains(assembly, required) {
+			t.Errorf("production harbor-mgmt graph does not wire %q", required)
+		}
+	}
+}
+
 func TestProductionGraphWiresOutageAwareAbuseProtection(t *testing.T) {
 	source, err := os.ReadFile("main.go")
 	if err != nil {

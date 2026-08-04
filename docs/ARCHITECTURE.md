@@ -63,6 +63,49 @@ per-region, so a user's data never leaves their jurisdiction.
    pure string operation, no global database (§5.1). A bad rollout or a legal
    request is contained to one region.
 
+## Harbor Cloud management API (optional, private path only)
+
+Harbor Cloud — the closed-source SaaS control plane — provisions and manages
+self-hosted-shaped Harbor clusters through one narrow, internal contract
+rather than by reaching into the region's data plane directly:
+
+```
+Harbor Cloud ──(WireGuard, private CIDR only)──► harbor-mgmt  /admin/v1/*
+                cloudServiceAuth JWT                 │  namespaces · sessions
+                (short-lived, scoped, replay-guarded) │  │
+                                                       │  └─ keys:rotate ──► harbor-hot  /admin/keys/rotate
+                                                       │                      (MGMT_HOT_PROXY_TOKEN,
+                                                       │                       credential=cloud-proxy)
+                                                       ▼
+                                          cloud_namespaces / cloud_operations /
+                                          cloud_sessions (this region's Postgres)
+```
+
+`internal/cloudapi` mounts `/admin/v1/*` only on `harbor-mgmt`, gated behind
+`mgmt.cloudIntegration.enabled` (default `false`) and reachable only over the
+private NodePort + NetworkPolicy CIDR allow-list described in
+[`deploy/README.md`](../deploy/README.md#harbor-cloud-management-api) — it is
+never exposed by `harbor-hot`'s public listener or `auth.harborauth.com`.
+
+**Key rotation is a proxy hop, not a second implementation.** `POST
+/admin/v1/keys/rotate` requires the `keys:rotate` scope, then makes an
+internal HTTP call to harbor-hot's existing, unmodified `POST
+/admin/keys/rotate` — authenticated with `MGMT_HOT_PROXY_TOKEN`, a *second*
+static credential independent of the operator's `ADMIN_API_TOKEN` (see
+[`deploy/README.md`](../deploy/README.md#two-distinct-internal-credentials)).
+This reuses harbor-hot's already-tested rotation state machine instead of
+forking it, and keeps rotation privileged infrastructure: it is reachable
+only via this scope-checked proxy hop or a human holding `ADMIN_API_TOKEN`,
+never through Harbor Cloud's customer-facing self-service surface.
+
+Everything else on this path — namespace lifecycle and session minting — is
+served directly by `internal/cloudapi` against namespace-scoped tables in
+this region's own Postgres, with no relationship to end-user OIDC state.
+Full contract: `api/openapi/harbor-cloud.yaml` (Apache-2.0, fixtures under
+`internal/cloudapi/testdata/contract/`) — shared with harbor-cloud as YAML +
+JSON fixtures only, never a Go import in either direction (see *Proprietary
+components* below).
+
 ## Where to go next
 
 - **OIDC login flow** — [`OIDC-LOGIN-FLOW.md`](OIDC-LOGIN-FLOW.md): step-by-step

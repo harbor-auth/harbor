@@ -34,3 +34,13 @@ data:
   REGISTRATION_BASE_URL: "https://auth.example.com"
   MTA_DOMAIN: "mta-eu.harbor.id"
   RELAY_DOMAIN: "relay.eu.harbor.id"
+  # Harbor Cloud management API (internal/cloudapi) — disabled by default.
+  # Flip to "true" only after also setting CLOUD_SERVICE_AUTH_PUBLIC_KEY /
+  # MGMT_HOT_PROXY_TOKEN in secret-mgmt.yaml and opening the matching
+  # NetworkPolicy path to harbor-hot; see deploy/README.md's "Harbor Cloud
+  # management API" section.
+  CLOUD_INTEGRATION_ENABLED: "false"
+  # harbor-hot's cluster-internal Service DNS name. Non-secret, so it lives
+  # here rather than in secret-mgmt.yaml. Only read when
+  # CLOUD_INTEGRATION_ENABLED is "true".
+  HARBOR_HOT_INTERNAL_URL: "http://harbor-hot.harbor.svc.cluster.local"

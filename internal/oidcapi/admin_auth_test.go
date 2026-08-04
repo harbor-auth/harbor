@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/harbor-auth/harbor/internal/crypto"
@@ -53,6 +54,13 @@ func adminBufLogger(buf *bytes.Buffer) *slog.Logger {
 	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
+// oneCred builds a single-credential Credentials slice labeled "operator",
+// matching production's ADMIN_API_TOKEN wiring, for tests that only care
+// about single-token accept/reject behavior.
+func oneCred(token string) []AdminCredential {
+	return []AdminCredential{{Label: "operator", Token: token}}
+}
+
 // withAdminPaths is a test-local path dispatcher that applies mw only when the
 // request path is in paths, and falls through to base otherwise. It mirrors the
 // behavior that WithAdminAuth (task 4) will provide, allowing these tests to
@@ -79,7 +87,7 @@ func withAdminPaths(base http.Handler, paths []string, mw func(http.Handler) htt
 // invoked.
 func TestAdminAuthMiddleware_NoHeader(t *testing.T) {
 	spy := &spyHandler{}
-	mw := AdminAuthMiddleware(AdminAuthConfig{Token: "secret-token"})
+	mw := AdminAuthMiddleware(AdminAuthConfig{Credentials: oneCred("secret-token")})
 	rec := httptest.NewRecorder()
 	mw(spy).ServeHTTP(rec, bearerReq(http.MethodPost, "/admin/keys/rotate", ""))
 
@@ -95,7 +103,7 @@ func TestAdminAuthMiddleware_NoHeader(t *testing.T) {
 // rejected with 401 and the inner handler (e.g. the rotator) is NOT invoked.
 func TestAdminAuthMiddleware_WrongToken(t *testing.T) {
 	spy := &spyHandler{}
-	mw := AdminAuthMiddleware(AdminAuthConfig{Token: "correct-token"})
+	mw := AdminAuthMiddleware(AdminAuthConfig{Credentials: oneCred("correct-token")})
 	rec := httptest.NewRecorder()
 	mw(spy).ServeHTTP(rec, bearerReq(http.MethodPost, "/admin/keys/rotate", "Bearer wrong-token"))
 
@@ -113,7 +121,7 @@ func TestAdminAuthMiddleware_WrongToken(t *testing.T) {
 func TestAdminAuthMiddleware_CorrectToken(t *testing.T) {
 	const tok = "super-secret-admin-token"
 	spy := &spyHandler{}
-	mw := AdminAuthMiddleware(AdminAuthConfig{Token: tok})
+	mw := AdminAuthMiddleware(AdminAuthConfig{Credentials: oneCred(tok)})
 	rec := httptest.NewRecorder()
 	mw(spy).ServeHTTP(rec, bearerReq(http.MethodPost, "/admin/keys/rotate", "Bearer "+tok))
 
@@ -140,7 +148,7 @@ func TestAdminAuthMiddleware_EmptyConfigToken(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			spy := &spyHandler{}
-			mw := AdminAuthMiddleware(AdminAuthConfig{Token: ""})
+			mw := AdminAuthMiddleware(AdminAuthConfig{Credentials: oneCred("")})
 			rec := httptest.NewRecorder()
 			mw(spy).ServeHTTP(rec, bearerReq(http.MethodPost, "/admin/keys/rotate", tc.header))
 
@@ -163,7 +171,7 @@ func TestAdminAuthMiddleware_BearerCaseInsensitive(t *testing.T) {
 	for _, prefix := range prefixes {
 		t.Run(prefix, func(t *testing.T) {
 			spy := &spyHandler{}
-			mw := AdminAuthMiddleware(AdminAuthConfig{Token: tok})
+			mw := AdminAuthMiddleware(AdminAuthConfig{Credentials: oneCred(tok)})
 			rec := httptest.NewRecorder()
 			mw(spy).ServeHTTP(rec, bearerReq(http.MethodPost, "/admin/keys/rotate", prefix+" "+tok))
 
@@ -190,7 +198,7 @@ func TestAdminAuthMiddleware_WWWAuthenticateHeader(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			mw := AdminAuthMiddleware(AdminAuthConfig{Token: "tok"})
+			mw := AdminAuthMiddleware(AdminAuthConfig{Credentials: oneCred("tok")})
 			rec := httptest.NewRecorder()
 			mw(&spyHandler{}).ServeHTTP(rec, bearerReq(http.MethodPost, "/admin/revoke-jwt", tc.header))
 
@@ -209,7 +217,7 @@ func TestAdminAuthMiddleware_WWWAuthenticateHeader(t *testing.T) {
 // TestAdminAuthMiddleware_ErrorResponseShape verifies the 401 body is the
 // standard PII-free JSON error envelope used throughout oidcapi.
 func TestAdminAuthMiddleware_ErrorResponseShape(t *testing.T) {
-	mw := AdminAuthMiddleware(AdminAuthConfig{Token: "tok"})
+	mw := AdminAuthMiddleware(AdminAuthConfig{Credentials: oneCred("tok")})
 	rec := httptest.NewRecorder()
 	mw(&spyHandler{}).ServeHTTP(rec, bearerReq(http.MethodPost, "/admin/keys/rotate", "Bearer wrong"))
 
@@ -232,8 +240,8 @@ func TestAdminAuthMiddleware_TokenNotLogged(t *testing.T) {
 	const secret = "ultra-secret-value"
 	var buf bytes.Buffer
 	mw := AdminAuthMiddleware(AdminAuthConfig{
-		Token:  secret,
-		Logger: adminBufLogger(&buf),
+		Credentials: oneCred(secret),
+		Logger:      adminBufLogger(&buf),
 	})
 	handler := mw(&spyHandler{})
 
@@ -283,7 +291,7 @@ func TestAdminAuth_ThroughRouter_RotateEndpoint(t *testing.T) {
 	const tok = "admin-rotate-token"
 	srv := newTestServer(t)
 	base := openapi.HandlerFromMux(srv, http.NewServeMux())
-	mw := AdminAuthMiddleware(AdminAuthConfig{Token: tok})
+	mw := AdminAuthMiddleware(AdminAuthConfig{Credentials: oneCred(tok)})
 	h := withAdminPaths(base, []string{"/admin/keys/rotate", "/admin/revoke-jwt"}, mw)
 
 	ts := httptest.NewServer(h)
@@ -329,7 +337,7 @@ func TestAdminAuth_ThroughRouter_RevokeJwtEndpoint(t *testing.T) {
 	const tok = "admin-revoke-token"
 	srv := newTestServer(t)
 	base := openapi.HandlerFromMux(srv, http.NewServeMux())
-	mw := AdminAuthMiddleware(AdminAuthConfig{Token: tok})
+	mw := AdminAuthMiddleware(AdminAuthConfig{Credentials: oneCred(tok)})
 	h := withAdminPaths(base, []string{"/admin/keys/rotate", "/admin/revoke-jwt"}, mw)
 
 	ts := httptest.NewServer(h)
@@ -374,7 +382,7 @@ func TestAdminAuth_NonAdminPathsUnaffected(t *testing.T) {
 	const tok = "admin-token"
 	srv := newTestServer(t)
 	base := openapi.HandlerFromMux(srv, http.NewServeMux())
-	mw := AdminAuthMiddleware(AdminAuthConfig{Token: tok})
+	mw := AdminAuthMiddleware(AdminAuthConfig{Credentials: oneCred(tok)})
 	// Only admin paths are protected; all others fall through to base unchanged.
 	h := withAdminPaths(base, []string{"/admin/keys/rotate", "/admin/revoke-jwt"}, mw)
 
@@ -415,7 +423,7 @@ func TestAdminAuth_NonAdminPathsUnaffected(t *testing.T) {
 func TestAdminAuth_NonAdminPathsWithNoToken_TokenEndpoint(t *testing.T) {
 	srv := newTestServer(t)
 	base := openapi.HandlerFromMux(srv, http.NewServeMux())
-	mw := AdminAuthMiddleware(AdminAuthConfig{Token: "admin-tok"})
+	mw := AdminAuthMiddleware(AdminAuthConfig{Credentials: oneCred("admin-tok")})
 	h := withAdminPaths(base, []string{"/admin/keys/rotate", "/admin/revoke-jwt"}, mw)
 
 	ts := httptest.NewServer(h)
@@ -484,5 +492,108 @@ func TestAdminBearerToken_Present(t *testing.T) {
 				t.Fatalf("adminBearerToken = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// --- multi-credential (operator + cloud-proxy) tests ---
+
+// twoCreds returns the operator/cloud-proxy credential set harbor-hot wires
+// in production: ADMIN_API_TOKEN labeled "operator", MGMT_HOT_PROXY_TOKEN
+// labeled "cloud-proxy".
+func twoCreds(operatorTok, cloudProxyTok string) []AdminCredential {
+	return []AdminCredential{
+		{Label: "operator", Token: operatorTok},
+		{Label: "cloud-proxy", Token: cloudProxyTok},
+	}
+}
+
+// TestAdminAuthMiddleware_MultiCredential_BothAccepted verifies that either
+// the operator token or the cloud-proxy token is independently sufficient to
+// pass the middleware — neither credential depends on the other.
+func TestAdminAuthMiddleware_MultiCredential_BothAccepted(t *testing.T) {
+	const operatorTok, proxyTok = "operator-token-value", "cloud-proxy-token-value"
+	mw := AdminAuthMiddleware(AdminAuthConfig{Credentials: twoCreds(operatorTok, proxyTok)})
+
+	for _, tok := range []string{operatorTok, proxyTok} {
+		t.Run(tok, func(t *testing.T) {
+			spy := &spyHandler{}
+			rec := httptest.NewRecorder()
+			mw(spy).ServeHTTP(rec, bearerReq(http.MethodPost, "/admin/keys/rotate", "Bearer "+tok))
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200", rec.Code)
+			}
+			if !spy.called {
+				t.Fatal("inner handler must be invoked for a valid credential")
+			}
+		})
+	}
+}
+
+// TestAdminAuthMiddleware_MultiCredential_NeitherMatches verifies that a
+// token matching neither configured credential is rejected with 401 and the
+// inner handler is not invoked.
+func TestAdminAuthMiddleware_MultiCredential_NeitherMatches(t *testing.T) {
+	mw := AdminAuthMiddleware(AdminAuthConfig{Credentials: twoCreds("operator-token", "cloud-proxy-token")})
+	spy := &spyHandler{}
+	rec := httptest.NewRecorder()
+	mw(spy).ServeHTTP(rec, bearerReq(http.MethodPost, "/admin/keys/rotate", "Bearer neither-of-the-above"))
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	if spy.called {
+		t.Fatal("inner handler must NOT be invoked when no configured credential matches")
+	}
+}
+
+// TestAdminAuthMiddleware_MultiCredential_LabelsCredentialInLog verifies that
+// an accepted request's log line records which credential label matched
+// (docs/DESIGN.md: leaking one credential must be distinguishable from
+// leaking the other) and that a rejected request's log line carries no
+// credential label at all.
+func TestAdminAuthMiddleware_MultiCredential_LabelsCredentialInLog(t *testing.T) {
+	const operatorTok, proxyTok = "operator-token-value", "cloud-proxy-token-value"
+	var buf bytes.Buffer
+	mw := AdminAuthMiddleware(AdminAuthConfig{
+		Credentials: twoCreds(operatorTok, proxyTok),
+		Logger:      adminBufLogger(&buf),
+	})
+	handler := mw(&spyHandler{})
+
+	buf.Reset()
+	handler.ServeHTTP(httptest.NewRecorder(), bearerReq(http.MethodPost, "/admin/keys/rotate", "Bearer "+operatorTok))
+	if !strings.Contains(buf.String(), "credential=operator") {
+		t.Errorf("log output for operator token = %q, want it to contain credential=operator", buf.String())
+	}
+
+	buf.Reset()
+	handler.ServeHTTP(httptest.NewRecorder(), bearerReq(http.MethodPost, "/admin/keys/rotate", "Bearer "+proxyTok))
+	if !strings.Contains(buf.String(), "credential=cloud-proxy") {
+		t.Errorf("log output for cloud-proxy token = %q, want it to contain credential=cloud-proxy", buf.String())
+	}
+
+	buf.Reset()
+	handler.ServeHTTP(httptest.NewRecorder(), bearerReq(http.MethodPost, "/admin/keys/rotate", "Bearer wrong-token"))
+	if strings.Contains(buf.String(), "credential=") {
+		t.Errorf("log output for a rejected request = %q, must not carry a credential label", buf.String())
+	}
+}
+
+// TestAdminAuthMiddleware_EmptyCredentials_FailsClosed verifies the
+// fail-closed contract with a nil/empty Credentials slice (as opposed to the
+// single-empty-token case covered by TestAdminAuthMiddleware_EmptyConfigToken):
+// every request is rejected with 401.
+func TestAdminAuthMiddleware_EmptyCredentials_FailsClosed(t *testing.T) {
+	spy := &spyHandler{}
+	mw := AdminAuthMiddleware(AdminAuthConfig{})
+	rec := httptest.NewRecorder()
+	mw(spy).ServeHTTP(rec, bearerReq(http.MethodPost, "/admin/keys/rotate", "Bearer some-token"))
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (fail-closed when Credentials is empty)", rec.Code)
+	}
+	if spy.called {
+		t.Fatal("inner handler must NOT be invoked when Credentials is empty (fail-closed)")
 	}
 }

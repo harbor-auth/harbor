@@ -97,8 +97,10 @@ hot:
   secrets:
     # If set, the chart does NOT create a Secret and instead references this one
     # (which must expose DATABASE_URL / REDIS_URL / HARBOR_KMS_SECRET /
-    # ADMIN_API_TOKEN keys). When this is set, the external Secret must supply
-    # the same user-DEK KEK as the management Secret.
+    # ADMIN_API_TOKEN / MGMT_HOT_PROXY_TOKEN keys). When this is set, the
+    # external Secret must supply the same user-DEK KEK as the management
+    # Secret, and the same MGMT_HOT_PROXY_TOKEN as harbor-mgmt's Secret
+    # (mgmt.cloudIntegration.hotProxyToken).
     existingSecret: ""
     # Name of the Secret managed by External Secrets Operator that exposes
     # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY for KMS access. Set to ""
@@ -181,14 +183,33 @@ mgmt:
   # cluster. It is disabled for self-hosters by default. Production must place
   # this NodePort behind a private encrypted transport (the reference host uses
   # WireGuard) and restrict allowedCIDR to the Harbor Cloud tunnel address.
+  #
+  # When enabled, harbor-mgmt additionally registers the internal, versioned
+  # /admin/v1/* management API (internal/cloudapi) that Harbor Cloud calls for
+  # session minting, namespace lifecycle, and signing-key rotation — never
+  # exposed by harbor-hot's public listener.
   cloudIntegration:
     enabled: false
     nodePort: 30081
     allowedCIDR: ""
+    # PEM-encoded SPKI trust-anchor public key (ES256 or Ed25519) harbor-mgmt
+    # verifies Harbor Cloud's self-issued cloudServiceAuth JWTs against. An
+    # empty value fails closed: every /admin/v1/* request is rejected.
+    cloudServiceAuthPublicKey: ""
+    # Second, distinct internal admin credential harbor-mgmt presents to
+    # harbor-hot when proxying POST /admin/v1/keys/rotate — never the
+    # operator's ADMIN_API_TOKEN. This single value is projected into BOTH
+    # harbor-mgmt's and harbor-hot's Secrets as MGMT_HOT_PROXY_TOKEN (hot
+    # reads it via internal/oidcapi's AdminAuthMiddleware, labeled
+    # "cloud-proxy") — set it once here rather than duplicating it per
+    # component.
+    # Generate: openssl rand -hex 32
+    hotProxyToken: ""
   secrets:
     # When set, this Secret must expose DATABASE_URL / REDIS_URL /
-    # HARBOR_KMS_SECRET / INITIAL_ACCESS_TOKEN. Its HARBOR_KMS_SECRET must
-    # equal the value in harbor-hot's Secret.
+    # HARBOR_KMS_SECRET / INITIAL_ACCESS_TOKEN, and, when cloudIntegration is
+    # enabled, CLOUD_SERVICE_AUTH_PUBLIC_KEY / MGMT_HOT_PROXY_TOKEN. Its
+    # HARBOR_KMS_SECRET must equal the value in harbor-hot's Secret.
     existingSecret: ""
     databaseUrl: ""
     # Shared Redis backs BFF, enrollment, WebAuthn, and abuse-control state.

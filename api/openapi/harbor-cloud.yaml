@@ -1,0 +1,488 @@
+# Harbor Cloud management API — OpenAPI 3.1 contract.
+#
+# This file is the SOURCE OF TRUTH for the authenticated internal contract
+# harbor core exposes to Harbor Cloud (the closed-source SaaS control plane,
+# `harbor-auth/harbor-cloud`) for session minting, namespace lifecycle, and
+# signing-key rotation. See
+# openspec/changes/harbor-cloud-management-api-contract-2ee993ea/{proposal,design}.md
+# for the full design.
+#
+# Licensing boundary: this file (and everything under api/**, REUSE.toml) is
+# Apache-2.0, distinct from the repository-wide AGPL-3.0-only default, so it
+# can be shared with and consumed by the proprietary harbor-cloud repo as a
+# plain contract (OpenAPI + JSON fixtures) — NEVER as a Go import in either
+# direction.
+#
+# Reachability: every operation below is registered ONLY on harbor-mgmt,
+# ONLY when `mgmt.cloudIntegration.enabled` is true, and is reachable ONLY
+# over the private WireGuard-backed internal ingress path. None of these
+# routes are ever exposed on harbor-hot's public listener or on the public
+# ingress host (auth.harborauth.com).
+#
+# Go server stubs are GENERATED from this file via oapi-codegen — never
+# hand-edit generated output; if code and spec disagree, the code is the bug
+# (DESIGN §1.3/§1.5, `@codegen`).
+openapi: 3.1.0
+info:
+  title: Harbor Cloud management API
+  version: 1.0.0
+  description: >-
+    Internal, authenticated contract between harbor core (harbor-mgmt) and
+    Harbor Cloud. Covers namespace-scoped management session minting,
+    namespace lifecycle (create/read/delete), and privileged signing-key
+    rotation. Every operation requires a short-lived, narrowly-scoped
+    `cloudServiceAuth` bearer JWT — never the operator `ADMIN_API_TOKEN` and
+    never the RFC 7591 client initial-access token. This surface is private
+    only: it is never reachable from the public internet.
+servers:
+  - url: https://cloudapi.internal.harbor-mgmt.svc:8443
+    description: >-
+      Private WireGuard-backed internal ingress path (the mgmt.cloudIntegration
+      NodePort). Not resolvable and not routable from the public internet;
+      never exposed on auth.harborauth.com.
+tags:
+  - name: sessions
+    description: Namespace-scoped management session minting.
+  - name: namespaces
+    description: Namespace provisioning lifecycle.
+  - name: keys
+    description: Privileged signing-key rotation (proxied to harbor-hot).
+paths:
+  /admin/v1/sessions:
+    post:
+      operationId: postAdminV1Sessions
+      summary: Mint a namespace-scoped management session
+      description: >-
+        Mints a short-lived, namespace-scoped credential Harbor Cloud uses to
+        perform bounded provisioning operations against exactly one
+        namespace. This is NOT an end-user OIDC/BFF session. Requires the
+        `sessions:mint` scope. Idempotent on `Idempotency-Key`: retrying the
+        same key with the same request body returns the original response
+        verbatim (including the still-valid `session_id`); the same key with
+        a different body is rejected. The returned `token` is an opaque
+        bearer credential — only its hash is persisted server-side, so the
+        plaintext is returned once (except on an idempotent replay, which
+        returns the originally-cached response body).
+      tags:
+        - sessions
+      security:
+        - cloudServiceAuth: [sessions:mint]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SessionMintRequest"
+      responses:
+        "201":
+          description: Session minted (or, on idempotent replay, the original session).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionMintResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The target namespace does not exist or is deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/IdempotencyKeyReused"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /admin/v1/namespaces:
+    post:
+      operationId: postAdminV1Namespaces
+      summary: Create a namespace
+      description: >-
+        Provisions a new namespace record. Requires the `namespaces:write`
+        scope. Idempotent on `Idempotency-Key`: retrying the same key with
+        the same request body returns the original response verbatim and
+        creates no second namespace row; the same key with a different body
+        is rejected with `idempotency_key_reused`. Creating an `id` that
+        already names an active (non-deleted) namespace, under a fresh
+        idempotency key, is rejected with `namespace_already_exists`.
+      tags:
+        - namespaces
+      security:
+        - cloudServiceAuth: [namespaces:write]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NamespaceCreateRequest"
+      responses:
+        "201":
+          description: Namespace created (or, on idempotent replay, the original namespace).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NamespaceResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: >-
+            Either the namespace `id` already exists (`namespace_already_exists`)
+            or the `Idempotency-Key` was reused with a different request body
+            (`idempotency_key_reused`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /admin/v1/namespaces/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Namespace identifier.
+        schema:
+          type: string
+    get:
+      operationId: getAdminV1Namespace
+      summary: Get a namespace
+      description: >-
+        Returns the current lifecycle state of a namespace. Requires the
+        `namespaces:read` scope.
+      tags:
+        - namespaces
+      security:
+        - cloudServiceAuth: [namespaces:read]
+      responses:
+        "200":
+          description: Namespace found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NamespaceResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The namespace does not exist or has been deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    delete:
+      operationId: deleteAdminV1Namespace
+      summary: Delete a namespace
+      description: >-
+        Soft-deletes a namespace. Requires the `namespaces:write` scope. This
+        operation is naturally idempotent: deleting an absent or
+        already-deleted namespace still returns `204` — it never returns
+        `404`. An `Idempotency-Key` is still required and is honored the same
+        way as create (a reused key with a different request body is
+        rejected with `idempotency_key_reused`).
+      tags:
+        - namespaces
+      security:
+        - cloudServiceAuth: [namespaces:write]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204":
+          description: >-
+            Namespace deleted (or confirmed absent/already-deleted). Always
+            the outcome for a well-formed, authorized request — never `404`.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/IdempotencyKeyReused"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /admin/v1/keys/rotate:
+    post:
+      operationId: postAdminV1KeysRotate
+      summary: Rotate the signing key (privileged proxy to harbor-hot)
+      description: >-
+        Requires the `keys:rotate` scope. Proxies to harbor-hot's existing,
+        unmodified `/admin/keys/rotate` using a second internal credential
+        distinct from the operator's `ADMIN_API_TOKEN`, so leaking one
+        credential never leaks the other. This route is privileged
+        infrastructure — it is NEVER exposed on any customer/tenant-facing
+        surface, and is not part of customer self-service. No
+        `Idempotency-Key` is required: harbor-hot's rotation state machine is
+        itself the source of truth and is safe to call repeatedly (each call
+        is a new rotation, not a retry of a prior one).
+      tags:
+        - keys
+      security:
+        - cloudServiceAuth: [keys:rotate]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KeysRotateRequest"
+      responses:
+        "200":
+          description: Rotation initiated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/KeysRotateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          description: Internal error, or harbor-hot's proxied rotation call failed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+components:
+  securitySchemes:
+    cloudServiceAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        Short-lived, asymmetrically-signed (ES256/EdDSA) service JWT minted
+        by Harbor Cloud's own service identity — never a static shared
+        secret, never the operator `ADMIN_API_TOKEN`, never the RFC 7591
+        client initial-access token. Required claims: `iss` (Harbor Cloud's
+        service identity), `aud` (must equal `harbor-mgmt-cloudapi`), `sub`
+        (caller service id), `scope` (space-delimited, e.g.
+        `sessions:mint namespaces:read namespaces:write keys:rotate`), `exp`
+        (60-120s lifetime), `iat`, and `jti` (single-use — a reused `jti` is
+        rejected as `token_replayed`). Verified against a configured
+        trust-anchor public key; verification is fail-closed when
+        unconfigured.
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: >-
+        Caller-generated opaque key that de-duplicates retries of this exact
+        request over an unreliable private tunnel. The server hashes the
+        normalized request body and keys a response ledger on
+        `(idempotency_key, operation)`: replaying the same key with the same
+        body returns the original response verbatim; replaying the same key
+        with a different body is rejected with `idempotency_key_reused`.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 255
+  responses:
+    BadRequest:
+      description: Malformed or invalid request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: >-
+        Missing, malformed, expired, replayed, or wrong-audience service
+        token — or the trust anchor is unconfigured (fail-closed).
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: >-
+        The presented service token is valid but lacks the scope required by
+        this operation, or (for session-bearer operations) targets a
+        namespace the session was not minted for.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    IdempotencyKeyReused:
+      description: The `Idempotency-Key` was previously used with a different request body.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    RateLimited:
+      description: The per-route rate limit was exceeded.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    NamespaceCreateRequest:
+      type: object
+      description: Request to provision a new namespace.
+      required:
+        - id
+      properties:
+        id:
+          type: string
+          description: >-
+            Caller-chosen namespace identifier, immutable once created.
+            Lowercase alphanumeric and hyphens only.
+          pattern: "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+          example: "acme-prod"
+        display_name:
+          type: string
+          description: Optional human-readable label (never used for lookups or auth).
+    NamespaceResponse:
+      type: object
+      description: A namespace's current provisioning-lifecycle state.
+      required:
+        - id
+        - status
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          description: Current lifecycle state.
+          enum:
+            - active
+            - deleting
+            - deleted
+        display_name:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        deleted_at:
+          type: string
+          format: date-time
+          description: Present only once the namespace has been deleted.
+    SessionMintRequest:
+      type: object
+      description: Request to mint a namespace-scoped management session.
+      required:
+        - namespace_id
+      properties:
+        namespace_id:
+          type: string
+          description: The namespace this session will be scoped to.
+        ttl_seconds:
+          type: integer
+          description: >-
+            Requested session lifetime in seconds. The server MAY clamp this
+            to its own configured min/max bounds.
+          minimum: 60
+          maximum: 3600
+          default: 900
+    SessionMintResponse:
+      type: object
+      description: >-
+        A minted management session. `token` is an opaque bearer credential
+        — only its hash is persisted server-side, so this is the only
+        response that ever carries the plaintext (idempotent replays return
+        this same cached body).
+      required:
+        - session_id
+        - namespace_id
+        - token
+        - expires_at
+      properties:
+        session_id:
+          type: string
+        namespace_id:
+          type: string
+        token:
+          type: string
+          description: Opaque bearer credential scoped to `namespace_id`.
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+    KeysRotateRequest:
+      type: object
+      description: >-
+        Request to rotate the signing key. All fields are optional; omitting
+        `emergency` defaults to scheduled rotation with grace period and
+        overlap window (mirrors harbor-hot's `/admin/keys/rotate`).
+      properties:
+        emergency:
+          type: boolean
+          description: >-
+            If true, perform emergency rotation with zero grace period and
+            zero overlap window. Use only when the signing key is confirmed
+            compromised.
+          default: false
+    KeysRotateResponse:
+      type: object
+      description: Response from a successful, proxied signing-key rotation.
+      required:
+        - new_kid
+        - promoted_at
+      properties:
+        new_kid:
+          type: string
+          description: Key ID (RFC 7638 JWK Thumbprint) of the new signing key.
+        old_kid:
+          type: string
+          description: Key ID of the previous active signing key, if any.
+        promoted_at:
+          type: string
+          format: date-time
+          description: Timestamp when the new key will be (or was) promoted to active.
+        retired_at:
+          type: string
+          format: date-time
+          description: Timestamp when the old key will be retired, if applicable.
+        is_emergency:
+          type: boolean
+          description: True if this was an emergency rotation.
+    Error:
+      type: object
+      description: >-
+        Stable, machine-readable error envelope returned by every
+        `/admin/v1/*` operation on failure.
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          description: Stable, machine-readable error code.
+          enum:
+            - invalid_request
+            - invalid_token
+            - insufficient_scope
+            - token_replayed
+            - session_expired
+            - cross_tenant_forbidden
+            - namespace_already_exists
+            - namespace_not_found
+            - idempotency_key_reused
+            - rate_limited
+        message:
+          type: string
+          description: Human-readable description (no PII, no token material).
+        request_id:
+          type: string
+          description: Correlation id for cross-referencing the audit event log.

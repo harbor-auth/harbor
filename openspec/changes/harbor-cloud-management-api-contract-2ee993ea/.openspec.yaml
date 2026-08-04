@@ -1,0 +1,3 @@
+schema: spec-driven
+created: 2026-08-03
+goal: Implement the authenticated harbor-cloud management API contract (session minting, namespace lifecycle, signing-key rotation) on harbor-mgmt, reachable only over the private WireGuard/cloudIntegration path, with scoped service-token auth, idempotent retries, and cross-process contract/security tests

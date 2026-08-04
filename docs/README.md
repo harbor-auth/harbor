@@ -51,6 +51,7 @@ docs/plans/         → future WHAT — intent not yet built
 | [rate-limiting](features/rate-limiting.md) | implemented | §4.1, §6.1, §11.7 | `internal/oidcapi/`, `cmd/harbor-hot/` | 2026-07-21 |
 | [bff-flow-wiring](features/bff-flow-wiring.md) | implemented | §9, §11.2 | `internal/bff/`, `internal/oidc/`, `cmd/harbor-hot/` | 2026-07-22 |
 | [redis-enrollment-session](features/redis-enrollment-session.md) | implemented | §9, §4.1 | `internal/clients/`, `internal/webauthn/`, `cmd/harbor-mgmt/` | 2026-07-22 |
+| [harbor-cloud-management-api](features/harbor-cloud-management-api.md) | implemented | — (see openspec change) | `internal/cloudapi/`, `cmd/harbor-mgmt/`, `api/openapi/harbor-cloud.yaml`, `deploy/helm/` | 2026-08-04 |
 
 ## Plans (future / in progress)
 

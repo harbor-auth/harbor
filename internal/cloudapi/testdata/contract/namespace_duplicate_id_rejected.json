@@ -1,0 +1,26 @@
+{
+  "name": "namespace_duplicate_id_rejected",
+  "spec_scenario": "Duplicate namespace id is rejected",
+  "steps": [
+    {
+      "method": "POST",
+      "path": "/admin/v1/namespaces",
+      "auth": "valid",
+      "scope": "namespaces:write",
+      "idempotency_key": "ns-key-3",
+      "request_body": {"id": "contract-ns-3"},
+      "want_status": 201,
+      "want_body_contains": {"id": "contract-ns-3"}
+    },
+    {
+      "method": "POST",
+      "path": "/admin/v1/namespaces",
+      "auth": "valid",
+      "scope": "namespaces:write",
+      "idempotency_key": "ns-key-3-fresh",
+      "request_body": {"id": "contract-ns-3"},
+      "want_status": 409,
+      "want_error_code": "namespace_already_exists"
+    }
+  ]
+}

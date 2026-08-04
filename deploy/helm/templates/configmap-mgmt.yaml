@@ -38,3 +38,11 @@ data:
   # RELAY_DOMAIN is the SPF/DKIM domain users include in their DNS records.
   MTA_DOMAIN: {{ .Values.mgmt.relay.mtaDomain | default "mta.harbor.id" | quote }}
   RELAY_DOMAIN: {{ .Values.mgmt.relay.relayDomain | default "relay.harbor.id" | quote }}
+  # Harbor Cloud management API (internal/cloudapi) gate. Always present
+  # (mirrors deploy/k8s/configmap-mgmt.yaml) — its value, not its presence,
+  # controls whether harbor-mgmt registers the /admin/v1/* routes.
+  CLOUD_INTEGRATION_ENABLED: {{ .Values.mgmt.cloudIntegration.enabled | quote }}
+  # harbor-hot's cluster-internal Service DNS name. Non-secret, so it lives
+  # here rather than in the Secret. Only read when CLOUD_INTEGRATION_ENABLED
+  # is "true".
+  HARBOR_HOT_INTERNAL_URL: http://{{ include "harbor.fullname" . }}-hot.{{ .Release.Namespace }}.svc.cluster.local

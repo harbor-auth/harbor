@@ -34,8 +34,10 @@ BIN_DIR        ?= bin
 MODULE         := github.com/harbor-auth/harbor
 DATABASE_URL   ?=
 MIGRATIONS_DIR := db/migrations
-OPENAPI_SPEC   := api/openapi/harbor.yaml
-OAPI_CONFIG    := api/openapi/oapi-codegen.yaml
+OPENAPI_SPEC       := api/openapi/harbor.yaml
+OAPI_CONFIG        := api/openapi/oapi-codegen.yaml
+OPENAPI_CLOUD_SPEC := api/openapi/harbor-cloud.yaml
+OAPI_CLOUD_CONFIG  := api/openapi/oapi-codegen-cloud.yaml
 
 # SOFT — human-only escape hatch (see F3 note above). Empty by default; never
 # set by agents or CI.
@@ -119,7 +121,9 @@ generate: ## Regenerate all code from the api/ contracts (spec-first, zero drift
 		echo '  sqlc generate'; sqlc generate; fi
 	@$(REQUIRE); if _require oapi-codegen 'go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@latest (or: nix develop)'; then \
 		echo '  oapi-codegen -config $(OAPI_CONFIG) $(OPENAPI_SPEC)'; \
-		oapi-codegen -config $(OAPI_CONFIG) $(OPENAPI_SPEC); fi
+		oapi-codegen -config $(OAPI_CONFIG) $(OPENAPI_SPEC); \
+		echo '  oapi-codegen -config $(OAPI_CLOUD_CONFIG) $(OPENAPI_CLOUD_SPEC)'; \
+		oapi-codegen -config $(OAPI_CLOUD_CONFIG) $(OPENAPI_CLOUD_SPEC); fi
 	@$(REQUIRE); if _require buf 'go install github.com/bufbuild/buf/cmd/buf@latest (or: nix develop)'; then \
 		echo '  buf generate'; buf generate; fi
 	@if [ -f package.json ] || [ -f web/package.json ]; then \

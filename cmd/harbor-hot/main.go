@@ -178,13 +178,25 @@ func runWithGraphObserver(ctx context.Context, logger *slog.Logger, observe func
 
 	srv := oidcapi.New(apiCfg)
 
-	// The admin endpoints are always backed by the required database, so their
-	// credential is also unconditionally required at startup.
+	// The admin endpoints are always backed by the required database, so the
+	// operator credential is also unconditionally required at startup. The
+	// cloud-proxy credential is optional — it is only presented by
+	// harbor-mgmt's cloudapi key-rotation proxy (internal/cloudapi/keys.go),
+	// which is itself gated behind mgmt.cloudIntegration — so a standalone
+	// harbor-hot deployment need not configure it.
 	adminToken, err := loadAdminToken()
 	if err != nil {
 		return err
 	}
-	adminMW := oidcapi.AdminAuthMiddleware(oidcapi.AdminAuthConfig{Token: adminToken, Logger: logger})
+	proxyToken, err := loadMgmtHotProxyToken()
+	if err != nil {
+		return err
+	}
+	adminCredentials := []oidcapi.AdminCredential{{Label: "operator", Token: adminToken}}
+	if proxyToken != "" {
+		adminCredentials = append(adminCredentials, oidcapi.AdminCredential{Label: "cloud-proxy", Token: proxyToken})
+	}
+	adminMW := oidcapi.AdminAuthMiddleware(oidcapi.AdminAuthConfig{Credentials: adminCredentials, Logger: logger})
 
 	// Register custom endpoints not in the OpenAPI spec on the mux before
 	// passing to HandlerFromMux so they are part of the same routing tree:
@@ -634,6 +646,24 @@ func loadAdminToken() (string, error) {
 				"refusing to expose unauthenticated admin key-rotation/JWT-revocation endpoints",
 			minAdminTokenBytes,
 		)
+	}
+	return token, nil
+}
+
+// loadMgmtHotProxyToken loads the optional MGMT_HOT_PROXY_TOKEN admin
+// credential (label "cloud-proxy") that harbor-mgmt's cloudapi key-rotation
+// proxy presents instead of ADMIN_API_TOKEN, so leaking one credential never
+// leaks the other. Unlike ADMIN_API_TOKEN this is optional — harbor-hot
+// serves fine without Harbor Cloud integration configured — but when set it
+// must meet the same minimum-entropy bar; an empty return means "not
+// configured", not "fail closed".
+func loadMgmtHotProxyToken() (string, error) {
+	token := os.Getenv("MGMT_HOT_PROXY_TOKEN")
+	if token == "" {
+		return "", nil
+	}
+	if len(token) < minAdminTokenBytes {
+		return "", fmt.Errorf("MGMT_HOT_PROXY_TOKEN must be at least %d bytes when set", minAdminTokenBytes)
 	}
 	return token, nil
 }

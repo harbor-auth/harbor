@@ -1,0 +1,22 @@
+{
+  "name": "auth_replayed_jti_rejected",
+  "spec_scenario": "Replayed jti is rejected",
+  "steps": [
+    {
+      "method": "GET",
+      "path": "/admin/v1/namespaces/auth-check-ns",
+      "auth": "valid",
+      "scope": "namespaces:read",
+      "want_status": 404,
+      "want_error_code": "namespace_not_found"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/namespaces/auth-check-ns",
+      "auth": "reused_from_step",
+      "reuse_from_step": 1,
+      "want_status": 401,
+      "want_error_code": "token_replayed"
+    }
+  ]
+}

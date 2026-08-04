@@ -1,0 +1,36 @@
+{
+  "name": "session_mint_idempotent_retry",
+  "spec_scenario": "Session mint is idempotent on retry",
+  "steps": [
+    {
+      "method": "POST",
+      "path": "/admin/v1/namespaces",
+      "auth": "valid",
+      "scope": "namespaces:write",
+      "idempotency_key": "ns-key-5",
+      "request_body": {"id": "contract-ns-5"},
+      "want_status": 201
+    },
+    {
+      "method": "POST",
+      "path": "/admin/v1/sessions",
+      "auth": "valid",
+      "scope": "sessions:mint",
+      "idempotency_key": "sess-key-1",
+      "request_body": {"namespace_id": "contract-ns-5"},
+      "want_status": 201,
+      "want_body_contains": {"namespace_id": "contract-ns-5"},
+      "want_body_nonempty_fields": ["session_id", "token"]
+    },
+    {
+      "method": "POST",
+      "path": "/admin/v1/sessions",
+      "auth": "valid",
+      "scope": "sessions:mint",
+      "idempotency_key": "sess-key-1",
+      "request_body": {"namespace_id": "contract-ns-5"},
+      "want_status": 201,
+      "want_same_body_as_step": 2
+    }
+  ]
+}

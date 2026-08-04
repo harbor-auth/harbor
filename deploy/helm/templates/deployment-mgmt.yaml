@@ -61,8 +61,11 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.mgmt.port }}
-          # Config (including regional KMS/WebAuthn settings), then secrets
-          # (DATABASE_URL/REDIS_URL).
+          # Config (including regional KMS/WebAuthn settings, and — when
+          # mgmt.cloudIntegration.enabled — CLOUD_INTEGRATION_ENABLED /
+          # HARBOR_HOT_INTERNAL_URL), then secrets (DATABASE_URL/REDIS_URL,
+          # and — when enabled — CLOUD_SERVICE_AUTH_PUBLIC_KEY /
+          # MGMT_HOT_PROXY_TOKEN).
           envFrom:
             - configMapRef:
                 name: {{ include "harbor.fullname" . }}-mgmt-config

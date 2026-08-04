@@ -61,6 +61,10 @@ spec:
           # Config then secrets (DATABASE_URL/REDIS_URL, registration token,
           # and the shared user-DEK KEK). Regional signing-KMS key IDs are
           # non-secret config; provider credentials come from workload identity.
+          # This also carries the Harbor Cloud management API's config
+          # (CLOUD_INTEGRATION_ENABLED, HARBOR_HOT_INTERNAL_URL from the
+          # ConfigMap; CLOUD_SERVICE_AUTH_PUBLIC_KEY, MGMT_HOT_PROXY_TOKEN from
+          # the Secret) — inert while CLOUD_INTEGRATION_ENABLED is "false".
           envFrom:
             - configMapRef:
                 name: harbor-mgmt-config

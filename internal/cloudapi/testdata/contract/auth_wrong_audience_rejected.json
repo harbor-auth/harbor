@@ -1,0 +1,14 @@
+{
+  "name": "auth_wrong_audience_rejected",
+  "spec_scenario": "Wrong audience is rejected",
+  "steps": [
+    {
+      "method": "GET",
+      "path": "/admin/v1/namespaces/auth-check-ns",
+      "auth": "wrong_audience",
+      "scope": "namespaces:read",
+      "want_status": 401,
+      "want_error_code": "invalid_token"
+    }
+  ]
+}

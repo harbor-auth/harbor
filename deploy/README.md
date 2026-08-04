@@ -120,6 +120,71 @@ trusted network (VPN / bastion). Two safe patterns:
 > (`/admin/keys/rotate?emergency=true`) invalidates every outstanding token
 > instantly — unauthenticated access would be a critical outage vector.
 
+## Harbor Cloud management API
+
+`internal/cloudapi` implements the authenticated, versioned `/admin/v1/*`
+management API that the proprietary Harbor Cloud control plane calls to
+provision namespaces, mint namespace-scoped sessions, and rotate signing
+keys. It is registered on `harbor-mgmt` (never `harbor-hot`'s public
+listener) and is fully inert unless `mgmt.cloudIntegration.enabled` is set —
+the shipped default for self-hosters is `false`.
+
+### Private-path-only reachability
+
+`/admin/v1/*` is **never** exposed on `auth.harborauth.com` or any other
+public ingress. Reachability is restricted at two independent layers:
+
+1. **A dedicated NodePort, not the public Service.** When
+   `cloudIntegration.enabled` is `true`,
+   `deploy/helm/templates/service-mgmt.yaml` opens a second Service on
+   `cloudIntegration.nodePort` (default `30081`). Production must place this
+   NodePort behind a private, encrypted transport — the reference deployment
+   uses a WireGuard tunnel to Harbor Cloud's cluster — never bind it to a
+   public-facing load balancer.
+2. **NetworkPolicy CIDR allow-list.** `deploy/helm/templates/networkpolicy-mgmt.yaml`
+   adds an ingress rule scoped to `cloudIntegration.allowedCIDR` (the
+   WireGuard tunnel address) only when `cloudIntegration.enabled` is `true`;
+   `allowedCIDR` is `required` at template time, so the chart refuses to
+   render an accidentally-unbounded rule. Every other source — including
+   same-cluster pods outside this rule and, by construction, the internet —
+   is denied.
+
+Both layers are defense in depth on top of the application-level
+`cloudServiceAuth` verification (`internal/cloudapi.ServiceAuthVerifier`):
+even a leaked service JWT cannot be presented from outside the tunnel CIDR,
+and a request that reaches the pod without a valid JWT is still rejected
+fail-closed (see `INV-CLOUDAPI-SERVICE-AUTH` / `INV-CLOUDAPI-REPLAY-RESISTANT`
+in `invariants/registry.yaml`).
+
+### Two distinct internal credentials
+
+`/admin/v1/*` and harbor-hot's operator `/admin/*` surface are guarded by
+**two independently rotatable credentials** — leaking one must never leak
+the other:
+
+| Credential | Env var | Consumed by | Purpose |
+|---|---|---|---|
+| Operator admin token | `ADMIN_API_TOKEN` | `harbor-hot` (`AdminAuthMiddleware`) | Direct human/operator calls to `/admin/keys/rotate`, `/admin/revoke-jwt`, etc. (see [Admin Endpoint Access](#admin-endpoint-access) above). |
+| Management-to-hot proxy token | `MGMT_HOT_PROXY_TOKEN` | `harbor-mgmt` (`internal/cloudapi.KeysHandler`) presents it; `harbor-hot` (`AdminAuthMiddleware`) accepts it | The internal service hop `harbor-mgmt` makes to `harbor-hot` when proxying `POST /admin/v1/keys/rotate` on Harbor Cloud's behalf. |
+
+`AdminAuthMiddleware` accepts either credential on `harbor-hot`'s `/admin/*`
+routes and logs which one matched (`credential=operator` vs
+`credential=cloud-proxy`), so an operator token leak and a cloud-proxy token
+leak are distinguishable in the audit trail and each can be rotated without
+touching the other. `MGMT_HOT_PROXY_TOKEN` is **never** the caller-facing
+credential for `/admin/v1/*` itself — Harbor Cloud authenticates to
+`harbor-mgmt` with a short-lived, scoped `cloudServiceAuth` JWT
+(`CLOUD_SERVICE_AUTH_PUBLIC_KEY` trust anchor), and only `harbor-mgmt`'s own
+proxy hop to `harbor-hot` uses the static `MGMT_HOT_PROXY_TOKEN`. Key
+rotation is deliberately kept out of Harbor Cloud's customer self-service
+surface: only the `keys:rotate`-scoped `cloudapi` handler or a human holding
+`ADMIN_API_TOKEN` can ever reach harbor-hot's rotation state machine.
+
+Generate both secrets the same way: `openssl rand -hex 32`. See
+`deploy/helm/values.yaml`'s `hot.secrets.adminApiToken` and
+`mgmt.cloudIntegration.hotProxyToken` (or the raw manifest placeholders in
+`deploy/k8s/secret-hot.yaml` / `deploy/k8s/secret-mgmt.yaml`).
+
 ## Rate limiting & trusted client IP
 
 Harbor's hot-path rate limiter (`/token`, `/introspect`, `/authorize`,

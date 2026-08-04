@@ -27,6 +27,20 @@ spec:
       ports:
         - port: {{ .Values.hot.port }}
           protocol: TCP
+    {{- if .Values.mgmt.cloudIntegration.enabled }}
+    # harbor-mgmt, for the internal/cloudapi key-rotation proxy call
+    # (POST /admin/v1/keys/rotate -> harbor-hot's POST /admin/keys/rotate,
+    # authenticated with MGMT_HOT_PROXY_TOKEN). Only opened when
+    # cloudIntegration is enabled — mirrors the egress rule this chart opens
+    # on harbor-mgmt's NetworkPolicy for the same call.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "harbor.mgmt.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: {{ .Values.hot.port }}
+          protocol: TCP
+    {{- end }}
   egress:
     # DNS (kube-dns / CoreDNS).
     - to:

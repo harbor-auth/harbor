@@ -1,0 +1,14 @@
+{
+  "name": "auth_missing_scope_rejected",
+  "spec_scenario": "Missing required scope is rejected",
+  "steps": [
+    {
+      "method": "GET",
+      "path": "/admin/v1/namespaces/auth-check-ns",
+      "auth": "insufficient_scope",
+      "scope": "sessions:mint",
+      "want_status": 403,
+      "want_error_code": "insufficient_scope"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "name": "namespace_delete_idempotent_on_absent",
+  "spec_scenario": "Delete is idempotent, including on an absent namespace",
+  "steps": [
+    {
+      "method": "DELETE",
+      "path": "/admin/v1/namespaces/never-existed",
+      "auth": "valid",
+      "scope": "namespaces:write",
+      "idempotency_key": "del-key-absent",
+      "want_status": 204
+    }
+  ]
+}

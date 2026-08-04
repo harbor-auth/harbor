@@ -328,6 +328,61 @@ func TestLoadAdminToken(t *testing.T) {
 	}
 }
 
+// TestLoadMgmtHotProxyToken verifies that, unlike ADMIN_API_TOKEN,
+// MGMT_HOT_PROXY_TOKEN is optional (unset => "", no error — harbor-hot runs
+// fine without Harbor Cloud integration configured) but when set must still
+// meet the same minimum-entropy bar.
+func TestLoadMgmtHotProxyToken(t *testing.T) {
+	const validToken = "12345678901234567890123456789012" // exactly 32 bytes
+	const shortToken = "tooshort"                         // 8 bytes < 32
+
+	tests := []struct {
+		name       string
+		proxyToken string
+		set        bool
+		wantErr    bool
+		wantToken  string
+	}{
+		{
+			name: "unset => empty, no error",
+			set:  false,
+		},
+		{
+			name:       "empty string => empty, no error",
+			proxyToken: "",
+			set:        true,
+		},
+		{
+			name:       "token too short => error",
+			proxyToken: shortToken,
+			set:        true,
+			wantErr:    true,
+		},
+		{
+			name:       "token >= 32 bytes => ok",
+			proxyToken: validToken,
+			set:        true,
+			wantToken:  validToken,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.set {
+				t.Setenv("MGMT_HOT_PROXY_TOKEN", tt.proxyToken)
+			}
+
+			got, err := loadMgmtHotProxyToken()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("loadMgmtHotProxyToken() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && got != tt.wantToken {
+				t.Errorf("loadMgmtHotProxyToken() = %q, want %q", got, tt.wantToken)
+			}
+		})
+	}
+}
+
 func TestProductionGraphRejectsMissingRequiredStores(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	_, _, err := buildHotGraph(context.Background(), "https://issuer.example", nil, nil, bffDeps{}, crypto.KMSConfig{}, logger)
