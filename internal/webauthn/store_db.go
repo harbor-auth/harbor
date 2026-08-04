@@ -67,7 +67,8 @@ func (s *DBStore) GetUser(ctx context.Context, userID []byte) (User, error) {
 	if err != nil {
 		return User{}, ErrUserNotFound
 	}
-	if _, err = s.q.GetUser(ctx, uid); err != nil {
+	row, err := s.q.GetUser(ctx, uid)
+	if err != nil {
 		return User{}, ErrUserNotFound
 	}
 	creds, err := s.q.ListCredentialsByUser(ctx, uid)
@@ -81,7 +82,7 @@ func (s *DBStore) GetUser(ctx context.Context, userID []byte) (User, error) {
 	// name and displayName are display-only; Harbor stores no profile PII in the
 	// users table, so the opaque user ID string serves as both.
 	uidStr := string(userID)
-	return NewUser(userID, uidStr, uidStr, goCreds), nil
+	return NewUser(userID, uidStr, uidStr, goCreds).WithRecoveryRequired(row.RecoveryRequired), nil
 }
 
 // AddCredential implements Store: persists a newly-registered passkey.

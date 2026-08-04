@@ -24,15 +24,18 @@ import (
 // decoupled from the library's interface so the storage layer never depends on
 // go-webauthn internals.
 type User struct {
-	id          []byte
-	name        string
-	displayName string
-	credentials []gowebauthn.Credential
+	id               []byte
+	name             string
+	displayName      string
+	credentials      []gowebauthn.Credential
+	recoveryRequired bool
 }
 
 // NewUser builds a User. The id is the opaque WebAuthn user handle (docs/DESIGN.md
 // §3.2 — never a globally-stable, correlatable identifier surfaced to an RP);
 // name/displayName are for display only and are never used for auth decisions.
+// The returned User has recoveryRequired=false; use WithRecoveryRequired to set
+// it from the caller's storage row.
 func NewUser(id []byte, name, displayName string, credentials []gowebauthn.Credential) User {
 	return User{
 		id:          id,
@@ -41,6 +44,21 @@ func NewUser(id []byte, name, displayName string, credentials []gowebauthn.Crede
 		credentials: credentials,
 	}
 }
+
+// WithRecoveryRequired returns a copy of u with recoveryRequired set. Store
+// implementations use this to carry the users table's recovery_required
+// column through GetUser without changing NewUser's signature (and so every
+// existing call site) — see DBStore.GetUser.
+func (u User) WithRecoveryRequired(v bool) User {
+	u.recoveryRequired = v
+	return u
+}
+
+// RecoveryRequired reports whether this user must complete account recovery
+// setup before full-scope actions are allowed (REQ-005, docs/DESIGN.md
+// §11.1). The login ceremony surfaces it so callers can gate the resulting
+// session's scope correctly instead of defaulting to full access.
+func (u User) RecoveryRequired() bool { return u.recoveryRequired }
 
 // WebAuthnID returns the user handle (opaque, ≤64 bytes).
 func (u User) WebAuthnID() []byte { return u.id }

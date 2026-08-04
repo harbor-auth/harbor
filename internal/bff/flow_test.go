@@ -75,8 +75,8 @@ func (m *mockWebAuthn) BeginLogin(_ context.Context, _ []byte) (*protocol.Creden
 	}, "webauthn-session-key", nil
 }
 
-func (m *mockWebAuthn) FinishLogin(_ context.Context, _ string, _ *protocol.ParsedCredentialAssertionData) (string, error) {
-	return m.userID, nil
+func (m *mockWebAuthn) FinishLogin(_ context.Context, _ string, _ *protocol.ParsedCredentialAssertionData) (string, bool, error) {
+	return m.userID, false, nil
 }
 
 func (m *mockWebAuthn) BeginDiscoverableLogin(_ context.Context) (*protocol.CredentialAssertion, string, error) {
@@ -87,8 +87,8 @@ func (m *mockWebAuthn) BeginDiscoverableLogin(_ context.Context) (*protocol.Cred
 	}, "discoverable-session-key", nil
 }
 
-func (m *mockWebAuthn) FinishDiscoverableLogin(_ context.Context, _ string, _ *protocol.ParsedCredentialAssertionData) (string, error) {
-	return m.userID, nil
+func (m *mockWebAuthn) FinishDiscoverableLogin(_ context.Context, _ string, _ *protocol.ParsedCredentialAssertionData) (string, bool, error) {
+	return m.userID, false, nil
 }
 
 // mockResolver implements bff.UserResolver with a fixed user handle.

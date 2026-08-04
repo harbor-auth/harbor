@@ -533,6 +533,98 @@ this time but errors immediately on a pre-existing Go-toolchain-version
 mismatch (built with go1.24, repo targets go1.25) unrelated to this change;
 `make`/`-race` remain unavailable as in every prior task on this branch.
 
+# Task 19: Fix /signin sessions missing SessionScope, causing RequireFullScope to reject returning users
+
+Root cause confirmed by reading `internal/bff/middleware.go`'s `Middleware`:
+it unconditionally injects `session.SessionScope` into the request context via
+`ContextWithSessionScope` (never the nil/absent path that would default to
+`SessionScopeFull`), so a session whose `SessionScope` field was never set —
+every session `ServeSignin` creates, and every one `FinishLoginWithParsedData`
+completed via `sessions.SetUser` — carries the Go zero value `""`, which
+always fails `RequireFullScope`'s `scope != SessionScopeFull` check. Also
+confirmed both Redis (`setUserScript`) and in-memory `SetUser` implementations
+only ever touch the `UserID` field, leaving whatever `SessionScope` was
+present untouched — so simply pre-seeding `SessionScope: SessionScopeFull` at
+`Create` time in `signin.go` would have "fixed" the bug, but only by
+*guessing* full scope instead of checking it: a returning user who registered
+a first passkey but never completed the mandatory recovery-setup step (task
+3/12/15's `recovery_required` gate), then came back later and signed in
+directly via `/signin` instead of resuming that flow, would wrongly be
+granted `SessionScopeFull` — undoing the mandatory-recovery invariant those
+tasks exist to enforce. `internal/webauthn/service.go`'s `FinishLogin` /
+`FinishDiscoverableLogin` never checked `recovery_required` at all (that flag
+only ever gated *other* routes via `RequireFullScope`), so this edge case is
+real, not hypothetical, and the task's own two proposed fixes both boil down
+to needing the real flag.
+
+Chose the correct-by-construction fix (option 1 from the task body: "call
+SetUserWithRecoveryStatus ... with the user's real recovery_required") over
+the corner-case-regressing shortcut (blindly defaulting to full scope):
+
+1. `internal/webauthn/user.go`: added `recoveryRequired bool` to `User` plus
+   a `WithRecoveryRequired(bool) User` builder and `RecoveryRequired() bool`
+   accessor — additive only, `NewUser`'s signature (15+ call sites across the
+   package) is untouched.
+2. `internal/webauthn/store_db.go`: `DBStore.GetUser` was already fetching
+   the full `db.User` row (including `recovery_required`) and then silently
+   discarding it (`if _, err = s.q.GetUser(...)`) in favor of the query's
+   error only. Now captures the row and calls
+   `.WithRecoveryRequired(row.RecoveryRequired)`.
+3. `internal/webauthn/service.go`: `FinishLogin` and `FinishDiscoverableLogin`
+   now additionally return the resolved user's `recoveryRequired` alongside
+   the existing return values (captured via a closure-local `resolved User`
+   in the discoverable path, since `ValidatePasskeyLogin`'s returned
+   `gowebauthn.User` interface value is never type-asserted back to the
+   concrete type). `internal/webauthn/handlers.go`'s one direct caller
+   (`POST /webauthn/login/finish`, unrelated to the BFF flow) just gained an
+   extra discarded `_`.
+4. `internal/bff/login.go`: `WebAuthnService` interface's `FinishLogin` /
+   `FinishDiscoverableLogin` now return `recoveryRequired bool` too.
+   `FinishLoginWithParsedData` calls `sessions.SetUserWithRecoveryStatus`
+   (not `SetUser`) with that value — the exact same primitive
+   `recoverySessionIssuer` / `bffSessionScopeRefresher` already use elsewhere
+   in this codebase, so `/signin`-originated sessions now get identical
+   scope semantics to every other session-issuing path instead of a third,
+   divergent one.
+5. `cmd/harbor-mgmt/bff.go`'s `bffWebAuthnAdapter` threads the new return
+   value through (its `FinishLogin` fails closed either way — unused while
+   `DiscoverableUserResolver` is wired — and just gained the extra `false`).
+6. Test-first: added a `SessionScope`/`RecoveryRequired` assertion to the
+   existing `TestSigninHandler_DiscoverableSignin_HappyPath` (the real
+   `/signin` → `/login` → `/login/complete` end-to-end test that should have
+   caught this bug originally but never asserted scope) and to
+   `TestLoginHandler_FinishLogin_HappyPath` /
+   `_Discoverable_HappyPath`, plus a new
+   `TestLoginHandler_FinishLogin_Discoverable_RecoveryRequiredStaysFenced` in
+   a new file `internal/bff/login_recovery_scope_test.go` (kept out of
+   `login_test.go`, which is already 957 lines against the filesystem
+   linter's 798-line frozen baseline — `tools/lint/filesize`'s ratchet policy
+   says such files "may not grow"; confirmed via its README that this LOC
+   check is advisory-only in `make agent-check` --binary-only CI mode, but
+   minimized growth anyway) proving a `recovery_required=true` user stays
+   fenced to `SessionScopeEnrollmentOnly`. Confirmed all of these fail for the
+   expected reason (`session.SessionScope = "", want "full"` /
+   `want "enrollment_only"`) by temporarily reverting
+   `FinishLoginWithParsedData`'s `SetUserWithRecoveryStatus` call back to
+   `SetUser` and rerunning before restoring the fix. Also added
+   `TestDBStore_GetUser_CarriesRecoveryRequired` in
+   `internal/webauthn/store_db_test.go` proving the DB row's
+   `recovery_required` column survives into the returned `webauthn.User`.
+7. Updated every mock implementing `bff.WebAuthnService` for the new
+   3-return-value signatures (`internal/bff/login_test.go`,
+   `internal/bff/signin_test.go`, `internal/bff/flow_test.go`) and every
+   direct `svc.FinishLogin`/`FinishDiscoverableLogin` call site in
+   `internal/webauthn/service_test.go`.
+8. Verify: `go build ./...`, `go vet ./...`, `go test ./...` (whole repo,
+   all green, including `internal/arch`'s package-boundary checks — no new
+   cross-package imports were introduced), `go build -tags e2e ./...` /
+   `go vet -tags e2e ./e2e/...` (compiles clean; no e2e test references
+   `FinishLogin`/`FinishDiscoverableLogin` directly, they all drive real
+   HTTP, so none needed updating), `gofmt -l .` clean. `make`/`gcc`/`nix` are
+   unavailable in this sandbox (same pre-existing condition noted on every
+   prior task on this branch), so `make agent-check`/golangci-lint could not
+   be run directly.
+
 # Task 20: Fix wrong recoveryScopedSessionCookie constant in e2e/recovery_test.go
 
 Task 8's investigation (see above) had already pinned this: `recoveryScopedSessionCookie

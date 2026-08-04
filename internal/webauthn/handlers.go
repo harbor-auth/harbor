@@ -154,7 +154,7 @@ func (h *Handler) FinishLogin(w http.ResponseWriter, r *http.Request) {
 		writeErrorCode(w, http.StatusBadRequest, "session_expired", "missing or invalid session")
 		return
 	}
-	if _, err := h.svc.FinishLogin(r.Context(), userID, key, r.Body); err != nil {
+	if _, _, err := h.svc.FinishLogin(r.Context(), userID, key, r.Body); err != nil {
 		writeError(w, err)
 		return
 	}

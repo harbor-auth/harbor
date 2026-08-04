@@ -93,7 +93,7 @@ func TestService_FinishRegistration_NoSession(t *testing.T) {
 
 func TestService_FinishLogin_NoSession(t *testing.T) {
 	svc, _ := newTestService(t)
-	_, err := svc.FinishLogin(context.Background(), []byte("demo-user"), "missing-key", strings.NewReader("{}"))
+	_, _, err := svc.FinishLogin(context.Background(), []byte("demo-user"), "missing-key", strings.NewReader("{}"))
 	if !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("err = %v, want ErrSessionNotFound", err)
 	}
@@ -101,7 +101,7 @@ func TestService_FinishLogin_NoSession(t *testing.T) {
 
 func TestService_FinishLogin_UnknownUser(t *testing.T) {
 	svc, _ := newTestService(t)
-	_, err := svc.FinishLogin(context.Background(), []byte("nobody"), "some-key", strings.NewReader("{}"))
+	_, _, err := svc.FinishLogin(context.Background(), []byte("nobody"), "some-key", strings.NewReader("{}"))
 	if !errors.Is(err, ErrUserNotFound) {
 		t.Fatalf("err = %v, want ErrUserNotFound", err)
 	}
@@ -125,7 +125,7 @@ func TestService_FinishLogin_InvalidBody(t *testing.T) {
 	}
 
 	// Try to finish with invalid JSON body.
-	_, err = svc.FinishLogin(context.Background(), []byte("demo-user"), sessionKey, strings.NewReader("not-json"))
+	_, _, err = svc.FinishLogin(context.Background(), []byte("demo-user"), sessionKey, strings.NewReader("not-json"))
 	if err == nil {
 		t.Fatal("expected error for invalid body, got nil")
 	}
@@ -150,7 +150,7 @@ func TestService_FinishLogin_MalformedAssertion(t *testing.T) {
 
 	// Try to finish with valid JSON but incomplete/malformed assertion response.
 	// This should fail validation in the WebAuthn library.
-	_, err = svc.FinishLogin(context.Background(), []byte("demo-user"), sessionKey, strings.NewReader(`{"id":"bad","rawId":"bad","type":"public-key","response":{}}`))
+	_, _, err = svc.FinishLogin(context.Background(), []byte("demo-user"), sessionKey, strings.NewReader(`{"id":"bad","rawId":"bad","type":"public-key","response":{}}`))
 	if err == nil {
 		t.Fatal("expected error for malformed assertion, got nil")
 	}
@@ -237,7 +237,7 @@ func TestService_BeginDiscoverableLogin(t *testing.T) {
 
 func TestService_FinishDiscoverableLogin_NoSession(t *testing.T) {
 	svc, _ := newTestService(t)
-	_, _, err := svc.FinishDiscoverableLogin(context.Background(), "missing-key", strings.NewReader("{}"))
+	_, _, _, err := svc.FinishDiscoverableLogin(context.Background(), "missing-key", strings.NewReader("{}"))
 	if !errors.Is(err, ErrSessionNotFound) {
 		t.Fatalf("err = %v, want ErrSessionNotFound", err)
 	}
@@ -257,7 +257,7 @@ func TestService_FinishDiscoverableLogin_UnknownHandle(t *testing.T) {
 
 	// Any body with an unrecognised userHandle (or an otherwise-invalid
 	// assertion) must return a generic error — not ErrUserNotFound.
-	_, _, err = svc.FinishDiscoverableLogin(context.Background(), sessionKey,
+	_, _, _, err = svc.FinishDiscoverableLogin(context.Background(), sessionKey,
 		strings.NewReader(`{"id":"bad","rawId":"bad","type":"public-key","response":{}}`))
 	if err == nil {
 		t.Fatal("expected error for unknown/invalid handle, got nil")

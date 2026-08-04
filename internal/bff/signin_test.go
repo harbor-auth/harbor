@@ -258,6 +258,17 @@ func TestSigninHandler_DiscoverableSignin_HappyPath(t *testing.T) {
 	if finalSession.UserID != "discoverable-user-id" {
 		t.Errorf("session.UserID = %q, want %q", finalSession.UserID, "discoverable-user-id")
 	}
+	// Regression guard (task 19): a returning user signing in through GET
+	// /signin with no pending recovery requirement must land in
+	// SessionScopeFull. ServeSignin's BFFSessionRecord never sets SessionScope
+	// at creation, so if FinishLoginWithParsedData ever regresses back to
+	// calling sessions.SetUser (which leaves SessionScope untouched) instead of
+	// SetUserWithRecoveryStatus, this session would stay at the Go zero value
+	// "" and fail every bff.RequireFullScope route despite a fully successful
+	// sign-in.
+	if finalSession.SessionScope != SessionScopeFull {
+		t.Errorf("session.SessionScope = %q, want %q", finalSession.SessionScope, SessionScopeFull)
+	}
 }
 
 // TestSigninHandler_DiscoverableSignin_UnknownCredentialFailsClosed proves an
@@ -286,8 +297,8 @@ func TestSigninHandler_DiscoverableSignin_UnknownCredentialFailsClosed(t *testin
 	}
 
 	webauthn := &mockWebAuthnService{
-		finishDiscoverableFunc: func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, error) {
-			return "", errors.New("unknown userHandle")
+		finishDiscoverableFunc: func(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, bool, error) {
+			return "", false, errors.New("unknown userHandle")
 		},
 	}
 	loginHandler := NewLoginHandler(store, webauthn, DiscoverableUserResolver{}, "http://localhost:8080/authorize/complete")

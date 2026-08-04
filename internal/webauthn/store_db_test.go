@@ -178,6 +178,33 @@ func TestDBStore_GetUser_OK(t *testing.T) {
 	}
 }
 
+// TestDBStore_GetUser_CarriesRecoveryRequired proves the users.recovery_required
+// column (already fetched into db.User by the underlying query) survives into
+// the returned webauthn.User instead of being silently discarded — the login
+// ceremony (Service.FinishLogin / FinishDiscoverableLogin) relies on this to
+// tell bff.LoginHandler whether a returning user's session must stay fenced to
+// enrollment-only scope (task 19).
+func TestDBStore_GetUser_CarriesRecoveryRequired(t *testing.T) {
+	q := newFakeStoreQuerier()
+	id := uuid.New()
+	uid := pgUUID(id)
+	q.users[uid] = db.User{
+		ID:               uid,
+		Region:           "EU",
+		Status:           "active",
+		RecoveryRequired: true,
+	}
+	s := NewDBStore(q)
+
+	u, err := s.GetUser(context.Background(), uidBytes(uid))
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if !u.RecoveryRequired() {
+		t.Error("u.RecoveryRequired() = false, want true (users.recovery_required was true)")
+	}
+}
+
 func TestDBStore_AddCredential_OK(t *testing.T) {
 	s, q, uid := newFakeDBStore(t)
 	cred := gowebauthn.Credential{

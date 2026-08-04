@@ -68,8 +68,8 @@ func (a *bffWebAuthnAdapter) BeginLogin(ctx context.Context, userID []byte) (*pr
 
 // FinishLogin is not used when the application is wired with
 // bff.DiscoverableUserResolver.  It fails closed to prevent accidental use.
-func (a *bffWebAuthnAdapter) FinishLogin(_ context.Context, _ string, _ *protocol.ParsedCredentialAssertionData) (string, error) {
-	return "", errors.New("bff: non-discoverable login is not supported")
+func (a *bffWebAuthnAdapter) FinishLogin(_ context.Context, _ string, _ *protocol.ParsedCredentialAssertionData) (string, bool, error) {
+	return "", false, errors.New("bff: non-discoverable login is not supported")
 }
 
 // BeginDiscoverableLogin starts a discoverable (passkey/usernameless) assertion
@@ -81,15 +81,17 @@ func (a *bffWebAuthnAdapter) BeginDiscoverableLogin(ctx context.Context) (*proto
 // FinishDiscoverableLogin completes the discoverable assertion.  It
 // re-serialises the already-parsed assertion back to JSON because
 // webauthn.Service re-parses the raw body internally, then returns the
-// base64url-encoded WebAuthn user handle as the BFF session user_id.
-func (a *bffWebAuthnAdapter) FinishDiscoverableLogin(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, error) {
+// base64url-encoded WebAuthn user handle as the BFF session user_id, plus the
+// user's real recovery_required status so LoginHandler can scope the session
+// correctly (bff.LoginHandler.FinishLoginWithParsedData).
+func (a *bffWebAuthnAdapter) FinishDiscoverableLogin(ctx context.Context, sessionKey string, response *protocol.ParsedCredentialAssertionData) (string, bool, error) {
 	body, err := json.Marshal(response.Raw)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	userID, _, err := a.svc.FinishDiscoverableLogin(ctx, sessionKey, bytes.NewReader(body))
+	userID, recoveryRequired, _, err := a.svc.FinishDiscoverableLogin(ctx, sessionKey, bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	return userID, nil
+	return userID, recoveryRequired, nil
 }
