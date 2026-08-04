@@ -67,9 +67,8 @@ const (
 	// bffSessionCookieName is the BFF session cookie
 	// (bff.CookieName == mgmtapi.RecoveryScopedSessionCookieName), set by the
 	// post-registration handoff (cmd/harbor-mgmt/caller.go) and by
-	// POST /recovery/complete. NOTE: e2e/recovery_test.go's
-	// recoveryScopedSessionCookie constant ("harbor_recovery_session") does
-	// not match any cookie the server actually sets — do not reuse it here.
+	// POST /recovery/complete. Also used by e2e/recovery_test.go's
+	// scoped-session assertions.
 	bffSessionCookieName = "__Host-harbor-bff"
 
 	// enrollmentSessionCookieName carries the one-time enrollment handoff

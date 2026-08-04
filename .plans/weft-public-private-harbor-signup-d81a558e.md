@@ -532,3 +532,29 @@ file for a narrowly-scoped bug fix). `golangci-lint` is present in this sandbox
 this time but errors immediately on a pre-existing Go-toolchain-version
 mismatch (built with go1.24, repo targets go1.25) unrelated to this change;
 `make`/`-race` remain unavailable as in every prior task on this branch.
+
+# Task 20: Fix wrong recoveryScopedSessionCookie constant in e2e/recovery_test.go
+
+Task 8's investigation (see above) had already pinned this: `recoveryScopedSessionCookie
+= "harbor_recovery_session"` in `e2e/recovery_test.go` never matched any cookie
+the server actually sets — the real scoped/handoff cookie is `__Host-harbor-bff`
+(`mgmtapi.RecoveryScopedSessionCookieName == bff.CookieName`), and task 8 already
+declared the correctly-valued `bffSessionCookieName` constant in `e2e/signup_test.go`
+(same package) rather than reusing the wrong one, filing this as a follow-on.
+
+1. `e2e/recovery_test.go`: deleted the wrong `recoveryScopedSessionCookie` constant
+   and its doc comment, and replaced its three call sites
+   (`TestRecoveryCeremonyEndToEnd`, `TestRecoveryInvalidCodeFailsClosed`,
+   `TestRecoveryScopedSessionDeniesNonEnrollment`) with the existing, correctly-valued
+   `bffSessionCookieName` from `signup_test.go` — same package, no new declaration
+   needed.
+2. `e2e/signup_test.go`: updated `bffSessionCookieName`'s doc comment, which
+   explicitly warned future readers not to reuse the (now-deleted)
+   `recoveryScopedSessionCookie` — the warning no longer applies now that the
+   constant is gone, so reworded it to note it's also used by
+   `recovery_test.go`'s scoped-session assertions.
+3. Verify: `go build -tags e2e ./e2e/...`, `go vet -tags e2e ./e2e/...`,
+   `gofmt -l e2e/recovery_test.go e2e/signup_test.go` (all clean), `go test -tags
+   e2e ./e2e/... -run TestRecovery -v` (4/4 skip gracefully — no live harbor-mgmt/DB
+   in this sandbox — same as every prior task on this branch; confirms the file
+   still compiles and the renamed references resolve).
