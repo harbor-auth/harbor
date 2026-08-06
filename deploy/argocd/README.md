@@ -295,18 +295,57 @@ following the steps above.
 
 ## One-time bootstrap (initial ArgoCD install)
 
+Harbor is deployed by **three** Applications, not one. Registering only
+`application.yaml` leaves PostgreSQL/Redis/PKI and the OpenBao Transit KMS
+unmanaged — which is how this cluster previously drifted from git.
+
 ```bash
 # 1. Install ArgoCD:
 kubectl create namespace argocd
 kubectl apply -n argocd \
   -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
 
-# 2. Register the Harbor Application (after this file is on main):
-kubectl apply -f deploy/argocd/application.yaml
+# 2. Register all three Applications (after this file is on main).
+#    `harbor-auth/harbor` is a public repository, so no ArgoCD repository
+#    credential is required for these sources.
+kubectl apply -f deploy/argocd/platform-application.yaml  # postgres, redis, PKI (incl. the harbor-public Certificate)
+kubectl apply -f deploy/openbao/application.yaml                      # OpenBao Transit KMS (see deploy/openbao/README.md — needs a manual unseal after install)
+kubectl apply -f deploy/argocd/application.yaml                       # the Harbor chart itself
 ```
 
 After that, everything is automatic — merges to `main` deploy without any manual
 `kubectl`/`helm` step.
+
+### Adopting a cluster that already has hand-applied resources
+
+Both Applications that carry `prune: true` (`harbor`, `openbao`) will delete
+anything in their destination that is not in git. When adopting an existing
+cluster, register each Application with its `syncPolicy.automated` block
+stripped, inspect `argocd app diff <name>`, sync manually, and only then apply
+the pristine manifest to switch auto-sync on:
+
+```bash
+yq 'del(.spec.syncPolicy.automated)' deploy/argocd/application.yaml | kubectl apply -n argocd -f -
+argocd app diff harbor          # gate: no unexpected deletions, no immutable-field changes
+argocd app sync harbor
+kubectl apply -f deploy/argocd/application.yaml   # restore automated sync
+```
+
+### Preflight before the first sync of the `harbor` Application
+
+`values-prod.yaml` sets `mgmt.cloudIntegration.enabled: true`, and `harbor-mgmt`
+**refuses to boot** unless `CLOUD_SERVICE_AUTH_PUBLIC_KEY` and
+`MGMT_HOT_PROXY_TOKEN` are present in the out-of-band `harbor-mgmt-secrets`
+Secret. Verify both keys exist *before* syncing, or the rollout crash-loops:
+
+```bash
+kubectl get secret harbor-mgmt-secrets -n harbor -o go-template='{{range $k,$v := .data}}{{$k}}{{"\n"}}{{end}}'
+```
+
+Note that this cluster's sealed-secrets controller is installed with
+`fullnameOverride=sealed-secrets-controller`, so resealing here needs
+`kubeseal --controller-name sealed-secrets-controller`. The Harbor Cloud cluster
+uses the name `sealed-secrets` — the two are deliberately independent.
 
 ---
 

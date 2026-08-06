@@ -71,22 +71,35 @@ ingress:
   host: auth.harborauth.com
   # Provisioned by cert-manager (Let's Encrypt) into the harbor namespace.
   tlsSecretName: harbor-tls
+  annotations:
+    # Drop the chart-default cluster-issuer annotation. The explicit Certificate
+    # `harbor-public` (deploy/platform/pki.yaml, delivered by the harbor-platform
+    # Application) is the single owner of the `harbor-tls` Secret. Leaving the
+    # annotation in place makes cert-manager's ingress-shim create a SECOND
+    # Certificate named after the Secret, and the two race for it — the loser
+    # sits permanently NotReady with reason IncorrectCertificate and renewal
+    # ownership is nondeterministic.
+    #
+    # `null` (not `{}`) is required: values files deep-merge into the chart
+    # defaults, so an explicit null is what removes a single inherited key while
+    # keeping the sibling ssl-redirect/proxy-timeout annotations.
+    cert-manager.io/cluster-issuer: null
 # OpenBao Transit key name. This is an identifier, not key material.
 kmsKeyMap: EU=harbor-eu
 # migrate Job uses harbor-hot's Secret by default (shares the same DATABASE_URL).
 # The DB user must have DDL privileges (CREATE/ALTER TABLE). Set
 # migrate.enabled=false to manage schema migrations out-of-band.
 #
-# ONE-TIME BOOTSTRAP (first automated deploy after manual psql seed):
-# The prod DB was seeded via raw psql, which did NOT create golang-migrate's
-# schema_migrations bookkeeping table. Before the first ArgoCD sync that includes
-# the migrate Job, run:
-#   DB=$(kubectl get secret harbor-hot-secrets -n harbor -o jsonpath='{.data.DATABASE_URL}' | base64 -d)
-#   kubectl exec -n harbor harbor-postgresql-0 -- psql "$DB" -c \
-#     "CREATE TABLE IF NOT EXISTS schema_migrations (version bigint NOT NULL PRIMARY KEY, dirty boolean NOT NULL);"
-#   kubectl exec -n harbor harbor-postgresql-0 -- psql "$DB" -c \
-#     "INSERT INTO schema_migrations VALUES (16, false) ON CONFLICT DO NOTHING;"
-# After that one-time step every subsequent deploy is fully automated.
+# BOOTSTRAP SEED: NO LONGER REQUIRED — DO NOT RUN.
+# This block previously instructed operators to create schema_migrations and
+# seed it with version 16. That is now both unnecessary and actively harmful:
+# the production database already has a schema_migrations table reporting
+# version 18, dirty=false (verified 2026-08-05). Re-seeding 16 would make
+# golang-migrate replay 0017 and 0018 over an already-migrated schema and leave
+# the DB dirty. The migrate Job picks up from 18 and applies 0019 forward on its
+# own. Verify current state with:
+#   kubectl exec -n harbor harbor-postgresql-0 -- \
+#     psql -U harbor -d harbor -h 127.0.0.1 -tAc "SELECT version, dirty FROM schema_migrations;"
 # migrate:
 #   secrets:
 #     existingSecret: harbor-hot-secrets   # default; explicit override not needed
