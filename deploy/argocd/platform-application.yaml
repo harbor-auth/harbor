@@ -14,6 +14,21 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: harbor
+  # The API server defaults several fields inside StatefulSet
+  # volumeClaimTemplates that git cannot express: apiVersion/kind on each
+  # template, spec.volumeMode (Filesystem), and a status block. ArgoCD does not
+  # normalise these, so harbor-postgresql and harbor-redis would report
+  # OutOfSync forever and selfHeal would re-sync them on every reconcile.
+  #
+  # volumeClaimTemplates are immutable after creation — a StatefulSet update
+  # cannot resize or otherwise alter them — so ignoring the field drops no
+  # drift signal we could act on. Changing storage requires recreating the
+  # StatefulSet deliberately, which this rule does not hide.
+  ignoreDifferences:
+    - group: apps
+      kind: StatefulSet
+      jsonPointers:
+        - /spec/volumeClaimTemplates
   syncPolicy:
     automated:
       prune: false
