@@ -30,6 +30,10 @@ type ClientProvisioningStore interface {
 	List(ctx context.Context, namespaceID string) ([]clients.NamespacedClient, error)
 	Update(ctx context.Context, c clients.UpdateNamespacedClient) (clients.NamespacedClient, error)
 	SoftDelete(ctx context.Context, clientID, namespaceID string) error
+	// SoftDeleteAllForNamespace cascades a namespace's soft-delete to every
+	// live client it owns (H2 fix) — DeleteAdminV1Namespace calls this so a
+	// deleted tenant's clients stop authenticating at /token.
+	SoftDeleteAllForNamespace(ctx context.Context, namespaceID string) error
 }
 
 // maxNamespaceRequestBodyBytes caps the namespace create request body (an id
@@ -242,6 +246,27 @@ func (s *Server) GetAdminV1Namespace(w http.ResponseWriter, r *http.Request, id 
 // Idempotency-Key is still required and honored the same way as create: a
 // reused key targeting a different id is rejected with
 // 409 idempotency_key_reused.
+//
+// H2: this ALSO cascades the soft-delete to every live client the namespace
+// owns (clientStore.SoftDeleteAllForNamespace), via
+// db/queries/relying_parties.sql's SoftDeleteNamespaceClients — otherwise a
+// deleted tenant's clients keep authenticating at /token, /authorize,
+// /introspect, and /revoke forever (GetRelyingParty filters
+// relying_parties.deleted_at but has no reason to know about
+// cloud_namespaces), and the namespaced routes 404 on the now-deleted
+// namespace before an operator could even enumerate them to clean up by
+// hand. The two soft-deletes below are sequential statements, NOT one
+// database transaction: cloudapi.Store and clients.DBNamespacedClientStore
+// are separate packages, each behind its own narrow querier interface, with
+// no shared transaction handle threaded through Server — making this
+// atomic would require restructuring both stores (and every test that
+// constructs a Server) to share a transaction-capable handle, which is out
+// of scope here. Given that constraint, clients are cascaded FIRST: if the
+// process dies between the two statements, the namespace is left live with
+// zero working clients (annoying, safely recoverable by retrying the same
+// Idempotency-Key) rather than the reverse ordering's failure mode — a
+// namespace reported deleted whose clients are still silently live, which is
+// the exact bug this fix closes.
 func (s *Server) DeleteAdminV1Namespace(w http.ResponseWriter, r *http.Request, id string, params cloudopenapi.DeleteAdminV1NamespaceParams) {
 	idempotencyKey := params.IdempotencyKey
 	if !validIdempotencyKey(idempotencyKey) {
@@ -269,6 +294,10 @@ func (s *Server) DeleteAdminV1Namespace(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	if err := s.clientStore.SoftDeleteAllForNamespace(ctx, id); err != nil {
+		writeInternalError(w, "cloudapi: cascade soft delete namespace clients", err)
+		return
+	}
 	if err := s.store.SoftDeleteNamespace(ctx, id); err != nil {
 		writeInternalError(w, "cloudapi: soft delete namespace", err)
 		return

@@ -287,6 +287,44 @@ func TestDeleteAdminV1NamespaceIdempotencyKeyReusedWithDifferentTargetIsRejected
 	}
 }
 
+// TestDeleteAdminV1NamespaceCascadesToClients proves H2's fix: deleting a
+// namespace must soft-delete every live client it owns, not just the
+// cloud_namespaces row — otherwise the client keeps authenticating forever
+// (see db/queries/relying_parties.sql's SoftDeleteNamespaceClients doc
+// comment). This exercises the handler and fakeClientStore; the real-SQL
+// proof (including that authentication itself actually stops) lives in
+// integration_test.go's TestIntegrationNamespaceDeleteCascadesToClientSoftDeleteAndStopsAuthentication.
+func TestDeleteAdminV1NamespaceCascadesToClients(t *testing.T) {
+	srv, q, cs := newTestServerWithClients()
+	q.putNamespace("tenant-a", "active")
+	q.putNamespace("tenant-b", "active")
+
+	doPostClient(t, srv, "tenant-a", "cascade-key-1", clientBodyNoAuth("cascade-client-a", "https://a.example.com/cb"))
+	doPostClient(t, srv, "tenant-b", "cascade-key-2", clientBodyNoAuth("cascade-client-b", "https://b.example.com/cb"))
+
+	rec := doDeleteNamespace(t, srv, "tenant-a", "del-cascade-key")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body = %s", rec.Code, rec.Body.String())
+	}
+
+	rowA, ok := cs.row("cascade-client-a")
+	if !ok {
+		t.Fatal("cascade-client-a vanished from the store")
+	}
+	if rowA.DeletedAt == nil {
+		t.Fatal("cascade-client-a was not soft-deleted when its owning namespace was deleted")
+	}
+
+	// tenant-b's client must be completely unaffected.
+	rowB, ok := cs.row("cascade-client-b")
+	if !ok {
+		t.Fatal("cascade-client-b vanished from the store")
+	}
+	if rowB.DeletedAt != nil {
+		t.Fatal("cascade-client-b was soft-deleted by tenant-a's namespace delete — cascade leaked across tenants")
+	}
+}
+
 func TestDeleteAdminV1NamespaceMissingIdempotencyKeyIsRejected(t *testing.T) {
 	srv, _ := newTestServer()
 	rec := doDeleteNamespace(t, srv, "acme-prod", "")

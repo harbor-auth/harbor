@@ -195,6 +195,18 @@ paths:
         `404`. An `Idempotency-Key` is still required and is honored the same
         way as create (a reused key with a different request body is
         rejected with `idempotency_key_reused`).
+
+        Deleting a namespace ALSO soft-deletes every OIDC client it owns —
+        exactly as if each had been individually `DELETE`d via
+        `/admin/v1/namespaces/{namespace}/clients/{client_id}` — so a deleted
+        tenant's clients stop authenticating immediately rather than
+        remaining live indefinitely. Because deletion is otherwise permanent
+        for a client_id (see that operation's description), this cascade is
+        as well: the namespace's clients cannot be recovered by any API call.
+        Once a namespace is deleted, its `/admin/v1/namespaces/{namespace}/clients*`
+        routes also 404 (the namespace itself is gone), so an operator cannot
+        enumerate a namespace's clients after deletion — do so BEFORE
+        deleting the namespace if that is needed.
       tags:
         - namespaces
       security:
@@ -424,6 +436,14 @@ paths:
         `404` (which would confirm the id's existence) and never an actual
         deletion of someone else's client. An `Idempotency-Key` is still
         required and honored the same way as namespace delete.
+
+        A deleted `client_id` is burned PERMANENTLY: it can never be reused,
+        by this namespace or any other. `client_id` remains the underlying
+        table's primary key and the row is never physically removed (only
+        marked deleted), so a later `POST` naming the same `client_id` is
+        rejected with `409 client_already_exists` exactly as if the client
+        were still live. Mint a new `client_id` for a logically-replacement
+        client.
       tags:
         - clients
       security:

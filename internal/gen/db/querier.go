@@ -366,6 +366,22 @@ type Querier interface {
 	// already-deleted namespace — the caller's DELETE handler treats that as
 	// success (idempotent delete: 204, always).
 	SoftDeleteCloudNamespace(ctx context.Context, id string) error
+	// SoftDeleteNamespaceClients cascades a namespace's soft-delete to every live
+	// client it owns (Harbor Cloud management API H2 fix). Without this,
+	// DeleteAdminV1Namespace only marked cloud_namespaces deleted: GetRelyingParty
+	// filters relying_parties.deleted_at but never joins cloud_namespaces, so a
+	// deleted tenant's clients kept authenticating at /token indefinitely, and
+	// namespaceActive's 404-on-deleted-namespace meant an operator could not even
+	// enumerate them through the namespaced routes to clean up by hand. Affects
+	// zero rows when namespace_id owns no live clients — not an error, mirrors
+	// SoftDeleteNamespacedClient's idempotent-no-op-on-zero-rows contract. Called
+	// from cloudapi.DeleteAdminV1Namespace as a second, sequential statement, NOT
+	// inside the same transaction as SoftDeleteCloudNamespace (cloudapi.Store and
+	// clients.DBNamespacedClientStore are separate packages behind narrow
+	// querier interfaces with no shared transaction handle — see
+	// internal/cloudapi/namespaces.go's DeleteAdminV1Namespace for the ordering
+	// this implies and why it is deliberate, not an oversight).
+	SoftDeleteNamespaceClients(ctx context.Context, namespaceID *string) error
 	// SoftDeleteNamespacedClient marks a namespaced client deleted. It affects
 	// zero rows for an absent client_id, a client owned by a different
 	// namespace, or an already-deleted client — the caller's DELETE handler

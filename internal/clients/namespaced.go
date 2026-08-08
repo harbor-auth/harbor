@@ -82,6 +82,7 @@ type namespacedClientQuerier interface {
 	ListNamespacedClients(ctx context.Context, namespaceID *string) ([]db.RelyingParty, error)
 	UpdateNamespacedClient(ctx context.Context, arg db.UpdateNamespacedClientParams) (db.RelyingParty, error)
 	SoftDeleteNamespacedClient(ctx context.Context, arg db.SoftDeleteNamespacedClientParams) error
+	SoftDeleteNamespaceClients(ctx context.Context, namespaceID *string) error
 }
 
 // DBNamespacedClientStore implements namespace-scoped OIDC client CRUD over
@@ -204,6 +205,20 @@ func (s *DBNamespacedClientStore) Update(ctx context.Context, c UpdateNamespaced
 func (s *DBNamespacedClientStore) SoftDelete(ctx context.Context, clientID, namespaceID string) error {
 	if err := s.q.SoftDeleteNamespacedClient(ctx, db.SoftDeleteNamespacedClientParams{ClientID: clientID, NamespaceID: &namespaceID}); err != nil {
 		return fmt.Errorf("namespaced client: soft delete: %w", err)
+	}
+	return nil
+}
+
+// SoftDeleteAllForNamespace marks every live client owned by namespaceID
+// deleted (Harbor Cloud management API H2 fix: cloudapi.DeleteAdminV1Namespace
+// calls this to cascade a namespace's soft-delete to its clients, so a
+// deleted tenant's clients stop authenticating at /token instead of
+// remaining live forever). It does not error when namespaceID owns no live
+// clients — the underlying UPDATE simply affects zero rows — mirroring
+// SoftDelete's idempotent-no-op contract.
+func (s *DBNamespacedClientStore) SoftDeleteAllForNamespace(ctx context.Context, namespaceID string) error {
+	if err := s.q.SoftDeleteNamespaceClients(ctx, &namespaceID); err != nil {
+		return fmt.Errorf("namespaced client: soft delete all for namespace: %w", err)
 	}
 	return nil
 }

@@ -93,6 +93,16 @@ func (f *fakeNamespacedClientQuerier) SoftDeleteNamespacedClient(_ context.Conte
 	return nil
 }
 
+func (f *fakeNamespacedClientQuerier) SoftDeleteNamespaceClients(_ context.Context, namespaceID *string) error {
+	for id, row := range f.rows {
+		if !row.DeletedAt.Valid && samePtrString(row.NamespaceID, namespaceID) {
+			row.DeletedAt = pgtype.Timestamptz{Time: time.Now().UTC(), Valid: true}
+			f.rows[id] = row
+		}
+	}
+	return nil
+}
+
 func samePtrString(a, b *string) bool {
 	if a == nil || b == nil {
 		return a == b
@@ -265,6 +275,42 @@ func TestDBNamespacedClientStoreSoftDeleteCrossTenantIsNoOp(t *testing.T) {
 	// tenant-a's row must still be live.
 	if _, err := store.Get(ctx, "client-a", "tenant-a"); err != nil {
 		t.Fatalf("Get() after cross-tenant delete attempt: %v, want row still live", err)
+	}
+}
+
+func TestDBNamespacedClientStoreSoftDeleteAllForNamespaceOnlyAffectsThatNamespace(t *testing.T) {
+	store, _ := newTestNamespacedClientStore()
+	ctx := context.Background()
+	for _, c := range []NewNamespacedClient{
+		{ClientID: "a1", NamespaceID: "tenant-a", SectorID: "a1", RedirectURIs: []string{"https://a1.example.com/cb"}, TokenFormat: "jwt"},
+		{ClientID: "a2", NamespaceID: "tenant-a", SectorID: "a2", RedirectURIs: []string{"https://a2.example.com/cb"}, TokenFormat: "jwt"},
+		{ClientID: "b1", NamespaceID: "tenant-b", SectorID: "b1", RedirectURIs: []string{"https://b1.example.com/cb"}, TokenFormat: "jwt"},
+	} {
+		if _, err := store.Create(ctx, c); err != nil {
+			t.Fatalf("Create(%s): %v", c.ClientID, err)
+		}
+	}
+
+	if err := store.SoftDeleteAllForNamespace(ctx, "tenant-a"); err != nil {
+		t.Fatalf("SoftDeleteAllForNamespace: %v", err)
+	}
+
+	if _, err := store.Get(ctx, "a1", "tenant-a"); !errors.Is(err, ErrClientNotFound) {
+		t.Errorf("Get(a1) after namespace cascade delete error = %v, want ErrClientNotFound", err)
+	}
+	if _, err := store.Get(ctx, "a2", "tenant-a"); !errors.Is(err, ErrClientNotFound) {
+		t.Errorf("Get(a2) after namespace cascade delete error = %v, want ErrClientNotFound", err)
+	}
+	// tenant-b's client must be completely unaffected by tenant-a's cascade.
+	if _, err := store.Get(ctx, "b1", "tenant-b"); err != nil {
+		t.Errorf("Get(b1) after tenant-a's cascade delete: %v, want still live", err)
+	}
+}
+
+func TestDBNamespacedClientStoreSoftDeleteAllForNamespaceOfEmptyNamespaceIsNoOp(t *testing.T) {
+	store, _ := newTestNamespacedClientStore()
+	if err := store.SoftDeleteAllForNamespace(context.Background(), "never-had-clients"); err != nil {
+		t.Fatalf("SoftDeleteAllForNamespace() on a namespace with no clients error = %v, want nil", err)
 	}
 }
 

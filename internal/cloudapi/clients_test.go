@@ -105,6 +105,22 @@ func (f *fakeClientStore) SoftDelete(_ context.Context, clientID, namespaceID st
 	return nil
 }
 
+// SoftDeleteAllForNamespace mirrors DBNamespacedClientStore.SoftDeleteAllForNamespace
+// (H2): every live client owned by namespaceID is marked deleted. Owning no
+// live clients is not an error — the real UPDATE simply affects zero rows.
+func (f *fakeClientStore) SoftDeleteAllForNamespace(_ context.Context, namespaceID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := time.Now().UTC()
+	for id, row := range f.clients {
+		if row.DeletedAt == nil && row.NamespaceID == namespaceID {
+			row.DeletedAt = &now
+			f.clients[id] = row
+		}
+	}
+	return nil
+}
+
 // get is a test-only convenience over the fake's internal map, bypassing the
 // namespace/deleted_at filtering Get applies — used where a test needs to
 // inspect a row regardless of ownership (e.g. asserting sector_id on the
@@ -347,6 +363,30 @@ func TestPostAdminV1NamespacesClientsValidation(t *testing.T) {
 			body: `{"client_id":"client-val00004","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"client_secret_basic"}`,
 		},
 		{
+			// H1: an explicit "" must never be treated as "field omitted,
+			// apply the default" — it must be rejected outright. Before the
+			// fix this decoded into a non-nil *string pointing at "" (the
+			// generated type is a bare `string`, so the OpenAPI enum is not
+			// enforced at decode time), sailed through
+			// ValidateTokenEndpointAuthMethod("") (which returns nil —
+			// correctly, for its OTHER caller, mgmtapi's RFC 7591 register,
+			// where a bare string field cannot distinguish omitted from
+			// explicit-empty), and produced a client with a NULL
+			// token_endpoint_auth_method — which internal/oidc/auth_method.go
+			// maps to ClientAuthNone: a client admitted at /token with NO
+			// credential check.
+			name: `empty-string token_endpoint_auth_method is rejected, not defaulted`,
+			body: `{"client_id":"client-val00011","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":""}`,
+		},
+		{
+			// Same H1 hole, but with a hash also supplied — the review's
+			// second "Verified failure": pre-fix this stored the hash but the
+			// client authenticated with none anyway (NULL auth method wins),
+			// silently making the hash dead weight.
+			name: `empty-string token_endpoint_auth_method with a hash is still rejected`,
+			body: `{"client_id":"client-val00012","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"","client_secret_hash":"` + validSecretHash64Hex + `"}`,
+		},
+		{
 			name: "non-loopback http redirect_uri rejected",
 			body: `{"client_id":"client-val00005","redirect_uris":["http://not-loopback.example.com/cb"],"token_endpoint_auth_method":"none"}`,
 		},
@@ -479,9 +519,86 @@ func TestPutAdminV1NamespacesClientNotFound(t *testing.T) {
 	}
 }
 
+// TestPutAdminV1NamespacesClientEmptyAuthMethodDoesNotDowngradeClient is the
+// review's third "Verified failure": PUT {"redirect_uris":[...],
+// "token_endpoint_auth_method":""} against a LIVE client_secret_basic client
+// must be rejected — not silently accepted and used to downgrade the client
+// to public (token_endpoint_auth_method NULL -> ClientAuthNone in
+// internal/oidc/auth_method.go), which is an authentication bypass for
+// anyone who already knows the client_id (H1).
+func TestPutAdminV1NamespacesClientEmptyAuthMethodDoesNotDowngradeClient(t *testing.T) {
+	srv, q, cs := newTestServerWithClients()
+	q.putNamespace("tenant-a", "active")
+	doPostClient(t, srv, "tenant-a", "put-empty-am-create",
+		`{"client_id":"client-ppppppppp","redirect_uris":["https://a.example.com/cb"],"client_secret_hash":"`+validSecretHash64Hex+`","token_endpoint_auth_method":"client_secret_basic"}`)
+
+	rec := doPutClient(t, srv, "tenant-a", "client-ppppppppp", "put-empty-am-attempt",
+		`{"redirect_uris":["https://a.example.com/cb2"],"token_endpoint_auth_method":""}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	if got := decodeError(t, rec).Code; got != cloudopenapi.ErrorCodeInvalidRequest {
+		t.Fatalf("error code = %q, want invalid_request", got)
+	}
+
+	// The client must still be exactly as it was: confidential, with its
+	// hash intact — the rejected PUT must not have mutated anything.
+	row, ok := cs.row("client-ppppppppp")
+	if !ok {
+		t.Fatal("client-ppppppppp vanished")
+	}
+	if row.TokenEndpointAuthMethod != "client_secret_basic" {
+		t.Fatalf("TokenEndpointAuthMethod = %q, want unchanged client_secret_basic (rejected PUT must not downgrade)", row.TokenEndpointAuthMethod)
+	}
+	if len(row.ClientSecretHash) == 0 {
+		t.Fatal("ClientSecretHash was cleared by a rejected PUT")
+	}
+}
+
+// TestPutAdminV1NamespacesClientEmptySecretHashIsRejected is M1's proof:
+// PUT {"client_secret_hash":""} must be rejected outright, never silently
+// treated as "hash omitted" (which UpdateNamespacedClient's COALESCE would
+// turn into "leave the stored hash untouched" — exactly the
+// none-with-a-retained-hash state H1 forbids, and a trap for a later PUT
+// that switches back to a confidential method under a secret the operator
+// believed removed).
+func TestPutAdminV1NamespacesClientEmptySecretHashIsRejected(t *testing.T) {
+	srv, q, cs := newTestServerWithClients()
+	q.putNamespace("tenant-a", "active")
+	doPostClient(t, srv, "tenant-a", "put-empty-hash-create",
+		`{"client_id":"client-qqqqqqqqq","redirect_uris":["https://a.example.com/cb"],"client_secret_hash":"`+validSecretHash64Hex+`","token_endpoint_auth_method":"client_secret_basic"}`)
+
+	rec := doPutClient(t, srv, "tenant-a", "client-qqqqqqqqq", "put-empty-hash-attempt",
+		`{"redirect_uris":["https://a.example.com/cb2"],"token_endpoint_auth_method":"none","client_secret_hash":""}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+	}
+	if got := decodeError(t, rec).Code; got != cloudopenapi.ErrorCodeInvalidRequest {
+		t.Fatalf("error code = %q, want invalid_request", got)
+	}
+
+	row, ok := cs.row("client-qqqqqqqqq")
+	if !ok {
+		t.Fatal("client-qqqqqqqqq vanished")
+	}
+	if row.TokenEndpointAuthMethod != "client_secret_basic" || len(row.ClientSecretHash) == 0 {
+		t.Fatalf("client mutated by a rejected PUT: auth_method=%q hash_len=%d", row.TokenEndpointAuthMethod, len(row.ClientSecretHash))
+	}
+}
+
 // --- delete --------------------------------------------------------------
 
-func TestDeleteAdminV1NamespacesClientSoftDeletesAndStopsAuthentication(t *testing.T) {
+// TestDeleteAdminV1NamespacesClientSoftDeletesThenGetIsNotFound proves the
+// handler-level contract over fakeClientStore: after DELETE, GET reports
+// client_not_found. It does NOT — and, over a fake store that reimplements
+// deleted_at filtering rather than exercising real SQL, cannot — prove that
+// authentication itself stops (L1). That proof requires the real
+// GetRelyingParty query and oidc.AuthenticateClient, and lives in
+// integration_test.go's TestIntegrationClientSoftDeleteStopsAuthentication,
+// which runs against real PostgreSQL. This test was previously named
+// ...SoftDeletesAndStopsAuthentication despite never touching an
+// authentication path — renamed so its name matches what it actually checks.
+func TestDeleteAdminV1NamespacesClientSoftDeletesThenGetIsNotFound(t *testing.T) {
 	srv, q, _ := newTestServerWithClients()
 	q.putNamespace("tenant-a", "active")
 	doPostClient(t, srv, "tenant-a", "del-key-1", `{"client_id":"client-oooooooo","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
@@ -503,5 +620,110 @@ func TestDeleteAdminV1NamespacesClientIdempotentOnAbsent(t *testing.T) {
 	rec := doDeleteClient(t, srv, "tenant-a", "never-existed", "del-key-3")
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestDeleteAdminV1NamespacesClientRejectsMalformedPathParameters is L2's
+// proof: unlike POST/PUT, DELETE previously validated neither namespace nor
+// client_id against their documented patterns at all before hashing them
+// into the idempotency ledger key.
+func TestDeleteAdminV1NamespacesClientRejectsMalformedPathParameters(t *testing.T) {
+	srv, q, _ := newTestServerWithClients()
+	q.putNamespace("tenant-a", "active")
+
+	tests := []struct {
+		name      string
+		namespace string
+		clientID  string
+	}{
+		{name: "client_id too short", namespace: "tenant-a", clientID: "short"},
+		{name: "client_id has invalid characters", namespace: "tenant-a", clientID: "bad$id$$$$"},
+		{name: "namespace has invalid characters", namespace: "Not_Valid", clientID: "client-rrrrrrrr"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rec := doDeleteClient(t, srv, tt.namespace, tt.clientID, "del-malformed-"+tt.name)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
+			}
+			if got := decodeError(t, rec).Code; got != cloudopenapi.ErrorCodeInvalidRequest {
+				t.Fatalf("error code = %q, want invalid_request", got)
+			}
+		})
+	}
+}
+
+// TestHashClientDeleteRequestIsInjective proves L2's fix: the classic
+// ambiguous-concatenation collision the review flagged for a single
+// separator byte — namespace `"a\x00"` + clientID `"b"` vs namespace `"a"` +
+// clientID `"\x00b"`, both of which produce the literal byte string
+// `a\x00\x00b` under naive concatenation — must now hash differently.
+func TestHashClientDeleteRequestIsInjective(t *testing.T) {
+	h1 := hashClientDeleteRequest("a\x00", "b")
+	h2 := hashClientDeleteRequest("a", "\x00b")
+	if h1 == h2 {
+		t.Fatal("hashClientDeleteRequest(\"a\\x00\", \"b\") == hashClientDeleteRequest(\"a\", \"\\x00b\") — not injective")
+	}
+}
+
+// --- resolveExplicitAuthMethod / validateAuthMethodSecretPairing (Go-level) ---
+
+func TestResolveExplicitAuthMethodRejectsEmptyString(t *testing.T) {
+	rec := httptest.NewRecorder()
+	_, ok := resolveExplicitAuthMethod(rec, "")
+	if ok {
+		t.Fatal("resolveExplicitAuthMethod(\"\") = ok true, want false")
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestResolveExplicitAuthMethodAcceptsKnownValues(t *testing.T) {
+	for _, method := range []string{"none", "client_secret_basic", "client_secret_post"} {
+		rec := httptest.NewRecorder()
+		got, ok := resolveExplicitAuthMethod(rec, method)
+		if !ok || got != method {
+			t.Errorf("resolveExplicitAuthMethod(%q) = (%q, %v), want (%q, true)", method, got, ok, method)
+		}
+	}
+}
+
+// TestValidateAuthMethodSecretPairingFailsClosedOnUnknownMethod proves the
+// switch's new default: branch — the exact spot where an empty-string
+// authMethod once matched no case and fell through to ok=true (H1).
+func TestValidateAuthMethodSecretPairingFailsClosedOnUnknownMethod(t *testing.T) {
+	for _, tt := range []struct {
+		authMethod    string
+		hasSecretHash bool
+	}{
+		{authMethod: "", hasSecretHash: false},
+		{authMethod: "", hasSecretHash: true},
+		{authMethod: "private_key_jwt", hasSecretHash: false},
+	} {
+		if _, ok := validateAuthMethodSecretPairing(tt.authMethod, tt.hasSecretHash); ok {
+			t.Errorf("validateAuthMethodSecretPairing(%q, %v) = ok true, want false (fail closed)", tt.authMethod, tt.hasSecretHash)
+		}
+	}
+}
+
+// --- clientResponse (L7) ----------------------------------------------------
+
+// TestClientResponseEmptyGrantAndResponseTypesMarshalAsEmptyArrays proves L7:
+// a client with no grant_types/response_types must serialize those fields as
+// JSON "[]", never "null" — cloudopenapi.ClientResponse declares them as
+// *[]string, and a non-nil pointer to a nil slice marshals as "null".
+func TestClientResponseEmptyGrantAndResponseTypesMarshalAsEmptyArrays(t *testing.T) {
+	resp := clientResponse(clients.NamespacedClient{ClientID: "c", NamespaceID: "n"})
+	body, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	for _, field := range []string{`"grant_types":[]`, `"response_types":[]`} {
+		if !strings.Contains(string(body), field) {
+			t.Errorf("response body = %s, want it to contain %s", body, field)
+		}
 	}
 }

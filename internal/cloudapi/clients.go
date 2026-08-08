@@ -15,6 +15,7 @@ package cloudapi
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -130,11 +131,11 @@ func (s *Server) PostAdminV1NamespacesClients(w http.ResponseWriter, r *http.Req
 	}
 	authMethod := defaultClientAuthMethod
 	if req.TokenEndpointAuthMethod != nil {
-		authMethod = string(*req.TokenEndpointAuthMethod)
-	}
-	if err := clients.ValidateTokenEndpointAuthMethod(authMethod); err != nil {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
+		var ok bool
+		authMethod, ok = resolveExplicitAuthMethod(w, string(*req.TokenEndpointAuthMethod))
+		if !ok {
+			return
+		}
 	}
 	secretHashHex := stringOrEmpty(req.ClientSecretHash)
 	if secretHashHex != "" && !clientSecretHashPattern.MatchString(secretHashHex) {
@@ -307,6 +308,20 @@ func (s *Server) PutAdminV1NamespacesClient(w http.ResponseWriter, r *http.Reque
 		writeCloudError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	// M1: a PRESENT-but-empty client_secret_hash must be rejected outright,
+	// never silently treated as "omitted". UpdateNamespacedClient's COALESCE
+	// (db/queries/relying_parties.sql) means "" here would leave the STORED
+	// hash untouched while hasSecretHash below is computed as if it were
+	// cleared — exactly the none-with-a-retained-hash state H1 forbids, and a
+	// trap for a later PUT that switches back to a confidential auth method
+	// under a secret the operator believed removed. There is no "clear the
+	// secret" operation on this route (see ClientUpdateRequest's doc comment
+	// in api/openapi/harbor-cloud.yaml) — clearing requires a fresh
+	// client_secret_hash, not an empty one.
+	if req.ClientSecretHash != nil && *req.ClientSecretHash == "" {
+		writeCloudError(w, http.StatusBadRequest, "invalid_request", "client_secret_hash must not be empty; omit the field entirely to leave the stored hash unchanged")
+		return
+	}
 	secretHashHex := stringOrEmpty(req.ClientSecretHash)
 	if secretHashHex != "" && !clientSecretHashPattern.MatchString(secretHashHex) {
 		writeCloudError(w, http.StatusBadRequest, "invalid_request", "client_secret_hash must be 64 lowercase hex characters")
@@ -314,9 +329,9 @@ func (s *Server) PutAdminV1NamespacesClient(w http.ResponseWriter, r *http.Reque
 	}
 	var explicitAuthMethod string
 	if req.TokenEndpointAuthMethod != nil {
-		explicitAuthMethod = string(*req.TokenEndpointAuthMethod)
-		if err := clients.ValidateTokenEndpointAuthMethod(explicitAuthMethod); err != nil {
-			writeCloudError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		var ok bool
+		explicitAuthMethod, ok = resolveExplicitAuthMethod(w, string(*req.TokenEndpointAuthMethod))
+		if !ok {
 			return
 		}
 	}
@@ -433,13 +448,22 @@ func (s *Server) DeleteAdminV1NamespacesClient(w http.ResponseWriter, r *http.Re
 		writeCloudError(w, http.StatusBadRequest, "invalid_request", "missing or invalid Idempotency-Key header")
 		return
 	}
+	// POST/PUT both validate their path/body identifiers against these same
+	// patterns before doing anything else; DELETE previously validated
+	// neither namespace nor client_id at all (L2), letting an
+	// arbitrary-length, arbitrary-byte path segment reach hashClientDeleteRequest
+	// and the idempotency ledger. This does not weaken the "DELETE always
+	// returns 204" contract below — that contract covers a syntactically
+	// valid id that is absent/foreign/already-deleted, not a malformed one.
+	if !namespaceIDPattern.MatchString(namespace) || !clientIDPattern.MatchString(clientId) {
+		writeCloudError(w, http.StatusBadRequest, "invalid_request", "namespace and client_id must match their documented patterns")
+		return
+	}
 
 	ctx := r.Context()
 	// DELETE carries no request body, so (namespace, client_id) IS the
 	// request's identity for idempotency purposes — mirrors
-	// DeleteAdminV1Namespace's reqHash over the id path parameter. The
-	// \x00 separator matters: without it, namespace "a" + client_id "bc"
-	// would hash identically to namespace "ab" + client_id "c".
+	// DeleteAdminV1Namespace's reqHash over the id path parameter.
 	reqHash := hashClientDeleteRequest(namespace, clientId)
 
 	stored, outcome, err := s.checkIdempotency(ctx, idempotencyKey, opClientDelete, reqHash)
@@ -482,6 +506,33 @@ func (s *Server) namespaceActive(ctx context.Context, w http.ResponseWriter, nam
 	return true
 }
 
+// resolveExplicitAuthMethod validates a token_endpoint_auth_method the caller
+// explicitly supplied (as opposed to omitted the field, which the caller
+// defaults away from this function entirely). raw == "" is rejected outright
+// rather than treated as "caller omitted it": ClientCreateRequestTokenEndpointAuthMethod
+// / ClientUpdateRequestTokenEndpointAuthMethod (internal/gen/openapi/cloud) are
+// bare `string` types, so oapi-codegen does NOT enforce the OpenAPI enum at
+// decode time, and {"token_endpoint_auth_method":""} decodes into a non-nil
+// pointer to "". Without this check that "" would reach
+// clients.ValidateTokenEndpointAuthMethod, which treats "" as "field omitted,
+// apply the default" for mgmtapi's RFC 7591 registerRequest (a bare string,
+// with no way to distinguish omitted from explicit empty) — and from there
+// into a NULL token_endpoint_auth_method column, which
+// internal/oidc/auth_method.go maps to ClientAuthNone: a live confidential
+// client silently downgraded to authenticating with NO credential (H1).
+func resolveExplicitAuthMethod(w http.ResponseWriter, raw string) (string, bool) {
+	if raw == "" {
+		writeCloudError(w, http.StatusBadRequest, "invalid_request",
+			`token_endpoint_auth_method, if present, must be exactly one of "client_secret_basic", "client_secret_post", "none" — omit the field entirely to accept the default`)
+		return "", false
+	}
+	if err := clients.ValidateTokenEndpointAuthMethod(raw); err != nil {
+		writeCloudError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return "", false
+	}
+	return raw, true
+}
+
 // validateAuthMethodSecretPairing enforces the invariant
 // internal/oidc/auth_method.go's AuthenticateClient depends on: a NULL/empty
 // token_endpoint_auth_method is treated as ClientAuthNone, and under
@@ -501,6 +552,15 @@ func validateAuthMethodSecretPairing(authMethod string, hasSecretHash bool) (mes
 		if !hasSecretHash {
 			return "token_endpoint_auth_method " + authMethod + " requires client_secret_hash", false
 		}
+	default:
+		// Fail closed. This is the second, independent line of defense
+		// against H1: resolveExplicitAuthMethod should already have rejected
+		// anything other than the three known enum values (including "") by
+		// the time this runs, but this switch must never silently fall
+		// through and return ok=true for an unrecognized authMethod — that
+		// is exactly how "" (matching no case above) once slipped past this
+		// function entirely.
+		return "token_endpoint_auth_method " + authMethod + " is not a recognized value", false
 	}
 	return "", true
 }
@@ -514,8 +574,13 @@ func clientResponse(c clients.NamespacedClient) cloudopenapi.ClientResponse {
 	if c.Name != "" {
 		namePtr = &c.Name
 	}
-	grantTypes := append([]string(nil), c.GrantTypes...)
-	responseTypes := append([]string(nil), c.ResponseTypes...)
+	// []string{} (not []string(nil)) as the append base: an empty
+	// grant_types/response_types must marshal as JSON "[]", not "null" —
+	// append onto a nil slice stays nil when c.GrantTypes/c.ResponseTypes is
+	// itself empty, and json.Marshal renders a nil slice through a non-nil
+	// *[]string pointer as "null".
+	grantTypes := append([]string{}, c.GrantTypes...)
+	responseTypes := append([]string{}, c.ResponseTypes...)
 	scope := strings.Join(c.ScopesAllowed, " ")
 	return cloudopenapi.ClientResponse{
 		ClientId:                c.ClientID,
@@ -645,9 +710,21 @@ func hashClientUpdateRequest(namespace, clientID string, req cloudopenapi.Client
 
 // hashClientDeleteRequest computes the idempotency ledger's request_hash for
 // a client delete request. DELETE has no body, so (namespace, clientID) IS
-// the request's identity. The \x00 separator is load-bearing: without it,
-// namespace "a" + clientID "bc" would hash identically to namespace "ab" +
-// clientID "c".
+// the request's identity, and the encoding below must be injective: a single
+// separator byte is NOT sufficient — namespace `"a\x00"` + clientID `"b"` and
+// namespace `"a"` + clientID `"\x00b"` would both encode to the literal bytes
+// `a\x00\x00b` (L2). This mirrors internal/identity/ppid.go's encodeMessage:
+// length-prefix namespace with a fixed 8-byte big-endian length before
+// appending clientID, so no two distinct (namespace, clientID) pairs can ever
+// produce the same message regardless of what bytes either string contains.
 func hashClientDeleteRequest(namespace, clientID string) [32]byte {
-	return sha256.Sum256([]byte(namespace + "\x00" + clientID))
+	ns := []byte(namespace)
+	id := []byte(clientID)
+	msg := make([]byte, 0, 8+len(ns)+len(id))
+	var lenPrefix [8]byte
+	binary.BigEndian.PutUint64(lenPrefix[:], uint64(len(ns)))
+	msg = append(msg, lenPrefix[:]...)
+	msg = append(msg, ns...)
+	msg = append(msg, id...)
+	return sha256.Sum256(msg)
 }

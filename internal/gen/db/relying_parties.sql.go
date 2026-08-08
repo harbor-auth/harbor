@@ -313,6 +313,33 @@ func (q *Queries) ListNamespacedClients(ctx context.Context, namespaceID *string
 	return items, nil
 }
 
+const softDeleteNamespaceClients = `-- name: SoftDeleteNamespaceClients :exec
+UPDATE relying_parties
+SET deleted_at = now()
+WHERE namespace_id = $1
+  AND deleted_at IS NULL
+`
+
+// SoftDeleteNamespaceClients cascades a namespace's soft-delete to every live
+// client it owns (Harbor Cloud management API H2 fix). Without this,
+// DeleteAdminV1Namespace only marked cloud_namespaces deleted: GetRelyingParty
+// filters relying_parties.deleted_at but never joins cloud_namespaces, so a
+// deleted tenant's clients kept authenticating at /token indefinitely, and
+// namespaceActive's 404-on-deleted-namespace meant an operator could not even
+// enumerate them through the namespaced routes to clean up by hand. Affects
+// zero rows when namespace_id owns no live clients — not an error, mirrors
+// SoftDeleteNamespacedClient's idempotent-no-op-on-zero-rows contract. Called
+// from cloudapi.DeleteAdminV1Namespace as a second, sequential statement, NOT
+// inside the same transaction as SoftDeleteCloudNamespace (cloudapi.Store and
+// clients.DBNamespacedClientStore are separate packages behind narrow
+// querier interfaces with no shared transaction handle — see
+// internal/cloudapi/namespaces.go's DeleteAdminV1Namespace for the ordering
+// this implies and why it is deliberate, not an oversight).
+func (q *Queries) SoftDeleteNamespaceClients(ctx context.Context, namespaceID *string) error {
+	_, err := q.db.Exec(ctx, softDeleteNamespaceClients, namespaceID)
+	return err
+}
+
 const softDeleteNamespacedClient = `-- name: SoftDeleteNamespacedClient :exec
 UPDATE relying_parties
 SET deleted_at = now()

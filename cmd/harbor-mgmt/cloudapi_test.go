@@ -91,6 +91,10 @@ func (unusedCloudClientStore) SoftDelete(context.Context, string, string) error 
 	panic("unusedCloudClientStore: SoftDelete should not be reached in wiring tests")
 }
 
+func (unusedCloudClientStore) SoftDeleteAllForNamespace(context.Context, string) error {
+	panic("unusedCloudClientStore: SoftDeleteAllForNamespace should not be reached in wiring tests")
+}
+
 // --- fake rate limiter --------------------------------------------------
 
 type fakeRateLimiter struct {
