@@ -44,7 +44,12 @@ func TestHelmSecurityContract(t *testing.T) {
 			!strings.Contains(text, "\nkind: ConfigMap\n") &&
 			!strings.Contains(text, "\nkind: Secret\n") &&
 			!strings.Contains(text, "\nkind: NetworkPolicy\n") &&
-			!strings.Contains(text, "\nkind: Ingress\n") {
+			!strings.Contains(text, "\nkind: Ingress\n") &&
+			// ServiceAccount and Job are needed by
+			// assertServiceAccountsExist; without them every workload's
+			// serviceAccountName would look unresolvable.
+			!strings.Contains(text, "\nkind: ServiceAccount\n") &&
+			!strings.Contains(text, "\nkind: Job\n") {
 			continue
 		}
 		objects = append(objects, decode(t, document)...)
@@ -55,6 +60,47 @@ func TestHelmSecurityContract(t *testing.T) {
 	assertRuntimeConfigurationContract(t, objects, false)
 	assertEnvNameParity(t, loadFiles(t, filepath.Join("..", "k8s", "*.yaml")), objects)
 	assertPublicLoginRoute(t, objects)
+	assertServiceAccountsExist(t, objects)
+}
+
+// assertServiceAccountsExist checks that every workload's serviceAccountName is
+// actually created by the same render.
+//
+// deployment-relay.yaml named harbor-relay-sa, which serviceaccounts.yaml never
+// created — it only ever made the hot and mgmt accounts. A pod referencing a
+// missing ServiceAccount is not admitted at all, so this did not degrade the
+// relay, it stopped it from ever starting. helm lint and helm template both
+// pass, because neither resolves a name to an object.
+//
+// The relay-enabled matrix entry is what gives this teeth: with the relay off
+// its templates never render, and the gap is invisible.
+func assertServiceAccountsExist(t *testing.T, objects []object) {
+	t.Helper()
+	accounts := map[string]bool{"": true, "default": true}
+	for _, item := range objects {
+		if kind, _ := item["kind"].(string); kind == "ServiceAccount" {
+			accounts[pathString(t, item, "metadata", "name")] = true
+		}
+	}
+
+	var checked int
+	for _, item := range objects {
+		kind, _ := item["kind"].(string)
+		if kind != "Deployment" && kind != "Job" {
+			continue
+		}
+		podSpec := pathMap(t, item, "spec", "template", "spec")
+		checked++
+		name, _ := podSpec["serviceAccountName"].(string)
+		if !accounts[name] {
+			t.Errorf("%s/%s references ServiceAccount %q, which this render never creates; "+
+				"the pod would not be admitted at all",
+				kind, pathString(t, item, "metadata", "name"), name)
+		}
+	}
+	if checked == 0 {
+		t.Error("no workloads examined for ServiceAccount references; the render or filter changed")
+	}
 }
 
 func assertPublicLoginRoute(t *testing.T, objects []object) {
