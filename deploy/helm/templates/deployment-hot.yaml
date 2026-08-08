@@ -40,6 +40,7 @@ spec:
       # Dedicated SA with no auto-mounted API token (harbor-hot never calls the
       # K8s API).
       serviceAccountName: {{ include "harbor.hot.serviceAccountName" . }}
+      {{- include "harbor.imagePullSecrets" . | nindent 6 }}
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 30
       securityContext:

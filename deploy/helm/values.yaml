@@ -25,6 +25,20 @@ global:
     # The production hot/mgmt helpers require per-component sha256 digests.
     tag: development-only
     pullPolicy: IfNotPresent
+  # Names of pre-existing kubernetes.io/dockerconfigjson Secrets used to pull
+  # the images above. Empty means anonymous pulls, which only works while the
+  # packages are public.
+  #
+  # Without this a cluster cannot pull its own images at all: it survives only
+  # while they happen to be cached on the node, and cannot recover from image
+  # garbage collection or a node rebuild. It bites hardest on the migrate Job,
+  # which runs as an Argo CD PreSync hook — when that cannot pull, the hook
+  # never completes and the entire sync stalls, so no workload rolls.
+  #
+  # Create the Secret out of band, e.g.
+  #   kubectl create secret docker-registry ghcr-pull -n harbor   #     --docker-server=ghcr.io --docker-username=<user> --docker-password=<token>
+  # then set:  global.imagePullSecrets: [ghcr-pull]
+  imagePullSecrets: []
   postgresTLS:
     # Mount the issuing CA so DATABASE_URL can use sslmode=verify-full.
     enabled: false

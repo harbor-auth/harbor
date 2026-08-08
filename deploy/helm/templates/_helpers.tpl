@@ -200,3 +200,20 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{ include "harbor.migrate.selectorLabels" . }}
 app.kubernetes.io/component: migrate
 {{- end -}}
+
+{{/*
+Image pull secrets, rendered into a pod spec.
+
+Attached per pod spec rather than to the ServiceAccounts, because the migrate
+Job runs under the default ServiceAccount — and that Job is a PreSync hook, so
+if it alone cannot pull, the whole sync stalls before anything rolls.
+*/}}
+{{- define "harbor.imagePullSecrets" -}}
+{{- with .Values.global.imagePullSecrets }}
+imagePullSecrets:
+  {{- range . }}
+  - name: {{ . }}
+  {{- end }}
+{{- end }}
+{{- end -}}
+

@@ -146,6 +146,66 @@ func assertHelmSourceSecurityContract(t *testing.T) {
 	}
 }
 
+// TestEveryWorkloadCanPullItsImage guards the image-pull path.
+//
+// Both clusters run on private GHCR packages with no registry credentials, so
+// a workload whose pod spec omits imagePullSecrets can only start while its
+// image happens to be cached on the node — it cannot survive image garbage
+// collection or a node rebuild. The migrate Job is the sharpest case: it runs
+// as an Argo CD PreSync hook under the default ServiceAccount, so when it
+// alone cannot pull, the hook never completes and the entire sync stalls
+// before any workload rolls.
+//
+// Asserted against template source rather than a render so it holds without a
+// helm binary, and so a NEW workload template cannot quietly skip it.
+func TestEveryWorkloadCanPullItsImage(t *testing.T) {
+	templates, err := filepath.Glob(filepath.Join("..", "helm", "templates", "*.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(templates) == 0 {
+		t.Fatal("no chart templates found; this test would pass vacuously")
+	}
+
+	var checked int
+	for _, template := range templates {
+		data, readErr := os.ReadFile(template)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		// Only pod-bearing templates pull images.
+		if !bytes.Contains(data, []byte("image: {{ include")) {
+			continue
+		}
+		checked++
+		if !bytes.Contains(data, []byte(`include "harbor.imagePullSecrets"`)) {
+			t.Errorf("%s runs an image but its pod spec omits imagePullSecrets; "+
+				"on a private registry this workload cannot pull once its image "+
+				"leaves the node cache", filepath.Base(template))
+		}
+	}
+	if checked < 4 {
+		t.Fatalf("only %d image-bearing templates found, want at least 4 "+
+			"(hot, mgmt, relay, migrate) — the detection pattern has drifted", checked)
+	}
+
+	helpers, err := os.ReadFile(filepath.Join("..", "helm", "templates", "_helpers.tpl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(helpers, []byte(`define "harbor.imagePullSecrets"`)) {
+		t.Error("_helpers.tpl no longer defines harbor.imagePullSecrets")
+	}
+
+	values, err := os.ReadFile(filepath.Join("..", "helm", "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(values, []byte("imagePullSecrets: []")) {
+		t.Error("values.yaml no longer declares global.imagePullSecrets, so the knob is undiscoverable")
+	}
+}
+
 func TestHarborImagesRequireKeylessSignatures(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "kyverno", "policies", "verify-harbor-images.yaml"))
 	if err != nil {

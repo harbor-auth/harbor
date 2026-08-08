@@ -50,6 +50,7 @@ spec:
       labels:
         {{- include "harbor.migrate.labels" . | nindent 8 }}
     spec:
+      {{- include "harbor.imagePullSecrets" . | nindent 6 }}
       # Fresh pod per retry so each attempt's logs are self-contained.
       restartPolicy: Never
       # The migrator does not call the K8s API; the 'default' SA is used only
