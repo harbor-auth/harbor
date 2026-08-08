@@ -25,8 +25,35 @@ const (
 	CloudServiceAuthScopes = "cloudServiceAuth.Scopes"
 )
 
+// Defines values for ClientCreateRequestGrantTypes.
+const (
+	AuthorizationCode ClientCreateRequestGrantTypes = "authorization_code"
+	RefreshToken      ClientCreateRequestGrantTypes = "refresh_token"
+)
+
+// Defines values for ClientCreateRequestResponseTypes.
+const (
+	Code ClientCreateRequestResponseTypes = "code"
+)
+
+// Defines values for ClientCreateRequestTokenEndpointAuthMethod.
+const (
+	ClientCreateRequestTokenEndpointAuthMethodClientSecretBasic ClientCreateRequestTokenEndpointAuthMethod = "client_secret_basic"
+	ClientCreateRequestTokenEndpointAuthMethodClientSecretPost  ClientCreateRequestTokenEndpointAuthMethod = "client_secret_post"
+	ClientCreateRequestTokenEndpointAuthMethodNone              ClientCreateRequestTokenEndpointAuthMethod = "none"
+)
+
+// Defines values for ClientUpdateRequestTokenEndpointAuthMethod.
+const (
+	ClientUpdateRequestTokenEndpointAuthMethodClientSecretBasic ClientUpdateRequestTokenEndpointAuthMethod = "client_secret_basic"
+	ClientUpdateRequestTokenEndpointAuthMethodClientSecretPost  ClientUpdateRequestTokenEndpointAuthMethod = "client_secret_post"
+	ClientUpdateRequestTokenEndpointAuthMethodNone              ClientUpdateRequestTokenEndpointAuthMethod = "none"
+)
+
 // Defines values for ErrorCode.
 const (
+	ErrorCodeClientAlreadyExists    ErrorCode = "client_already_exists"
+	ErrorCodeClientNotFound         ErrorCode = "client_not_found"
 	ErrorCodeCrossTenantForbidden   ErrorCode = "cross_tenant_forbidden"
 	ErrorCodeIdempotencyKeyReused   ErrorCode = "idempotency_key_reused"
 	ErrorCodeInsufficientScope      ErrorCode = "insufficient_scope"
@@ -45,6 +72,68 @@ const (
 	Deleted  NamespaceResponseStatus = "deleted"
 	Deleting NamespaceResponseStatus = "deleting"
 )
+
+// ClientCreateRequest Request to provision an OIDC relying party (client) in a namespace. `client_secret_hash` and `token_endpoint_auth_method` must be consistent: a confidential auth method (`client_secret_basic` / `client_secret_post`) requires `client_secret_hash`; `none` (or omitting the field, which defaults away from `none` per below) forbids it. An inconsistent pairing is rejected as `invalid_request`.
+type ClientCreateRequest struct {
+	// ClientId Caller-chosen client identifier, immutable once created.
+	ClientId string `json:"client_id"`
+
+	// ClientName Human-readable display name.
+	ClientName *string `json:"client_name,omitempty"`
+
+	// ClientSecretHash Lowercase hex-encoded SHA-256 digest of the client secret. Harbor stores this value VERBATIM and applies no further transform (no additional hashing, no KDF) — the caller must submit the digest of a high-entropy secret, never a low-entropy password's hash.
+	ClientSecretHash *string                          `json:"client_secret_hash,omitempty"`
+	GrantTypes       *[]ClientCreateRequestGrantTypes `json:"grant_types,omitempty"`
+
+	// RedirectUris OAuth 2.0 redirect URIs, exact-matched at `/authorize`.
+	RedirectUris  []string                            `json:"redirect_uris"`
+	ResponseTypes *[]ClientCreateRequestResponseTypes `json:"response_types,omitempty"`
+
+	// Scope Space-delimited OAuth 2.0 scopes the client may request.
+	Scope *string `json:"scope,omitempty"`
+
+	// TokenEndpointAuthMethod Client authentication method at the token endpoint.
+	TokenEndpointAuthMethod *ClientCreateRequestTokenEndpointAuthMethod `json:"token_endpoint_auth_method,omitempty"`
+}
+
+// ClientCreateRequestGrantTypes defines model for ClientCreateRequest.GrantTypes.
+type ClientCreateRequestGrantTypes string
+
+// ClientCreateRequestResponseTypes defines model for ClientCreateRequest.ResponseTypes.
+type ClientCreateRequestResponseTypes string
+
+// ClientCreateRequestTokenEndpointAuthMethod Client authentication method at the token endpoint.
+type ClientCreateRequestTokenEndpointAuthMethod string
+
+// ClientListResponse The clients owned by a namespace.
+type ClientListResponse struct {
+	Clients []ClientResponse `json:"clients"`
+}
+
+// ClientResponse A namespace-owned client's current state. NEVER carries a secret or secret hash, in either direction — this response shape is used for create, get, update, and list, and none of those operations echo `client_secret_hash` back.
+type ClientResponse struct {
+	ClientId                string    `json:"client_id"`
+	ClientName              *string   `json:"client_name,omitempty"`
+	CreatedAt               time.Time `json:"created_at"`
+	GrantTypes              *[]string `json:"grant_types,omitempty"`
+	NamespaceId             string    `json:"namespace_id"`
+	RedirectUris            []string  `json:"redirect_uris"`
+	ResponseTypes           *[]string `json:"response_types,omitempty"`
+	Scope                   *string   `json:"scope,omitempty"`
+	TokenEndpointAuthMethod string    `json:"token_endpoint_auth_method"`
+}
+
+// ClientUpdateRequest Request to update a namespace-owned client's mutable metadata. The same `client_secret_hash` / `token_endpoint_auth_method` consistency rule as create applies. Omitting `client_secret_hash` leaves the stored hash unchanged (it does NOT clear it) — there is no way to move a client from confidential to public via this route without also changing `token_endpoint_auth_method`.
+type ClientUpdateRequest struct {
+	ClientName              *string                                     `json:"client_name,omitempty"`
+	ClientSecretHash        *string                                     `json:"client_secret_hash,omitempty"`
+	RedirectUris            []string                                    `json:"redirect_uris"`
+	Scope                   *string                                     `json:"scope,omitempty"`
+	TokenEndpointAuthMethod *ClientUpdateRequestTokenEndpointAuthMethod `json:"token_endpoint_auth_method,omitempty"`
+}
+
+// ClientUpdateRequestTokenEndpointAuthMethod defines model for ClientUpdateRequest.TokenEndpointAuthMethod.
+type ClientUpdateRequestTokenEndpointAuthMethod string
 
 // Error Stable, machine-readable error envelope returned by every `/admin/v1/*` operation on failure.
 type Error struct {
@@ -161,6 +250,24 @@ type DeleteAdminV1NamespaceParams struct {
 	IdempotencyKey IdempotencyKey `json:"Idempotency-Key"`
 }
 
+// PostAdminV1NamespacesClientsParams defines parameters for PostAdminV1NamespacesClients.
+type PostAdminV1NamespacesClientsParams struct {
+	// IdempotencyKey Caller-generated opaque key that de-duplicates retries of this exact request over an unreliable private tunnel. The server hashes the normalized request body and keys a response ledger on `(idempotency_key, operation)`: replaying the same key with the same body returns the original response verbatim; replaying the same key with a different body is rejected with `idempotency_key_reused`.
+	IdempotencyKey IdempotencyKey `json:"Idempotency-Key"`
+}
+
+// DeleteAdminV1NamespacesClientParams defines parameters for DeleteAdminV1NamespacesClient.
+type DeleteAdminV1NamespacesClientParams struct {
+	// IdempotencyKey Caller-generated opaque key that de-duplicates retries of this exact request over an unreliable private tunnel. The server hashes the normalized request body and keys a response ledger on `(idempotency_key, operation)`: replaying the same key with the same body returns the original response verbatim; replaying the same key with a different body is rejected with `idempotency_key_reused`.
+	IdempotencyKey IdempotencyKey `json:"Idempotency-Key"`
+}
+
+// PutAdminV1NamespacesClientParams defines parameters for PutAdminV1NamespacesClient.
+type PutAdminV1NamespacesClientParams struct {
+	// IdempotencyKey Caller-generated opaque key that de-duplicates retries of this exact request over an unreliable private tunnel. The server hashes the normalized request body and keys a response ledger on `(idempotency_key, operation)`: replaying the same key with the same body returns the original response verbatim; replaying the same key with a different body is rejected with `idempotency_key_reused`.
+	IdempotencyKey IdempotencyKey `json:"Idempotency-Key"`
+}
+
 // PostAdminV1SessionsParams defines parameters for PostAdminV1Sessions.
 type PostAdminV1SessionsParams struct {
 	// IdempotencyKey Caller-generated opaque key that de-duplicates retries of this exact request over an unreliable private tunnel. The server hashes the normalized request body and keys a response ledger on `(idempotency_key, operation)`: replaying the same key with the same body returns the original response verbatim; replaying the same key with a different body is rejected with `idempotency_key_reused`.
@@ -172,6 +279,12 @@ type PostAdminV1KeysRotateJSONRequestBody = KeysRotateRequest
 
 // PostAdminV1NamespacesJSONRequestBody defines body for PostAdminV1Namespaces for application/json ContentType.
 type PostAdminV1NamespacesJSONRequestBody = NamespaceCreateRequest
+
+// PostAdminV1NamespacesClientsJSONRequestBody defines body for PostAdminV1NamespacesClients for application/json ContentType.
+type PostAdminV1NamespacesClientsJSONRequestBody = ClientCreateRequest
+
+// PutAdminV1NamespacesClientJSONRequestBody defines body for PutAdminV1NamespacesClient for application/json ContentType.
+type PutAdminV1NamespacesClientJSONRequestBody = ClientUpdateRequest
 
 // PostAdminV1SessionsJSONRequestBody defines body for PostAdminV1Sessions for application/json ContentType.
 type PostAdminV1SessionsJSONRequestBody = SessionMintRequest
@@ -190,6 +303,21 @@ type ServerInterface interface {
 	// Get a namespace
 	// (GET /admin/v1/namespaces/{id})
 	GetAdminV1Namespace(w http.ResponseWriter, r *http.Request, id string)
+	// List OIDC clients in a namespace
+	// (GET /admin/v1/namespaces/{namespace}/clients)
+	GetAdminV1NamespacesClients(w http.ResponseWriter, r *http.Request, namespace string)
+	// Provision an OIDC client in a namespace
+	// (POST /admin/v1/namespaces/{namespace}/clients)
+	PostAdminV1NamespacesClients(w http.ResponseWriter, r *http.Request, namespace string, params PostAdminV1NamespacesClientsParams)
+	// Delete an OIDC client
+	// (DELETE /admin/v1/namespaces/{namespace}/clients/{client_id})
+	DeleteAdminV1NamespacesClient(w http.ResponseWriter, r *http.Request, namespace string, clientId string, params DeleteAdminV1NamespacesClientParams)
+	// Get an OIDC client
+	// (GET /admin/v1/namespaces/{namespace}/clients/{client_id})
+	GetAdminV1NamespacesClient(w http.ResponseWriter, r *http.Request, namespace string, clientId string)
+	// Update an OIDC client
+	// (PUT /admin/v1/namespaces/{namespace}/clients/{client_id})
+	PutAdminV1NamespacesClient(w http.ResponseWriter, r *http.Request, namespace string, clientId string, params PutAdminV1NamespacesClientParams)
 	// Mint a namespace-scoped management session
 	// (POST /admin/v1/sessions)
 	PostAdminV1Sessions(w http.ResponseWriter, r *http.Request, params PostAdminV1SessionsParams)
@@ -355,6 +483,272 @@ func (siw *ServerInterfaceWrapper) GetAdminV1Namespace(w http.ResponseWriter, r 
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetAdminV1Namespace(w, r, id)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetAdminV1NamespacesClients operation middleware
+func (siw *ServerInterfaceWrapper) GetAdminV1NamespacesClients(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "namespace" -------------
+	var namespace string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "namespace", r.PathValue("namespace"), &namespace, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "namespace", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, CloudServiceAuthScopes, []string{"clients:read"})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetAdminV1NamespacesClients(w, r, namespace)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PostAdminV1NamespacesClients operation middleware
+func (siw *ServerInterfaceWrapper) PostAdminV1NamespacesClients(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "namespace" -------------
+	var namespace string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "namespace", r.PathValue("namespace"), &namespace, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "namespace", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, CloudServiceAuthScopes, []string{"clients:write"})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PostAdminV1NamespacesClientsParams
+
+	headers := r.Header
+
+	// ------------- Required header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = IdempotencyKey
+
+	} else {
+		err := fmt.Errorf("Header parameter Idempotency-Key is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "Idempotency-Key", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PostAdminV1NamespacesClients(w, r, namespace, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteAdminV1NamespacesClient operation middleware
+func (siw *ServerInterfaceWrapper) DeleteAdminV1NamespacesClient(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "namespace" -------------
+	var namespace string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "namespace", r.PathValue("namespace"), &namespace, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "namespace", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "client_id" -------------
+	var clientId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "client_id", r.PathValue("client_id"), &clientId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "client_id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, CloudServiceAuthScopes, []string{"clients:write"})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DeleteAdminV1NamespacesClientParams
+
+	headers := r.Header
+
+	// ------------- Required header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = IdempotencyKey
+
+	} else {
+		err := fmt.Errorf("Header parameter Idempotency-Key is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "Idempotency-Key", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteAdminV1NamespacesClient(w, r, namespace, clientId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetAdminV1NamespacesClient operation middleware
+func (siw *ServerInterfaceWrapper) GetAdminV1NamespacesClient(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "namespace" -------------
+	var namespace string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "namespace", r.PathValue("namespace"), &namespace, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "namespace", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "client_id" -------------
+	var clientId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "client_id", r.PathValue("client_id"), &clientId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "client_id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, CloudServiceAuthScopes, []string{"clients:read"})
+
+	r = r.WithContext(ctx)
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetAdminV1NamespacesClient(w, r, namespace, clientId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutAdminV1NamespacesClient operation middleware
+func (siw *ServerInterfaceWrapper) PutAdminV1NamespacesClient(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "namespace" -------------
+	var namespace string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "namespace", r.PathValue("namespace"), &namespace, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "namespace", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "client_id" -------------
+	var clientId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "client_id", r.PathValue("client_id"), &clientId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "client_id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, CloudServiceAuthScopes, []string{"clients:write"})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutAdminV1NamespacesClientParams
+
+	headers := r.Header
+
+	// ------------- Required header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = IdempotencyKey
+
+	} else {
+		err := fmt.Errorf("Header parameter Idempotency-Key is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "Idempotency-Key", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutAdminV1NamespacesClient(w, r, namespace, clientId, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -538,6 +932,11 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc("POST "+options.BaseURL+"/admin/v1/namespaces", wrapper.PostAdminV1Namespaces)
 	m.HandleFunc("DELETE "+options.BaseURL+"/admin/v1/namespaces/{id}", wrapper.DeleteAdminV1Namespace)
 	m.HandleFunc("GET "+options.BaseURL+"/admin/v1/namespaces/{id}", wrapper.GetAdminV1Namespace)
+	m.HandleFunc("GET "+options.BaseURL+"/admin/v1/namespaces/{namespace}/clients", wrapper.GetAdminV1NamespacesClients)
+	m.HandleFunc("POST "+options.BaseURL+"/admin/v1/namespaces/{namespace}/clients", wrapper.PostAdminV1NamespacesClients)
+	m.HandleFunc("DELETE "+options.BaseURL+"/admin/v1/namespaces/{namespace}/clients/{client_id}", wrapper.DeleteAdminV1NamespacesClient)
+	m.HandleFunc("GET "+options.BaseURL+"/admin/v1/namespaces/{namespace}/clients/{client_id}", wrapper.GetAdminV1NamespacesClient)
+	m.HandleFunc("PUT "+options.BaseURL+"/admin/v1/namespaces/{namespace}/clients/{client_id}", wrapper.PutAdminV1NamespacesClient)
 	m.HandleFunc("POST "+options.BaseURL+"/admin/v1/sessions", wrapper.PostAdminV1Sessions)
 
 	return m
@@ -546,70 +945,111 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 // Base64 encoded, gzipped, json marshaled Swagger object
 var swaggerSpec = []string{
 
-	"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",
+	"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",
 }
 
 // GetSwagger returns the content of the embedded swagger specification file

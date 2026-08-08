@@ -10,13 +10,14 @@ import (
 	cloudopenapi "github.com/harbor-auth/harbor/internal/gen/openapi/cloud"
 )
 
-// newTestServer builds a Server over a fresh memQuerier-backed Store.
-// memQuerier (the stateful in-memory querier fake multi-call sequences like
-// idempotent retry need) is defined once, in sessions_test.go, and shared by
-// every *_test.go file in this package.
+// newTestServer builds a Server over a fresh memQuerier-backed Store and a
+// fresh fakeClientStore. memQuerier (the stateful in-memory querier fake
+// multi-call sequences like idempotent retry need) is defined once, in
+// sessions_test.go, and shared by every *_test.go file in this package;
+// fakeClientStore is defined once, in clients_test.go, likewise shared.
 func newTestServer() (*Server, *memQuerier) {
 	q := newMemQuerier()
-	return NewServer(NewStore(q)), q
+	return NewServer(NewStore(q), newFakeClientStore()), q
 }
 
 func doPostNamespace(t *testing.T, srv *Server, idempotencyKey, body string) *httptest.ResponseRecorder {
@@ -55,10 +56,19 @@ func decodeError(t *testing.T, rec *httptest.ResponseRecorder) cloudopenapi.Erro
 func TestNewServerPanicsOnNilStore(t *testing.T) {
 	defer func() {
 		if recover() == nil {
-			t.Fatal("NewServer(nil) did not panic")
+			t.Fatal("NewServer(nil, ...) did not panic")
 		}
 	}()
-	NewServer(nil)
+	NewServer(nil, newFakeClientStore())
+}
+
+func TestNewServerPanicsOnNilClientStore(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("NewServer(..., nil) did not panic")
+		}
+	}()
+	NewServer(NewStore(newMemQuerier()), nil)
 }
 
 func TestPostAdminV1NamespacesCreatesNamespace(t *testing.T) {
@@ -274,6 +284,44 @@ func TestDeleteAdminV1NamespaceIdempotencyKeyReusedWithDifferentTargetIsRejected
 	}
 	if got := decodeError(t, rec).Code; got != cloudopenapi.ErrorCodeIdempotencyKeyReused {
 		t.Fatalf("error code = %q, want idempotency_key_reused", got)
+	}
+}
+
+// TestDeleteAdminV1NamespaceCascadesToClients proves H2's fix: deleting a
+// namespace must soft-delete every live client it owns, not just the
+// cloud_namespaces row — otherwise the client keeps authenticating forever
+// (see db/queries/relying_parties.sql's SoftDeleteNamespaceClients doc
+// comment). This exercises the handler and fakeClientStore; the real-SQL
+// proof (including that authentication itself actually stops) lives in
+// integration_test.go's TestIntegrationNamespaceDeleteCascadesToClientSoftDeleteAndStopsAuthentication.
+func TestDeleteAdminV1NamespaceCascadesToClients(t *testing.T) {
+	srv, q, cs := newTestServerWithClients()
+	q.putNamespace("tenant-a", "active")
+	q.putNamespace("tenant-b", "active")
+
+	doPostClient(t, srv, "tenant-a", "cascade-key-1", clientBodyNoAuth("cascade-client-a", "https://a.example.com/cb"))
+	doPostClient(t, srv, "tenant-b", "cascade-key-2", clientBodyNoAuth("cascade-client-b", "https://b.example.com/cb"))
+
+	rec := doDeleteNamespace(t, srv, "tenant-a", "del-cascade-key")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body = %s", rec.Code, rec.Body.String())
+	}
+
+	rowA, ok := cs.row("cascade-client-a")
+	if !ok {
+		t.Fatal("cascade-client-a vanished from the store")
+	}
+	if rowA.DeletedAt == nil {
+		t.Fatal("cascade-client-a was not soft-deleted when its owning namespace was deleted")
+	}
+
+	// tenant-b's client must be completely unaffected.
+	rowB, ok := cs.row("cascade-client-b")
+	if !ok {
+		t.Fatal("cascade-client-b vanished from the store")
+	}
+	if rowB.DeletedAt != nil {
+		t.Fatal("cascade-client-b was soft-deleted by tenant-a's namespace delete — cascade leaked across tenants")
 	}
 }
 

@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/harbor-auth/harbor/internal/gen/db"
 	"github.com/harbor-auth/harbor/internal/oidc"
@@ -24,9 +26,12 @@ func newFakeRPQuerier(rows ...db.RelyingParty) *fakeRPQuerier {
 	return &fakeRPQuerier{rows: m}
 }
 
+// GetRelyingParty mirrors the real query's "AND deleted_at IS NULL" filter
+// (db/queries/relying_parties.sql) so this fake exercises the same
+// not-found-on-soft-delete behavior Lookup depends on in production.
 func (f *fakeRPQuerier) GetRelyingParty(_ context.Context, clientID string) (db.RelyingParty, error) {
 	r, ok := f.rows[clientID]
-	if !ok {
+	if !ok || r.DeletedAt.Valid {
 		return db.RelyingParty{}, pgx.ErrNoRows
 	}
 	return r, nil
@@ -81,6 +86,26 @@ func TestDBClientRegistryLookupUnknown(t *testing.T) {
 	_, ok := reg.Lookup(context.Background(), "unknown")
 	if ok {
 		t.Fatal("expected found=false for unknown client")
+	}
+}
+
+// TestDBClientRegistryLookupSoftDeleted proves a soft-deleted relying_parties
+// row (deleted_at set — e.g. by SoftDeleteNamespacedClient) is invisible to
+// Lookup exactly like an absent client_id. This is what makes a namespaced
+// client's DELETE route actually stop the client from authenticating at
+// /token, /authorize, /introspect, and /revoke — all of which resolve
+// clients through this same Lookup path.
+func TestDBClientRegistryLookupSoftDeleted(t *testing.T) {
+	reg := NewDBClientRegistry(newFakeRPQuerier(db.RelyingParty{
+		ClientID:      "deleted-rp",
+		SectorID:      "sector.example.com",
+		RedirectUris:  []string{"https://rp.example.com/cb"},
+		ScopesAllowed: []string{"openid"},
+		DeletedAt:     pgtype.Timestamptz{Time: time.Now(), Valid: true},
+	}))
+	_, ok := reg.Lookup(context.Background(), "deleted-rp")
+	if ok {
+		t.Fatal("expected found=false for a soft-deleted client")
 	}
 }
 

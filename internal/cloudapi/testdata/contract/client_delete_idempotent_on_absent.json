@@ -1,0 +1,14 @@
+{
+  "name": "client_delete_idempotent_on_absent",
+  "spec_scenario": "Client delete is idempotent (204) on an absent namespace/client",
+  "steps": [
+    {
+      "method": "DELETE",
+      "path": "/admin/v1/namespaces/never-existed-ns/clients/never-existed-client",
+      "auth": "valid",
+      "scope": "clients:write",
+      "idempotency_key": "delete-absent-key",
+      "want_status": 204
+    }
+  ]
+}

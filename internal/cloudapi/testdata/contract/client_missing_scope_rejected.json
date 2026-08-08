@@ -1,0 +1,14 @@
+{
+  "name": "client_missing_scope_rejected",
+  "spec_scenario": "Missing required scope is rejected on the client-provisioning surface",
+  "steps": [
+    {
+      "method": "GET",
+      "path": "/admin/v1/namespaces/scope-check-ns/clients/scope-check-client",
+      "auth": "insufficient_scope",
+      "scope": "namespaces:read",
+      "want_status": 403,
+      "want_error_code": "insufficient_scope"
+    }
+  ]
+}

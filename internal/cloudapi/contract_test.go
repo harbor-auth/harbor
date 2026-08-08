@@ -114,12 +114,12 @@ func requireServiceAuth(verifier *ServiceAuthVerifier) cloudopenapi.MiddlewareFu
 }
 
 // newContractRouter assembles the real /admin/v1/* http.Handler over the
-// given store and verifier — the same composition every scenario in this
-// package's tests (fixture-driven and integration) exercises requests
-// through.
-func newContractRouter(store *Store, verifier *ServiceAuthVerifier, hotBaseURL, proxyToken string, hotClient *http.Client) http.Handler {
+// given store, client store, and verifier — the same composition every
+// scenario in this package's tests (fixture-driven and integration)
+// exercises requests through.
+func newContractRouter(store *Store, clientStore ClientProvisioningStore, verifier *ServiceAuthVerifier, hotBaseURL, proxyToken string, hotClient *http.Client) http.Handler {
 	adapter := &contractAdapter{
-		Server:   NewServer(store),
+		Server:   NewServer(store, clientStore),
 		sessions: NewSessionsHandler(store),
 		keys:     NewKeysHandler(verifier, hotBaseURL, proxyToken, hotClient),
 	}
@@ -272,7 +272,7 @@ func newContractEnv(t *testing.T) *contractEnv {
 	hot := newRecordingHotServer(t)
 
 	env := &contractEnv{
-		router: newContractRouter(store, verifier, hot.URL, "contract-proxy-token", hot.Client()),
+		router: newContractRouter(store, newFakeClientStore(), verifier, hot.URL, "contract-proxy-token", hot.Client()),
 		ecPriv: priv,
 		now:    now,
 		q:      q,
@@ -285,7 +285,7 @@ func newContractEnv(t *testing.T) *contractEnv {
 	if err != nil {
 		t.Fatalf("NewServiceAuthVerifier (unconfigured): %v", err)
 	}
-	env.unconfR = newContractRouter(NewStore(newMemQuerier()), unconfVerifier, hot.URL, "contract-proxy-token", hot.Client())
+	env.unconfR = newContractRouter(NewStore(newMemQuerier()), newFakeClientStore(), unconfVerifier, hot.URL, "contract-proxy-token", hot.Client())
 
 	return env
 }
@@ -445,6 +445,8 @@ func validErrorCode(code cloudopenapi.ErrorCode) bool {
 		cloudopenapi.ErrorCodeCrossTenantForbidden,
 		cloudopenapi.ErrorCodeNamespaceAlreadyExists,
 		cloudopenapi.ErrorCodeNamespaceNotFound,
+		cloudopenapi.ErrorCodeClientAlreadyExists,
+		cloudopenapi.ErrorCodeClientNotFound,
 		cloudopenapi.ErrorCodeIdempotencyKeyReused,
 		cloudopenapi.ErrorCodeRateLimited:
 		return true
@@ -504,7 +506,7 @@ func TestContractAuditEventsEmitted(t *testing.T) {
 		t.Fatalf("NewServiceAuthVerifier: %v", err)
 	}
 	hot := newRecordingHotServer(t)
-	router := newContractRouter(NewStore(newMemQuerier()), verifier, hot.URL, "contract-proxy-token", hot.Client())
+	router := newContractRouter(NewStore(newMemQuerier()), newFakeClientStore(), verifier, hot.URL, "contract-proxy-token", hot.Client())
 
 	claims := map[string]any{
 		"iss": "harbor-cloud", "sub": "harbor-cloud-svc-audit", "aud": ExpectedAudience,
