@@ -1,0 +1,45 @@
+# harbor-backup — offsite backup CronJobs (etcd snapshots + pg_dump → R2).
+#
+# This Application was missing entirely, which is why the production cluster ran
+# for days with no automated backup of any kind: the manifests existed in
+# deploy/backup/ but nothing ever applied them.
+#
+# BEFORE THE FIRST SYNC, three things must exist on the cluster (none are
+# managed here — see deploy/backup/README.md):
+#
+#   1. the harbor-backup namespace, labelled for privileged pod security
+#      (the etcd CronJob mounts a hostPath and runs as root),
+#   2. the harbor-backup ServiceAccount,
+#   3. the backup-credentials Secret holding real rclone R2/S3 credentials.
+#
+# Syncing without (3) leaves both CronJobs failing every run against CHANGEME
+# credentials, so the Secret is created out of band and excluded from the
+# kustomization rather than shipped as a placeholder.
+#
+# prune is false: these are scheduled jobs whose in-flight pods should never be
+# reaped by a reconcile, and there is nothing here worth deleting automatically.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: harbor-backup
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/harbor-auth/harbor.git
+    targetRevision: main
+    path: deploy/backup
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: harbor-backup
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
+    syncOptions:
+      # The namespace carries pod-security labels that this Application does
+      # not own, so it must be created by the operator, not by ArgoCD.
+      - CreateNamespace=false
+      - ServerSideApply=true
