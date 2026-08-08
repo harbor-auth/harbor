@@ -1,5 +1,13 @@
 # Harbor
 
+> [!WARNING]
+> **The live deployment is not production ready.** It works end to end, but it
+> is carrying deliberate shortcuts — including an over-scoped registry
+> credential, an OpenBao instance whose five unseal shares all sit on one
+> machine, and no offsite backups. See
+> [docs/NOT-PRODUCTION-READY.md](docs/NOT-PRODUCTION-READY.md) before pointing
+> anything at it that you would be sorry to lose.
+
 **Privacy-first, ethical Single Sign-On.** A tracking-free replacement for "Sign in with Google/Facebook".
 
 Harbor is an OpenID Provider (OP) that authenticates people to the apps they've explicitly connected — and **nothing more**. No tracking, no profiling, no data selling. We're a neutral identity + auth broker that manages your passkeys, MFA, and logins.
