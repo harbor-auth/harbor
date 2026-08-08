@@ -83,13 +83,28 @@ type Querier interface {
 	// the namespace in between, producing a live client owned by a dead tenant
 	// (invisible to every namespaced route, since namespaceActive 404s on the
 	// now-deleted namespace, and never stopped from authenticating at /token).
-	// The WHERE EXISTS below makes the liveness check and the insert ONE atomic
-	// statement: if cloud_namespaces has no live row for namespace_id at the
-	// instant this runs, zero rows are selected and nothing is inserted — a
-	// concurrent DELETE either fully happens-before or fully happens-after this
-	// statement under Postgres's read-committed snapshot per statement, with no
-	// window in between. The Go layer's pre-check stays (fast, clear 404 for the
-	// common non-racing case); this is the race-proof backstop.
+	// The WHERE EXISTS below collapses the liveness check and the insert into ONE
+	// statement, which removes the Go-level window (a full round-trip) entirely.
+	//
+	// It does NOT by itself make this race-free, and it is worth being precise
+	// about why: under READ COMMITTED the sub-select takes a snapshot, not a lock,
+	// so a concurrent soft-delete can commit between the EXISTS evaluating true and
+	// this INSERT committing. The FK does not help either — the insert's FK check
+	// takes FOR KEY SHARE on the parent while a soft-delete is a non-key UPDATE
+	// taking FOR NO KEY UPDATE, and those two do not conflict. This was reproduced
+	// against a real Postgres 16 before FOR SHARE was added.
+	//
+	// FOR SHARE is what actually closes it: it conflicts with the soft-delete's
+	// FOR NO KEY UPDATE, so the delete blocks until this statement commits.
+	// Concurrent creates in the same namespace still do not block each other (the
+	// lock is shared), and there is no lock-order cycle with the delete cascade,
+	// because this inserts a NEW row and so never waits on rows the cascade holds.
+	//
+	// The Go layer's pre-check stays as the fast, clear 404 for the common
+	// non-racing case. Note that GetRelyingParty's join against cloud_namespaces is
+	// the load-bearing guard for the security consequence: it re-checks namespace
+	// liveness on every authentication, so even an orphan that somehow existed
+	// could never reach /token.
 	CreateNamespacedClient(ctx context.Context, arg CreateNamespacedClientParams) (RelyingParty, error)
 	// CreateRegisteredClient inserts a dynamically-registered client (RFC 7591).
 	// Includes all new columns from migration 0012 for dynamic registration.
@@ -254,12 +269,14 @@ type Querier interface {
 	// soft-deleted, not just a client that is itself soft-deleted. The primary
 	// fix for the create-time TOCTOU race is CreateNamespacedClient's
 	// INSERT ... WHERE EXISTS (this file) — that closes the race at the source,
-	// so this join should never actually reject anything in steady state. It is
-	// here anyway as a second, independent line of defense: it is what stops
-	// ANY orphan (a live relying_parties row under a dead cloud_namespaces row,
-	// however it came to exist — a bug elsewhere, a manual DB fix gone wrong,
-	// future code that inserts into relying_parties without this guard) from
-	// authenticating, mirroring the two-layer pattern H1 already uses for
+	// so in steady state this join rarely rejects anything. Do not mistake that for
+	// it being optional: this join is the LOAD-BEARING guard for the security
+	// consequence. CreateNamespacedClient's FOR SHARE closes the create-side race,
+	// but this is what re-checks namespace liveness on EVERY authentication, so no
+	// orphan — a live relying_parties row under a dead cloud_namespaces row,
+	// however it came to exist (a bug elsewhere, a manual DB fix gone wrong, future
+	// code inserting without the guard) — can ever reach /token. It mirrors the
+	// two-layer pattern H1 already uses for
 	// token_endpoint_auth_method (resolveExplicitAuthMethod +
 	// validateAuthMethodSecretPairing in internal/cloudapi/clients.go). The LEFT
 	// JOIN is a single indexed primary-key lookup against cloud_namespaces (a
@@ -271,6 +288,9 @@ type Querier interface {
 	// state for every operator-registered or dynamically-RFC-7591-registered
 	// client (0020_relying_parties_namespace.up.sql) — without the IS NULL
 	// escape hatch this join would reject every non-cloud client in the system.
+	// Correctness also depends on the FK added by that migration: a DANGLING
+	// namespace_id would be NULL-extended by the LEFT JOIN and therefore ALLOWED,
+	// and it is the FK to cloud_namespaces(id) that makes such a row impossible.
 	GetRelyingParty(ctx context.Context, clientID string) (RelyingParty, error)
 	// Get a single revocation entry by ID (for debugging/admin).
 	GetRevocation(ctx context.Context, id pgtype.UUID) (RevocationOutbox, error)
