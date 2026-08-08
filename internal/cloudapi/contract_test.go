@@ -21,6 +21,7 @@ package cloudapi
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -53,14 +54,19 @@ import (
 // the seam that reconciles the two without changing either production file.
 type contractAdapter struct {
 	*Server
-	sessions *SessionsHandler
-	keys     *KeysHandler
+	sessions     *SessionsHandler
+	userSessions *UserSessionsHandler
+	keys         *KeysHandler
 }
 
 var _ cloudopenapi.ServerInterface = (*contractAdapter)(nil)
 
 func (a *contractAdapter) PostAdminV1Sessions(w http.ResponseWriter, r *http.Request, _ cloudopenapi.PostAdminV1SessionsParams) {
 	a.sessions.PostSessions(w, r)
+}
+
+func (a *contractAdapter) PostAdminV1UserSessions(w http.ResponseWriter, r *http.Request) {
+	a.userSessions.PostUserSessions(w, r)
 }
 
 func (a *contractAdapter) PostAdminV1KeysRotate(w http.ResponseWriter, r *http.Request) {
@@ -89,39 +95,62 @@ func requireServiceAuth(verifier *ServiceAuthVerifier) cloudopenapi.MiddlewareFu
 				return
 			}
 
+			required, _ := r.Context().Value(cloudopenapi.CloudServiceAuthScopes).([]string)
+			routeScope := strings.Join(required, " ")
+
 			bearer := extractBearerToken(r)
 			if bearer == "" {
-				writeVerifyError(w, ErrInvalidToken)
+				writeVerifyError(w, ErrInvalidToken, routeScope)
 				return
 			}
 			route := r.Method + " " + r.URL.Path
 			claims, err := verifier.Verify(WithRoute(r.Context(), route), bearer)
 			if err != nil {
-				writeVerifyError(w, err)
+				writeVerifyError(w, err, routeScope)
 				return
 			}
-			if required, ok := r.Context().Value(cloudopenapi.CloudServiceAuthScopes).([]string); ok {
-				for _, scope := range required {
-					if !claims.HasScope(scope) {
-						writeCloudAPIError(w, http.StatusForbidden, "insufficient_scope", "the "+scope+" scope is required")
-						return
-					}
+			for _, scope := range required {
+				if !claims.HasScope(scope) {
+					writeCloudAPIError(w, http.StatusForbidden, "insufficient_scope", "the "+scope+" scope is required")
+					return
 				}
 			}
-			next.ServeHTTP(w, r)
+			// M5 — mirrors cmd/harbor-mgmt/cloudapi.go's cloudAuthorized:
+			// attach claims so PostUserSessions can check the matched
+			// anchor's AllowedNamespaces against its own request body.
+			next.ServeHTTP(w, r.WithContext(WithServiceClaims(r.Context(), claims)))
 		})
 	}
 }
 
+// contractSubjectHMACKey is a fixed, well-formed test key for the
+// user-sessions route's SubjectHasher — never a production secret, only
+// meets NewSubjectHasher's length floor so the route can be exercised.
+const contractSubjectHMACKey = "contract-test-subject-hmac-key-32b!"
+
+// contractUserSessionRegion is the fixed region newContractRouter's
+// UserSessionsHandler enrolls new federated users into — this package's
+// fixture-driven tests never reach a real create (the in-memory Store has no
+// WithFederatedIdentities pool wired), so its exact value is not otherwise
+// observable; it only needs to be a region region.Parse accepts.
+const contractUserSessionRegion = "EU"
+
 // newContractRouter assembles the real /admin/v1/* http.Handler over the
 // given store, client store, and verifier — the same composition every
 // scenario in this package's tests (fixture-driven and integration)
-// exercises requests through.
-func newContractRouter(store *Store, clientStore ClientProvisioningStore, verifier *ServiceAuthVerifier, hotBaseURL, proxyToken string, hotClient *http.Client) http.Handler {
+// exercises requests through. redisClient backs the user-sessions route's
+// one-time login code store (logincode.go) exactly as cmd/harbor-mgmt wires
+// it in production.
+func newContractRouter(store *Store, clientStore ClientProvisioningStore, verifier *ServiceAuthVerifier, hotBaseURL, proxyToken string, hotClient *http.Client, redisClient *redis.Client) http.Handler {
+	hasher, err := NewSubjectHasher([]byte(contractSubjectHMACKey))
+	if err != nil {
+		panic(err) // fixed constant above; a failure here is a test bug, not a runtime condition
+	}
 	adapter := &contractAdapter{
-		Server:   NewServer(store, clientStore),
-		sessions: NewSessionsHandler(store),
-		keys:     NewKeysHandler(verifier, hotBaseURL, proxyToken, hotClient),
+		Server:       NewServer(store, clientStore),
+		sessions:     NewSessionsHandler(store),
+		userSessions: NewUserSessionsHandler(store, hasher, NewRedisLoginCodeStore(redisClient), contractUserSessionRegion),
+		keys:         NewKeysHandler(verifier, hotBaseURL, proxyToken, hotClient),
 	}
 	return cloudopenapi.HandlerWithOptions(adapter, cloudopenapi.StdHTTPServerOptions{
 		Middlewares: []cloudopenapi.MiddlewareFunc{requireServiceAuth(verifier)},
@@ -272,7 +301,7 @@ func newContractEnv(t *testing.T) *contractEnv {
 	hot := newRecordingHotServer(t)
 
 	env := &contractEnv{
-		router: newContractRouter(store, newFakeClientStore(), verifier, hot.URL, "contract-proxy-token", hot.Client()),
+		router: newContractRouter(store, newFakeClientStore(), verifier, hot.URL, "contract-proxy-token", hot.Client(), redisClient),
 		ecPriv: priv,
 		now:    now,
 		q:      q,
@@ -285,7 +314,7 @@ func newContractEnv(t *testing.T) *contractEnv {
 	if err != nil {
 		t.Fatalf("NewServiceAuthVerifier (unconfigured): %v", err)
 	}
-	env.unconfR = newContractRouter(NewStore(newMemQuerier()), newFakeClientStore(), unconfVerifier, hot.URL, "contract-proxy-token", hot.Client())
+	env.unconfR = newContractRouter(NewStore(newMemQuerier()), newFakeClientStore(), unconfVerifier, hot.URL, "contract-proxy-token", hot.Client(), redisClient)
 
 	return env
 }
@@ -448,7 +477,9 @@ func validErrorCode(code cloudopenapi.ErrorCode) bool {
 		cloudopenapi.ErrorCodeClientAlreadyExists,
 		cloudopenapi.ErrorCodeClientNotFound,
 		cloudopenapi.ErrorCodeIdempotencyKeyReused,
-		cloudopenapi.ErrorCodeRateLimited:
+		cloudopenapi.ErrorCodeRateLimited,
+		cloudopenapi.ErrorCodeSubjectUnavailable,
+		cloudopenapi.ErrorCodeInvalidSubject:
 		return true
 	default:
 		return false
@@ -506,7 +537,7 @@ func TestContractAuditEventsEmitted(t *testing.T) {
 		t.Fatalf("NewServiceAuthVerifier: %v", err)
 	}
 	hot := newRecordingHotServer(t)
-	router := newContractRouter(NewStore(newMemQuerier()), newFakeClientStore(), verifier, hot.URL, "contract-proxy-token", hot.Client())
+	router := newContractRouter(NewStore(newMemQuerier()), newFakeClientStore(), verifier, hot.URL, "contract-proxy-token", hot.Client(), redisClient)
 
 	claims := map[string]any{
 		"iss": "harbor-cloud", "sub": "harbor-cloud-svc-audit", "aud": ExpectedAudience,
@@ -594,4 +625,89 @@ func TestContractRateLimitFailsClosed(t *testing.T) {
 	if errBody.Code != cloudopenapi.ErrorCodeRateLimited {
 		t.Errorf("error.code = %q, want rate_limited", errBody.Code)
 	}
+}
+
+// TestContractUserSessionsAnchorNamespaceBindingEndToEnd is M5's end-to-end
+// proof, over the REAL /admin/v1/user-sessions router — verifier,
+// requireServiceAuth's ServiceClaims propagation, and the handler's own
+// check, exactly as cmd/harbor-mgmt's cloudAuthorized wires them in
+// production. Without per-anchor namespace binding, two configured bridge
+// keys (the entire point of multi-anchor trust) would let one tenant's
+// bridge mint a login code for a subject in a namespace it has nothing to do
+// with; a token's `sub` claim alone never proves which tenant it speaks for.
+func TestContractUserSessionsAnchorNamespaceBindingEndToEnd(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ec key: %v", err)
+	}
+	mr := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = redisClient.Close() }) //nolint:errcheck // test cleanup
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	verifier, err := NewServiceAuthVerifier(ServiceAuthVerifierConfig{
+		Anchors: []TrustAnchorConfig{
+			{
+				PublicKeyPEM:      pemEncodePublicKey(t, &priv.PublicKey),
+				AllowedScopes:     []string{"user-sessions:mint"},
+				AllowedNamespaces: []string{"acme"},
+			},
+		},
+		ReplayGuard: NewRedisReplayGuard(redisClient),
+		Now:         func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewServiceAuthVerifier: %v", err)
+	}
+
+	// newFederatedTestStore (usersessions_test.go) wires a real
+	// ResolveOrCreateFederatedUser transaction path (fakeFederatedPool) and
+	// pre-creates the "acme" namespace; a plain NewStore here would 500 on
+	// the successful-mint sub-test with "federated identities not
+	// configured".
+	store, _ := newFederatedTestStore(t)
+	if _, err := store.CreateNamespace(context.Background(), "globex", "active"); err != nil {
+		t.Fatalf("CreateNamespace globex: %v", err)
+	}
+	hot := newRecordingHotServer(t)
+	router := newContractRouter(store, newFakeClientStore(), verifier, hot.URL, "contract-proxy-token", hot.Client(), redisClient)
+
+	sign := func(jti string) string {
+		claims := map[string]any{
+			"iss": "harbor-cloud", "sub": "acme-bridge", "aud": ExpectedAudience,
+			"scope": "user-sessions:mint", "exp": now.Add(90 * time.Second).Unix(), "iat": now.Unix(), "jti": jti,
+		}
+		return signES256(t, priv, map[string]any{"alg": "ES256", "typ": "JWT"}, claims)
+	}
+	post := func(t *testing.T, jti, namespaceID string) *httptest.ResponseRecorder {
+		t.Helper()
+		body := `{"namespace_id":"` + namespaceID + `","subject":"alice@example.com"}`
+		req := httptest.NewRequest(http.MethodPost, "/admin/v1/user-sessions", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+sign(jti))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("namespace the anchor is NOT bound to is rejected 403 cross_tenant_forbidden", func(t *testing.T) {
+		rec := post(t, "jti-cross-tenant", "globex")
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403; body = %s", rec.Code, rec.Body.String())
+		}
+		var errBody cloudopenapi.Error
+		if err := json.Unmarshal(rec.Body.Bytes(), &errBody); err != nil {
+			t.Fatalf("decode error body: %v; body = %s", err, rec.Body.String())
+		}
+		if errBody.Code != cloudopenapi.ErrorCodeCrossTenantForbidden {
+			t.Errorf("error.code = %q, want cross_tenant_forbidden", errBody.Code)
+		}
+	})
+
+	t.Run("the anchor's own bound namespace is accepted 201", func(t *testing.T) {
+		rec := post(t, "jti-own-tenant", "acme")
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+		}
+	})
 }

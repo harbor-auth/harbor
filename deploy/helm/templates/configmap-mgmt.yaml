@@ -46,3 +46,7 @@ data:
   # here rather than in the Secret. Only read when CLOUD_INTEGRATION_ENABLED
   # is "true".
   HARBOR_HOT_INTERNAL_URL: http://{{ include "harbor.fullname" . }}-hot.{{ .Release.Namespace }}.svc.cluster.local
+  # Same-origin path GET /login/sso redirects to after a successful
+  # corporate-SSO handoff (cmd/harbor-mgmt/sso.go). Non-secret. Only read
+  # when CLOUD_INTEGRATION_ENABLED is "true".
+  SSO_DASHBOARD_PATH: {{ .Values.mgmt.cloudIntegration.ssoDashboardPath | default "/dashboard" | quote }}

@@ -42,6 +42,43 @@ func TestSetBFFCookie(t *testing.T) {
 	}
 }
 
+// TestSetSSOBFFCookie is M1's unit-level proof: the SSO-specific cookie
+// writer produces the SAME cookie as SetBFFCookie in every attribute except
+// SameSite, which must be Lax (not Strict) — see SetSSOBFFCookie's doc
+// comment for why.
+func TestSetSSOBFFCookie(t *testing.T) {
+	w := httptest.NewRecorder()
+	SetSSOBFFCookie(w, "test-request-id", 5*time.Minute)
+
+	cookies := w.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("expected 1 cookie, got %d", len(cookies))
+	}
+
+	c := cookies[0]
+	if c.Name != CookieName {
+		t.Errorf("Name = %q, want %q", c.Name, CookieName)
+	}
+	if c.Value != "test-request-id" {
+		t.Errorf("Value = %q, want %q", c.Value, "test-request-id")
+	}
+	if c.Path != "/" {
+		t.Errorf("Path = %q, want %q", c.Path, "/")
+	}
+	if c.MaxAge != 300 {
+		t.Errorf("MaxAge = %d, want %d", c.MaxAge, 300)
+	}
+	if !c.Secure {
+		t.Error("Secure = false, want true")
+	}
+	if !c.HttpOnly {
+		t.Error("HttpOnly = false, want true")
+	}
+	if c.SameSite != http.SameSiteLaxMode {
+		t.Errorf("SameSite = %v, want %v (M1 — sent on the cross-site-originated top-level redirect to the dashboard)", c.SameSite, http.SameSiteLaxMode)
+	}
+}
+
 func TestReadBFFCookie(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{

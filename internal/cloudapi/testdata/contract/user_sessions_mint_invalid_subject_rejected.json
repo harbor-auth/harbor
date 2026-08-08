@@ -1,0 +1,15 @@
+{
+  "name": "user_sessions_mint_invalid_subject_rejected",
+  "spec_scenario": "SSO user-session handoff: an empty subject is rejected",
+  "steps": [
+    {
+      "method": "POST",
+      "path": "/admin/v1/user-sessions",
+      "auth": "valid",
+      "scope": "user-sessions:mint",
+      "request_body": {"namespace_id": "contract-ns-usersessions-2", "subject": ""},
+      "want_status": 400,
+      "want_error_code": "invalid_subject"
+    }
+  ]
+}

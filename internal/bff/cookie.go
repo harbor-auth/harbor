@@ -37,6 +37,47 @@ func SetBFFCookie(w http.ResponseWriter, requestID string, maxAge time.Duration)
 	})
 }
 
+// SetSSOBFFCookie writes the BFF session cookie with SameSite=Lax instead of
+// SetBFFCookie's Strict, for the corporate-SSO landing route ONLY
+// (cmd/harbor-mgmt/sso.go's GET /login/sso).
+//
+// Why (M1): the browser reaches /login/sso via a cross-site redirect chain
+// (Harbor Cloud's SAML bridge -> ... -> here). RFC 6265bis §5.2 computes a
+// request's "site for cookies" over the WHOLE redirect chain, not just the
+// immediately preceding hop — one cross-site hop ANYWHERE in that chain
+// nulls it for every subsequent hop, including same-origin ones. The 303
+// this handler issues to SSO_DASHBOARD_PATH is one of those subsequent hops,
+// so a SameSite=Strict cookie set here would very likely be withheld on
+// that follow-up request: the user lands on the dashboard unauthenticated,
+// and only a manual reload (a fresh top-level navigation, genuinely
+// same-site this time) recovers the session.
+//
+// SameSite=Lax is the standard remedy: it IS sent on top-level GET
+// navigations regardless of the referring site — exactly this handoff's
+// shape — while still refusing the cookie on cross-site POSTs, XHR, and
+// subresource requests, which is Lax's actual CSRF protection and the
+// reason it's an acceptable relaxation here. The alternative (a same-site
+// self-submitting interstitial page) would also work but is more moving
+// parts for the same outcome; prefer this smaller change.
+//
+// Every other BFF cookie write (SetBFFCookie: passkey/WebAuthn login and
+// enrollment) MUST stay SameSite=Strict — those flows are same-site,
+// top-level navigations start to finish (no cross-site hop ever precedes
+// them), so Strict costs nothing there and is the tighter default. Do not
+// widen SetBFFCookie itself to Lax; if a future flow needs this same
+// treatment, add another SSO-shaped call site here instead.
+func SetSSOBFFCookie(w http.ResponseWriter, requestID string, maxAge time.Duration) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     CookieName,
+		Value:    requestID,
+		Path:     "/",
+		MaxAge:   int(maxAge.Seconds()),
+		Secure:   true,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
 // ReadBFFCookie extracts the request_id from the BFF session cookie. Returns an
 // empty string if the cookie is absent or invalid.
 func ReadBFFCookie(r *http.Request) string {

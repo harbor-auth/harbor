@@ -154,7 +154,10 @@ func TestStepUpGate_VerificationIsBoundToOneSession(t *testing.T) {
 	store.now = fixedNow(now)
 	for _, id := range []string{"session-a", "session-b"} {
 		if err := store.Create(context.Background(), BFFSessionRecord{
-			RequestID: id, UserID: "user-1", ExpiresAt: now.Add(time.Hour),
+			// A non-empty BrowserNonceHash represents a normal, nonce-bound
+			// login (e.g. via /authorize or /signin) — the only kind of
+			// session RecordTOTPStepUp is willing to step up (M3).
+			RequestID: id, UserID: "user-1", BrowserNonceHash: []byte("nonce-hash"), ExpiresAt: now.Add(time.Hour),
 		}); err != nil {
 			t.Fatalf("Create(%s): %v", id, err)
 		}
@@ -323,9 +326,10 @@ func TestRecordTOTPStepUp(t *testing.T) {
 
 	const requestID = "req-totp"
 	if err := store.Create(ctx, BFFSessionRecord{
-		RequestID: requestID,
-		UserID:    "user-1",
-		ExpiresAt: now.Add(1 * time.Hour),
+		RequestID:        requestID,
+		UserID:           "user-1",
+		BrowserNonceHash: []byte("nonce-hash"),
+		ExpiresAt:        now.Add(1 * time.Hour),
 	}); err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
@@ -351,6 +355,99 @@ func TestRecordTOTPStepUp_SessionNotFound(t *testing.T) {
 	err := RecordTOTPStepUp(context.Background(), store, "nonexistent", time.Now())
 	if !errors.Is(err, ErrBFFSessionNotFound) {
 		t.Errorf("RecordTOTPStepUp(nonexistent) = %v, want ErrBFFSessionNotFound", err)
+	}
+}
+
+// TestRecordTOTPStepUp_RefusesFederatedSession is M3's core proof: the
+// corporate-SSO handoff's session shape (AuthMethod=federated, no
+// BrowserNonceHash — exactly what cmd/harbor-mgmt/sso.go's
+// wireSSOLoginRoute mints) must never get a step-up verification recorded,
+// however valid the TOTP code presented was. Without this, a federated
+// session could self-enroll TOTP and use it to unlock
+// StepUpGate-protected routes it was never meant to reach.
+func TestRecordTOTPStepUp_RefusesFederatedSession(t *testing.T) {
+	now := time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
+	store := NewInMemoryBFFSessionStore()
+	store.now = fixedNow(now)
+	ctx := context.Background()
+
+	const requestID = "req-federated"
+	if err := store.Create(ctx, BFFSessionRecord{
+		RequestID:  requestID,
+		UserID:     "user-1",
+		AuthMethod: oidc.AuthMethodFederated,
+		// BrowserNonceHash deliberately nil, mirroring wireSSOLoginRoute.
+		ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	err := RecordTOTPStepUp(ctx, store, requestID, now)
+	if !errors.Is(err, ErrStepUpNotPermittedForSession) {
+		t.Fatalf("RecordTOTPStepUp(federated session) error = %v, want ErrStepUpNotPermittedForSession", err)
+	}
+
+	got, getErr := store.Get(ctx, requestID)
+	if getErr != nil {
+		t.Fatalf("Get failed: %v", getErr)
+	}
+	if !got.MFAVerifiedAt.IsZero() {
+		t.Errorf("MFAVerifiedAt = %v, want zero (never stamped)", got.MFAVerifiedAt)
+	}
+
+	// The step-up gate must therefore still deny this session.
+	gate := NewStepUpGate(store, DefaultStepUpTTL)
+	gate.now = fixedNow(now)
+	if reached, rec := serveStepUp(gate, requestID); reached || rec.Code != http.StatusForbidden {
+		t.Fatalf("federated session after failed RecordTOTPStepUp: reached=%v status=%d, want denied 403", reached, rec.Code)
+	}
+}
+
+// TestRecordTOTPStepUp_RefusesNonceLessSession proves the SECOND, independent
+// half of the M3 check: a session with no AuthMethod set at all (not even
+// "federated") but ALSO no BrowserNonceHash is refused too — the check does
+// not rely solely on AuthMethod being correctly labeled.
+func TestRecordTOTPStepUp_RefusesNonceLessSession(t *testing.T) {
+	now := time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
+	store := NewInMemoryBFFSessionStore()
+	store.now = fixedNow(now)
+	ctx := context.Background()
+
+	const requestID = "req-nonceless"
+	if err := store.Create(ctx, BFFSessionRecord{
+		RequestID: requestID,
+		UserID:    "user-1",
+		ExpiresAt: now.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("Create failed: %v", err)
+	}
+
+	if err := RecordTOTPStepUp(ctx, store, requestID, now); !errors.Is(err, ErrStepUpNotPermittedForSession) {
+		t.Fatalf("RecordTOTPStepUp(nonce-less session) error = %v, want ErrStepUpNotPermittedForSession", err)
+	}
+}
+
+// TestSessionEligibleForMFAStepUp exercises the exported predicate directly
+// (internal/mgmtapi.MFAEnrollmentGuard's production adapter,
+// cmd/harbor-mgmt's bffMFAEnrollmentGuard, relies on the exact same
+// function).
+func TestSessionEligibleForMFAStepUp(t *testing.T) {
+	cases := []struct {
+		name    string
+		session BFFSessionRecord
+		want    bool
+	}{
+		{"normal nonce-bound webauthn session", BFFSessionRecord{AuthMethod: oidc.AuthMethodWebAuthn, BrowserNonceHash: []byte("h")}, true},
+		{"federated session with a nonce (shouldn't happen, still refused)", BFFSessionRecord{AuthMethod: oidc.AuthMethodFederated, BrowserNonceHash: []byte("h")}, false},
+		{"non-federated session with no nonce", BFFSessionRecord{AuthMethod: oidc.AuthMethodWebAuthn}, false},
+		{"federated, nonce-less (wireSSOLoginRoute's actual shape)", BFFSessionRecord{AuthMethod: oidc.AuthMethodFederated}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := SessionEligibleForMFAStepUp(tc.session); got != tc.want {
+				t.Errorf("SessionEligibleForMFAStepUp(%+v) = %v, want %v", tc.session, got, tc.want)
+			}
+		})
 	}
 }
 

@@ -1,0 +1,15 @@
+{
+  "name": "user_sessions_mint_missing_scope_rejected",
+  "spec_scenario": "SSO user-session handoff: missing user-sessions:mint scope is rejected",
+  "steps": [
+    {
+      "method": "POST",
+      "path": "/admin/v1/user-sessions",
+      "auth": "insufficient_scope",
+      "scope": "sessions:mint",
+      "request_body": {"namespace_id": "contract-ns-usersessions-1", "subject": "alice@example.com"},
+      "want_status": 403,
+      "want_error_code": "insufficient_scope"
+    }
+  ]
+}

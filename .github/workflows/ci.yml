@@ -33,12 +33,15 @@
 # see that job's own header comment for why: without it, the real-SQL tests
 # `t.Skip` themselves in every OTHER job (none of which set
 # DATABASE_URL/REDIS_URL) and nothing in the pipeline ever exercises the real
-# queries those tests exist to double-check.
+# queries those tests exist to double-check — including the concurrent
+# ResolveOrCreateFederatedUser race, which only a real Postgres transaction
+# can actually exercise (usersessions_test.go's in-memory fake cannot).
 #
 # Branch protection: require the `agent-check`, `e2e`, AND `integration` jobs
 # on the default branch. That is what gives the F5 tamper guards + CODEOWNERS
 # (agent-check), the assembled OIDC flow (e2e), and the real-database
-# namespace/client provisioning contract (integration) their teeth — a red
+# namespace/client provisioning contract and the federated-identity race
+# guarantee (integration) their teeth — a red
 # check-results, a tamper finding, a broken assembled flow, or a real-SQL
 # regression all block the merge.
 name: ci
@@ -202,19 +205,28 @@ jobs:
       - name: Run e2e OIDC harness (F8)
         run: nix develop -c make e2e
 
-  # integration — L1: runs the `-tags=integration` suite (real Postgres/Redis,
+  # integration: runs the `-tags=integration` suite (real Postgres/Redis,
   # no fakes) that `agent-check`'s plain `go test ./...` never exercises.
   # Without this job, internal/cloudapi/integration_test.go's
   # requireIntegrationDeps (and cmd/harbor-mgmt's equivalent
   # TestRunBuildsDurableManagementGraph) `t.Skip` themselves the instant
   # DATABASE_URL/REDIS_URL are unset — which they always were in every
   # existing CI job — so nothing in the automated pipeline had ever run the
-  # real SQL (db/queries/relying_parties.sql's namespace-scoped client
-  # queries, including CreateNamespacedClient's H2 TOCTOU guard and
-  # GetRelyingParty's cloud_namespaces join) against a real database. That let
-  # the Go fakes these tests exist to double-check (fakeClientStore,
-  # fakeNamespacedClientQuerier, ...) silently drift from the real queries
-  # without any check ever turning red.
+  # real SQL against a real database. Two things depend on that:
+  #
+  #   - db/queries/relying_parties.sql's namespace-scoped client queries,
+  #     including CreateNamespacedClient's TOCTOU guard and GetRelyingParty's
+  #     cloud_namespaces join. Without this the Go fakes those tests exist to
+  #     double-check (fakeClientStore, fakeNamespacedClientQuerier, ...) could
+  #     silently drift from the real queries with nothing turning red.
+  #
+  #   - the SSO user-session handoff, in particular
+  #     TestIntegrationUserSessionsConcurrentResolveOrCreate, which proves 20
+  #     goroutines racing ResolveOrCreateFederatedUser for the same
+  #     (namespace, subject) leave behind exactly one users row and one
+  #     federated_identities row — a property only a real Postgres
+  #     transaction, not the in-memory fakeFederatedPool usersessions_test.go
+  #     uses, can actually exercise.
   #
   # Postgres/Redis image tags and health-check parameters mirror
   # e2e/docker-compose.yml (the `e2e` job's own dependency stack above) — the
@@ -229,13 +241,14 @@ jobs:
   # main_integration_test.go (TestRunBuildsDurableLiveGraph) and
   # internal/crypto's kmsclient_aws_test.go
   # (TestAWSKMSClientLocalStackIntegration). Standing up localstack too is out
-  # of scope for THIS job — L1 is specifically about the Postgres/Redis-only
+  # of scope for THIS job — it is specifically about the Postgres/Redis-only
   # cloudapi and harbor-mgmt suites — so those two are known, accepted
   # exceptions and will continue to report SKIP here. The assertion step below
   # only fails on a SKIP whose test name matches the Postgres/Redis-only
   # suites this job IS responsible for, so those two exceptions can never
   # silently grow to cover — or mask a regression in — a suite this job
   # actually owns.
+  #
   # No continue-on-error anywhere in this job: a failing (or silently
   # skipped) real-Postgres test fails the job directly.
   integration:
@@ -281,7 +294,7 @@ jobs:
 
       # `-v` output is required, not cosmetic: the assertion step below greps
       # it for `--- SKIP` lines, which is what stops a silently-skipped suite
-      # (L1's actual failure mode) from reading as a pass.
+      # (this job's actual failure mode) from reading as a pass.
       - name: Run integration tests (real Postgres/Redis; -tags=integration)
         run: |
           set -euo pipefail
@@ -301,19 +314,30 @@ jobs:
             echo '==> ERROR: a Postgres/Redis-only integration test reported SKIP —'
             echo '    DATABASE_URL/REDIS_URL were set, so this means requireIntegrationDeps'
             echo '    (or its cmd/harbor-mgmt equivalent) is skipping for some OTHER reason.'
-            echo '    That is exactly L1: a skip masquerading as a pass. Fix the dependency'
-            echo '    wiring above, do not just let this check pass.'
+            echo '    That is exactly the failure mode this job exists to prevent: a skip'
+            echo '    masquerading as a pass. Fix the dependency wiring above, do not just'
+            echo '    let this check pass.'
             exit 1
           fi
-          # Positive control: confirm specific, known tests for the H1/H2/M1/L1
-          # findings this suite exists to guard actually executed and passed —
-          # proves the grep above isn't vacuously true because nothing ran at
-          # all (e.g. a build failure that produced an empty log).
+          # Positive control: confirm specific, known tests for the findings
+          # this suite exists to guard actually executed and passed — proves
+          # the grep above isn't vacuously true because nothing ran at all
+          # (e.g. a build failure that produced an empty log). The first group
+          # covers namespace/client provisioning; the second covers the SSO
+          # user-session handoff, where
+          # TestIntegrationUserSessionsConcurrentResolveOrCreate is the core
+          # proof that the resolve-or-create path is genuinely transactional.
           for want in \
             'TestIntegrationNamespaceDeleteCascadesToClientSoftDeleteAndStopsAuthentication' \
             'TestIntegrationClientCreateRaceAgainstNamespaceDeleteIsClosed' \
             'TestIntegrationClientCreateInGapBetweenNamespaceDeleteStatementsStillFailsToAuthenticate' \
             'TestIntegrationClientCredentialPairingRejections' \
+            'TestIntegrationUserSessionsCreatePath' \
+            'TestIntegrationUserSessionsSameSubjectTwiceOneUser' \
+            'TestIntegrationUserSessionsSameSubjectTwoNamespacesDistinctUsers' \
+            'TestIntegrationUserSessionsErasedUserReturns403' \
+            'TestIntegrationUserSessionsConcurrentResolveOrCreate' \
+            'TestIntegrationCrossTenantSessionRejected' \
             'TestRunBuildsDurableManagementGraph' \
           ; do
             if ! grep -q -- "--- PASS: $want" integration-test.log; then

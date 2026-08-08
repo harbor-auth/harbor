@@ -29,6 +29,16 @@ func TestMapAuthMethodToACRAMR(t *testing.T) {
 			wantACR: "urn:harbor:ac:recovery",
 			wantAMR: []string{"rc"},
 		},
+		{
+			method:  AuthMethodFederated,
+			wantACR: "urn:harbor:ac:federated",
+			// Negative assertion, deliberately exact: "fed" only, never
+			// "user" (an RFC 8176 user-presence test Harbor cannot
+			// attest for a third-party redirect) and never
+			// hwk/pwd/otp/mfa — so nobody adds one of those later
+			// without this test failing.
+			wantAMR: []string{"fed"},
+		},
 		// Fail-closed: unknown method must produce no claims rather than a lie.
 		{
 			method:  AuthMethod("unknown"),

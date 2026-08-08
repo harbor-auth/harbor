@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/harbor-auth/harbor/internal/crypto"
 	db "github.com/harbor-auth/harbor/internal/gen/db"
 )
 
@@ -96,12 +97,30 @@ type querier interface {
 	GetCloudOperation(ctx context.Context, arg db.GetCloudOperationParams) (db.CloudOperation, error)
 	CreateCloudSession(ctx context.Context, arg db.CreateCloudSessionParams) (db.CloudSession, error)
 	GetCloudSession(ctx context.Context, sessionID string) (db.CloudSession, error)
+	// DeleteFederatedIdentitiesByNamespace backs
+	// Store.DeleteFederatedIdentitiesByNamespace (H1: called from the
+	// namespace soft-delete path so an offboarded tenant's corporate-SSO
+	// subject mappings don't linger). q is the same *db.Queries — and so the
+	// same underlying Postgres — WithFederatedIdentities' pool talks to; this
+	// table needs no separate wiring the way the atomic
+	// ResolveOrCreateFederatedUser transaction does.
+	DeleteFederatedIdentitiesByNamespace(ctx context.Context, namespaceID string) error
 }
 
 // Store persists Harbor Cloud management API records — namespaces, the
 // idempotency ledger, and namespace-scoped sessions — in PostgreSQL.
 type Store struct {
 	q querier
+
+	// fedPool, keys, and cipher back ResolveOrCreateFederatedUser
+	// (federated_store.go). All three are nil until WithFederatedIdentities
+	// is called — ResolveOrCreateFederatedUser fails closed
+	// (ErrFederatedIdentitiesUnconfigured) until then, rather than silently
+	// running without the atomicity WithFederatedIdentities exists to
+	// provide.
+	fedPool federatedPool
+	keys    crypto.KeyProvider
+	cipher  crypto.Encryptor
 }
 
 // NewStore wraps a sqlc Queries (or any querier). Panics if q is nil —
@@ -111,6 +130,23 @@ func NewStore(q querier) *Store {
 		panic("cloudapi: nil querier")
 	}
 	return &Store{q: q}
+}
+
+// WithFederatedIdentities wires ResolveOrCreateFederatedUser's dependencies
+// and returns s for chaining (mirrors clients.DBSessionStore.WithPool):
+// pool for the atomic create-user + create-mapping transaction, and
+// keys/cipher for sealing a fresh user record exactly the way
+// identity.Enroller does (region-wrapped DEK, AAD-bound encrypted pairwise
+// secret). federated_store.go cannot simply reuse harbor-mgmt's shared
+// *identity.Enroller: EnrollFederated's persistence must run INSIDE this
+// call's own transaction, so a fresh, per-call Enroller is constructed over
+// a transaction-bound federated persister instead (see
+// ResolveOrCreateFederatedUser).
+func (s *Store) WithFederatedIdentities(pool federatedPool, keys crypto.KeyProvider, cipher crypto.Encryptor) *Store {
+	s.fedPool = pool
+	s.keys = keys
+	s.cipher = cipher
+	return s
 }
 
 // CreateNamespace persists a new namespace provisioning record in the given
@@ -150,6 +186,26 @@ func (s *Store) GetNamespace(ctx context.Context, id string) (Namespace, error) 
 func (s *Store) SoftDeleteNamespace(ctx context.Context, id string) error {
 	if err := s.q.SoftDeleteCloudNamespace(ctx, id); err != nil {
 		return fmt.Errorf("cloudapi: soft delete namespace: %w", err)
+	}
+	return nil
+}
+
+// DeleteFederatedIdentitiesByNamespace removes every corporate-SSO
+// subject->user mapping for a namespace (H1). The DELETE affects zero rows
+// (never errors) when the namespace never had any federated identities, so
+// callers can invoke this unconditionally on offboarding rather than first
+// checking whether SSO was ever used for that tenant.
+//
+// This is deliberately a SEPARATE statement from SoftDeleteNamespace, not
+// wrapped in a shared transaction with it: querier (unlike federatedPool) is
+// not transaction-aware, and namespaces.go's DeleteAdminV1Namespace already
+// treats delete as idempotent and safely retryable end-to-end (the
+// idempotency ledger only records success once every step here has
+// returned), so a failure between the two leaves at most a stale row set
+// that a retry of the same DELETE /admin/v1/namespaces/{id} call cleans up.
+func (s *Store) DeleteFederatedIdentitiesByNamespace(ctx context.Context, id string) error {
+	if err := s.q.DeleteFederatedIdentitiesByNamespace(ctx, id); err != nil {
+		return fmt.Errorf("cloudapi: delete federated identities for namespace: %w", err)
 	}
 	return nil
 }

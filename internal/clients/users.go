@@ -73,3 +73,54 @@ func (p *DBUserPersister) PersistUser(ctx context.Context, r identity.UserRecord
 	}
 	return nil
 }
+
+// federatedUserQuerier is the narrow interface over *db.Queries that
+// DBFederatedUserPersister needs. Production code passes *db.Queries (either
+// pool-bound or, inside internal/cloudapi's ResolveOrCreateFederatedUser
+// transaction, db.New(tx)); tests pass a small fake.
+type federatedUserQuerier interface {
+	CreateFederatedUser(ctx context.Context, arg db.CreateFederatedUserParams) (db.User, error)
+}
+
+// DBFederatedUserPersister implements identity.FederatedUserPersister,
+// writing corporate-SSO UserRecords to the users table via the
+// CreateFederatedUser query — a SEPARATE query and SEPARATE Go type from
+// DBUserPersister/PersistUser, deliberately: PersistUser's
+// recovery_required=true guard above exists precisely because it must never
+// be reachable with false. Splitting persistence into two types means a
+// caller cannot even compile code that hands a federated
+// (recovery_required=false) record to the regular UserPersister — the two
+// paths are statically distinct, not just runtime-guarded.
+type DBFederatedUserPersister struct {
+	q federatedUserQuerier
+}
+
+// Compile-time proof that DBFederatedUserPersister implements
+// identity.FederatedUserPersister.
+var _ identity.FederatedUserPersister = (*DBFederatedUserPersister)(nil)
+
+// NewDBFederatedUserPersister returns a FederatedUserPersister backed by q.
+func NewDBFederatedUserPersister(q federatedUserQuerier) *DBFederatedUserPersister {
+	return &DBFederatedUserPersister{q: q}
+}
+
+// PersistFederatedUser implements identity.FederatedUserPersister. The
+// CreateFederatedUser query hardcodes status='active' and
+// recovery_required=false as SQL literals (db/queries/users.sql) — this
+// method has no parameter that could override either.
+func (p *DBFederatedUserPersister) PersistFederatedUser(ctx context.Context, r identity.UserRecord) error {
+	var id pgtype.UUID
+	if err := id.Scan(r.ID); err != nil {
+		return fmt.Errorf("clients: PersistFederatedUser: invalid user ID %q: %w", r.ID, err)
+	}
+	_, err := p.q.CreateFederatedUser(ctx, db.CreateFederatedUserParams{
+		ID:             id,
+		Region:         r.Region,
+		DekWrapped:     r.DekWrapped,
+		PairwiseSecret: r.PairwiseSecret,
+	})
+	if err != nil {
+		return fmt.Errorf("clients: PersistFederatedUser: %w", err)
+	}
+	return nil
+}

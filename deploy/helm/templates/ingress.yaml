@@ -1,8 +1,9 @@
 {{- if .Values.ingress.enabled }}
 # Ingress: the shared public origin routes the BFF login paths and the
 # public signup/sign-in surface (/signup*, /signin, /enroll, /webauthn/*,
-# /recovery/*) to harbor-mgmt; every other path goes to harbor-hot. Other
-# management APIs stay unreachable because no public path selects them.
+# /recovery/*, /dashboard*) to harbor-mgmt; every other path goes to
+# harbor-hot. Other management APIs stay unreachable because no public path
+# selects them.
 #
 # The host here MUST match hot.issuer, or the OIDC discovery document will
 # advertise endpoints under a different origin than clients reach.
@@ -73,6 +74,20 @@ spec:
                 port:
                   number: 80
           - path: /recovery
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "harbor.fullname" . }}-mgmt
+                port:
+                  number: 80
+          # /dashboard: the BFF dashboard (internal/bff/dashboard.go) — where
+          # BOTH the post-registration handoff and GET /login/sso's 303 land
+          # (SSO_DASHBOARD_PATH defaults to "/dashboard"; M2). Without this
+          # entry the request falls through to the "/" catch-all below and
+          # harbor-hot 404s it — the caller reaches this handoff having
+          # already authenticated, then gets a bare 404 instead of their
+          # dashboard.
+          - path: /dashboard
             pathType: Prefix
             backend:
               service:

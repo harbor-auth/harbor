@@ -62,6 +62,26 @@ type Querier interface {
 	// opaque rawID from the authenticator (DESIGN §3.1); webauthn_pubkey is the COSE
 	// public key; webauthn_aaguid identifies the authenticator model.
 	CreateCredential(ctx context.Context, arg CreateCredentialParams) (Credential, error)
+	// user_id must always be an id THIS request just created via CreateFederatedUser
+	// (see internal/cloudapi/federated_store.go's ResolveOrCreateFederatedUser) —
+	// this query never binds a federated subject to a pre-existing user.
+	CreateFederatedIdentity(ctx context.Context, arg CreateFederatedIdentityParams) (FederatedIdentity, error)
+	// Creates a user record for a corporate-SSO subject (internal/identity's
+	// EnrollFederated / internal/cloudapi's ResolveOrCreateFederatedUser).
+	// status and recovery_required are SQL literals, not parameters, so no
+	// caller can pass anything else:
+	//   status='active'            — not 'pending' (which means "awaiting
+	//     first-passkey activation", a ceremony an SSO user will never run: they
+	//     authenticate at their employer's IdP, never at a Harbor passkey
+	//     prompt).
+	//   recovery_required=false    — an SSO user has no Harbor-held credential
+	//     to recover; their recovery path is their employer's IdP. Issuing
+	//     Harbor recovery codes would mint a Harbor-local credential that
+	//     BYPASSES the corporate IdP entirely. `true` would also fence them into
+	//     SessionScopeEnrollmentOnly, where bff.RequireFullScope 403s the whole
+	//     dashboard for a user who will never complete the passkey ceremony that
+	//     clears it.
+	CreateFederatedUser(ctx context.Context, arg CreateFederatedUserParams) (User, error)
 	CreateGrant(ctx context.Context, arg CreateGrantParams) (Grant, error)
 	CreateMFAFactor(ctx context.Context, arg CreateMFAFactorParams) (MfaFactor, error)
 	// Namespace-scoped OIDC client CRUD (Harbor Cloud management API contract,
@@ -150,6 +170,10 @@ type Querier interface {
 	// DeleteExpiredSessions reaps rows whose refresh token has expired — background
 	// cleanup, off the hot path.
 	DeleteExpiredSessions(ctx context.Context) error
+	// Removes every federated identity mapping for a namespace. Called when a
+	// namespace is deleted (cloud_namespaces soft-delete, internal/cloudapi) so a
+	// future namespace id reuse can never resolve through a stale mapping.
+	DeleteFederatedIdentitiesByNamespace(ctx context.Context, namespaceID string) error
 	DeleteMFAFactor(ctx context.Context, id pgtype.UUID) error
 	// Deletes all recovery codes for a user. Used when regenerating codes
 	// (old codes are invalidated when new ones are issued).
@@ -228,6 +252,11 @@ type Querier interface {
 	// ID (rawID) returned by the authenticator during assertion. Required by the
 	// login ceremony to locate which stored passkey is being used (DESIGN §3.1).
 	GetCredentialByWebAuthnCredID(ctx context.Context, webauthnCredID []byte) (Credential, error)
+	// Queries for the federated_identities table (db/migrations/0021) — the
+	// corporate-SSO handoff's namespace-scoped external-subject -> Harbor user_id
+	// mapping. The query IS the contract (DESIGN §1.3): `sqlc generate` produces
+	// typed Go — never hand-write DB types.
+	GetFederatedIdentity(ctx context.Context, arg GetFederatedIdentityParams) (FederatedIdentity, error)
 	// Queries for the grants table. The query IS the contract (DESIGN §1.3):
 	// `sqlc generate` (via @codegen) produces typed Go — never hand-write DB types.
 	GetGrant(ctx context.Context, id pgtype.UUID) (Grant, error)
@@ -448,6 +477,10 @@ type Querier interface {
 	// 0016_relay_addresses.up.sql), so deleting a client any user has consented
 	// to, or that has an active relay address, would raise SQLSTATE 23503.
 	SoftDeleteNamespacedClient(ctx context.Context, arg SoftDeleteNamespacedClientParams) error
+	// Bumps last_seen_at on an existing mapping (called on every successful
+	// resolve, not just creation, so the row reflects the subject's most recent
+	// SSO login).
+	TouchFederatedIdentity(ctx context.Context, arg TouchFederatedIdentityParams) error
 	UpdateBYODomainState(ctx context.Context, arg UpdateBYODomainStateParams) (ByoDomain, error)
 	// UpdateCredentialSignCount advances a passkey's signature counter after an
 	// assertion — a monotonically increasing counter is how WebAuthn detects a

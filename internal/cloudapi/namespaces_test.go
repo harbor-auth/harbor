@@ -234,6 +234,34 @@ func TestDeleteAdminV1NamespaceSoftDeletesAndReturns204(t *testing.T) {
 	if !row.DeletedAt.Valid {
 		t.Fatal("namespace row not marked deleted")
 	}
+
+	// H1: deleting a namespace must also delete its federated_identities
+	// rows — a dead-code query whose own comment claimed this happened, with
+	// nothing actually calling it, would otherwise leave an offboarded
+	// tenant's corporate-SSO subject mappings live forever.
+	if q.deleteFederatedIdentitiesByNamespaceCalls != 1 {
+		t.Fatalf("DeleteFederatedIdentitiesByNamespace called %d times, want 1", q.deleteFederatedIdentitiesByNamespaceCalls)
+	}
+	if len(q.deletedFederatedIdentityNamespaces) != 1 || q.deletedFederatedIdentityNamespaces[0] != "acme-prod" {
+		t.Fatalf("DeleteFederatedIdentitiesByNamespace called for %v, want [acme-prod]", q.deletedFederatedIdentityNamespaces)
+	}
+}
+
+// TestDeleteAdminV1NamespaceRemovesFederatedIdentitiesEvenWhenNoneExist
+// proves H1's cleanup call is made unconditionally on every namespace
+// delete — including the idempotent "namespace never existed" and "already
+// deleted" cases db/queries/federated_identities.sql documents as no-ops
+// (DELETE affecting zero rows), never gated behind "was SSO ever used for
+// this tenant."
+func TestDeleteAdminV1NamespaceRemovesFederatedIdentitiesEvenWhenNoneExist(t *testing.T) {
+	srv, q := newTestServer()
+	rec := doDeleteNamespace(t, srv, "never-existed", "del-key-1")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204; body = %s", rec.Code, rec.Body.String())
+	}
+	if q.deleteFederatedIdentitiesByNamespaceCalls != 1 {
+		t.Fatalf("DeleteFederatedIdentitiesByNamespace called %d times, want 1", q.deleteFederatedIdentitiesByNamespaceCalls)
+	}
 }
 
 func TestDeleteAdminV1NamespaceIdempotentOnAbsentNamespace(t *testing.T) {

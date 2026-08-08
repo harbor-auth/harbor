@@ -28,18 +28,20 @@ import (
 // §2). keys:rotate is enforced inside KeysHandler.PostKeysRotate itself, not
 // here — see registerCloudAPIRoutes.
 const (
-	scopeSessionsMint    = "sessions:mint"
-	scopeNamespacesRead  = "namespaces:read"
-	scopeNamespacesWrite = "namespaces:write"
-	scopeClientsRead     = "clients:read"
-	scopeClientsWrite    = "clients:write"
+	scopeSessionsMint     = "sessions:mint"
+	scopeNamespacesRead   = "namespaces:read"
+	scopeNamespacesWrite  = "namespaces:write"
+	scopeClientsRead      = "clients:read"
+	scopeClientsWrite     = "clients:write"
+	scopeUserSessionsMint = "user-sessions:mint"
 )
 
-// cloudAPILimiters names the nine independently-limited /admin/v1/* routes
-// (one Redis-backed sliding-window limiter per route, so a burst on one
-// operation never starves another).
+// cloudAPILimiters names the independently-limited /admin/v1/* routes (one
+// Redis-backed sliding-window limiter per route, so a burst on one operation
+// never starves another).
 type cloudAPILimiters struct {
 	sessionsMint     clients.RateLimiter
+	userSessionsMint clients.RateLimiter
 	namespacesCreate clients.RateLimiter
 	namespacesGet    clients.RateLimiter
 	namespacesDelete clients.RateLimiter
@@ -68,6 +70,7 @@ func newCloudAPILimiters(client *redis.Client, logger *slog.Logger) cloudAPILimi
 	}
 	return cloudAPILimiters{
 		sessionsMint:     limiter("sessions_mint", 120, time.Minute),
+		userSessionsMint: limiter("user_sessions_mint", 60, time.Minute),
 		namespacesCreate: limiter("namespaces_create", 30, time.Minute),
 		namespacesGet:    limiter("namespaces_get", 300, time.Minute),
 		namespacesDelete: limiter("namespaces_delete", 30, time.Minute),
@@ -79,18 +82,21 @@ func newCloudAPILimiters(client *redis.Client, logger *slog.Logger) cloudAPILimi
 	}
 }
 
-// registerCloudAPIRoutes registers the ten internal, service-JWT-authenticated
-// /admin/v1/* routes on mux: session minting, namespace create/get/delete,
-// namespace-scoped client create/list/get/update/delete, and the
-// key-rotation proxy. Callers gate this behind CLOUD_INTEGRATION_ENABLED —
-// harbor-hot's public listener never calls this, and when unregistered the
-// mux 404s every /admin/v1/* path.
-func registerCloudAPIRoutes(mux *http.ServeMux, verifier *cloudapi.ServiceAuthVerifier, store *cloudapi.Store, clientStore cloudapi.ClientProvisioningStore, keysHandler *cloudapi.KeysHandler, limiters cloudAPILimiters) {
+// registerCloudAPIRoutes registers the eleven internal,
+// service-JWT-authenticated /admin/v1/* routes on mux: session minting, the
+// SSO user-session handoff, namespace create/get/delete, namespace-scoped
+// client create/list/get/update/delete, and the key-rotation proxy. Callers
+// gate this behind CLOUD_INTEGRATION_ENABLED — harbor-hot's public listener
+// never calls this, and when unregistered the mux 404s every /admin/v1/* path.
+func registerCloudAPIRoutes(mux *http.ServeMux, verifier *cloudapi.ServiceAuthVerifier, store *cloudapi.Store, clientStore cloudapi.ClientProvisioningStore, userSessionsHandler *cloudapi.UserSessionsHandler, keysHandler *cloudapi.KeysHandler, limiters cloudAPILimiters) {
 	sessionsHandler := cloudapi.NewSessionsHandler(store)
 	server := cloudapi.NewServer(store, clientStore)
 
 	mux.HandleFunc("POST /admin/v1/sessions", cloudRateLimited(limiters.sessionsMint, "sessions_mint",
 		cloudAuthorized(verifier, "POST /admin/v1/sessions", scopeSessionsMint, sessionsHandler.PostSessions)))
+
+	mux.HandleFunc("POST /admin/v1/user-sessions", cloudRateLimited(limiters.userSessionsMint, "user_sessions_mint",
+		cloudAuthorized(verifier, "POST /admin/v1/user-sessions", scopeUserSessionsMint, userSessionsHandler.PostUserSessions)))
 
 	mux.HandleFunc("POST /admin/v1/namespaces", cloudRateLimited(limiters.namespacesCreate, "namespaces_create",
 		cloudAuthorized(verifier, "POST /admin/v1/namespaces", scopeNamespacesWrite, func(w http.ResponseWriter, r *http.Request) {
@@ -153,14 +159,19 @@ func cloudAuthorized(verifier *cloudapi.ServiceAuthVerifier, route, scope string
 		}
 		claims, err := verifier.Verify(cloudapi.WithRoute(r.Context(), route), bearer)
 		if err != nil {
-			writeCloudVerifyError(w, err)
+			writeCloudVerifyError(w, err, scope)
 			return
 		}
 		if !claims.HasScope(scope) {
 			writeCloudWiringError(w, http.StatusForbidden, cloudopenapi.ErrorCodeInsufficientScope, "the "+scope+" scope is required")
 			return
 		}
-		next(w, r)
+		// M5 — per-anchor namespace binding: attach claims to the request
+		// context so a handler that needs a namespace_id parsed from ITS OWN
+		// request body (not available here) can check it against the
+		// matched anchor's AllowedNamespaces — see usersessions.go's
+		// PostUserSessions, the one route that currently reads this.
+		next(w, r.WithContext(cloudapi.WithServiceClaims(r.Context(), claims)))
 	}
 }
 
@@ -221,10 +232,19 @@ func writeCloudWiringError(w http.ResponseWriter, status int, code cloudopenapi.
 // replayed jti gets its own stable code, every other verification failure
 // (malformed/invalid signature, wrong audience, missing scope, expired, or an
 // unconfigured trust anchor/replay guard) is reported as invalid_token so a
-// caller never learns which specific check failed.
-func writeCloudVerifyError(w http.ResponseWriter, err error) {
+// caller never learns which specific check failed. routeScope is the scope
+// the calling route requires; per L1, it is used verbatim in the
+// insufficient_scope message so an anchor-scope rejection (the signing key
+// isn't permitted to assert routeScope) reads byte-for-byte identically to
+// the route's own required-scope rejection just below in cloudAuthorized —
+// a caller must not be able to tell the two apart from the response body.
+func writeCloudVerifyError(w http.ResponseWriter, err error, routeScope string) {
 	if errors.Is(err, cloudapi.ErrReplayed) {
 		writeCloudWiringError(w, http.StatusUnauthorized, cloudopenapi.ErrorCodeTokenReplayed, "the bearer token has already been used")
+		return
+	}
+	if errors.Is(err, cloudapi.ErrScopeNotPermittedForAnchor) {
+		writeCloudWiringError(w, http.StatusForbidden, cloudopenapi.ErrorCodeInsufficientScope, "the "+routeScope+" scope is required")
 		return
 	}
 	writeCloudWiringError(w, http.StatusUnauthorized, cloudopenapi.ErrorCodeInvalidToken, "a valid cloudServiceAuth bearer token is required")

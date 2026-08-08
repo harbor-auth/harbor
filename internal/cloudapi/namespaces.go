@@ -321,6 +321,27 @@ func (s *Server) DeleteAdminV1Namespace(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// H1: a deleted namespace's corporate-SSO subject mappings must not
+	// outlive it. NOT because the namespace id could later be reused by a
+	// different tenant — it can't: cloud_namespaces.id is the table's
+	// primary key and CreateNamespace's uniqueness check covers both a live
+	// AND a soft-deleted row with that id (store.go's CreateNamespace doc
+	// comment), so any create attempt against a previously-used id, deleted
+	// or not, permanently 409s. The actual benefit is data hygiene / data
+	// minimization: an offboarded tenant's SSO subject mappings (namespace-
+	// scoped HMACs of real external identities) have no further reason to
+	// exist once the namespace they belong to is gone, and leaving them
+	// around is pure liability with no corresponding use. Not in the same
+	// transaction as the soft-delete above (see
+	// DeleteFederatedIdentitiesByNamespace's doc comment); a failure here is
+	// surfaced as a 500 rather than swallowed so the idempotency ledger is
+	// never told this delete succeeded when cleanup didn't — a retry with
+	// the same Idempotency-Key re-runs both steps.
+	if err := s.store.DeleteFederatedIdentitiesByNamespace(ctx, id); err != nil {
+		writeInternalError(w, "cloudapi: delete federated identities for namespace", err)
+		return
+	}
+
 	s.recordOperation(ctx, idempotencyKey, opNamespaceDelete, reqHash, http.StatusNoContent, nil)
 	writeCloudBody(w, http.StatusNoContent, nil)
 }

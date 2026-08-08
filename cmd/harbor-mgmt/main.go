@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -72,19 +73,44 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if envBool("RATE_LIMIT_DISABLED") {
 		return errors.New("RATE_LIMIT_DISABLED is not allowed in production")
 	}
+	// REGION is parsed here — earlier than the WebAuthn-origin binding that
+	// uses it further down (which needs WEBAUTHN_RP_ORIGINS, parsed later) —
+	// because the cloudIntegrationEnabled block right below also needs `reg`
+	// as-a-string to enroll new corporate-SSO users into
+	// (internal/cloudapi.NewUserSessionsHandler). Splitting the parse from
+	// the origin-binding calls, rather than moving the whole original block,
+	// keeps region.BindIssuerHost/region.Resolve exactly where they were,
+	// still ordered after WEBAUTHN_RP_ORIGINS is available.
+	regionName := os.Getenv("REGION")
+	if regionName == "" {
+		return errors.New("harbor-mgmt requires REGION")
+	}
+	reg, err := region.Parse(regionName)
+	if err != nil {
+		return fmt.Errorf("invalid REGION: %w", err)
+	}
 	// The Harbor Cloud management API (internal/cloudapi) is wired only when
 	// explicitly enabled (mgmt.cloudIntegration.enabled in deploy config) —
 	// harbor-hot's public listener never imports this package, and by
-	// default no /admin/v1/* route is registered at all (a 404, not an
-	// auth failure). When enabled, its three dependencies are required
-	// up front so a misconfigured deployment fails at boot rather than
-	// serving cloudapi routes that silently 401 every request.
+	// default no /admin/v1/* route (nor GET /login/sso) is registered at all
+	// (a 404, not an auth failure). When enabled, its dependencies are
+	// required up front so a misconfigured deployment fails at boot rather
+	// than serving cloudapi routes that silently 401/500 every request.
 	cloudIntegrationEnabled := envBool("CLOUD_INTEGRATION_ENABLED")
 	var cloudServiceAuthPublicKey, cloudHotProxyToken, cloudHotInternalURL string
+	var cloudServiceAuthAnchors []cloudapi.TrustAnchorConfig
+	var ssoSubjectHMACKey []byte
+	var ssoDashboardPath string
 	if cloudIntegrationEnabled {
 		cloudServiceAuthPublicKey = os.Getenv("CLOUD_SERVICE_AUTH_PUBLIC_KEY")
-		if cloudServiceAuthPublicKey == "" {
-			return errors.New("harbor-mgmt requires CLOUD_SERVICE_AUTH_PUBLIC_KEY when CLOUD_INTEGRATION_ENABLED is set")
+		if rawAnchors := os.Getenv("CLOUD_SERVICE_AUTH_PUBLIC_KEYS"); rawAnchors != "" {
+			cloudServiceAuthAnchors, err = cloudapi.ParseTrustAnchorsEnv(rawAnchors)
+			if err != nil {
+				return fmt.Errorf("invalid CLOUD_SERVICE_AUTH_PUBLIC_KEYS: %w", err)
+			}
+		}
+		if cloudServiceAuthPublicKey == "" && len(cloudServiceAuthAnchors) == 0 {
+			return errors.New("harbor-mgmt requires CLOUD_SERVICE_AUTH_PUBLIC_KEY or CLOUD_SERVICE_AUTH_PUBLIC_KEYS when CLOUD_INTEGRATION_ENABLED is set")
 		}
 		cloudHotProxyToken = os.Getenv("MGMT_HOT_PROXY_TOKEN")
 		if cloudHotProxyToken == "" {
@@ -92,6 +118,14 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		}
 		cloudHotInternalURL = os.Getenv("HARBOR_HOT_INTERNAL_URL")
 		if err := validateInternalURL("HARBOR_HOT_INTERNAL_URL", cloudHotInternalURL); err != nil {
+			return err
+		}
+		ssoSubjectHMACKey, err = decodeSSOSubjectHMACKey(os.Getenv("SSO_SUBJECT_HMAC_KEY"))
+		if err != nil {
+			return fmt.Errorf("harbor-mgmt requires a valid SSO_SUBJECT_HMAC_KEY when CLOUD_INTEGRATION_ENABLED is set: %w", err)
+		}
+		ssoDashboardPath, err = validateSSODashboardPath(os.Getenv("SSO_DASHBOARD_PATH"))
+		if err != nil {
 			return err
 		}
 	}
@@ -241,6 +275,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		WithEnrollmentCallerSource(bffEnrollmentCallerAdapter{}).
 		WithMFA(mfaService).
 		WithMFASessionStamper(bffMFASessionStamper{store: bffStore}).
+		WithMFAEnrollmentGuard(bffMFAEnrollmentGuard{store: bffStore}).
 		WithCompliance(complianceDeps).
 		WithAuditTrail(auditTrailDeps).
 		WithRelayStore(relayStore).
@@ -285,16 +320,40 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	if cloudIntegrationEnabled {
 		cloudVerifier, err := cloudapi.NewServiceAuthVerifier(cloudapi.ServiceAuthVerifierConfig{
 			PublicKeyPEM: cloudServiceAuthPublicKey,
+			Anchors:      cloudServiceAuthAnchors,
 			ReplayGuard:  cloudapi.NewRedisReplayGuard(redisClient),
 			Logger:       telemetry.New(logger),
 		})
 		if err != nil {
 			return fmt.Errorf("configure cloud service auth verifier: %w", err)
 		}
-		cloudStore := cloudapi.NewStore(q)
+		// WithFederatedIdentities wires the corporate-SSO identity-resolution
+		// transaction (internal/cloudapi/federated_store.go) over the same
+		// pool and user-DEK key provider used for regular enrollment — a
+		// federated user's DEK/pairwise-secret sealing is identical to a
+		// regular signup's, only the persistence path and recovery_required
+		// policy differ (identity.EnrollFederated).
+		cloudStore := cloudapi.NewStore(q).WithFederatedIdentities(cloudapi.NewPgxFederatedPool(pool), kp, crypto.NewCipher())
 		cloudClientStore := clients.NewDBNamespacedClientStore(q)
+		subjectHasher, err := cloudapi.NewSubjectHasher(ssoSubjectHMACKey)
+		if err != nil {
+			return fmt.Errorf("configure SSO subject hasher: %w", err)
+		}
+		// Shared by both the minting side (POST /admin/v1/user-sessions,
+		// below) and the redemption side (GET /login/sso) — a login code
+		// minted by one must be redeemable by the other.
+		ssoLoginCodes := cloudapi.NewRedisLoginCodeStore(redisClient)
+		userSessionsHandler := cloudapi.NewUserSessionsHandler(cloudStore, subjectHasher, ssoLoginCodes, string(reg))
 		cloudKeysHandler := cloudapi.NewKeysHandler(cloudVerifier, cloudHotInternalURL, cloudHotProxyToken, nil)
-		registerCloudAPIRoutes(mux, cloudVerifier, cloudStore, cloudClientStore, cloudKeysHandler, newCloudAPILimiters(redisClient, logger))
+		registerCloudAPIRoutes(mux, cloudVerifier, cloudStore, cloudClientStore, userSessionsHandler, cloudKeysHandler, newCloudAPILimiters(redisClient, logger))
+
+		// GET /login/sso is registered INSIDE this same gate: with cloud
+		// integration off, it must 404 like every other /admin/v1/* route,
+		// not exist-and-fail (there would be no login codes to ever redeem).
+		ssoLoginAbuseProtection := newMgmtLimiter(redisClient, "sso_login", 120, time.Minute, logger)
+		mux.HandleFunc("GET /login/sso", wireSSOLoginRoute(
+			ssoLoginCodes, bffStore, dbActiveUserChecker{q: q}, auditRecorder, ssoLoginAbuseProtection.limiter, ssoDashboardPath, logger,
+		))
 	}
 	signupHandler.Routes(mux)
 	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(webauthnService), bff.DiscoverableUserResolver{}, authorizeCompleteURL)
@@ -306,14 +365,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	}
 	mux.HandleFunc("GET /signin", signinHandler.ServeSignin)
 	handler := bff.Middleware(bffStore)(requireSensitiveManagementStepUp(bff.NewStepUpGate(bffStore, bff.DefaultStepUpTTL), mux))
-	regionName := os.Getenv("REGION")
-	if regionName == "" {
-		return errors.New("harbor-mgmt requires REGION")
-	}
-	reg, err := region.Parse(regionName)
-	if err != nil {
-		return fmt.Errorf("invalid REGION: %w", err)
-	}
+	// REGION itself was already parsed into `reg` near the top of run(), for
+	// the cloudIntegrationEnabled block above — this just finishes binding it
+	// to the WebAuthn origin now that WEBAUTHN_RP_ORIGINS is available.
 	if err := region.BindIssuerHost(rpOrigins[0], reg); err != nil {
 		return fmt.Errorf("bind WebAuthn origin to REGION: %w", err)
 	}
@@ -479,6 +533,50 @@ func validateProductionURL(name, raw string) error {
 		return fmt.Errorf("invalid %s: requires an absolute credential-free HTTPS URL (HTTP is limited to loopback integration endpoints)", name)
 	}
 	return nil
+}
+
+// decodeSSOSubjectHMACKey decodes SSO_SUBJECT_HMAC_KEY as hex or base64url.
+// It only decodes — the minimum-length (32 byte) requirement is enforced by
+// cloudapi.NewSubjectHasher itself, so this helper never duplicates that
+// bound and can't drift from it.
+//
+// HEX IS TRIED FIRST, deliberately (L3). deploy/helm/values.yaml's doc
+// comment for this key tells operators to generate it with
+// `openssl rand -hex 32` — a 64-character lowercase hex string. That string
+// is ALSO well-formed base64url input: hex's alphabet [0-9a-f] is a strict
+// subset of base64url's, and 64 is divisible by 4 (RawURLEncoding needs no
+// padding at that length). So trying base64url first would decode the
+// DOCUMENTED, canonical format without ever returning an error — just
+// silently into 48 WRONG bytes — leaving the hex branch dead code for
+// exactly the input operators are told to produce. Every existing subject's
+// HMAC would then be computed under a key nobody intended, orphaning every
+// federated account tied to it, with nothing anywhere raising an error.
+//
+// Trying hex first is safe, not merely convenient: hex.DecodeString rejects
+// odd-length input and any byte outside [0-9a-fA-F] outright. A genuine
+// base64url key (RawURLEncoding, no padding) of N raw bytes produces
+// ceil(N*8/6) characters, which is odd whenever N mod 3 != 0 — an immediate
+// hex rejection — and even when it happens to land on an even length, it
+// would ALSO have to consist entirely of characters from hex's 16-symbol
+// alphabet to be mistaken for hex, which is astronomically unlikely for
+// CSPRNG-derived bytes. A padded base64.URLEncoding key is ruled out even
+// more simply: its trailing "=" is not a valid hex digit, so hex.Decode
+// fails immediately and this falls through to the base64 branches below.
+func decodeSSOSubjectHMACKey(raw string) ([]byte, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, errors.New("must not be empty")
+	}
+	if b, err := hex.DecodeString(raw); err == nil {
+		return b, nil
+	}
+	if b, err := base64.RawURLEncoding.DecodeString(raw); err == nil {
+		return b, nil
+	}
+	if b, err := base64.URLEncoding.DecodeString(raw); err == nil {
+		return b, nil
+	}
+	return nil, errors.New("must be hex- or base64url-encoded")
 }
 
 // validateInternalURL checks that raw is an absolute http(s) URL with no

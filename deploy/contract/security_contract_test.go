@@ -70,13 +70,14 @@ func assertPublicLoginRoute(t *testing.T, objects []object) {
 	}
 	paths := pathSlice(t, pathMap(t, rule, "http"), "paths")
 	want := map[string]string{
-		"/login":    "harbor-mgmt",
-		"/signup":   "harbor-mgmt",
-		"/signin":   "harbor-mgmt",
-		"/enroll":   "harbor-mgmt",
-		"/webauthn": "harbor-mgmt",
-		"/recovery": "harbor-mgmt",
-		"/":         "harbor-hot",
+		"/login":     "harbor-mgmt",
+		"/signup":    "harbor-mgmt",
+		"/signin":    "harbor-mgmt",
+		"/enroll":    "harbor-mgmt",
+		"/webauthn":  "harbor-mgmt",
+		"/recovery":  "harbor-mgmt",
+		"/dashboard": "harbor-mgmt", // M2: SSO_DASHBOARD_PATH's default landing target (GET /login/sso, and the post-registration handoff) must resolve to harbor-mgmt, not fall through to harbor-hot's catch-all.
+		"/":          "harbor-hot",
 	}
 	for _, item := range paths {
 		path, ok := asObject(item)

@@ -65,6 +65,10 @@ func (unusedCloudQuerier) GetCloudSession(context.Context, string) (db.CloudSess
 	panic("unusedCloudQuerier: GetCloudSession should not be reached in wiring tests")
 }
 
+func (unusedCloudQuerier) DeleteFederatedIdentitiesByNamespace(context.Context, string) error {
+	panic("unusedCloudQuerier: DeleteFederatedIdentitiesByNamespace should not be reached in wiring tests")
+}
+
 // unusedCloudClientStore is unusedCloudQuerier's counterpart for
 // cloudapi.ClientProvisioningStore: every method panics, so these wiring
 // tests fail loudly if a request ever reaches past auth/scope/rate-limit
@@ -138,12 +142,13 @@ func cloudTestSignES256(t *testing.T, priv *ecdsa.PrivateKey, header, claims map
 // panicking fake querier, and a *cloudapi.KeysHandler — enough to exercise
 // registerCloudAPIRoutes end-to-end without a real database.
 type cloudTestEnv struct {
-	verifier    *cloudapi.ServiceAuthVerifier
-	store       *cloudapi.Store
-	clientStore cloudapi.ClientProvisioningStore
-	keys        *cloudapi.KeysHandler
-	ecPriv      *ecdsa.PrivateKey
-	now         time.Time
+	verifier     *cloudapi.ServiceAuthVerifier
+	store        *cloudapi.Store
+	clientStore  cloudapi.ClientProvisioningStore
+	userSessions *cloudapi.UserSessionsHandler
+	keys         *cloudapi.KeysHandler
+	ecPriv       *ecdsa.PrivateKey
+	now          time.Time
 }
 
 func newCloudTestEnv(t *testing.T) *cloudTestEnv {
@@ -174,9 +179,22 @@ func newCloudTestEnv(t *testing.T) *cloudTestEnv {
 
 	store := cloudapi.NewStore(unusedCloudQuerier{})
 	clientStore := unusedCloudClientStore{}
+	// A fixed 32+ byte test key — never production material, only long
+	// enough to satisfy NewSubjectHasher's floor. The store above has no
+	// WithFederatedIdentities pool wired, so — mirroring unusedCloudQuerier
+	// — any request that reaches past auth/scope into
+	// ResolveOrCreateFederatedUser fails closed with
+	// ErrFederatedIdentitiesUnconfigured rather than silently succeeding;
+	// every test in this file only exercises the auth/scope/rate-limit
+	// rejection paths ahead of that.
+	hasher, err := cloudapi.NewSubjectHasher([]byte("cloudapi-wiring-test-hmac-key-32b!!"))
+	if err != nil {
+		t.Fatalf("NewSubjectHasher: %v", err)
+	}
+	userSessions := cloudapi.NewUserSessionsHandler(store, hasher, cloudapi.NewRedisLoginCodeStore(redisClient), "EU")
 	keys := cloudapi.NewKeysHandler(verifier, "http://harbor-hot.internal:8080", "cloud-proxy-token", nil)
 
-	return &cloudTestEnv{verifier: verifier, store: store, clientStore: clientStore, keys: keys, ecPriv: priv, now: now}
+	return &cloudTestEnv{verifier: verifier, store: store, clientStore: clientStore, userSessions: userSessions, keys: keys, ecPriv: priv, now: now}
 }
 
 // token mints a cloudServiceAuth bearer JWT valid against env's trust anchor.
@@ -199,13 +217,14 @@ func (e *cloudTestEnv) token(t *testing.T, scope, jti string) string {
 func (e *cloudTestEnv) mux(t *testing.T, limiters cloudAPILimiters) *http.ServeMux {
 	t.Helper()
 	mux := http.NewServeMux()
-	registerCloudAPIRoutes(mux, e.verifier, e.store, e.clientStore, e.keys, limiters)
+	registerCloudAPIRoutes(mux, e.verifier, e.store, e.clientStore, e.userSessions, e.keys, limiters)
 	return mux
 }
 
 func allowAllLimiters() cloudAPILimiters {
 	return cloudAPILimiters{
 		sessionsMint:     alwaysAllow(),
+		userSessionsMint: alwaysAllow(),
 		namespacesCreate: alwaysAllow(),
 		namespacesGet:    alwaysAllow(),
 		namespacesDelete: alwaysAllow(),
@@ -227,6 +246,7 @@ var cloudAuthedRoutes = []struct {
 	scope  string
 }{
 	{"sessions mint", http.MethodPost, "/admin/v1/sessions", scopeSessionsMint},
+	{"user sessions mint", http.MethodPost, "/admin/v1/user-sessions", scopeUserSessionsMint},
 	{"namespaces create", http.MethodPost, "/admin/v1/namespaces", scopeNamespacesWrite},
 	{"namespaces get", http.MethodGet, "/admin/v1/namespaces/ns-1", scopeNamespacesRead},
 	{"namespaces delete", http.MethodDelete, "/admin/v1/namespaces/ns-1", scopeNamespacesWrite},

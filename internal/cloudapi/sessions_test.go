@@ -22,13 +22,15 @@ import (
 // persistence across multiple calls (mint, then a retried mint; mint, then a
 // later verification) to exercise idempotent retry and session lookup.
 type memQuerier struct {
-	mu                   sync.Mutex
-	namespaces           map[string]db.CloudNamespace
-	operations           map[[2]string]db.CloudOperation
-	sessions             map[string]db.CloudSession
-	createSessionCalls   int
-	createNamespaceCalls int
-	softDeleteCalls      int
+	mu                                        sync.Mutex
+	namespaces                                map[string]db.CloudNamespace
+	operations                                map[[2]string]db.CloudOperation
+	sessions                                  map[string]db.CloudSession
+	createSessionCalls                        int
+	createNamespaceCalls                      int
+	softDeleteCalls                           int
+	deleteFederatedIdentitiesByNamespaceCalls int
+	deletedFederatedIdentityNamespaces        []string
 }
 
 func newMemQuerier() *memQuerier {
@@ -78,6 +80,14 @@ func (m *memQuerier) SoftDeleteCloudNamespace(_ context.Context, id string) erro
 	}
 	row.DeletedAt = pgtype.Timestamptz{Time: time.Unix(0, 0), Valid: true}
 	m.namespaces[id] = row
+	return nil
+}
+
+func (m *memQuerier) DeleteFederatedIdentitiesByNamespace(_ context.Context, namespaceID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deleteFederatedIdentitiesByNamespaceCalls++
+	m.deletedFederatedIdentityNamespaces = append(m.deletedFederatedIdentityNamespaces, namespaceID)
 	return nil
 }
 
