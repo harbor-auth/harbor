@@ -7,6 +7,10 @@
 # Resources applied:
 #   - cronjob-etcd.yaml        — harbor-etcd-sync CronJob (etcd snapshots → R2, every 6h)
 #   - cronjob-pgdump.yaml      — harbor-pgdump CronJob (pg_dump → R2, daily 03:00 UTC)
+#   - cronjob-pgdump-local.yaml — harbor-pgdump-local CronJob + PVC (pg_dump to
+#     an on-cluster volume, daily 02:00 UTC). Needs no credentials, so it gives
+#     the cluster a recovery point while the offsite path waits on R2 keys. It
+#     is a complement to offsite backup, not a substitute — see its header.
 #
 # NOT applied from here:
 #
@@ -33,3 +37,4 @@ kind: Kustomization
 resources:
   - cronjob-etcd.yaml
   - cronjob-pgdump.yaml
+  - cronjob-pgdump-local.yaml
