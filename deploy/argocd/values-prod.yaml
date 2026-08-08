@@ -9,6 +9,16 @@
 # remains fail-closed until the first successful signed publish replaces them.
 
 global:
+  # Pull credential for the private GHCR packages. Created out of band on the
+  # cluster (kubernetes.io/dockerconfigjson), like every other credential here.
+  #
+  # SHORTCUT — NOT PRODUCTION READY: the token currently in this Secret is a
+  # personal OAuth token that also carries admin:enterprise, repo and workflow.
+  # It works, but it is far broader than a pull credential needs to be. Replace
+  # it with a fine-grained PAT limited to read:packages, or make the packages
+  # public. See SHORTCUTS in docs/.
+  imagePullSecrets:
+    - ghcr-pull
   # The isolated core cluster is intentionally a single K3s node.
   topologyKey: kubernetes.io/hostname
   image:
