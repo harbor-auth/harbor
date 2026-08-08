@@ -180,6 +180,12 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: harbor-migrate
+        # The on-cluster pg_dump. It has to be named here or the dump simply
+        # times out: this policy is default-deny, so a backup that is not an
+        # explicit peer cannot reach the database it exists to copy.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: harbor-pgdump-local
       ports:
         - port: 5432
           protocol: TCP

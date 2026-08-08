@@ -21,10 +21,25 @@
 # fails cannot silently age out every remaining copy.
 ---
 apiVersion: v1
+# Namespace: harbor, not harbor-backup, and that is deliberate.
+#
+# This job needs two things that are scoped to the harbor namespace and cannot
+# be reached from outside it:
+#
+#   1. the harbor-postgresql-auth Secret — a secretKeyRef cannot cross
+#      namespaces, so from harbor-backup the pod never gets a password;
+#   2. an allowed path through the harbor-postgresql NetworkPolicy, whose
+#      ingress rules are bare podSelectors with no namespaceSelector, and so
+#      only ever match pods in this namespace.
+#
+# Running it from harbor-backup would fail on both counts. The alternative —
+# copying the credential into a second namespace and widening the database's
+# NetworkPolicy to admit it — trades a real security boundary for filesystem
+# tidiness, and duplicates a credential that then has to be rotated twice.
 kind: PersistentVolumeClaim
 metadata:
   name: harbor-backup-local
-  namespace: harbor-backup
+  namespace: harbor
   labels:
     app.kubernetes.io/name: harbor-pgdump-local
     app.kubernetes.io/component: backup
@@ -43,7 +58,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: harbor-pgdump-local
-  namespace: harbor-backup
+  namespace: harbor
   labels:
     app.kubernetes.io/name: harbor-pgdump-local
     app.kubernetes.io/component: backup
