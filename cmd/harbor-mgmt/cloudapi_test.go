@@ -65,6 +65,10 @@ func (unusedCloudQuerier) GetCloudSession(context.Context, string) (db.CloudSess
 	panic("unusedCloudQuerier: GetCloudSession should not be reached in wiring tests")
 }
 
+func (unusedCloudQuerier) DeleteFederatedIdentitiesByNamespace(context.Context, string) error {
+	panic("unusedCloudQuerier: DeleteFederatedIdentitiesByNamespace should not be reached in wiring tests")
+}
+
 // --- fake rate limiter --------------------------------------------------
 
 type fakeRateLimiter struct {

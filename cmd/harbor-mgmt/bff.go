@@ -29,6 +29,38 @@ func (s bffMFASessionStamper) StampMFAStepUp(ctx context.Context, userID string,
 	return bff.RecordTOTPStepUp(ctx, s.store, requestID, verifiedAt)
 }
 
+// bffMFAEnrollmentGuard adapts bff.SessionEligibleForMFAStepUp to
+// mgmtapi.MFAEnrollmentGuard (M3): a session RecordTOTPStepUp will never
+// stamp a step-up for should not be able to enroll a new TOTP factor either.
+// A missing/unresolvable session denies enrollment (fail closed) rather than
+// treating "we couldn't check" as "allowed" — the mirror image of
+// mgmtapi.MFAEnrollmentGuard's nil-guard-means-allow default, which is safe
+// only because THIS instance, when wired, does not itself default open.
+type bffMFAEnrollmentGuard struct{ store bff.BFFSessionStore }
+
+func (g bffMFAEnrollmentGuard) EnrollmentAllowed(ctx context.Context) bool {
+	requestID := bff.SessionIDFromContext(ctx)
+	if requestID == "" {
+		return false
+	}
+	session, err := g.store.Get(ctx, requestID)
+	if err != nil {
+		return false
+	}
+	return bff.SessionEligibleForMFAStepUp(session)
+}
+
+// requireSensitiveManagementStepUp gates the listed path prefixes behind a
+// fresh MFA verification (bff.StepUpGate). It deliberately does NOT list
+// /mfa/enroll, /mfa/activate, or /mfa/verify — those must stay reachable
+// WITHOUT a prior step-up, or a user could never complete their first MFA
+// challenge. What stops a session from using /mfa/* to manufacture a
+// step-up it isn't entitled to (M3 — a federated corporate-SSO session,
+// which is nonce-less and drives the dashboard, self-enrolling TOTP and
+// stamping its way past this gate) is enforced one level down, in
+// bff.RecordTOTPStepUp and internal/mgmtapi.MFAEnrollmentGuard — never by
+// this prefix list. Do not "fix" M3-shaped bugs by adding /mfa/* here; that
+// only breaks legitimate first-time enrollment.
 func requireSensitiveManagementStepUp(gate *bff.StepUpGate, next http.Handler) http.Handler {
 	protected := []string{"/consent-grants", "/audit-events", "/relay-addresses", "/byo-domains", "/recovery/factors", "/mfa/factors", "/compliance/"}
 	guarded := gate.Require(next)

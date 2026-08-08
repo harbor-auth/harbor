@@ -256,6 +256,19 @@ func (s *Server) DeleteAdminV1Namespace(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
+	// H1: a deleted namespace's corporate-SSO subject mappings must not
+	// outlive it — otherwise a future reuse of this namespace id could
+	// resolve through a stale federated_identities row bound to the OLD
+	// tenant's subjects. Not in the same transaction as the soft-delete
+	// above (see DeleteFederatedIdentitiesByNamespace's doc comment); a
+	// failure here is surfaced as a 500 rather than swallowed so the
+	// idempotency ledger is never told this delete succeeded when cleanup
+	// didn't — a retry with the same Idempotency-Key re-runs both steps.
+	if err := s.store.DeleteFederatedIdentitiesByNamespace(ctx, id); err != nil {
+		writeInternalError(w, "cloudapi: delete federated identities for namespace", err)
+		return
+	}
+
 	s.recordOperation(ctx, idempotencyKey, opNamespaceDelete, reqHash, http.StatusNoContent, nil)
 	writeCloudBody(w, http.StatusNoContent, nil)
 }

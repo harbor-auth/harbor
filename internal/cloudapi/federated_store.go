@@ -43,12 +43,16 @@ type federatedTx interface {
 }
 
 // federatedPool begins a federatedTx (the atomic create-or-map path) and
-// answers a plain, non-transactional GetFederatedIdentity read (used once,
-// to re-read the winner after losing a create race). *pgxpool.Pool satisfies
-// this via pgxFederatedPool (below); tests supply an in-memory fake.
+// answers two plain, non-transactional reads (used once each, to re-read the
+// winner after losing a create race, and then re-check ITS user's status —
+// L7: the loser must apply the exact same active-status gate the primary
+// read path does, not silently skip it just because it arrived at the
+// winner's row via a different path). *pgxpool.Pool satisfies this via
+// pgxFederatedPool (below); tests supply an in-memory fake.
 type federatedPool interface {
 	Begin(ctx context.Context) (federatedTx, error)
 	GetFederatedIdentity(ctx context.Context, arg db.GetFederatedIdentityParams) (db.FederatedIdentity, error)
+	GetUser(ctx context.Context, id pgtype.UUID) (db.User, error)
 }
 
 // pgxFederatedPool adapts a *pgxpool.Pool to federatedPool for production
@@ -72,6 +76,10 @@ func (p *pgxFederatedPool) Begin(ctx context.Context) (federatedTx, error) {
 
 func (p *pgxFederatedPool) GetFederatedIdentity(ctx context.Context, arg db.GetFederatedIdentityParams) (db.FederatedIdentity, error) {
 	return db.New(p.pool).GetFederatedIdentity(ctx, arg)
+}
+
+func (p *pgxFederatedPool) GetUser(ctx context.Context, id pgtype.UUID) (db.User, error) {
+	return db.New(p.pool).GetUser(ctx, id)
 }
 
 // pgxFederatedTx adapts a real pgx.Tx (via db.New(tx)) to federatedTx.
@@ -204,6 +212,19 @@ func (s *Store) ResolveOrCreateFederatedUser(ctx context.Context, namespaceID st
 			})
 			if rerr != nil {
 				return "", false, fmt.Errorf("cloudapi: re-read federated identity after conflict: %w", rerr)
+			}
+			// L7: apply the SAME active-status gate the primary (cache-hit)
+			// read path above enforces. Without this, the create-race loser
+			// was the one return path that could hand back a user id
+			// belonging to an erased/shredded account — subject_unavailable
+			// must hold regardless of which side of the race a caller landed
+			// on.
+			winnerUser, uerr := s.fedPool.GetUser(ctx, winner.UserID)
+			if uerr != nil {
+				return "", false, fmt.Errorf("cloudapi: load federated user after conflict: %w", uerr)
+			}
+			if winnerUser.Status != "active" {
+				return "", false, ErrFederatedSubjectUnavailable
 			}
 			return uuidToString(winner.UserID), false, nil
 		}

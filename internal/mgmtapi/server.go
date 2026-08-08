@@ -136,6 +136,14 @@ type Server struct {
 	// mfaSessionStamper binds successful verification to the authenticated BFF
 	// browser session. Nil makes verification fail closed.
 	mfaSessionStamper MFASessionStamper
+	// mfaEnrollmentGuard, when non-nil, is consulted by PostMFAEnroll before
+	// starting a new TOTP enrollment (M3). This is a defense-in-depth check,
+	// not the load-bearing one — bff.RecordTOTPStepUp independently refuses
+	// to stamp a step-up for the same disqualified sessions regardless of
+	// whether enrollment was ever attempted, so a nil guard here (an
+	// unwired/dev-scaffold instance) does not reopen M3. Nil is therefore
+	// treated as "allow" rather than fail-closed, unlike mfaSessionStamper.
+	mfaEnrollmentGuard MFAEnrollmentGuard
 	// compliance, when non-nil, backs the POST /compliance/export and POST
 	// /compliance/erase endpoints. Nil puts those routes into a 503 state.
 	compliance *ComplianceDeps
@@ -349,6 +357,15 @@ func (s *Server) WithEnrollmentCallerSource(src CallerSource) *Server {
 // s for chaining.
 func (s *Server) WithMFA(service MFAService) *Server {
 	s.mfa = service
+	return s
+}
+
+// WithMFAEnrollmentGuard wires the (optional, defense-in-depth) check
+// PostMFAEnroll consults before starting a new TOTP enrollment — see
+// mfaEnrollmentGuard's doc comment for why a nil guard is safe. Returns s
+// for chaining.
+func (s *Server) WithMFAEnrollmentGuard(guard MFAEnrollmentGuard) *Server {
+	s.mfaEnrollmentGuard = guard
 	return s
 }
 

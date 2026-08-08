@@ -188,7 +188,13 @@ func wireSSOLoginRoute(
 			return
 		}
 
-		bff.SetBFFCookie(w, requestID, ssoLoginSessionTTL)
+		// M1: SetSSOBFFCookie (SameSite=Lax), not SetBFFCookie (Strict) — the
+		// browser reaches this handler via a cross-site redirect chain (the
+		// SAML bridge), and the 303 below to dashboardPath is itself part of
+		// that chain, so a Strict cookie set here would very likely never
+		// reach the dashboard request. See SetSSOBFFCookie's doc comment for
+		// the full RFC 6265bis §5.2 reasoning.
+		bff.SetSSOBFFCookie(w, requestID, ssoLoginSessionTTL)
 		// Deliberately no enrollment cookie (mgmtapi.EnrollmentSessionCookieName /
 		// RecoveryScopedSessionCookieName): this is not an enrollment
 		// session and must not unlock the WebAuthn ceremony endpoints.

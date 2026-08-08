@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -288,8 +291,14 @@ func TestSSOLoginCookieAttributes(t *testing.T) {
 	if !found.Secure {
 		t.Error("cookie is not Secure")
 	}
-	if found.SameSite != http.SameSiteStrictMode {
-		t.Errorf("cookie SameSite = %v, want Strict", found.SameSite)
+	// M1: Lax, not Strict — this handler is reached via a cross-site
+	// redirect chain from the SAML bridge, and its own 303 to dashboardPath
+	// is part of that chain (RFC 6265bis §5.2 computes "site for cookies"
+	// over the WHOLE chain). A Strict cookie would very likely be withheld
+	// on that follow-up request, landing the user on the dashboard
+	// unauthenticated. See bff.SetSSOBFFCookie's doc comment.
+	if found.SameSite != http.SameSiteLaxMode {
+		t.Errorf("cookie SameSite = %v, want Lax", found.SameSite)
 	}
 	if found.Path != "/" {
 		t.Errorf("cookie Path = %q, want /", found.Path)
@@ -395,6 +404,16 @@ func TestValidateSSODashboardPath(t *testing.T) {
 	}
 }
 
+// TestDecodeSSOSubjectHMACKey is L4: the previous version of this test used
+// a 60-character "hex-encoded 32 bytes" literal that is actually 30 bytes
+// (len("...")/2), which — being divisible by 4 — was ALSO silently consumed
+// by the base64url branch, and only asserted len(b) != 0, which asserts
+// nothing about which branch ran or what bytes came out. This version pins
+// an exact 64-char (32-byte) hex literal — openssl rand -hex 32's exact
+// output shape — and asserts byte-for-byte equality against decoding via
+// hex directly, proving decodeSSOSubjectHMACKey's hex-first ordering (L3)
+// actually takes effect for the documented format, not just that SOME
+// decode succeeded.
 func TestDecodeSSOSubjectHMACKey(t *testing.T) {
 	if _, err := decodeSSOSubjectHMACKey(""); err == nil {
 		t.Error("expected an error for an empty key")
@@ -402,8 +421,41 @@ func TestDecodeSSOSubjectHMACKey(t *testing.T) {
 	if _, err := decodeSSOSubjectHMACKey("not-valid-base64url-or-hex!!!"); err == nil {
 		t.Error("expected an error for an undecodable key")
 	}
-	// hex-encoded 32 bytes
-	if b, err := decodeSSOSubjectHMACKey("aabbccddeeff00112233445566778899aabbccddeeff0011223344556677"); err != nil || len(b) == 0 {
-		t.Errorf("decode hex key: got %v, %v", b, err)
-	}
+
+	t.Run("hex-encoded 32 bytes (openssl rand -hex 32's exact shape)", func(t *testing.T) {
+		const hexKey = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+		wantHex, err := hex.DecodeString(hexKey)
+		if err != nil {
+			t.Fatalf("test setup: hex.DecodeString: %v", err)
+		}
+		if len(wantHex) != 32 {
+			t.Fatalf("test setup: hexKey decodes to %d bytes, want 32 — fix the literal", len(wantHex))
+		}
+		got, err := decodeSSOSubjectHMACKey(hexKey)
+		if err != nil {
+			t.Fatalf("decode hex key: unexpected error: %v", err)
+		}
+		if !bytes.Equal(got, wantHex) {
+			t.Errorf("decode hex key = %x, want %x — must decode as hex (L3), not silently as base64url into different bytes", got, wantHex)
+		}
+	})
+
+	t.Run("base64url-encoded 32 bytes", func(t *testing.T) {
+		// A 32-byte input's unpadded base64url encoding is always 43
+		// characters — an ODD length hex.DecodeString rejects outright
+		// regardless of the actual characters produced — so this
+		// deterministically exercises the base64url fallback branch.
+		rawKey := bytes.Repeat([]byte{0xfa}, 32)
+		b64Key := base64.RawURLEncoding.EncodeToString(rawKey)
+		if len(b64Key)%2 == 0 {
+			t.Fatalf("test setup: b64Key has even length %d — no longer guaranteed to skip the hex branch", len(b64Key))
+		}
+		got, err := decodeSSOSubjectHMACKey(b64Key)
+		if err != nil {
+			t.Fatalf("decode base64url key: unexpected error: %v", err)
+		}
+		if !bytes.Equal(got, rawKey) {
+			t.Errorf("decode base64url key = %x, want %x", got, rawKey)
+		}
+	})
 }

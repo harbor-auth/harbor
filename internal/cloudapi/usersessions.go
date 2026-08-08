@@ -131,7 +131,9 @@ func NewUserSessionsHandler(store *Store, hasher *SubjectHasher, codes LoginCode
 // Responses:
 //   - 201 Created             login code minted
 //   - 400 Bad Request         malformed body, invalid namespace_id/subject, or an unknown JSON field
-//   - 403 Forbidden           the resolved user exists but is not active (subject_unavailable)
+//   - 403 Forbidden           the resolved user exists but is not active (subject_unavailable), or
+//     the presented token's anchor is namespace-restricted (M5) and does not
+//     permit namespace_id (cross_tenant_forbidden)
 //   - 404 Not Found           the target namespace does not exist or is deleted
 //   - 500 Internal Server Error  minting or persistence failure
 func (h *UserSessionsHandler) PostUserSessions(w http.ResponseWriter, r *http.Request) {
@@ -155,6 +157,23 @@ func (h *UserSessionsHandler) PostUserSessions(w http.ResponseWriter, r *http.Re
 	}
 	if len(req.Subject) == 0 || len(req.Subject) > maxSubjectLength {
 		writeCloudError(w, http.StatusBadRequest, "invalid_subject", "subject must be between 1 and 1024 bytes")
+		return
+	}
+
+	// M5 — per-anchor namespace binding: the JWT `sub` alone says nothing
+	// about which tenant a caller speaks for, so with two bridge keys
+	// configured — the entire point of multi-anchor trust — nothing before
+	// this would stop tenant A's bridge from minting a login code for a
+	// subject in tenant B's namespace. Checked BEFORE the namespace lookup
+	// below (and its 404-on-absent branch) so an anchor restricted away from
+	// a namespace can't use this endpoint to learn whether that namespace
+	// even exists. ServiceClaimsFromContext returns ok=false only when this
+	// handler is invoked directly, bypassing the HTTP auth middleware that
+	// sets it (e.g. a unit test exercising this handler in isolation) — that
+	// case has no anchor to bind to and is treated as unrestricted, exactly
+	// as an untested code path already implicitly is today.
+	if claims, ok := ServiceClaimsFromContext(ctx); ok && !claims.NamespacePermitted(req.NamespaceId) {
+		writeCloudError(w, http.StatusForbidden, "cross_tenant_forbidden", "this signing key is not permitted to mint sessions for the requested namespace")
 		return
 	}
 

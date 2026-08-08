@@ -29,9 +29,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/harbor-auth/harbor/internal/clients"
@@ -44,9 +47,15 @@ import (
 // integrationDeps bundles the real dependencies a cross-process cloudapi
 // scenario needs. requireIntegrationDeps skips the calling test when either
 // dependency is unavailable, mirroring cmd/harbor-mgmt's
-// TestRunBuildsDurableManagementGraph.
+// TestRunBuildsDurableManagementGraph. q and pool are exposed alongside store
+// (M4) so a test can verify what actually landed in Postgres — e.g. that a
+// concurrent resolve-or-create left exactly one users row and one
+// federated_identities row — independent of whatever Store's own narrow
+// querier/federatedPool interfaces choose to expose.
 type integrationDeps struct {
 	store *Store
+	q     *db.Queries
+	pool  *pgxpool.Pool
 }
 
 func requireIntegrationDeps(t *testing.T) integrationDeps {
@@ -77,13 +86,14 @@ func requireIntegrationDeps(t *testing.T) integrationDeps {
 	// material, only long enough to satisfy crypto.NewLocalKeyProvider's
 	// length floor — so the user-sessions create-path can be exercised
 	// against a real transaction.
-	store := NewStore(db.New(pool)).WithFederatedIdentities(
+	q := db.New(pool)
+	store := NewStore(q).WithFederatedIdentities(
 		NewPgxFederatedPool(pool),
 		requireIntegrationKeyProvider(t),
 		crypto.NewCipher(),
 	)
 
-	return integrationDeps{store: store}
+	return integrationDeps{store: store, q: q, pool: pool}
 }
 
 // integrationKMSSecret is a fixed 32+ byte test secret for
@@ -133,6 +143,7 @@ type integrationEnv struct {
 	verifier *ServiceAuthVerifier
 	ecPriv   *ecdsa.PrivateKey
 	hot      *recordingHotServer
+	deps     integrationDeps // direct DB access, for verifying what the HTTP layer actually persisted (M4)
 }
 
 func newIntegrationEnv(t *testing.T) *integrationEnv {
@@ -158,7 +169,7 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 	ts := httptest.NewServer(router)
 	t.Cleanup(ts.Close)
 
-	return &integrationEnv{ts: ts, verifier: verifier, ecPriv: priv, hot: hot}
+	return &integrationEnv{ts: ts, verifier: verifier, ecPriv: priv, hot: hot, deps: deps}
 }
 
 // mint signs a fresh cloudServiceAuth JWT against this env's trust anchor.
@@ -423,5 +434,290 @@ func TestIntegrationCloudIntegrationDisabledReturns404(t *testing.T) {
 	_ = res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		t.Errorf("GET /healthz status = %d, want 200", res.StatusCode)
+	}
+}
+
+// --- M4: real-Postgres coverage for POST /admin/v1/user-sessions ----------
+//
+// contract_test.go's fixture-driven suite never exercises this route
+// end-to-end (its in-memory Store has no WithFederatedIdentities pool
+// wired), and usersessions_test.go's fakeFederatedPool doesn't enforce
+// federated_identities' primary key and gives Rollback no real semantics
+// (it "discards" a loser's row only because staged writes were never
+// merged in the first place) — so TestResolveOrCreateFederatedUserLosesCreateRaceRereadsWinner
+// would pass identically against an implementation with NO transaction at
+// all. These tests close that gap against the real database.
+
+// userSessionsSubjectHasher matches the hasher newContractRouter wires for
+// every HTTP-driven test in this file (contractSubjectHMACKey), so a test
+// can independently recompute the subject_hmac a mint request produced and
+// query federated_identities directly.
+func userSessionsSubjectHasher(t *testing.T) *SubjectHasher {
+	t.Helper()
+	h, err := NewSubjectHasher([]byte(contractSubjectHMACKey))
+	if err != nil {
+		t.Fatalf("NewSubjectHasher: %v", err)
+	}
+	return h
+}
+
+// mintUserSession issues a real POST /admin/v1/user-sessions request and
+// returns the decoded response. Fails the test on anything but 201.
+func (e *integrationEnv) mintUserSession(t *testing.T, namespaceID, subject string) cloudopenapi.UserSessionMintResponse {
+	t.Helper()
+	bearer := e.mint(t, "user-sessions:mint", 90*time.Second)
+	res := e.do(t, http.MethodPost, "/admin/v1/user-sessions", bearer, "",
+		fmt.Sprintf(`{"namespace_id":%q,"subject":%q}`, namespaceID, subject))
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("mint user session: status = %d, want 201", res.StatusCode)
+	}
+	var resp cloudopenapi.UserSessionMintResponse
+	if err := json.NewDecoder(res.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode mint response: %v", err)
+	}
+	return resp
+}
+
+// TestIntegrationUserSessionsCreatePath proves the 201 create path against a
+// REAL transaction: the response reports created=true with a usable login
+// code, and exactly one federated_identities row — bound to exactly one
+// active users row — exists for the (namespace, subject) pair afterward.
+func TestIntegrationUserSessionsCreatePath(t *testing.T) {
+	env := newIntegrationEnv(t)
+	ctx := context.Background()
+	nsID := uniqueID("it-us-create-ns")
+	if _, err := env.deps.store.CreateNamespace(ctx, nsID, "active"); err != nil {
+		t.Fatalf("CreateNamespace: %v", err)
+	}
+
+	resp := env.mintUserSession(t, nsID, "alice@example.com")
+	if resp.LoginCode == "" {
+		t.Error("login_code is empty")
+	}
+	if !resp.Created {
+		t.Error("Created = false, want true (first sighting)")
+	}
+
+	hasher := userSessionsSubjectHasher(t)
+	subjectHMAC := hasher.Hash(nsID, "alice@example.com")
+	fedIdentity, err := env.deps.q.GetFederatedIdentity(ctx, db.GetFederatedIdentityParams{
+		NamespaceID: nsID, SubjectHmac: subjectHMAC, KeyVersion: subjectHMACKeyVersion,
+	})
+	if err != nil {
+		t.Fatalf("GetFederatedIdentity: %v", err)
+	}
+	user, err := env.deps.q.GetUser(ctx, fedIdentity.UserID)
+	if err != nil {
+		t.Fatalf("GetUser: %v", err)
+	}
+	if user.Status != "active" {
+		t.Errorf("created user status = %q, want active", user.Status)
+	}
+}
+
+// TestIntegrationUserSessionsSameSubjectTwiceOneUser proves identity
+// resolution is idempotent on (namespace_id, subject) against a real
+// transaction: a second mint for the same pair resolves to the SAME user
+// (created=false, a fresh login code), never a second user row.
+func TestIntegrationUserSessionsSameSubjectTwiceOneUser(t *testing.T) {
+	env := newIntegrationEnv(t)
+	ctx := context.Background()
+	nsID := uniqueID("it-us-twice-ns")
+	if _, err := env.deps.store.CreateNamespace(ctx, nsID, "active"); err != nil {
+		t.Fatalf("CreateNamespace: %v", err)
+	}
+	const subject = "bob@example.com"
+
+	first := env.mintUserSession(t, nsID, subject)
+	if !first.Created {
+		t.Fatal("first mint: Created = false, want true")
+	}
+	second := env.mintUserSession(t, nsID, subject)
+	if second.Created {
+		t.Error("second mint: Created = true, want false (existing mapping)")
+	}
+	if second.LoginCode == first.LoginCode {
+		t.Error("second mint must issue a fresh, distinct login code, never replay the first")
+	}
+
+	hasher := userSessionsSubjectHasher(t)
+	subjectHMAC := hasher.Hash(nsID, subject)
+	var count int
+	if err := env.deps.pool.QueryRow(ctx,
+		`SELECT count(*) FROM federated_identities WHERE namespace_id = $1 AND subject_hmac = $2 AND key_version = $3`,
+		nsID, subjectHMAC, subjectHMACKeyVersion,
+	).Scan(&count); err != nil {
+		t.Fatalf("count federated_identities: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("federated_identities rows for (%s, %s) = %d, want 1", nsID, subject, count)
+	}
+}
+
+// TestIntegrationUserSessionsSameSubjectTwoNamespacesDistinctUsers proves
+// cross-tenant isolation against a real transaction: the SAME subject string
+// presented under two different namespaces resolves to two DIFFERENT users.
+func TestIntegrationUserSessionsSameSubjectTwoNamespacesDistinctUsers(t *testing.T) {
+	env := newIntegrationEnv(t)
+	ctx := context.Background()
+	nsA := uniqueID("it-us-nsa")
+	nsB := uniqueID("it-us-nsb")
+	if _, err := env.deps.store.CreateNamespace(ctx, nsA, "active"); err != nil {
+		t.Fatalf("CreateNamespace %s: %v", nsA, err)
+	}
+	if _, err := env.deps.store.CreateNamespace(ctx, nsB, "active"); err != nil {
+		t.Fatalf("CreateNamespace %s: %v", nsB, err)
+	}
+	const subject = "carol@example.com"
+
+	env.mintUserSession(t, nsA, subject)
+	env.mintUserSession(t, nsB, subject)
+
+	hasher := userSessionsSubjectHasher(t)
+	idA, err := env.deps.q.GetFederatedIdentity(ctx, db.GetFederatedIdentityParams{
+		NamespaceID: nsA, SubjectHmac: hasher.Hash(nsA, subject), KeyVersion: subjectHMACKeyVersion,
+	})
+	if err != nil {
+		t.Fatalf("GetFederatedIdentity(nsA): %v", err)
+	}
+	idB, err := env.deps.q.GetFederatedIdentity(ctx, db.GetFederatedIdentityParams{
+		NamespaceID: nsB, SubjectHmac: hasher.Hash(nsB, subject), KeyVersion: subjectHMACKeyVersion,
+	})
+	if err != nil {
+		t.Fatalf("GetFederatedIdentity(nsB): %v", err)
+	}
+	if idA.UserID == idB.UserID {
+		t.Fatalf("same subject in two namespaces resolved to the SAME user %v — cross-tenant isolation broken", idA.UserID)
+	}
+}
+
+// TestIntegrationUserSessionsErasedUserReturns403 proves an erased/shredded
+// user is refused re-entry via SSO against a real transaction: SetUserStatus
+// (the same primitive identity.Eraser uses) flips the already-resolved
+// user to "erased" between the two mints, and the second mint — for the
+// SAME (namespace, subject) pair, so it resolves to that exact user — is
+// rejected 403 subject_unavailable.
+func TestIntegrationUserSessionsErasedUserReturns403(t *testing.T) {
+	env := newIntegrationEnv(t)
+	ctx := context.Background()
+	nsID := uniqueID("it-us-erased-ns")
+	if _, err := env.deps.store.CreateNamespace(ctx, nsID, "active"); err != nil {
+		t.Fatalf("CreateNamespace: %v", err)
+	}
+	const subject = "dave@example.com"
+
+	first := env.mintUserSession(t, nsID, subject)
+	if !first.Created {
+		t.Fatal("first mint: Created = false, want true")
+	}
+
+	hasher := userSessionsSubjectHasher(t)
+	fedIdentity, err := env.deps.q.GetFederatedIdentity(ctx, db.GetFederatedIdentityParams{
+		NamespaceID: nsID, SubjectHmac: hasher.Hash(nsID, subject), KeyVersion: subjectHMACKeyVersion,
+	})
+	if err != nil {
+		t.Fatalf("GetFederatedIdentity: %v", err)
+	}
+	if err := env.deps.q.SetUserStatus(ctx, db.SetUserStatusParams{ID: fedIdentity.UserID, Status: "erased"}); err != nil {
+		t.Fatalf("SetUserStatus(erased): %v", err)
+	}
+
+	bearer := env.mint(t, "user-sessions:mint", 90*time.Second)
+	res := env.do(t, http.MethodPost, "/admin/v1/user-sessions", bearer, "",
+		fmt.Sprintf(`{"namespace_id":%q,"subject":%q}`, nsID, subject))
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("mint against erased user: status = %d, want 403", res.StatusCode)
+	}
+	if got := decodeIntegrationError(t, res).Code; got != cloudopenapi.ErrorCodeSubjectUnavailable {
+		t.Fatalf("error.code = %q, want subject_unavailable", got)
+	}
+}
+
+// TestIntegrationUserSessionsConcurrentResolveOrCreate is M4's core proof:
+// N goroutines call Store.ResolveOrCreateFederatedUser CONCURRENTLY for the
+// EXACT SAME (namespace, subject) against a REAL Postgres transaction — the
+// one scenario usersessions_test.go's fakeFederatedPool cannot exercise (its
+// Rollback is a no-op only because staged writes were never merged into the
+// pool, not because it enforces any real transactional isolation). Asserts:
+// every goroutine resolves to the SAME user id, exactly one of them reports
+// created=true, and the database ends up with EXACTLY ONE users row and
+// EXACTLY ONE federated_identities row for this pair — no orphaned user left
+// behind by a losing goroutine's rolled-back transaction.
+//
+//harbor:invariant INV-CLOUDAPI-REPLAY-RESISTANT
+func TestIntegrationUserSessionsConcurrentResolveOrCreate(t *testing.T) {
+	deps := requireIntegrationDeps(t)
+	ctx := context.Background()
+	nsID := uniqueID("it-us-concurrent-ns")
+	if _, err := deps.store.CreateNamespace(ctx, nsID, "active"); err != nil {
+		t.Fatalf("CreateNamespace: %v", err)
+	}
+	const subject = "concurrent@example.com"
+	hasher := userSessionsSubjectHasher(t)
+	subjectHMAC := hasher.Hash(nsID, subject)
+
+	const n = 20
+	var wg sync.WaitGroup
+	userIDs := make([]string, n)
+	createdFlags := make([]bool, n)
+	errs := make([]error, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			id, created, err := deps.store.ResolveOrCreateFederatedUser(ctx, nsID, subjectHMAC, subjectHMACKeyVersion, "EU")
+			userIDs[i], createdFlags[i], errs[i] = id, created, err
+		}(i)
+	}
+	close(start) // release every goroutine at once, maximising actual overlap
+	wg.Wait()
+
+	var firstID string
+	createdCount := 0
+	for i := 0; i < n; i++ {
+		if errs[i] != nil {
+			t.Fatalf("goroutine %d: ResolveOrCreateFederatedUser error: %v", i, errs[i])
+		}
+		if userIDs[i] == "" {
+			t.Fatalf("goroutine %d: empty user id", i)
+		}
+		if firstID == "" {
+			firstID = userIDs[i]
+		} else if userIDs[i] != firstID {
+			t.Fatalf("goroutine %d resolved to user %q, want %q — every goroutine must resolve to the SAME user", i, userIDs[i], firstID)
+		}
+		if createdFlags[i] {
+			createdCount++
+		}
+	}
+	if createdCount != 1 {
+		t.Errorf("created=true count = %d, want exactly 1 (exactly one goroutine must win the create race)", createdCount)
+	}
+
+	var winnerUUID pgtype.UUID
+	if err := winnerUUID.Scan(firstID); err != nil {
+		t.Fatalf("parse winner id %q: %v", firstID, err)
+	}
+	var userCount int
+	if err := deps.pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE id = $1`, winnerUUID).Scan(&userCount); err != nil {
+		t.Fatalf("count users: %v", err)
+	}
+	if userCount != 1 {
+		t.Errorf("users rows for %s = %d, want exactly 1 (no orphaned loser row survived rollback)", firstID, userCount)
+	}
+
+	var identityCount int
+	if err := deps.pool.QueryRow(ctx,
+		`SELECT count(*) FROM federated_identities WHERE namespace_id = $1 AND subject_hmac = $2 AND key_version = $3`,
+		nsID, subjectHMAC, subjectHMACKeyVersion,
+	).Scan(&identityCount); err != nil {
+		t.Fatalf("count federated_identities: %v", err)
+	}
+	if identityCount != 1 {
+		t.Errorf("federated_identities rows for (%s, %s) = %d, want exactly 1", nsID, subject, identityCount)
 	}
 }

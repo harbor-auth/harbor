@@ -102,10 +102,13 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           description: >-
-            Either the presented service token lacks `user-sessions:mint`
-            (`insufficient_scope`), or the resolved user exists but is not in
+            The presented service token lacks `user-sessions:mint`
+            (`insufficient_scope`); the resolved user exists but is not in
             `active` status — e.g. erased/shredded — and must not be
-            re-entered via SSO (`subject_unavailable`).
+            re-entered via SSO (`subject_unavailable`); or the token's
+            signing key is restricted to a set of namespaces (per-anchor
+            namespace binding) that does not include the request's
+            `namespace_id` (`cross_tenant_forbidden`).
           content:
             application/json:
               schema:

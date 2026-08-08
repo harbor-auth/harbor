@@ -97,6 +97,14 @@ type querier interface {
 	GetCloudOperation(ctx context.Context, arg db.GetCloudOperationParams) (db.CloudOperation, error)
 	CreateCloudSession(ctx context.Context, arg db.CreateCloudSessionParams) (db.CloudSession, error)
 	GetCloudSession(ctx context.Context, sessionID string) (db.CloudSession, error)
+	// DeleteFederatedIdentitiesByNamespace backs
+	// Store.DeleteFederatedIdentitiesByNamespace (H1: called from the
+	// namespace soft-delete path so an offboarded tenant's corporate-SSO
+	// subject mappings don't linger). q is the same *db.Queries — and so the
+	// same underlying Postgres — WithFederatedIdentities' pool talks to; this
+	// table needs no separate wiring the way the atomic
+	// ResolveOrCreateFederatedUser transaction does.
+	DeleteFederatedIdentitiesByNamespace(ctx context.Context, namespaceID string) error
 }
 
 // Store persists Harbor Cloud management API records — namespaces, the
@@ -178,6 +186,26 @@ func (s *Store) GetNamespace(ctx context.Context, id string) (Namespace, error) 
 func (s *Store) SoftDeleteNamespace(ctx context.Context, id string) error {
 	if err := s.q.SoftDeleteCloudNamespace(ctx, id); err != nil {
 		return fmt.Errorf("cloudapi: soft delete namespace: %w", err)
+	}
+	return nil
+}
+
+// DeleteFederatedIdentitiesByNamespace removes every corporate-SSO
+// subject->user mapping for a namespace (H1). The DELETE affects zero rows
+// (never errors) when the namespace never had any federated identities, so
+// callers can invoke this unconditionally on offboarding rather than first
+// checking whether SSO was ever used for that tenant.
+//
+// This is deliberately a SEPARATE statement from SoftDeleteNamespace, not
+// wrapped in a shared transaction with it: querier (unlike federatedPool) is
+// not transaction-aware, and namespaces.go's DeleteAdminV1Namespace already
+// treats delete as idempotent and safely retryable end-to-end (the
+// idempotency ledger only records success once every step here has
+// returned), so a failure between the two leaves at most a stale row set
+// that a retry of the same DELETE /admin/v1/namespaces/{id} call cleans up.
+func (s *Store) DeleteFederatedIdentitiesByNamespace(ctx context.Context, id string) error {
+	if err := s.q.DeleteFederatedIdentitiesByNamespace(ctx, id); err != nil {
+		return fmt.Errorf("cloudapi: delete federated identities for namespace: %w", err)
 	}
 	return nil
 }

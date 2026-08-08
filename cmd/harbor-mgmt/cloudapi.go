@@ -121,14 +121,19 @@ func cloudAuthorized(verifier *cloudapi.ServiceAuthVerifier, route, scope string
 		}
 		claims, err := verifier.Verify(cloudapi.WithRoute(r.Context(), route), bearer)
 		if err != nil {
-			writeCloudVerifyError(w, err)
+			writeCloudVerifyError(w, err, scope)
 			return
 		}
 		if !claims.HasScope(scope) {
 			writeCloudWiringError(w, http.StatusForbidden, cloudopenapi.ErrorCodeInsufficientScope, "the "+scope+" scope is required")
 			return
 		}
-		next(w, r)
+		// M5 — per-anchor namespace binding: attach claims to the request
+		// context so a handler that needs a namespace_id parsed from ITS OWN
+		// request body (not available here) can check it against the
+		// matched anchor's AllowedNamespaces — see usersessions.go's
+		// PostUserSessions, the one route that currently reads this.
+		next(w, r.WithContext(cloudapi.WithServiceClaims(r.Context(), claims)))
 	}
 }
 
@@ -189,19 +194,19 @@ func writeCloudWiringError(w http.ResponseWriter, status int, code cloudopenapi.
 // replayed jti gets its own stable code, every other verification failure
 // (malformed/invalid signature, wrong audience, missing scope, expired, or an
 // unconfigured trust anchor/replay guard) is reported as invalid_token so a
-// caller never learns which specific check failed.
-func writeCloudVerifyError(w http.ResponseWriter, err error) {
+// caller never learns which specific check failed. routeScope is the scope
+// the calling route requires; per L1, it is used verbatim in the
+// insufficient_scope message so an anchor-scope rejection (the signing key
+// isn't permitted to assert routeScope) reads byte-for-byte identically to
+// the route's own required-scope rejection just below in cloudAuthorized —
+// a caller must not be able to tell the two apart from the response body.
+func writeCloudVerifyError(w http.ResponseWriter, err error, routeScope string) {
 	if errors.Is(err, cloudapi.ErrReplayed) {
 		writeCloudWiringError(w, http.StatusUnauthorized, cloudopenapi.ErrorCodeTokenReplayed, "the bearer token has already been used")
 		return
 	}
 	if errors.Is(err, cloudapi.ErrScopeNotPermittedForAnchor) {
-		// §7 — per-key scope binding: the signing key that produced this
-		// token is not permitted to assert one of its claimed scopes. Reads
-		// identically to a route's own required-scope check
-		// (claims.HasScope) below — a caller must not be able to tell the
-		// two apart.
-		writeCloudWiringError(w, http.StatusForbidden, cloudopenapi.ErrorCodeInsufficientScope, "the presented token's signing key is not permitted to assert one of its claimed scopes")
+		writeCloudWiringError(w, http.StatusForbidden, cloudopenapi.ErrorCodeInsufficientScope, "the "+routeScope+" scope is required")
 		return
 	}
 	writeCloudWiringError(w, http.StatusUnauthorized, cloudopenapi.ErrorCodeInvalidToken, "a valid cloudServiceAuth bearer token is required")

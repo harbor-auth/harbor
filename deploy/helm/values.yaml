@@ -208,17 +208,31 @@ mgmt:
     # Optional: additional cloudServiceAuth trust anchors, each restricted to
     # its own permitted scope set (internal/cloudapi/serviceauth.go §7 —
     # per-key scope binding). Newline-separated entries of
-    # "<scope>[,<scope>...] <PEM, with line breaks escaped as literal \n>",
-    # e.g. the corporate-SSO SAML bridge gets a key permitted ONLY
-    # user-sessions:mint, never keys:rotate. Blank when unused —
-    # cloudServiceAuthPublicKey alone (permitted every scope, back-compat)
-    # remains sufficient for a deployment with a single caller.
+    # "<scope>[,<scope>...] [ns=<namespace>[,<namespace>...]] <PEM, with line
+    # breaks escaped as literal \n>", e.g. the corporate-SSO SAML bridge gets
+    # a key permitted ONLY user-sessions:mint, never keys:rotate. Blank when
+    # unused — cloudServiceAuthPublicKey alone (permitted every scope, every
+    # namespace, back-compat) remains sufficient for a deployment with a
+    # single caller.
+    #
+    # The optional "ns=" token (M5 — per-anchor namespace binding) further
+    # restricts WHICH namespace_id that key's user-sessions:mint tokens may
+    # act on. This matters as soon as a SECOND anchor is added for a second
+    # tenant's own bridge: without it, nothing stops tenant A's bridge from
+    # minting a login code for a subject in tenant B's namespace — the JWT's
+    # `sub` claim identifies the calling SERVICE, never the tenant. Omitting
+    # "ns=" leaves that anchor namespace-unrestricted.
+    #   e.g. "user-sessions:mint ns=acme <PEM...>" — this key may only mint
+    #   for the "acme" namespace, regardless of what namespace_id its bearer
+    #   token's request body names.
     additionalServiceAuthPublicKeys: ""
-    # HMAC-SHA256 key (base64url- or hex-encoded, >=32 bytes) harbor-mgmt
+    # HMAC-SHA256 key (hex- or base64url-encoded, >=32 bytes) harbor-mgmt
     # uses to hash corporate-SSO subjects (SAML NameIDs) before persisting
     # them (federated_identities.subject_hmac) — the raw subject is never
     # stored. Required when cloudIntegration is enabled.
-    # Generate: openssl rand -hex 32
+    # Generate: openssl rand -hex 32 — hex is tried first by
+    # cmd/harbor-mgmt/main.go's decodeSSOSubjectHMACKey (L3), specifically so
+    # this canonical, documented format is never misread as base64url.
     ssoSubjectHmacKey: ""
     # Same-origin absolute path GET /login/sso redirects to after a
     # successful corporate-SSO handoff. Must start with "/", no scheme, no

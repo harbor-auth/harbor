@@ -37,6 +37,22 @@ type MFASessionStamper interface {
 	StampMFAStepUp(ctx context.Context, userID string, verifiedAt time.Time) error
 }
 
+// MFAEnrollmentGuard reports whether the caller's CURRENT session (not just
+// their user account) is permitted to enroll a new TOTP factor (M3). A
+// session this browser never proved ownership of via the /authorize nonce
+// cookie — today, that's exactly the corporate-SSO handoff's federated
+// session (cmd/harbor-mgmt/sso.go's wireSSOLoginRoute) — must not be able to
+// self-enroll a factor whose only purpose, from that session's perspective,
+// would be to manufacture a step-up verification. This is checked here as
+// defense-in-depth, ahead of the (load-bearing) refusal in
+// bff.RecordTOTPStepUp, which independently blocks the SAME sessions from
+// ever having a step-up recorded regardless of whether enrollment happened.
+type MFAEnrollmentGuard interface {
+	// EnrollmentAllowed reports whether the request's session may enroll a
+	// new MFA factor.
+	EnrollmentAllowed(ctx context.Context) bool
+}
+
 // mfaCodeRequest is the JSON body for the code-carrying MFA endpoints (activate,
 // verify, verify-recovery).
 type mfaCodeRequest struct {
@@ -120,6 +136,7 @@ func (s *Server) decodeMFACode(w http.ResponseWriter, r *http.Request) (string, 
 // Responses:
 //   - 201 Created             on success ({factor_id, secret, provisioning_uri, recovery_codes})
 //   - 401 Unauthorized        missing authenticated user
+//   - 403 Forbidden           the session is not permitted to enroll a new factor (M3)
 //   - 409 Conflict            user already has an active TOTP factor
 //   - 503 Service Unavailable MFA not wired
 //   - 500 Internal Server Error enrollment failure
@@ -130,6 +147,10 @@ func (s *Server) PostMFAEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.mfa == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "MFA is not configured on this instance")
+		return
+	}
+	if s.mfaEnrollmentGuard != nil && !s.mfaEnrollmentGuard.EnrollmentAllowed(r.Context()) {
+		s.writeError(w, http.StatusForbidden, "mfa_enrollment_not_permitted", "this session is not permitted to enroll a new MFA factor")
 		return
 	}
 

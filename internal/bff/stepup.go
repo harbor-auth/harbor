@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"time"
+
+	"github.com/harbor-auth/harbor/internal/oidc"
 )
 
 // DefaultStepUpTTL is how long a step-up (MFA) verification stays valid before
@@ -86,6 +88,42 @@ type atomicTOTPStepUpStore interface {
 	RecordTOTPStepUp(ctx context.Context, requestID, userID string, verifiedAt time.Time) error
 }
 
+// ErrStepUpNotPermittedForSession is returned by RecordTOTPStepUp when the
+// session presenting a TOTP/recovery code is one this browser never proved
+// ownership of via the /authorize nonce cookie (M3). Today that is exactly
+// the corporate-SSO handoff's federated session (cmd/harbor-mgmt/sso.go's
+// wireSSOLoginRoute, deliberately minted with AuthMethod=federated and a nil
+// BrowserNonceHash). Without this check, a federated session could
+// self-enroll a TOTP factor, verify it, and have THIS function stamp
+// MFAVerifiedAt — after which StepUpGate.Require (which only checks
+// UserID+MFAVerifiedAt, not how the session was authenticated) would pass it
+// straight through to /compliance/export, /compliance/erase, /audit-events,
+// /consent-grants, and /relay-addresses. That every one of those routes
+// currently also happens to be un-routed to harbor-mgmt at the ingress is an
+// accident of deploy/helm/templates/ingress.yaml's path list, not an
+// application-level guarantee — this is the actual boundary.
+var ErrStepUpNotPermittedForSession = errors.New("bff: this session is not permitted to record a step-up verification")
+
+// SessionEligibleForMFAStepUp reports whether session is one RecordTOTPStepUp
+// is willing to record a step-up verification for (M3). Exported so
+// cmd/harbor-mgmt can apply the SAME predicate earlier, at MFA enrollment
+// time (internal/mgmtapi.MFAEnrollmentGuard) — a defense-in-depth check, not
+// a substitute for RecordTOTPStepUp's own (load-bearing) enforcement below.
+//
+// Both conditions are checked independently (not just AuthMethod) because
+// BrowserNonceHash — the property every other nonce gate in this package
+// (login.go) actually keys off — is the more fundamental one; AuthMethod is
+// the more legible one to read in an audit log or test failure. NOTE: this
+// also excludes the lost-device account-recovery track (its BFF session is
+// promoted to full scope in place via SetUserWithRecoveryStatus without ever
+// acquiring a browser nonce — see cmd/harbor-mgmt/caller.go's
+// recoverySessionIssuer) — a deliberate, accepted trade-off: that session is
+// short-lived, and a fresh, ordinary sign-in restores step-up eligibility
+// immediately.
+func SessionEligibleForMFAStepUp(session BFFSessionRecord) bool {
+	return session.AuthMethod != oidc.AuthMethodFederated && len(session.BrowserNonceHash) != 0
+}
+
 // RecordTOTPStepUp records a successful TOTP step-up as one ownership-checked
 // store mutation. Stores without this atomic capability fail closed.
 func RecordTOTPStepUp(ctx context.Context, store BFFSessionStore, requestID string, verifiedAt time.Time) error {
@@ -95,6 +133,11 @@ func RecordTOTPStepUp(ctx context.Context, store BFFSessionStore, requestID stri
 			return err
 		}
 		return ErrBFFSessionNotFound
+	}
+	// M3: refuse to manufacture a step-up verification for a session this
+	// browser never proved ownership of via the /authorize nonce cookie.
+	if !SessionEligibleForMFAStepUp(session) {
+		return ErrStepUpNotPermittedForSession
 	}
 	atomicStore, ok := store.(atomicTOTPStepUpStore)
 	if !ok {

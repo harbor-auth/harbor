@@ -112,7 +112,7 @@ func (h *KeysHandler) PostKeysRotate(w http.ResponseWriter, r *http.Request) {
 
 	claims, err := h.authorize(ctx, r)
 	if err != nil {
-		writeVerifyError(w, err)
+		writeVerifyError(w, err, scopeKeysRotate)
 		return
 	}
 	if !claims.HasScope(scopeKeysRotate) {
@@ -198,16 +198,19 @@ func extractBearerToken(r *http.Request) string {
 // failure (malformed/invalid signature, wrong audience, missing scope,
 // expired, or an unconfigured trust anchor/replay guard) is reported as
 // invalid_token so a caller never learns which specific check failed.
-func writeVerifyError(w http.ResponseWriter, err error) {
+// routeScope is the scope the calling route requires; it is used verbatim in
+// the insufficient_scope message so an anchor-scope rejection (L1: the
+// signing key isn't permitted to assert routeScope) is byte-for-byte
+// identical to the route's own HasScope rejection below — a caller must not
+// be able to tell, from the response body, whether it was the key's
+// per-anchor allow-list or the token's own claimed scopes that fell short.
+func writeVerifyError(w http.ResponseWriter, err error, routeScope string) {
 	if errors.Is(err, ErrReplayed) {
 		writeCloudAPIError(w, http.StatusUnauthorized, "token_replayed", "the bearer token has already been used")
 		return
 	}
 	if errors.Is(err, ErrScopeNotPermittedForAnchor) {
-		// §7 — per-key scope binding: reads identically to a route's own
-		// required-scope rejection — a caller must not be able to tell the
-		// two apart.
-		writeCloudAPIError(w, http.StatusForbidden, "insufficient_scope", "the presented token's signing key is not permitted to assert one of its claimed scopes")
+		writeCloudAPIError(w, http.StatusForbidden, "insufficient_scope", "the "+routeScope+" scope is required")
 		return
 	}
 	writeCloudAPIError(w, http.StatusUnauthorized, "invalid_token", "a valid cloudServiceAuth bearer token is required")

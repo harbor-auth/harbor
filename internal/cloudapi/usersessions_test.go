@@ -89,6 +89,19 @@ func (p *fakeFederatedPool) GetFederatedIdentity(_ context.Context, arg db.GetFe
 	return row, nil
 }
 
+// GetUser implements the plain, non-transactional read federatedPool needs
+// for L7's post-conflict status re-check (ResolveOrCreateFederatedUser's
+// create-race loser branch).
+func (p *fakeFederatedPool) GetUser(_ context.Context, id pgtype.UUID) (db.User, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	u, ok := p.users[uuid.UUID(id.Bytes).String()]
+	if !ok {
+		return db.User{}, pgx.ErrNoRows
+	}
+	return u, nil
+}
+
 // fakeFederatedTx stages writes locally; they only become visible to other
 // callers (via the pool) on Commit, mirroring real transaction isolation for
 // this package's single-goroutine tests.
@@ -348,6 +361,44 @@ func TestResolveOrCreateFederatedUserLosesCreateRaceRereadsWinner(t *testing.T) 
 	_ = got
 }
 
+// TestResolveOrCreateFederatedUserLosesCreateRaceToErasedWinnerIsUnavailable
+// is L7: the create-race LOSER branch must apply the exact same
+// active-status gate the primary (cache-hit) read path already does. Before
+// this fix, a caller who happened to lose the race to a winner whose account
+// was ALREADY erased (a narrow but real window — e.g. erasure and a second
+// concurrent SSO login landing at nearly the same instant) got back a live
+// user id instead of ErrFederatedSubjectUnavailable: the one return path
+// that skipped the check.
+func TestResolveOrCreateFederatedUserLosesCreateRaceToErasedWinnerIsUnavailable(t *testing.T) {
+	store, pool := newFederatedTestStore(t)
+	hasher, err := NewSubjectHasher([]byte("subject-hmac-test-key-32-bytes!!"))
+	if err != nil {
+		t.Fatalf("NewSubjectHasher: %v", err)
+	}
+	subjectHMAC := hasher.Hash("acme", "alice@example.com")
+
+	winnerID := uuid.New()
+	var winnerUID pgtype.UUID
+	if err := winnerUID.Scan(winnerID.String()); err != nil {
+		t.Fatalf("scan winner uuid: %v", err)
+	}
+	// The winner's account is already erased — the loser must not learn
+	// their user id and be granted a session anyway.
+	pool.putUser(db.User{ID: winnerUID, Region: "EU", Status: "erased"})
+	pool.mu.Lock()
+	pool.createFederatedIdentityErr = pgUniqueViolationForIdentity
+	pool.pendingWinnerIdentity = &db.FederatedIdentity{NamespaceID: "acme", SubjectHmac: subjectHMAC, KeyVersion: subjectHMACKeyVersion, UserID: winnerUID}
+	pool.mu.Unlock()
+
+	_, created, err := store.ResolveOrCreateFederatedUser(context.Background(), "acme", subjectHMAC, subjectHMACKeyVersion, "EU")
+	if !errors.Is(err, ErrFederatedSubjectUnavailable) {
+		t.Fatalf("ResolveOrCreateFederatedUser (lost race to erased winner) error = %v, want ErrFederatedSubjectUnavailable", err)
+	}
+	if created {
+		t.Error("created = true, want false")
+	}
+}
+
 // --- UserSessionsHandler (HTTP layer) --------------------------------------
 
 func newUserSessionsTestHandler(t *testing.T) (*UserSessionsHandler, *fakeFederatedPool, *redis.Client) {
@@ -506,6 +557,66 @@ func TestPostUserSessionsSameSubjectSecondCallCreatedFalse(t *testing.T) {
 	}
 	if secondResp.LoginCode == firstResp.LoginCode {
 		t.Error("second call must mint a fresh, distinct login code, never replay the first")
+	}
+}
+
+// TestPostUserSessionsAnchorNamespaceRestrictionRejectsOtherNamespace is M5
+// at the handler level: when ServiceClaims restricted to one namespace are
+// present in the request context (as cloudAuthorized/requireServiceAuth set
+// them in production), a mint request for a DIFFERENT namespace is rejected
+// 403 cross_tenant_forbidden — before the namespace-exists lookup even runs,
+// so a restricted anchor can't use this endpoint to probe which namespaces
+// exist. The same claims mint successfully against the namespace they ARE
+// bound to.
+func TestPostUserSessionsAnchorNamespaceRestrictionRejectsOtherNamespace(t *testing.T) {
+	h, _, _ := newUserSessionsTestHandler(t)
+	if _, err := h.store.CreateNamespace(context.Background(), "globex", "active"); err != nil {
+		t.Fatalf("CreateNamespace globex: %v", err)
+	}
+
+	restricted := ServiceClaims{
+		Subject:           "acme-bridge",
+		Scopes:            []string{"user-sessions:mint"},
+		allowedNamespaces: map[string]struct{}{"acme": {}},
+	}
+
+	doWithClaims := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/admin/v1/user-sessions", strings.NewReader(body))
+		req = req.WithContext(WithServiceClaims(req.Context(), restricted))
+		rec := httptest.NewRecorder()
+		h.PostUserSessions(rec, req)
+		return rec
+	}
+
+	t.Run("namespace outside the anchor's set is rejected", func(t *testing.T) {
+		rec := doWithClaims(`{"namespace_id":"globex","subject":"alice@example.com"}`)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403; body = %s", rec.Code, rec.Body.String())
+		}
+		if got := decodeError(t, rec); got.Code != cloudopenapi.ErrorCodeCrossTenantForbidden {
+			t.Errorf("error.code = %q, want cross_tenant_forbidden", got.Code)
+		}
+	})
+
+	t.Run("the anchor's own bound namespace still succeeds", func(t *testing.T) {
+		rec := doWithClaims(`{"namespace_id":"acme","subject":"alice@example.com"}`)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+// TestPostUserSessionsNoClaimsInContextIsUnrestricted proves the fallback
+// behavior for the many existing tests (and doPostUserSessions callers) that
+// invoke PostUserSessions directly, bypassing the HTTP auth middleware that
+// sets ServiceClaims: with no claims present, there is no anchor to bind to,
+// so the M5 check is a no-op — identical to this handler's behavior before
+// M5 existed.
+func TestPostUserSessionsNoClaimsInContextIsUnrestricted(t *testing.T) {
+	h, _, _ := newUserSessionsTestHandler(t)
+	rec := doPostUserSessions(h, `{"namespace_id":"acme","subject":"alice@example.com"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
 	}
 }
 

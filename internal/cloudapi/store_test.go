@@ -17,13 +17,14 @@ import (
 // pattern in internal/mgmtapi/byo_domain_store_test.go: each test wires only
 // the methods it exercises.
 type fakeQuerier struct {
-	createNamespaceFn     func(context.Context, db.CreateCloudNamespaceParams) (db.CloudNamespace, error)
-	getNamespaceFn        func(context.Context, string) (db.CloudNamespace, error)
-	softDeleteNamespaceFn func(context.Context, string) error
-	createOperationFn     func(context.Context, db.CreateCloudOperationParams) (db.CloudOperation, error)
-	getOperationFn        func(context.Context, db.GetCloudOperationParams) (db.CloudOperation, error)
-	createSessionFn       func(context.Context, db.CreateCloudSessionParams) (db.CloudSession, error)
-	getSessionFn          func(context.Context, string) (db.CloudSession, error)
+	createNamespaceFn                      func(context.Context, db.CreateCloudNamespaceParams) (db.CloudNamespace, error)
+	getNamespaceFn                         func(context.Context, string) (db.CloudNamespace, error)
+	softDeleteNamespaceFn                  func(context.Context, string) error
+	createOperationFn                      func(context.Context, db.CreateCloudOperationParams) (db.CloudOperation, error)
+	getOperationFn                         func(context.Context, db.GetCloudOperationParams) (db.CloudOperation, error)
+	createSessionFn                        func(context.Context, db.CreateCloudSessionParams) (db.CloudSession, error)
+	getSessionFn                           func(context.Context, string) (db.CloudSession, error)
+	deleteFederatedIdentitiesByNamespaceFn func(context.Context, string) error
 }
 
 func (f *fakeQuerier) CreateCloudNamespace(ctx context.Context, arg db.CreateCloudNamespaceParams) (db.CloudNamespace, error) {
@@ -46,6 +47,9 @@ func (f *fakeQuerier) CreateCloudSession(ctx context.Context, arg db.CreateCloud
 }
 func (f *fakeQuerier) GetCloudSession(ctx context.Context, sessionID string) (db.CloudSession, error) {
 	return f.getSessionFn(ctx, sessionID)
+}
+func (f *fakeQuerier) DeleteFederatedIdentitiesByNamespace(ctx context.Context, namespaceID string) error {
+	return f.deleteFederatedIdentitiesByNamespaceFn(ctx, namespaceID)
 }
 
 var errUniqueViolation = &pgconn.PgError{Code: "23505", ConstraintName: "cloud_namespaces_pkey"}
@@ -162,6 +166,39 @@ func TestStoreSoftDeleteNamespaceIdempotent(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("SoftDeleteCloudNamespace() called %d times, want 2", calls)
+	}
+}
+
+// TestStoreDeleteFederatedIdentitiesByNamespace proves the H1 store method
+// delegates to the sqlc-generated query and wraps a backend error rather
+// than swallowing it.
+func TestStoreDeleteFederatedIdentitiesByNamespace(t *testing.T) {
+	var gotNamespaceID string
+	q := &fakeQuerier{
+		deleteFederatedIdentitiesByNamespaceFn: func(_ context.Context, namespaceID string) error {
+			gotNamespaceID = namespaceID
+			return nil
+		},
+	}
+	store := NewStore(q)
+	if err := store.DeleteFederatedIdentitiesByNamespace(context.Background(), "acme-prod"); err != nil {
+		t.Fatalf("DeleteFederatedIdentitiesByNamespace() error = %v", err)
+	}
+	if gotNamespaceID != "acme-prod" {
+		t.Fatalf("DeleteFederatedIdentitiesByNamespace() namespaceID = %q, want acme-prod", gotNamespaceID)
+	}
+}
+
+func TestStoreDeleteFederatedIdentitiesByNamespacePropagatesBackendError(t *testing.T) {
+	backendErr := errors.New("connection reset")
+	q := &fakeQuerier{
+		deleteFederatedIdentitiesByNamespaceFn: func(context.Context, string) error {
+			return backendErr
+		},
+	}
+	store := NewStore(q)
+	if err := store.DeleteFederatedIdentitiesByNamespace(context.Background(), "acme-prod"); !errors.Is(err, backendErr) {
+		t.Fatalf("DeleteFederatedIdentitiesByNamespace() error = %v, want wrapped %v", err, backendErr)
 	}
 }
 

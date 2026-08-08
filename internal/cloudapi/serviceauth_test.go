@@ -568,6 +568,53 @@ func TestParseTrustAnchorsEnv(t *testing.T) {
 			}
 		})
 	}
+
+	// --- M5: the optional "ns=" namespace-binding token ---------------------
+
+	t.Run("ns= token restricts AllowedNamespaces", func(t *testing.T) {
+		anchors, err := ParseTrustAnchorsEnv("user-sessions:mint ns=acme " + escaped)
+		if err != nil {
+			t.Fatalf("ParseTrustAnchorsEnv: %v", err)
+		}
+		if len(anchors) != 1 {
+			t.Fatalf("got %d anchors, want 1", len(anchors))
+		}
+		if len(anchors[0].AllowedNamespaces) != 1 || anchors[0].AllowedNamespaces[0] != "acme" {
+			t.Errorf("AllowedNamespaces = %v, want [acme]", anchors[0].AllowedNamespaces)
+		}
+	})
+
+	t.Run("ns= token accepts a comma-separated namespace list", func(t *testing.T) {
+		anchors, err := ParseTrustAnchorsEnv("user-sessions:mint ns=acme,globex " + escaped)
+		if err != nil {
+			t.Fatalf("ParseTrustAnchorsEnv: %v", err)
+		}
+		if len(anchors[0].AllowedNamespaces) != 2 {
+			t.Fatalf("AllowedNamespaces = %v, want 2 entries", anchors[0].AllowedNamespaces)
+		}
+	})
+
+	t.Run("omitting ns= leaves AllowedNamespaces nil (unrestricted)", func(t *testing.T) {
+		anchors, err := ParseTrustAnchorsEnv("user-sessions:mint " + escaped)
+		if err != nil {
+			t.Fatalf("ParseTrustAnchorsEnv: %v", err)
+		}
+		if anchors[0].AllowedNamespaces != nil {
+			t.Errorf("AllowedNamespaces = %v, want nil", anchors[0].AllowedNamespaces)
+		}
+	})
+
+	for name, raw := range map[string]string{
+		"ns= with no PEM following":   "user-sessions:mint ns=acme",
+		"empty ns= namespace list":    "user-sessions:mint ns= " + escaped,
+		"empty namespace in ns= list": "user-sessions:mint ns=acme,, " + escaped,
+	} {
+		t.Run("malformed: "+name, func(t *testing.T) {
+			if _, err := ParseTrustAnchorsEnv(raw); err == nil {
+				t.Fatalf("ParseTrustAnchorsEnv(%q): expected an error, got none", raw)
+			}
+		})
+	}
 }
 
 // TestNewServiceAuthVerifierRejectsMalformedAnchor proves a malformed
@@ -596,5 +643,149 @@ func TestNewServiceAuthVerifierRejectsEmptyNonNilAllowedScopes(t *testing.T) {
 		Anchors: []TrustAnchorConfig{{PublicKeyPEM: pemEncodePublicKey(t, &priv.PublicKey), AllowedScopes: []string{}}},
 	}); err == nil {
 		t.Fatal("expected an error for a non-nil, empty AllowedScopes")
+	}
+}
+
+// TestNewServiceAuthVerifierRejectsDuplicateKeyAcrossAnchors is H2: an
+// operator who keeps the legacy, unrestricted CLOUD_SERVICE_AUTH_PUBLIC_KEY
+// configured and ALSO lists the very same key in CLOUD_SERVICE_AUTH_PUBLIC_KEYS
+// with a restricted scope set (intending to narrow it) must get a boot
+// failure, not a deployment where matchAnchor's first-match silently
+// resolves to the unrestricted legacy anchor and the "restriction" is a
+// no-op. Same assertion for two restricted CLOUD_SERVICE_AUTH_PUBLIC_KEYS
+// anchors sharing a key, and for the legacy key duplicated onto itself.
+func TestNewServiceAuthVerifierRejectsDuplicateKeyAcrossAnchors(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ec key: %v", err)
+	}
+	pemStr := pemEncodePublicKey(t, &priv.PublicKey)
+
+	t.Run("legacy PublicKeyPEM duplicated into a restricted Anchors entry", func(t *testing.T) {
+		_, err := NewServiceAuthVerifier(ServiceAuthVerifierConfig{
+			PublicKeyPEM: pemStr,
+			Anchors: []TrustAnchorConfig{
+				{PublicKeyPEM: pemStr, AllowedScopes: []string{"user-sessions:mint"}},
+			},
+		})
+		if err == nil {
+			t.Fatal("expected an error when the legacy unrestricted anchor and a restricted anchor share a key")
+		}
+	})
+
+	t.Run("two restricted Anchors entries sharing a key", func(t *testing.T) {
+		_, err := NewServiceAuthVerifier(ServiceAuthVerifierConfig{
+			Anchors: []TrustAnchorConfig{
+				{PublicKeyPEM: pemStr, AllowedScopes: []string{"user-sessions:mint"}},
+				{PublicKeyPEM: pemStr, AllowedScopes: []string{"keys:rotate"}},
+			},
+		})
+		if err == nil {
+			t.Fatal("expected an error when two Anchors entries share a key")
+		}
+	})
+
+	t.Run("distinct keys are accepted", func(t *testing.T) {
+		other, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatalf("generate ec key: %v", err)
+		}
+		_, err = NewServiceAuthVerifier(ServiceAuthVerifierConfig{
+			PublicKeyPEM: pemStr,
+			Anchors: []TrustAnchorConfig{
+				{PublicKeyPEM: pemEncodePublicKey(t, &other.PublicKey), AllowedScopes: []string{"user-sessions:mint"}},
+			},
+		})
+		if err != nil {
+			t.Fatalf("NewServiceAuthVerifier: unexpected error for distinct keys: %v", err)
+		}
+	})
+}
+
+// --- M5: per-anchor namespace binding --------------------------------------
+
+// TestServiceAuthVerifierNamespaceBinding proves ServiceClaims.NamespacePermitted:
+// an anchor configured with AllowedNamespaces only permits the namespaces in
+// that set, an anchor with none configured (nil) permits every namespace
+// (back-compat), and Verify correctly carries the matched anchor's
+// restriction — not some other anchor's — through to the returned claims.
+func TestServiceAuthVerifierNamespaceBinding(t *testing.T) {
+	restrictedPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ec key: %v", err)
+	}
+	unrestrictedPriv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ec key: %v", err)
+	}
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() }) //nolint:errcheck // test cleanup
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	verifier, err := NewServiceAuthVerifier(ServiceAuthVerifierConfig{
+		Anchors: []TrustAnchorConfig{
+			{PublicKeyPEM: pemEncodePublicKey(t, &restrictedPriv.PublicKey), AllowedScopes: []string{"user-sessions:mint"}, AllowedNamespaces: []string{"acme"}},
+			{PublicKeyPEM: pemEncodePublicKey(t, &unrestrictedPriv.PublicKey), AllowedScopes: []string{"user-sessions:mint"}},
+		},
+		ReplayGuard: NewRedisReplayGuard(client),
+		Now:         func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewServiceAuthVerifier: %v", err)
+	}
+
+	sign := func(priv *ecdsa.PrivateKey, jti string) string {
+		claims := map[string]any{
+			"iss": "harbor-cloud", "sub": "svc", "aud": ExpectedAudience,
+			"scope": "user-sessions:mint", "exp": now.Add(90 * time.Second).Unix(), "iat": now.Unix(), "jti": jti,
+		}
+		return signES256(t, priv, map[string]any{"alg": "ES256", "typ": "JWT"}, claims)
+	}
+
+	t.Run("restricted anchor permits its own namespace", func(t *testing.T) {
+		claims, err := verifier.Verify(context.Background(), sign(restrictedPriv, "jti-r-1"))
+		if err != nil {
+			t.Fatalf("Verify: unexpected error: %v", err)
+		}
+		if !claims.NamespacePermitted("acme") {
+			t.Error("NamespacePermitted(acme) = false, want true")
+		}
+	})
+
+	t.Run("restricted anchor rejects a different namespace", func(t *testing.T) {
+		claims, err := verifier.Verify(context.Background(), sign(restrictedPriv, "jti-r-2"))
+		if err != nil {
+			t.Fatalf("Verify: unexpected error: %v", err)
+		}
+		if claims.NamespacePermitted("globex") {
+			t.Error("NamespacePermitted(globex) = true, want false — this anchor is bound to acme only")
+		}
+	})
+
+	t.Run("unrestricted anchor (nil AllowedNamespaces) permits any namespace", func(t *testing.T) {
+		claims, err := verifier.Verify(context.Background(), sign(unrestrictedPriv, "jti-u-1"))
+		if err != nil {
+			t.Fatalf("Verify: unexpected error: %v", err)
+		}
+		if !claims.NamespacePermitted("acme") || !claims.NamespacePermitted("globex") {
+			t.Error("an anchor with no AllowedNamespaces restriction must permit every namespace")
+		}
+	})
+}
+
+// TestNewServiceAuthVerifierRejectsEmptyNonNilAllowedNamespaces mirrors
+// TestNewServiceAuthVerifierRejectsEmptyNonNilAllowedScopes: a non-nil but
+// empty AllowedNamespaces must fail boot rather than silently becoming
+// either "unrestricted" or "always-rejecting."
+func TestNewServiceAuthVerifierRejectsEmptyNonNilAllowedNamespaces(t *testing.T) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ec key: %v", err)
+	}
+	if _, err := NewServiceAuthVerifier(ServiceAuthVerifierConfig{
+		Anchors: []TrustAnchorConfig{{PublicKeyPEM: pemEncodePublicKey(t, &priv.PublicKey), AllowedScopes: []string{"user-sessions:mint"}, AllowedNamespaces: []string{}}},
+	}); err == nil {
+		t.Fatal("expected an error for a non-nil, empty AllowedNamespaces")
 	}
 }

@@ -275,6 +275,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		WithEnrollmentCallerSource(bffEnrollmentCallerAdapter{}).
 		WithMFA(mfaService).
 		WithMFASessionStamper(bffMFASessionStamper{store: bffStore}).
+		WithMFAEnrollmentGuard(bffMFAEnrollmentGuard{store: bffStore}).
 		WithCompliance(complianceDeps).
 		WithAuditTrail(auditTrailDeps).
 		WithRelayStore(relayStore).
@@ -533,14 +534,40 @@ func validateProductionURL(name, raw string) error {
 	return nil
 }
 
-// decodeSSOSubjectHMACKey decodes SSO_SUBJECT_HMAC_KEY as base64url or hex.
+// decodeSSOSubjectHMACKey decodes SSO_SUBJECT_HMAC_KEY as hex or base64url.
 // It only decodes — the minimum-length (32 byte) requirement is enforced by
 // cloudapi.NewSubjectHasher itself, so this helper never duplicates that
 // bound and can't drift from it.
+//
+// HEX IS TRIED FIRST, deliberately (L3). deploy/helm/values.yaml's doc
+// comment for this key tells operators to generate it with
+// `openssl rand -hex 32` — a 64-character lowercase hex string. That string
+// is ALSO well-formed base64url input: hex's alphabet [0-9a-f] is a strict
+// subset of base64url's, and 64 is divisible by 4 (RawURLEncoding needs no
+// padding at that length). So trying base64url first would decode the
+// DOCUMENTED, canonical format without ever returning an error — just
+// silently into 48 WRONG bytes — leaving the hex branch dead code for
+// exactly the input operators are told to produce. Every existing subject's
+// HMAC would then be computed under a key nobody intended, orphaning every
+// federated account tied to it, with nothing anywhere raising an error.
+//
+// Trying hex first is safe, not merely convenient: hex.DecodeString rejects
+// odd-length input and any byte outside [0-9a-fA-F] outright. A genuine
+// base64url key (RawURLEncoding, no padding) of N raw bytes produces
+// ceil(N*8/6) characters, which is odd whenever N mod 3 != 0 — an immediate
+// hex rejection — and even when it happens to land on an even length, it
+// would ALSO have to consist entirely of characters from hex's 16-symbol
+// alphabet to be mistaken for hex, which is astronomically unlikely for
+// CSPRNG-derived bytes. A padded base64.URLEncoding key is ruled out even
+// more simply: its trailing "=" is not a valid hex digit, so hex.Decode
+// fails immediately and this falls through to the base64 branches below.
 func decodeSSOSubjectHMACKey(raw string) ([]byte, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, errors.New("must not be empty")
+	}
+	if b, err := hex.DecodeString(raw); err == nil {
+		return b, nil
 	}
 	if b, err := base64.RawURLEncoding.DecodeString(raw); err == nil {
 		return b, nil
@@ -548,10 +575,7 @@ func decodeSSOSubjectHMACKey(raw string) ([]byte, error) {
 	if b, err := base64.URLEncoding.DecodeString(raw); err == nil {
 		return b, nil
 	}
-	if b, err := hex.DecodeString(raw); err == nil {
-		return b, nil
-	}
-	return nil, errors.New("must be base64url- or hex-encoded")
+	return nil, errors.New("must be hex- or base64url-encoded")
 }
 
 // validateInternalURL checks that raw is an absolute http(s) URL with no

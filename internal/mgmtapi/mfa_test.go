@@ -140,6 +140,81 @@ func TestPostMFAEnroll_Success(t *testing.T) {
 	}
 }
 
+// fakeMFAEnrollmentGuard is a function-field fake satisfying
+// MFAEnrollmentGuard, following this file's fakeMFAService pattern.
+type fakeMFAEnrollmentGuard struct {
+	allowed bool
+	called  bool
+}
+
+func (g *fakeMFAEnrollmentGuard) EnrollmentAllowed(context.Context) bool {
+	g.called = true
+	return g.allowed
+}
+
+// TestPostMFAEnroll_GuardDenies is M3's mgmtapi-level proof: when a
+// non-nil MFAEnrollmentGuard denies the current session (e.g. the
+// production bffMFAEnrollmentGuard adapter refusing a federated
+// corporate-SSO session), PostMFAEnroll returns 403 and never reaches the
+// underlying MFAService — no pending factor is ever created for a session
+// that was never entitled to enroll one.
+func TestPostMFAEnroll_GuardDenies(t *testing.T) {
+	svc := &fakeMFAService{}
+	guard := &fakeMFAEnrollmentGuard{allowed: false}
+	s := newMFAServer(svc).WithCallerSource(fakeCallerSource{userID: "user-1"}).WithMFAEnrollmentGuard(guard)
+
+	rec := httptest.NewRecorder()
+	s.PostMFAEnroll(rec, mfaRequest(http.MethodPost, "/mfa/enroll", "{}", "user-1"))
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	if !guard.called {
+		t.Error("EnrollmentAllowed was never consulted")
+	}
+	if svc.enrolled {
+		t.Error("MFAService.Enroll must not be called when the guard denies enrollment")
+	}
+}
+
+// TestPostMFAEnroll_GuardAllows proves a guard that permits the session lets
+// enrollment proceed exactly as if no guard were wired at all.
+func TestPostMFAEnroll_GuardAllows(t *testing.T) {
+	svc := &fakeMFAService{}
+	guard := &fakeMFAEnrollmentGuard{allowed: true}
+	s := newMFAServer(svc).WithCallerSource(fakeCallerSource{userID: "user-1"}).WithMFAEnrollmentGuard(guard)
+
+	rec := httptest.NewRecorder()
+	s.PostMFAEnroll(rec, mfaRequest(http.MethodPost, "/mfa/enroll", "{}", "user-1"))
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+	if !guard.called {
+		t.Error("EnrollmentAllowed was never consulted")
+	}
+	if !svc.enrolled {
+		t.Error("MFAService.Enroll should have been called")
+	}
+}
+
+// TestPostMFAEnroll_NilGuardAllows proves the (intentional, documented)
+// nil-guard-means-allow default: an mgmtapi.Server with no
+// MFAEnrollmentGuard wired at all (e.g. a dev-scaffold instance) does not
+// block enrollment — the load-bearing M3 enforcement lives in
+// bff.RecordTOTPStepUp, not here.
+func TestPostMFAEnroll_NilGuardAllows(t *testing.T) {
+	svc := &fakeMFAService{}
+	s := newMFAServer(svc).WithCallerSource(fakeCallerSource{userID: "user-1"}) // no guard wired
+
+	rec := httptest.NewRecorder()
+	s.PostMFAEnroll(rec, mfaRequest(http.MethodPost, "/mfa/enroll", "{}", "user-1"))
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestPostMFAEnroll_AlreadyEnrolled(t *testing.T) {
 	s := newMFAServer(&fakeMFAService{enrollErr: mfa.ErrAlreadyEnrolled}).WithCallerSource(fakeCallerSource{userID: "user-1"})
 	rec := httptest.NewRecorder()
