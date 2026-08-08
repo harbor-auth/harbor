@@ -32,7 +32,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/harbor-auth/harbor/internal/clients"
+	"github.com/harbor-auth/harbor/internal/crypto"
 	db "github.com/harbor-auth/harbor/internal/gen/db"
 	cloudopenapi "github.com/harbor-auth/harbor/internal/gen/openapi/cloud"
 	"github.com/harbor-auth/harbor/internal/httpserver"
@@ -70,13 +73,35 @@ func requireIntegrationDeps(t *testing.T) integrationDeps {
 	}
 	t.Cleanup(pool.Close)
 
-	return integrationDeps{store: NewStore(db.New(pool))}
+	// integrationKMSSecret is a fixed test secret — never production
+	// material, only long enough to satisfy crypto.NewLocalKeyProvider's
+	// length floor — so the user-sessions create-path can be exercised
+	// against a real transaction.
+	store := NewStore(db.New(pool)).WithFederatedIdentities(
+		NewPgxFederatedPool(pool),
+		requireIntegrationKeyProvider(t),
+		crypto.NewCipher(),
+	)
+
+	return integrationDeps{store: store}
 }
 
-// newIntegrationReplayGuard connects a fresh Redis client for the replay
-// guard. Callers must call requireIntegrationDeps (or otherwise confirm
-// REDIS_URL is set) first.
-func newIntegrationReplayGuard(t *testing.T) ReplayGuard {
+// integrationKMSSecret is a fixed 32+ byte test secret for
+// crypto.NewLocalKeyProvider — never production material.
+const integrationKMSSecret = "integration-test-kms-secret-32-bytes!!"
+
+func requireIntegrationKeyProvider(t *testing.T) crypto.KeyProvider {
+	t.Helper()
+	kp, err := crypto.NewLocalKeyProvider(integrationKMSSecret)
+	if err != nil {
+		t.Fatalf("crypto.NewLocalKeyProvider: %v", err)
+	}
+	return kp
+}
+
+// newIntegrationRedisClient connects a fresh Redis client. Callers must call
+// requireIntegrationDeps (or otherwise confirm REDIS_URL is set) first.
+func newIntegrationRedisClient(t *testing.T) *redis.Client {
 	t.Helper()
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -91,7 +116,7 @@ func newIntegrationReplayGuard(t *testing.T) ReplayGuard {
 		t.Fatal("clients.ConnectRedis returned a nil client despite a non-empty REDIS_URL")
 	}
 	t.Cleanup(func() { _ = redisClient.Close() }) //nolint:errcheck // test cleanup
-	return NewRedisReplayGuard(redisClient)
+	return redisClient
 }
 
 // uniqueID returns a namespace/idempotency-key-safe identifier that will not
@@ -113,7 +138,8 @@ type integrationEnv struct {
 func newIntegrationEnv(t *testing.T) *integrationEnv {
 	t.Helper()
 	deps := requireIntegrationDeps(t)
-	replayGuard := newIntegrationReplayGuard(t)
+	redisClient := newIntegrationRedisClient(t)
+	replayGuard := NewRedisReplayGuard(redisClient)
 
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -128,7 +154,7 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 	}
 
 	hot := newRecordingHotServer(t)
-	router := newContractRouter(deps.store, verifier, hot.URL, "integration-proxy-token", hot.Client())
+	router := newContractRouter(deps.store, verifier, hot.URL, "integration-proxy-token", hot.Client(), redisClient)
 	ts := httptest.NewServer(router)
 	t.Cleanup(ts.Close)
 

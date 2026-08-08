@@ -64,6 +64,14 @@ var (
 	// ErrReplayed is returned when the token's `jti` has already been
 	// presented (RedisReplayGuard SETNX on Verify.jti).
 	ErrReplayed = errors.New("cloudapi: service token replayed")
+
+	// ErrScopeNotPermittedForAnchor is returned when a token's signature
+	// verifies against a configured trust anchor, but the token's `scope`
+	// claim names a scope that anchor is not permitted to assert (§7 —
+	// per-key scope binding). Maps to the same 403 insufficient_scope a
+	// caller sees when its token simply lacks a route's required scope: the
+	// two are indistinguishable from the outside by design.
+	ErrScopeNotPermittedForAnchor = errors.New("cloudapi: token scope not permitted for signing key")
 )
 
 // ServiceClaims holds the validated claims of a cloudServiceAuth JWT.
@@ -145,14 +153,158 @@ func routeFromContext(ctx context.Context) string {
 	return "unknown"
 }
 
+// TrustAnchorConfig describes one accepted cloudServiceAuth signing key and
+// the scopes a token signed by it is permitted to assert (§7 — per-key scope
+// binding). It is what CLOUD_SERVICE_AUTH_PUBLIC_KEYS parses into
+// (ParseTrustAnchorsEnv) and what ServiceAuthVerifierConfig.Anchors accepts
+// directly for tests.
+type TrustAnchorConfig struct {
+	// PublicKeyPEM is the PEM-encoded SPKI public key (ES256/P-256 or
+	// Ed25519).
+	PublicKeyPEM string
+
+	// AllowedScopes is the exact set of scopes a token signed by this key is
+	// permitted to assert. A token whose `scope` claim names ANY scope
+	// outside this set is rejected in full (ErrScopeNotPermittedForAnchor) —
+	// never partially honoured by dropping just the disallowed scope.
+	//
+	// nil (as opposed to a non-nil empty slice) means UNRESTRICTED: every
+	// scope is permitted. This is reserved for the single legacy
+	// CLOUD_SERVICE_AUTH_PUBLIC_KEY anchor (back-compat with the pre-§7
+	// behavior, where the one configured key could assert any scope) — every
+	// anchor parsed from CLOUD_SERVICE_AUTH_PUBLIC_KEYS carries an explicit,
+	// non-nil scope set, since restricting scopes is that variable's entire
+	// purpose.
+	AllowedScopes []string
+}
+
+// trustAnchor is a TrustAnchorConfig after its PEM has been parsed into a
+// live public key and its scope list into a lookup set.
+type trustAnchor struct {
+	ecKey         *ecdsa.PublicKey
+	edKey         ed25519.PublicKey
+	allScopes     bool // true only for the legacy single-anchor back-compat path
+	allowedScopes map[string]struct{}
+}
+
+// permits reports whether every scope in scopes is permitted for this
+// anchor. An anchor with allScopes permits everything (back-compat). An
+// empty scopes slice trivially passes (Verify already rejects an empty
+// `scope` claim with ErrMissingScope before this is ever consulted).
+func (a trustAnchor) permits(scopes []string) bool {
+	if a.allScopes {
+		return true
+	}
+	for _, s := range scopes {
+		if _, ok := a.allowedScopes[s]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// buildTrustAnchor parses cfg into a live trustAnchor. Returns an error for
+// a missing/malformed/unsupported PEM, or an explicitly-empty (non-nil)
+// AllowedScopes — a deployment that means "unrestricted" must say so with
+// nil, never an empty list, so a config typo can never silently produce a
+// scope-less (and therefore always-rejecting) anchor.
+func buildTrustAnchor(cfg TrustAnchorConfig) (trustAnchor, error) {
+	pemStr := strings.TrimSpace(cfg.PublicKeyPEM)
+	if pemStr == "" {
+		return trustAnchor{}, errors.New("empty public key PEM")
+	}
+	pub, err := parseTrustAnchorPEM(pemStr)
+	if err != nil {
+		return trustAnchor{}, err
+	}
+	a := trustAnchor{}
+	switch key := pub.(type) {
+	case *ecdsa.PublicKey:
+		if key.Curve != elliptic.P256() {
+			return trustAnchor{}, errors.New("EC key must be P-256 (ES256)")
+		}
+		a.ecKey = key
+	case ed25519.PublicKey:
+		a.edKey = key
+	default:
+		return trustAnchor{}, fmt.Errorf("unsupported trust-anchor key type %T (want ES256 or Ed25519)", pub)
+	}
+	if cfg.AllowedScopes == nil {
+		a.allScopes = true
+	} else {
+		a.allowedScopes = make(map[string]struct{}, len(cfg.AllowedScopes))
+		for _, s := range cfg.AllowedScopes {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				return trustAnchor{}, errors.New("AllowedScopes contains an empty scope")
+			}
+			a.allowedScopes[s] = struct{}{}
+		}
+		if len(a.allowedScopes) == 0 {
+			return trustAnchor{}, errors.New("AllowedScopes must not be empty (use nil for an unrestricted anchor)")
+		}
+	}
+	return a, nil
+}
+
+// ParseTrustAnchorsEnv parses CLOUD_SERVICE_AUTH_PUBLIC_KEYS: one trust
+// anchor per line, formatted as
+//
+//	<scope>[,<scope>...] <SPKI PEM, with its line breaks escaped as literal \n>
+//
+// Blank lines and lines starting with "#" are skipped. This is a boot-time,
+// fail-fast parse: a malformed line is a hard error, never a silently
+// dropped anchor — a dropped anchor would leave a deployment believing a
+// caller is authorized when it silently is not.
+func ParseTrustAnchorsEnv(raw string) ([]TrustAnchorConfig, error) {
+	var anchors []TrustAnchorConfig
+	for i, line := range strings.Split(raw, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.SplitN(line, " ", 2)
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("cloudapi: CLOUD_SERVICE_AUTH_PUBLIC_KEYS line %d: expected \"<scopes> <pem>\"", i+1)
+		}
+		scopesPart, pemPart := strings.TrimSpace(fields[0]), strings.TrimSpace(fields[1])
+		if scopesPart == "" {
+			return nil, fmt.Errorf("cloudapi: CLOUD_SERVICE_AUTH_PUBLIC_KEYS line %d: missing scopes", i+1)
+		}
+		var scopes []string
+		for _, s := range strings.Split(scopesPart, ",") {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				return nil, fmt.Errorf("cloudapi: CLOUD_SERVICE_AUTH_PUBLIC_KEYS line %d: empty scope in scope list", i+1)
+			}
+			scopes = append(scopes, s)
+		}
+		pemStr := strings.ReplaceAll(pemPart, `\n`, "\n")
+		if pemStr == "" {
+			return nil, fmt.Errorf("cloudapi: CLOUD_SERVICE_AUTH_PUBLIC_KEYS line %d: missing PEM", i+1)
+		}
+		anchors = append(anchors, TrustAnchorConfig{PublicKeyPEM: pemStr, AllowedScopes: scopes})
+	}
+	return anchors, nil
+}
+
 // ServiceAuthVerifierConfig configures a ServiceAuthVerifier.
 type ServiceAuthVerifierConfig struct {
 	// PublicKeyPEM is the PEM-encoded SPKI trust-anchor public key
 	// (CLOUD_SERVICE_AUTH_PUBLIC_KEY) used to verify Harbor Cloud's
 	// self-issued service JWTs. Must be an ES256 (P-256) or Ed25519 key.
-	// Empty means the trust anchor is unconfigured: every Verify call fails
-	// closed with ErrTrustAnchorUnconfigured.
+	// When set, it is treated as ONE anchor permitted to assert every scope
+	// (back-compat with the pre-§7 single-key behavior) — combine with
+	// Anchors to add additional, scope-restricted keys. Empty AND an empty
+	// Anchors means the trust anchor is unconfigured: every Verify call
+	// fails closed with ErrTrustAnchorUnconfigured.
 	PublicKeyPEM string
+
+	// Anchors lists additional trust anchors, each restricted to its own
+	// permitted scope set (§7 — typically parsed from
+	// CLOUD_SERVICE_AUTH_PUBLIC_KEYS via ParseTrustAnchorsEnv). May be
+	// combined with PublicKeyPEM, or used alone.
+	Anchors []TrustAnchorConfig
 
 	// ReplayGuard rejects a jti that has already been presented. A nil
 	// ReplayGuard also fails closed (ErrReplayGuardUnavailable).
@@ -172,8 +324,7 @@ type ServiceAuthVerifierConfig struct {
 // has no code path that reads either of those credentials, only the bearer
 // JWT it is handed.
 type ServiceAuthVerifier struct {
-	ecKey       *ecdsa.PublicKey
-	edKey       ed25519.PublicKey
+	anchors     []trustAnchor
 	replayGuard ReplayGuard
 	logger      *telemetry.Logger
 	now         func() time.Time
@@ -181,8 +332,9 @@ type ServiceAuthVerifier struct {
 
 // NewServiceAuthVerifier builds a ServiceAuthVerifier. It returns an error
 // only for a malformed/unsupported configured public key (a fail-fast boot
-// error); an empty PublicKeyPEM is accepted and instead makes every
-// subsequent Verify call fail closed with ErrTrustAnchorUnconfigured.
+// error); an empty PublicKeyPEM with no Anchors is accepted and instead
+// makes every subsequent Verify call fail closed with
+// ErrTrustAnchorUnconfigured.
 func NewServiceAuthVerifier(cfg ServiceAuthVerifierConfig) (*ServiceAuthVerifier, error) {
 	now := cfg.Now
 	if now == nil {
@@ -193,29 +345,24 @@ func NewServiceAuthVerifier(cfg ServiceAuthVerifierConfig) (*ServiceAuthVerifier
 		logger = telemetry.New(nil)
 	}
 
-	var ecKey *ecdsa.PublicKey
-	var edKey ed25519.PublicKey
+	var anchors []trustAnchor
 	if pemStr := strings.TrimSpace(cfg.PublicKeyPEM); pemStr != "" {
-		pub, err := parseTrustAnchorPEM(pemStr)
+		a, err := buildTrustAnchor(TrustAnchorConfig{PublicKeyPEM: pemStr})
 		if err != nil {
 			return nil, fmt.Errorf("cloudapi: parse CLOUD_SERVICE_AUTH_PUBLIC_KEY: %w", err)
 		}
-		switch key := pub.(type) {
-		case *ecdsa.PublicKey:
-			if key.Curve != elliptic.P256() {
-				return nil, errors.New("cloudapi: trust-anchor EC key must be P-256 (ES256)")
-			}
-			ecKey = key
-		case ed25519.PublicKey:
-			edKey = key
-		default:
-			return nil, fmt.Errorf("cloudapi: unsupported trust-anchor key type %T (want ES256 or Ed25519)", pub)
+		anchors = append(anchors, a)
+	}
+	for i, ac := range cfg.Anchors {
+		a, err := buildTrustAnchor(ac)
+		if err != nil {
+			return nil, fmt.Errorf("cloudapi: parse CLOUD_SERVICE_AUTH_PUBLIC_KEYS anchor %d: %w", i, err)
 		}
+		anchors = append(anchors, a)
 	}
 
 	return &ServiceAuthVerifier{
-		ecKey:       ecKey,
-		edKey:       edKey,
+		anchors:     anchors,
 		replayGuard: cfg.ReplayGuard,
 		logger:      logger,
 		now:         now,
@@ -258,7 +405,7 @@ type serviceJWTHeader struct {
 //
 //harbor:invariant INV-CONSTANT-TIME-COMPARE
 func (v *ServiceAuthVerifier) Verify(ctx context.Context, bearer string) (ServiceClaims, error) {
-	if v.ecKey == nil && v.edKey == nil {
+	if len(v.anchors) == 0 {
 		v.audit(ctx, "", "trust_anchor_unconfigured")
 		return ServiceClaims{}, ErrTrustAnchorUnconfigured
 	}
@@ -291,7 +438,8 @@ func (v *ServiceAuthVerifier) Verify(ctx context.Context, bearer string) (Servic
 	}
 
 	signingInput := []byte(parts[0] + "." + parts[1])
-	if !v.verifySignature(header.Alg, signingInput, sig) {
+	anchor, matched := v.matchAnchor(header.Alg, signingInput, sig)
+	if !matched {
 		v.audit(ctx, "", "invalid_token")
 		return ServiceClaims{}, fmt.Errorf("%w: signature verification failed", ErrInvalidToken)
 	}
@@ -319,6 +467,18 @@ func (v *ServiceAuthVerifier) Verify(ctx context.Context, bearer string) (Servic
 	if len(scopes) == 0 {
 		v.audit(ctx, claims.Subject, "missing_scope")
 		return ServiceClaims{}, ErrMissingScope
+	}
+
+	// §7 — per-key scope binding: the SIGNING KEY that produced this
+	// signature (anchor, resolved above) must permit every scope the token
+	// claims to have, independent of whatever the token's own `scope` claim
+	// self-asserts. Without this, any holder of a single shared signing key
+	// could mint a token claiming keys:rotate even if that caller was only
+	// ever meant to hold user-sessions:mint. Rejected in full — never by
+	// silently dropping just the disallowed scope.
+	if !anchor.permits(scopes) {
+		v.audit(ctx, claims.Subject, "insufficient_scope")
+		return ServiceClaims{}, ErrScopeNotPermittedForAnchor
 	}
 
 	expiresAt := time.Unix(claims.Expiry, 0)
@@ -352,18 +512,27 @@ func (v *ServiceAuthVerifier) Verify(ctx context.Context, bearer string) (Servic
 	}, nil
 }
 
-// verifySignature dispatches to the algorithm matching the configured trust
-// anchor. An algorithm that doesn't match a configured key (including "none"
-// or any algorithm confusion attempt) is rejected.
-func (v *ServiceAuthVerifier) verifySignature(alg string, signingInput, sig []byte) bool {
-	switch alg {
-	case "ES256":
-		return v.ecKey != nil && verifyES256Signature(v.ecKey, signingInput, sig)
-	case "EdDSA":
-		return v.edKey != nil && ed25519.Verify(v.edKey, signingInput, sig)
-	default:
-		return false
+// matchAnchor returns the first configured anchor whose key verifies sig
+// over signingInput for the given alg, and whether one was found. An
+// algorithm that matches no configured key (including "none" or any
+// algorithm-confusion attempt) is rejected. Anchors hold distinct keys by
+// construction, so at most one anchor is ever expected to match a
+// well-formed signature; "first" only matters for a misconfigured deployment
+// that duplicates a key across two anchors.
+func (v *ServiceAuthVerifier) matchAnchor(alg string, signingInput, sig []byte) (trustAnchor, bool) {
+	for _, a := range v.anchors {
+		switch alg {
+		case "ES256":
+			if a.ecKey != nil && verifyES256Signature(a.ecKey, signingInput, sig) {
+				return a, true
+			}
+		case "EdDSA":
+			if a.edKey != nil && ed25519.Verify(a.edKey, signingInput, sig) {
+				return a, true
+			}
+		}
 	}
+	return trustAnchor{}, false
 }
 
 // verifyES256Signature verifies an ES256 (ECDSA P-256 SHA-256) signature.

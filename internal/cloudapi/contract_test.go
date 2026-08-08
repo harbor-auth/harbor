@@ -53,14 +53,19 @@ import (
 // the seam that reconciles the two without changing either production file.
 type contractAdapter struct {
 	*Server
-	sessions *SessionsHandler
-	keys     *KeysHandler
+	sessions     *SessionsHandler
+	userSessions *UserSessionsHandler
+	keys         *KeysHandler
 }
 
 var _ cloudopenapi.ServerInterface = (*contractAdapter)(nil)
 
 func (a *contractAdapter) PostAdminV1Sessions(w http.ResponseWriter, r *http.Request, _ cloudopenapi.PostAdminV1SessionsParams) {
 	a.sessions.PostSessions(w, r)
+}
+
+func (a *contractAdapter) PostAdminV1UserSessions(w http.ResponseWriter, r *http.Request) {
+	a.userSessions.PostUserSessions(w, r)
 }
 
 func (a *contractAdapter) PostAdminV1KeysRotate(w http.ResponseWriter, r *http.Request) {
@@ -113,15 +118,33 @@ func requireServiceAuth(verifier *ServiceAuthVerifier) cloudopenapi.MiddlewareFu
 	}
 }
 
+// contractSubjectHMACKey is a fixed, well-formed test key for the
+// user-sessions route's SubjectHasher — never a production secret, only
+// meets NewSubjectHasher's length floor so the route can be exercised.
+const contractSubjectHMACKey = "contract-test-subject-hmac-key-32b!"
+
+// contractUserSessionRegion is the fixed region newContractRouter's
+// UserSessionsHandler enrolls new federated users into — this package's
+// fixture-driven tests never reach a real create (the in-memory Store has no
+// WithFederatedIdentities pool wired), so its exact value is not otherwise
+// observable; it only needs to be a region region.Parse accepts.
+const contractUserSessionRegion = "EU"
+
 // newContractRouter assembles the real /admin/v1/* http.Handler over the
 // given store and verifier — the same composition every scenario in this
 // package's tests (fixture-driven and integration) exercises requests
-// through.
-func newContractRouter(store *Store, verifier *ServiceAuthVerifier, hotBaseURL, proxyToken string, hotClient *http.Client) http.Handler {
+// through. redisClient backs the user-sessions route's one-time login code
+// store (logincode.go) exactly as cmd/harbor-mgmt wires it in production.
+func newContractRouter(store *Store, verifier *ServiceAuthVerifier, hotBaseURL, proxyToken string, hotClient *http.Client, redisClient *redis.Client) http.Handler {
+	hasher, err := NewSubjectHasher([]byte(contractSubjectHMACKey))
+	if err != nil {
+		panic(err) // fixed constant above; a failure here is a test bug, not a runtime condition
+	}
 	adapter := &contractAdapter{
-		Server:   NewServer(store),
-		sessions: NewSessionsHandler(store),
-		keys:     NewKeysHandler(verifier, hotBaseURL, proxyToken, hotClient),
+		Server:       NewServer(store),
+		sessions:     NewSessionsHandler(store),
+		userSessions: NewUserSessionsHandler(store, hasher, NewRedisLoginCodeStore(redisClient), contractUserSessionRegion),
+		keys:         NewKeysHandler(verifier, hotBaseURL, proxyToken, hotClient),
 	}
 	return cloudopenapi.HandlerWithOptions(adapter, cloudopenapi.StdHTTPServerOptions{
 		Middlewares: []cloudopenapi.MiddlewareFunc{requireServiceAuth(verifier)},
@@ -272,7 +295,7 @@ func newContractEnv(t *testing.T) *contractEnv {
 	hot := newRecordingHotServer(t)
 
 	env := &contractEnv{
-		router: newContractRouter(store, verifier, hot.URL, "contract-proxy-token", hot.Client()),
+		router: newContractRouter(store, verifier, hot.URL, "contract-proxy-token", hot.Client(), redisClient),
 		ecPriv: priv,
 		now:    now,
 		q:      q,
@@ -285,7 +308,7 @@ func newContractEnv(t *testing.T) *contractEnv {
 	if err != nil {
 		t.Fatalf("NewServiceAuthVerifier (unconfigured): %v", err)
 	}
-	env.unconfR = newContractRouter(NewStore(newMemQuerier()), unconfVerifier, hot.URL, "contract-proxy-token", hot.Client())
+	env.unconfR = newContractRouter(NewStore(newMemQuerier()), unconfVerifier, hot.URL, "contract-proxy-token", hot.Client(), redisClient)
 
 	return env
 }
@@ -446,7 +469,9 @@ func validErrorCode(code cloudopenapi.ErrorCode) bool {
 		cloudopenapi.ErrorCodeNamespaceAlreadyExists,
 		cloudopenapi.ErrorCodeNamespaceNotFound,
 		cloudopenapi.ErrorCodeIdempotencyKeyReused,
-		cloudopenapi.ErrorCodeRateLimited:
+		cloudopenapi.ErrorCodeRateLimited,
+		cloudopenapi.ErrorCodeSubjectUnavailable,
+		cloudopenapi.ErrorCodeInvalidSubject:
 		return true
 	default:
 		return false
@@ -504,7 +529,7 @@ func TestContractAuditEventsEmitted(t *testing.T) {
 		t.Fatalf("NewServiceAuthVerifier: %v", err)
 	}
 	hot := newRecordingHotServer(t)
-	router := newContractRouter(NewStore(newMemQuerier()), verifier, hot.URL, "contract-proxy-token", hot.Client())
+	router := newContractRouter(NewStore(newMemQuerier()), verifier, hot.URL, "contract-proxy-token", hot.Client(), redisClient)
 
 	claims := map[string]any{
 		"iss": "harbor-cloud", "sub": "harbor-cloud-svc-audit", "aud": ExpectedAudience,

@@ -1,0 +1,15 @@
+{
+  "name": "user_sessions_mint_unknown_field_rejected",
+  "spec_scenario": "SSO user-session handoff: an unknown JSON field (e.g. email) is rejected — additionalProperties: false",
+  "steps": [
+    {
+      "method": "POST",
+      "path": "/admin/v1/user-sessions",
+      "auth": "valid",
+      "scope": "user-sessions:mint",
+      "request_body": {"namespace_id": "contract-ns-usersessions-3", "subject": "alice@example.com", "email": "alice@example.com"},
+      "want_status": 400,
+      "want_error_code": "invalid_request"
+    }
+  ]
+}

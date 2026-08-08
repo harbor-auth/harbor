@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/harbor-auth/harbor/internal/crypto"
 	db "github.com/harbor-auth/harbor/internal/gen/db"
 )
 
@@ -102,6 +103,16 @@ type querier interface {
 // idempotency ledger, and namespace-scoped sessions — in PostgreSQL.
 type Store struct {
 	q querier
+
+	// fedPool, keys, and cipher back ResolveOrCreateFederatedUser
+	// (federated_store.go). All three are nil until WithFederatedIdentities
+	// is called — ResolveOrCreateFederatedUser fails closed
+	// (ErrFederatedIdentitiesUnconfigured) until then, rather than silently
+	// running without the atomicity WithFederatedIdentities exists to
+	// provide.
+	fedPool federatedPool
+	keys    crypto.KeyProvider
+	cipher  crypto.Encryptor
 }
 
 // NewStore wraps a sqlc Queries (or any querier). Panics if q is nil —
@@ -111,6 +122,23 @@ func NewStore(q querier) *Store {
 		panic("cloudapi: nil querier")
 	}
 	return &Store{q: q}
+}
+
+// WithFederatedIdentities wires ResolveOrCreateFederatedUser's dependencies
+// and returns s for chaining (mirrors clients.DBSessionStore.WithPool):
+// pool for the atomic create-user + create-mapping transaction, and
+// keys/cipher for sealing a fresh user record exactly the way
+// identity.Enroller does (region-wrapped DEK, AAD-bound encrypted pairwise
+// secret). federated_store.go cannot simply reuse harbor-mgmt's shared
+// *identity.Enroller: EnrollFederated's persistence must run INSIDE this
+// call's own transaction, so a fresh, per-call Enroller is constructed over
+// a transaction-bound federated persister instead (see
+// ResolveOrCreateFederatedUser).
+func (s *Store) WithFederatedIdentities(pool federatedPool, keys crypto.KeyProvider, cipher crypto.Encryptor) *Store {
+	s.fedPool = pool
+	s.keys = keys
+	s.cipher = cipher
+	return s
 }
 
 // CreateNamespace persists a new namespace provisioning record in the given

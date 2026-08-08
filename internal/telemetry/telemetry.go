@@ -39,6 +39,7 @@ var AllowedFields = map[string]struct{}{
 	"component":     {},
 	"event":         {},
 	"caller":        {}, // a machine service-identity subject (JWT `sub`) for service-to-service auth, e.g. cloudapi's ServiceClaims.Subject — never an end-user identifier (distinct from the denied user `sub`, mirroring client_id's carve-out below).
+	"namespace_id":  {}, // a Harbor Cloud tenant identifier (internal/cloudapi), not a user identifier — mirrors client_id's carve-out.
 }
 
 // DeniedFields enumerates KNOWN-PII keys that must NEVER be emitted. It is used

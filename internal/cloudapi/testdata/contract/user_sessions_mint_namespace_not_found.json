@@ -1,0 +1,15 @@
+{
+  "name": "user_sessions_mint_namespace_not_found",
+  "spec_scenario": "SSO user-session handoff: valid token reaches the handler and an absent namespace is rejected",
+  "steps": [
+    {
+      "method": "POST",
+      "path": "/admin/v1/user-sessions",
+      "auth": "valid",
+      "scope": "user-sessions:mint",
+      "request_body": {"namespace_id": "does-not-exist-usersessions", "subject": "alice@example.com"},
+      "want_status": 404,
+      "want_error_code": "namespace_not_found"
+    }
+  ]
+}

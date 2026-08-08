@@ -205,11 +205,31 @@ mgmt:
     # component.
     # Generate: openssl rand -hex 32
     hotProxyToken: ""
+    # Optional: additional cloudServiceAuth trust anchors, each restricted to
+    # its own permitted scope set (internal/cloudapi/serviceauth.go §7 —
+    # per-key scope binding). Newline-separated entries of
+    # "<scope>[,<scope>...] <PEM, with line breaks escaped as literal \n>",
+    # e.g. the corporate-SSO SAML bridge gets a key permitted ONLY
+    # user-sessions:mint, never keys:rotate. Blank when unused —
+    # cloudServiceAuthPublicKey alone (permitted every scope, back-compat)
+    # remains sufficient for a deployment with a single caller.
+    additionalServiceAuthPublicKeys: ""
+    # HMAC-SHA256 key (base64url- or hex-encoded, >=32 bytes) harbor-mgmt
+    # uses to hash corporate-SSO subjects (SAML NameIDs) before persisting
+    # them (federated_identities.subject_hmac) — the raw subject is never
+    # stored. Required when cloudIntegration is enabled.
+    # Generate: openssl rand -hex 32
+    ssoSubjectHmacKey: ""
+    # Same-origin absolute path GET /login/sso redirects to after a
+    # successful corporate-SSO handoff. Must start with "/", no scheme, no
+    # "//" (cmd/harbor-mgmt/sso.go validates this at boot).
+    ssoDashboardPath: "/dashboard"
   secrets:
     # When set, this Secret must expose DATABASE_URL / REDIS_URL /
     # HARBOR_KMS_SECRET / INITIAL_ACCESS_TOKEN, and, when cloudIntegration is
-    # enabled, CLOUD_SERVICE_AUTH_PUBLIC_KEY / MGMT_HOT_PROXY_TOKEN. Its
-    # HARBOR_KMS_SECRET must equal the value in harbor-hot's Secret.
+    # enabled, CLOUD_SERVICE_AUTH_PUBLIC_KEY / MGMT_HOT_PROXY_TOKEN /
+    # SSO_SUBJECT_HMAC_KEY. Its HARBOR_KMS_SECRET must equal the value in
+    # harbor-hot's Secret.
     existingSecret: ""
     databaseUrl: ""
     # Shared Redis backs BFF, enrollment, WebAuthn, and abuse-control state.

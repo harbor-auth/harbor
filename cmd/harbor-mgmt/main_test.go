@@ -196,9 +196,10 @@ func TestCloudIntegrationGateRequiresItsConfigBeforeListen(t *testing.T) {
 	}
 
 	for name, marker := range map[string]string{
-		"trust-anchor public key": `requires CLOUD_SERVICE_AUTH_PUBLIC_KEY when CLOUD_INTEGRATION_ENABLED is set`,
+		"trust-anchor public key": `requires CLOUD_SERVICE_AUTH_PUBLIC_KEY or CLOUD_SERVICE_AUTH_PUBLIC_KEYS when CLOUD_INTEGRATION_ENABLED is set`,
 		"hot proxy token":         `requires MGMT_HOT_PROXY_TOKEN when CLOUD_INTEGRATION_ENABLED is set`,
 		"hot internal URL":        `validateInternalURL("HARBOR_HOT_INTERNAL_URL"`,
+		"SSO subject HMAC key":    `requires a valid SSO_SUBJECT_HMAC_KEY when CLOUD_INTEGRATION_ENABLED is set`,
 	} {
 		check := strings.Index(startup, marker)
 		if check < 0 {

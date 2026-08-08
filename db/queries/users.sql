@@ -15,6 +15,29 @@ RETURNING *;
 SELECT * FROM users
 WHERE id = $1;
 
+-- name: CreateFederatedUser :one
+-- Creates a user record for a corporate-SSO subject (internal/identity's
+-- EnrollFederated / internal/cloudapi's ResolveOrCreateFederatedUser).
+-- status and recovery_required are SQL literals, not parameters, so no
+-- caller can pass anything else:
+--   status='active'            — not 'pending' (which means "awaiting
+--     first-passkey activation", a ceremony an SSO user will never run: they
+--     authenticate at their employer's IdP, never at a Harbor passkey
+--     prompt).
+--   recovery_required=false    — an SSO user has no Harbor-held credential
+--     to recover; their recovery path is their employer's IdP. Issuing
+--     Harbor recovery codes would mint a Harbor-local credential that
+--     BYPASSES the corporate IdP entirely. `true` would also fence them into
+--     SessionScopeEnrollmentOnly, where bff.RequireFullScope 403s the whole
+--     dashboard for a user who will never complete the passkey ceremony that
+--     clears it.
+INSERT INTO users (
+    id, region, status, dek_wrapped, pairwise_secret, recovery_required
+) VALUES (
+    $1, $2, 'active', $3, $4, false
+)
+RETURNING *;
+
 -- name: SetUserStatus :exec
 UPDATE users
 SET status = $2

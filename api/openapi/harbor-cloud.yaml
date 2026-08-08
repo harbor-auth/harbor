@@ -43,11 +43,87 @@ servers:
 tags:
   - name: sessions
     description: Namespace-scoped management session minting.
+  - name: user-sessions
+    description: >-
+      End-user SSO session handoff — minting a one-time login code that hands
+      a corporate-SSO-authenticated end user to Harbor's own BFF session.
   - name: namespaces
     description: Namespace provisioning lifecycle.
   - name: keys
     description: Privileged signing-key rotation (proxied to harbor-hot).
 paths:
+  /admin/v1/user-sessions:
+    post:
+      operationId: postAdminV1UserSessions
+      summary: Mint a one-time login code for an SSO-authenticated end user
+      description: >-
+        Mints a short-lived, single-use login code that hands a corporate
+        user — already authenticated against their own IdP by Harbor Cloud's
+        SAML bridge — to Harbor's own BFF session, via `GET
+        /login/sso?code=`. Requires the `user-sessions:mint` scope.
+
+        Identity resolution is idempotent on `(namespace_id, subject)`: the
+        same pair always resolves to the same Harbor user, creating one only
+        the first time it is seen. Deliberately carries NO `Idempotency-Key`
+        and writes NO row to the shared `cloud_operations` ledger, unlike
+        every other operation in this contract — that idempotency ledger
+        exists to make a RETRY safe to replay verbatim, but the only
+        non-idempotent output here is a one-time login code, which must never
+        be persisted at rest for later replay. A retried mint simply issues a
+        second code for the same resolved user; the first is left to expire
+        unused rather than being replayed.
+
+        Carries no email or group claims: Harbor stores neither, and this
+        contract is a plain identity handoff, not a profile sync — accepting
+        PII fields here would put them on the wire for no purpose. The
+        response deliberately carries no `login_url` either — the redirect
+        target is an open-redirect sink, so the caller builds it from its own
+        configured Harbor origin rather than trusting a server-supplied URL.
+      tags:
+        - user-sessions
+      security:
+        - cloudServiceAuth: [user-sessions:mint]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserSessionMintRequest"
+      responses:
+        "201":
+          description: Login code minted (or, when the mapping already existed, minted for the existing user).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserSessionMintResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: >-
+            Either the presented service token lacks `user-sessions:mint`
+            (`insufficient_scope`), or the resolved user exists but is not in
+            `active` status — e.g. erased/shredded — and must not be
+            re-entered via SSO (`subject_unavailable`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "404":
+          description: The target namespace does not exist or is deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          description: Internal error minting or persisting the login code.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
   /admin/v1/sessions:
     post:
       operationId: postAdminV1Sessions
@@ -272,11 +348,15 @@ components:
         client initial-access token. Required claims: `iss` (Harbor Cloud's
         service identity), `aud` (must equal `harbor-mgmt-cloudapi`), `sub`
         (caller service id), `scope` (space-delimited, e.g.
-        `sessions:mint namespaces:read namespaces:write keys:rotate`), `exp`
-        (60-120s lifetime), `iat`, and `jti` (single-use — a reused `jti` is
-        rejected as `token_replayed`). Verified against a configured
-        trust-anchor public key; verification is fail-closed when
-        unconfigured.
+        `sessions:mint namespaces:read namespaces:write keys:rotate
+        user-sessions:mint`), `exp` (60-120s lifetime), `iat`, and `jti`
+        (single-use — a reused `jti` is rejected as `token_replayed`).
+        Verified against a configured trust-anchor public key; verification
+        is fail-closed when unconfigured. A deployment MAY configure multiple
+        trust anchors, each permitted only a subset of scopes (e.g. the
+        SAML-bridge caller is permitted `user-sessions:mint` only, never
+        `keys:rotate`) — see `CLOUD_SERVICE_AUTH_PUBLIC_KEYS` in
+        internal/cloudapi/serviceauth.go.
   parameters:
     IdempotencyKey:
       name: Idempotency-Key
@@ -376,6 +456,56 @@ components:
           type: string
           format: date-time
           description: Present only once the namespace has been deleted.
+    UserSessionMintRequest:
+      type: object
+      description: >-
+        Request to resolve (or create) the Harbor user for a corporate-SSO
+        subject and mint a one-time login code for them. Deliberately carries
+        no email or group claims — Harbor stores neither.
+      additionalProperties: false
+      required:
+        - namespace_id
+        - subject
+      properties:
+        namespace_id:
+          type: string
+          description: The namespace this SSO subject belongs to.
+          pattern: "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+        subject:
+          type: string
+          description: >-
+            The IdP-asserted subject identifier (e.g. a SAML NameID) for this
+            user within `namespace_id`. Never logged or persisted in the
+            clear — only its HMAC is stored, keyed to `namespace_id` so the
+            same subject in two different namespaces resolves to two distinct
+            Harbor users.
+          minLength: 1
+          maxLength: 1024
+    UserSessionMintResponse:
+      type: object
+      description: >-
+        A minted one-time login code. There is no `login_url` — the caller
+        builds the redirect target (`GET /login/sso?code=...`) from its own
+        configured Harbor origin.
+      required:
+        - login_code
+        - expires_at
+        - created
+      properties:
+        login_code:
+          type: string
+          description: >-
+            Opaque, single-use bearer credential. Redeemed exactly once via
+            `GET /login/sso?code=`; unredeemed codes expire quickly (120s).
+        expires_at:
+          type: string
+          format: date-time
+        created:
+          type: boolean
+          description: >-
+            True if this call created a new Harbor user for this
+            `(namespace_id, subject)` pair; false if it resolved to a user
+            created by an earlier call.
     SessionMintRequest:
       type: object
       description: Request to mint a namespace-scoped management session.
@@ -480,6 +610,8 @@ components:
             - namespace_not_found
             - idempotency_key_reused
             - rate_limited
+            - subject_unavailable
+            - invalid_subject
         message:
           type: string
           description: Human-readable description (no PII, no token material).

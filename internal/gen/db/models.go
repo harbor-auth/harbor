@@ -79,6 +79,15 @@ type Credential struct {
 	WebauthnCredID []byte             `json:"webauthn_cred_id"`
 }
 
+type FederatedIdentity struct {
+	NamespaceID string             `json:"namespace_id"`
+	SubjectHmac []byte             `json:"subject_hmac"`
+	KeyVersion  int16              `json:"key_version"`
+	UserID      pgtype.UUID        `json:"user_id"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	LastSeenAt  pgtype.Timestamptz `json:"last_seen_at"`
+}
+
 type Grant struct {
 	ID          pgtype.UUID        `json:"id"`
 	Region      string             `json:"region"`

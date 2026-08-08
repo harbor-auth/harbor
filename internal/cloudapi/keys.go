@@ -203,5 +203,12 @@ func writeVerifyError(w http.ResponseWriter, err error) {
 		writeCloudAPIError(w, http.StatusUnauthorized, "token_replayed", "the bearer token has already been used")
 		return
 	}
+	if errors.Is(err, ErrScopeNotPermittedForAnchor) {
+		// §7 — per-key scope binding: reads identically to a route's own
+		// required-scope rejection — a caller must not be able to tell the
+		// two apart.
+		writeCloudAPIError(w, http.StatusForbidden, "insufficient_scope", "the presented token's signing key is not permitted to assert one of its claimed scopes")
+		return
+	}
 	writeCloudAPIError(w, http.StatusUnauthorized, "invalid_token", "a valid cloudServiceAuth bearer token is required")
 }
