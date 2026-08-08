@@ -26,6 +26,11 @@ metadata:
     app.kubernetes.io/part-of: harbor
 spec:
   schedule: "0 3 * * *"
+  # Suspended until the backup-credentials Secret holds real R2/S3 keys.
+  # Without them every run fails at the rclone step, which would produce a
+  # daily failed Job and train operators to ignore backup alerts. Unsuspend in
+  # the same change that installs the credentials.
+  suspend: true
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
