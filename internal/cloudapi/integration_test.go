@@ -20,6 +20,8 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +38,7 @@ import (
 	db "github.com/harbor-auth/harbor/internal/gen/db"
 	cloudopenapi "github.com/harbor-auth/harbor/internal/gen/openapi/cloud"
 	"github.com/harbor-auth/harbor/internal/httpserver"
+	"github.com/harbor-auth/harbor/internal/oidc"
 )
 
 // integrationDeps bundles the real dependencies a cross-process cloudapi
@@ -45,6 +48,20 @@ import (
 type integrationDeps struct {
 	store       *Store
 	clientStore ClientProvisioningStore
+	// rawClientStore is the same clientStore, retyped to reach
+	// SoftDeleteAllForNamespace's sibling method Get directly (bypassing
+	// namespaceActive) and to construct registry below — both need the
+	// concrete *clients.DBNamespacedClientStore rather than the narrower
+	// ClientProvisioningStore interface.
+	rawClientStore *clients.DBNamespacedClientStore
+	// registry is a real oidc.ClientRegistry backed by the SAME relying_parties
+	// table clientStore writes to, via GetRelyingParty
+	// (db/queries/relying_parties.sql) — the exact query the hot path
+	// (/token, /authorize, /introspect, /revoke) uses. Tests use it with
+	// oidc.AuthenticateClient to prove a client actually stops authenticating
+	// after a soft-delete, real SQL end to end (L1) — not a fake that
+	// reimplements "deleted_at IS NULL" in Go.
+	registry *clients.DBClientRegistry
 }
 
 func requireIntegrationDeps(t *testing.T) integrationDeps {
@@ -72,7 +89,13 @@ func requireIntegrationDeps(t *testing.T) integrationDeps {
 	t.Cleanup(pool.Close)
 
 	q := db.New(pool)
-	return integrationDeps{store: NewStore(q), clientStore: clients.NewDBNamespacedClientStore(q)}
+	rawClientStore := clients.NewDBNamespacedClientStore(q)
+	return integrationDeps{
+		store:          NewStore(q),
+		clientStore:    rawClientStore,
+		rawClientStore: rawClientStore,
+		registry:       clients.NewDBClientRegistry(q),
+	}
 }
 
 // newIntegrationReplayGuard connects a fresh Redis client for the replay
@@ -110,6 +133,11 @@ type integrationEnv struct {
 	verifier *ServiceAuthVerifier
 	ecPriv   *ecdsa.PrivateKey
 	hot      *recordingHotServer
+	// deps exposes the same real store/clientStore/registry the router was
+	// built from, so a scenario can reach past the HTTP surface to prove a
+	// side effect (e.g. oidc.AuthenticateClient actually failing) that no
+	// /admin/v1/* response body could otherwise demonstrate.
+	deps integrationDeps
 }
 
 func newIntegrationEnv(t *testing.T) *integrationEnv {
@@ -134,7 +162,7 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 	ts := httptest.NewServer(router)
 	t.Cleanup(ts.Close)
 
-	return &integrationEnv{ts: ts, verifier: verifier, ecPriv: priv, hot: hot}
+	return &integrationEnv{ts: ts, verifier: verifier, ecPriv: priv, hot: hot, deps: deps}
 }
 
 // mint signs a fresh cloudServiceAuth JWT against this env's trust anchor.
@@ -399,5 +427,260 @@ func TestIntegrationCloudIntegrationDisabledReturns404(t *testing.T) {
 	_ = res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		t.Errorf("GET /healthz status = %d, want 200", res.StatusCode)
+	}
+}
+
+// --- namespace-scoped OIDC client provisioning (real Postgres) -------------
+//
+// The scenarios below exist because every OTHER test for this behaviour
+// (internal/clients/namespaced_test.go, internal/cloudapi/clients_test.go,
+// clients_isolation_test.go, contract_test.go's fixtures) runs against a Go
+// reimplementation of "namespace_id = $2 AND deleted_at IS NULL" rather than
+// the real SQL — which is exactly how the H1/H2/M1 defects this file's
+// scenarios prove fixed went undetected in the first place. These run the
+// real GetNamespacedClient/UpdateNamespacedClient/SoftDeleteNamespacedClient/
+// SoftDeleteNamespaceClients queries against real PostgreSQL, and — for the
+// "does it actually stop authenticating" scenarios — the real GetRelyingParty
+// query via clients.DBClientRegistry + oidc.AuthenticateClient, the same
+// pieces the hot path (/token) uses.
+
+// createIntegrationNamespace creates namespace id via the real router and
+// fails the test immediately if that does not succeed — every scenario below
+// needs an active namespace before it can provision a client into it.
+func createIntegrationNamespace(t *testing.T, env *integrationEnv, id string) {
+	t.Helper()
+	res := env.do(t, http.MethodPost, "/admin/v1/namespaces",
+		env.mint(t, "namespaces:write", 90*time.Second), uniqueID("it-ns-key"),
+		fmt.Sprintf(`{"id":%q}`, id))
+	defer func() { _ = res.Body.Close() }()
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("create namespace %s: status = %d, want 201", id, res.StatusCode)
+	}
+}
+
+// hashHex returns the lowercase-hex SHA-256 digest of secret, in the exact
+// form ClientCreateRequest/ClientUpdateRequest.client_secret_hash expects
+// (Harbor stores it verbatim — no further hashing).
+func hashHex(secret string) string {
+	sum := sha256.Sum256([]byte(secret))
+	return hex.EncodeToString(sum[:])
+}
+
+// TestIntegrationClientCrossNamespaceIsolation proves, against real
+// PostgreSQL, that GetNamespacedClient/UpdateNamespacedClient/
+// SoftDeleteNamespacedClient's `namespace_id = $2` WHERE clause actually
+// holds: a client provisioned under nsA is unreachable — for read, write, AND
+// delete — through nsB's routes, and nsA's row is byte-for-byte unaffected by
+// every rejected cross-tenant attempt.
+func TestIntegrationClientCrossNamespaceIsolation(t *testing.T) {
+	env := newIntegrationEnv(t)
+	nsA := uniqueID("it-client-iso-a")
+	nsB := uniqueID("it-client-iso-b")
+	createIntegrationNamespace(t, env, nsA)
+	createIntegrationNamespace(t, env, nsB)
+
+	clientID := uniqueID("it-iso-client")
+	createRes := env.do(t, http.MethodPost, "/admin/v1/namespaces/"+nsA+"/clients",
+		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"),
+		fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`, clientID))
+	defer func() { _ = createRes.Body.Close() }()
+	if createRes.StatusCode != http.StatusCreated {
+		t.Fatalf("create client status = %d, want 201", createRes.StatusCode)
+	}
+
+	getForeign := env.do(t, http.MethodGet, "/admin/v1/namespaces/"+nsB+"/clients/"+clientID,
+		env.mint(t, "clients:read", 90*time.Second), "", "")
+	defer func() { _ = getForeign.Body.Close() }()
+	if getForeign.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET via wrong namespace status = %d, want 404", getForeign.StatusCode)
+	}
+
+	putForeign := env.do(t, http.MethodPut, "/admin/v1/namespaces/"+nsB+"/clients/"+clientID,
+		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"),
+		`{"redirect_uris":["https://attacker.example.com/cb"],"client_name":"pwned"}`)
+	defer func() { _ = putForeign.Body.Close() }()
+	if putForeign.StatusCode != http.StatusNotFound {
+		t.Fatalf("PUT via wrong namespace status = %d, want 404", putForeign.StatusCode)
+	}
+
+	delForeign := env.do(t, http.MethodDelete, "/admin/v1/namespaces/"+nsB+"/clients/"+clientID,
+		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"), "")
+	defer func() { _ = delForeign.Body.Close() }()
+	if delForeign.StatusCode != http.StatusNoContent {
+		t.Fatalf("DELETE via wrong namespace status = %d, want 204 (idempotent no-op, never 404)", delForeign.StatusCode)
+	}
+
+	// The real row, read directly through the store (real SQL): still live,
+	// still owned by nsA, redirect_uris untouched by the rejected PUT.
+	row, err := env.deps.rawClientStore.Get(context.Background(), clientID, nsA)
+	if err != nil {
+		t.Fatalf("client vanished or became unreachable under its real owner nsA: %v", err)
+	}
+	if len(row.RedirectURIs) != 1 || row.RedirectURIs[0] != "https://a.example.com/cb" {
+		t.Fatalf("RedirectURIs = %v, want unchanged by the rejected cross-tenant PUT", row.RedirectURIs)
+	}
+	if row.DeletedAt != nil {
+		t.Fatal("client was soft-deleted by a cross-tenant DELETE against a different namespace")
+	}
+}
+
+// TestIntegrationClientSoftDeleteStopsAuthentication is the real-SQL
+// replacement for the misleadingly-named unit test in clients_test.go (L1):
+// it proves a client soft-deleted via DELETE actually stops authenticating,
+// using the same GetRelyingParty query and oidc.AuthenticateClient the hot
+// path (/token) uses — not a fake that reimplements deleted_at filtering.
+func TestIntegrationClientSoftDeleteStopsAuthentication(t *testing.T) {
+	env := newIntegrationEnv(t)
+	ns := uniqueID("it-client-auth-ns")
+	createIntegrationNamespace(t, env, ns)
+
+	clientID := uniqueID("it-auth-client")
+	secret := "integration-test-secret-" + clientID
+
+	createRes := env.do(t, http.MethodPost, "/admin/v1/namespaces/"+ns+"/clients",
+		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"),
+		fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"client_secret_basic","client_secret_hash":%q}`,
+			clientID, hashHex(secret)))
+	defer func() { _ = createRes.Body.Close() }()
+	if createRes.StatusCode != http.StatusCreated {
+		t.Fatalf("create client status = %d, want 201; body unavailable (closed)", createRes.StatusCode)
+	}
+
+	ctx := context.Background()
+	if _, ok := oidc.AuthenticateClient(ctx, env.deps.registry, clientID, oidc.ClientAuthSecretBasic, secret); !ok {
+		t.Fatal("AuthenticateClient failed BEFORE delete — client should authenticate with its real secret")
+	}
+
+	delRes := env.do(t, http.MethodDelete, "/admin/v1/namespaces/"+ns+"/clients/"+clientID,
+		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"), "")
+	defer func() { _ = delRes.Body.Close() }()
+	if delRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete status = %d, want 204", delRes.StatusCode)
+	}
+
+	if _, ok := oidc.AuthenticateClient(ctx, env.deps.registry, clientID, oidc.ClientAuthSecretBasic, secret); ok {
+		t.Fatal("AuthenticateClient succeeded AFTER delete — soft-delete did not stop authentication")
+	}
+}
+
+// TestIntegrationNamespaceDeleteCascadesToClientSoftDeleteAndStopsAuthentication
+// is H2's proof: deleting a namespace must cascade to every client it owns,
+// against real PostgreSQL, and that cascade must actually stop the client
+// from authenticating — not just from being visible through the (now-404)
+// namespaced routes.
+func TestIntegrationNamespaceDeleteCascadesToClientSoftDeleteAndStopsAuthentication(t *testing.T) {
+	env := newIntegrationEnv(t)
+	ns := uniqueID("it-ns-cascade")
+	createIntegrationNamespace(t, env, ns)
+
+	clientID := uniqueID("it-cascade-client")
+	secret := "integration-cascade-secret-" + clientID
+
+	createRes := env.do(t, http.MethodPost, "/admin/v1/namespaces/"+ns+"/clients",
+		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"),
+		fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"client_secret_basic","client_secret_hash":%q}`,
+			clientID, hashHex(secret)))
+	defer func() { _ = createRes.Body.Close() }()
+	if createRes.StatusCode != http.StatusCreated {
+		t.Fatalf("create client status = %d, want 201", createRes.StatusCode)
+	}
+
+	ctx := context.Background()
+	if _, ok := oidc.AuthenticateClient(ctx, env.deps.registry, clientID, oidc.ClientAuthSecretBasic, secret); !ok {
+		t.Fatal("AuthenticateClient failed BEFORE namespace delete — client should authenticate")
+	}
+
+	delNsRes := env.do(t, http.MethodDelete, "/admin/v1/namespaces/"+ns,
+		env.mint(t, "namespaces:write", 90*time.Second), uniqueID("it-key"), "")
+	defer func() { _ = delNsRes.Body.Close() }()
+	if delNsRes.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete namespace status = %d, want 204", delNsRes.StatusCode)
+	}
+
+	// The core bug (H2): before the fix, the client kept authenticating
+	// forever after its namespace was deleted.
+	if _, ok := oidc.AuthenticateClient(ctx, env.deps.registry, clientID, oidc.ClientAuthSecretBasic, secret); ok {
+		t.Fatal("client still authenticates after its owning namespace was deleted — H2 cascade did not stop it")
+	}
+
+	// Confirm the cascade set deleted_at on the real row, not merely that
+	// something downstream started rejecting it.
+	if _, err := env.deps.rawClientStore.Get(ctx, clientID, ns); !errors.Is(err, clients.ErrClientNotFound) {
+		t.Fatalf("rawClientStore.Get after namespace delete cascade: err=%v, want ErrClientNotFound", err)
+	}
+
+	// The namespaced routes 404 too — the namespace itself is gone, so an
+	// operator cannot enumerate its clients post-delete. This is the OTHER
+	// half of H2 (namespaceActive's 404-on-deleted-namespace) and is
+	// unchanged by design (see this file's package doc and namespaces.go) —
+	// asserted here so a future change to that behavior is caught.
+	getRes := env.do(t, http.MethodGet, "/admin/v1/namespaces/"+ns+"/clients/"+clientID,
+		env.mint(t, "clients:read", 90*time.Second), "", "")
+	defer func() { _ = getRes.Body.Close() }()
+	if getRes.StatusCode != http.StatusNotFound {
+		t.Fatalf("GET client under deleted namespace status = %d, want 404", getRes.StatusCode)
+	}
+}
+
+// TestIntegrationClientCredentialPairingRejections is H1/M1's real-SQL proof:
+// an empty-string token_endpoint_auth_method (create AND update) and a
+// present-but-empty client_secret_hash (update) are rejected outright, and a
+// rejected request never mutates the live client's stored auth method or
+// hash.
+func TestIntegrationClientCredentialPairingRejections(t *testing.T) {
+	env := newIntegrationEnv(t)
+	ns := uniqueID("it-pairing-ns")
+	createIntegrationNamespace(t, env, ns)
+
+	// H1 on create: "" must be rejected, never silently defaulted away from
+	// "none" (which would leave the client with NO credential check).
+	postEmptyID := uniqueID("it-pairing-create-empty")
+	postEmptyRes := env.do(t, http.MethodPost, "/admin/v1/namespaces/"+ns+"/clients",
+		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"),
+		fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":""}`, postEmptyID))
+	defer func() { _ = postEmptyRes.Body.Close() }()
+	if postEmptyRes.StatusCode != http.StatusBadRequest {
+		t.Fatalf("POST with empty token_endpoint_auth_method status = %d, want 400", postEmptyRes.StatusCode)
+	}
+	if _, err := env.deps.rawClientStore.Get(context.Background(), postEmptyID, ns); !errors.Is(err, clients.ErrClientNotFound) {
+		t.Fatalf("a rejected create must not have persisted a row: Get err=%v, want ErrClientNotFound", err)
+	}
+
+	// A real confidential client to attempt to attack via PUT.
+	clientID := uniqueID("it-pairing-client")
+	secret := "integration-pairing-secret-" + clientID
+	createRes := env.do(t, http.MethodPost, "/admin/v1/namespaces/"+ns+"/clients",
+		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"),
+		fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"client_secret_basic","client_secret_hash":%q}`,
+			clientID, hashHex(secret)))
+	defer func() { _ = createRes.Body.Close() }()
+	if createRes.StatusCode != http.StatusCreated {
+		t.Fatalf("create client status = %d, want 201", createRes.StatusCode)
+	}
+
+	// H1 on update: "" must not silently downgrade a confidential client to
+	// public (an authentication bypass for anyone who knows client_id).
+	putDowngradeRes := env.do(t, http.MethodPut, "/admin/v1/namespaces/"+ns+"/clients/"+clientID,
+		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"),
+		`{"redirect_uris":["https://a.example.com/cb2"],"token_endpoint_auth_method":""}`)
+	defer func() { _ = putDowngradeRes.Body.Close() }()
+	if putDowngradeRes.StatusCode != http.StatusBadRequest {
+		t.Fatalf("PUT with empty token_endpoint_auth_method status = %d, want 400", putDowngradeRes.StatusCode)
+	}
+
+	// M1 on update: a present-but-empty client_secret_hash must be rejected,
+	// never silently ignored via UpdateNamespacedClient's COALESCE.
+	putEmptyHashRes := env.do(t, http.MethodPut, "/admin/v1/namespaces/"+ns+"/clients/"+clientID,
+		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"),
+		`{"redirect_uris":["https://a.example.com/cb2"],"client_secret_hash":""}`)
+	defer func() { _ = putEmptyHashRes.Body.Close() }()
+	if putEmptyHashRes.StatusCode != http.StatusBadRequest {
+		t.Fatalf("PUT with empty client_secret_hash status = %d, want 400", putEmptyHashRes.StatusCode)
+	}
+
+	// Neither rejected PUT mutated the client: it must still authenticate
+	// exactly as originally configured, with its ORIGINAL secret.
+	if _, ok := oidc.AuthenticateClient(context.Background(), env.deps.registry, clientID, oidc.ClientAuthSecretBasic, secret); !ok {
+		t.Fatal("client_secret_basic client stopped authenticating with its original secret after two rejected PUTs")
 	}
 }
