@@ -44,3 +44,9 @@ data:
   # here rather than in secret-mgmt.yaml. Only read when
   # CLOUD_INTEGRATION_ENABLED is "true".
   HARBOR_HOT_INTERNAL_URL: "http://harbor-hot.harbor.svc.cluster.local"
+  # Same-origin path GET /login/sso redirects to after a successful
+  # corporate-SSO handoff (cmd/harbor-mgmt/sso.go). Must be an absolute path,
+  # not a full URL — a URL here would turn the handoff into an open redirect,
+  # so the binary rejects one at boot. Only read when
+  # CLOUD_INTEGRATION_ENABLED is "true".
+  SSO_DASHBOARD_PATH: "/dashboard"
