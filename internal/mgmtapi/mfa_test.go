@@ -99,6 +99,14 @@ type fakeMFASessionStamper struct{}
 
 func (fakeMFASessionStamper) StampMFAStepUp(context.Context, string, time.Time) error { return nil }
 
+// fakeErrMFASessionStamper always fails with the configured error — used to
+// exercise writeMFAStepUpStampError's 403-vs-503 split (M3).
+type fakeErrMFASessionStamper struct{ err error }
+
+func (f fakeErrMFASessionStamper) StampMFAStepUp(context.Context, string, time.Time) error {
+	return f.err
+}
+
 // mfaRequest builds an MFA request. Authentication is wired on the server via
 // WithCallerSource; the userID parameter is retained for call-site readability
 // but no longer sets a request header.
@@ -393,6 +401,54 @@ func TestPostMFAVerify_Unavailable(t *testing.T) {
 	}
 }
 
+// TestPostMFAVerify_GuardDenies is M3's fix: a session mfaEnrollmentGuard
+// (the same predicate that gates enrollment, reused here) denies is refused
+// 403 BEFORE MFAService.Verify ever runs — the TOTP code presented is never
+// spent on a request that was always going to be refused. Before this fix,
+// the ONLY check was downstream in StampMFAStepUp, after Verify had already
+// consumed the code.
+func TestPostMFAVerify_GuardDenies(t *testing.T) {
+	svc := &fakeMFAService{}
+	guard := &fakeMFAEnrollmentGuard{allowed: false}
+	s := newMFAServer(svc).WithCallerSource(fakeCallerSource{userID: "user-1"}).WithMFAEnrollmentGuard(guard)
+
+	rec := httptest.NewRecorder()
+	s.PostMFAVerify(rec, mfaRequest(http.MethodPost, "/mfa/verify", `{"code":"123456"}`, "user-1"))
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	if !guard.called {
+		t.Error("EnrollmentAllowed was never consulted")
+	}
+	if svc.verified {
+		t.Error("MFAService.Verify must not be called when the guard denies step-up — the code must never be spent")
+	}
+}
+
+// TestPostMFAVerify_StampStepUpNotPermittedIs403 is the backstop half of M3:
+// even with no guard wired (nil mfaEnrollmentGuard, an unwired/dev-scaffold
+// instance), if the load-bearing StampMFAStepUp call itself refuses with
+// ErrStepUpNotPermittedForSession, the response must still be 403 (a
+// session/client problem), never the generic 503 every OTHER StampMFAStepUp
+// failure gets.
+func TestPostMFAVerify_StampStepUpNotPermittedIs403(t *testing.T) {
+	svc := &fakeMFAService{}
+	s := newTestServer(nil).WithMFA(svc).
+		WithMFASessionStamper(fakeErrMFASessionStamper{err: ErrStepUpNotPermittedForSession}).
+		WithCallerSource(fakeCallerSource{userID: "user-1"})
+
+	rec := httptest.NewRecorder()
+	s.PostMFAVerify(rec, mfaRequest(http.MethodPost, "/mfa/verify", `{"code":"123456"}`, "user-1"))
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	if !svc.verified {
+		t.Error("MFAService.Verify should have been called (no guard was wired to refuse earlier)")
+	}
+}
+
 // --- POST /mfa/verify-recovery ---
 
 func TestPostMFAVerifyRecovery_Success(t *testing.T) {
@@ -441,6 +497,51 @@ func TestPostMFAVerifyRecovery_Unavailable(t *testing.T) {
 	s.PostMFAVerifyRecovery(rec, mfaRequest(http.MethodPost, "/mfa/verify-recovery", `{"code":"CODE-1111"}`, "user-1"))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+}
+
+// TestPostMFAVerifyRecovery_GuardDenies matters more than its TOTP twin
+// (TestPostMFAVerify_GuardDenies): a recovery code is single-use and burned
+// by a successful VerifyRecoveryCode call, so catching an ineligible session
+// only AFTER that call — as the old StampMFAStepUp-only check did — cost the
+// user one of their limited recovery codes for a request that was always
+// going to be refused. The pre-check below must run first.
+func TestPostMFAVerifyRecovery_GuardDenies(t *testing.T) {
+	svc := &fakeMFAService{}
+	guard := &fakeMFAEnrollmentGuard{allowed: false}
+	s := newMFAServer(svc).WithCallerSource(fakeCallerSource{userID: "user-1"}).WithMFAEnrollmentGuard(guard)
+
+	rec := httptest.NewRecorder()
+	s.PostMFAVerifyRecovery(rec, mfaRequest(http.MethodPost, "/mfa/verify-recovery", `{"code":"CODE-1111"}`, "user-1"))
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	if !guard.called {
+		t.Error("EnrollmentAllowed was never consulted")
+	}
+	if svc.recovered {
+		t.Error("MFAService.VerifyRecoveryCode must not be called when the guard denies step-up — the recovery code must never be burned")
+	}
+}
+
+// TestPostMFAVerifyRecovery_StampStepUpNotPermittedIs403 is the backstop
+// half of M3 for the recovery-code path — see
+// TestPostMFAVerify_StampStepUpNotPermittedIs403.
+func TestPostMFAVerifyRecovery_StampStepUpNotPermittedIs403(t *testing.T) {
+	svc := &fakeMFAService{}
+	s := newTestServer(nil).WithMFA(svc).
+		WithMFASessionStamper(fakeErrMFASessionStamper{err: ErrStepUpNotPermittedForSession}).
+		WithCallerSource(fakeCallerSource{userID: "user-1"})
+
+	rec := httptest.NewRecorder()
+	s.PostMFAVerifyRecovery(rec, mfaRequest(http.MethodPost, "/mfa/verify-recovery", `{"code":"CODE-1111"}`, "user-1"))
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	if !svc.recovered {
+		t.Error("MFAService.VerifyRecoveryCode should have been called (no guard was wired to refuse earlier)")
 	}
 }
 

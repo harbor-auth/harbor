@@ -642,9 +642,14 @@ func TestIntegrationUserSessionsErasedUserReturns403(t *testing.T) {
 // Rollback is a no-op only because staged writes were never merged into the
 // pool, not because it enforces any real transactional isolation). Asserts:
 // every goroutine resolves to the SAME user id, exactly one of them reports
-// created=true, and the database ends up with EXACTLY ONE users row and
-// EXACTLY ONE federated_identities row for this pair — no orphaned user left
-// behind by a losing goroutine's rolled-back transaction.
+// created=true, exactly one federated_identities row exists for this pair,
+// and — the assertion that actually discriminates a losing goroutine's real
+// ROLLBACK from a no-transaction implementation that just leaves its loser's
+// user row sitting there — the total `users` table row count grew by EXACTLY
+// ONE across the whole race, not by one per goroutine. (A per-winner-id
+// count can't tell the two apart: users.id is a PRIMARY KEY, so it is
+// structurally 0 or 1 no matter how many OTHER rows a bad implementation
+// orphaned.)
 //
 //harbor:invariant INV-CLOUDAPI-REPLAY-RESISTANT
 func TestIntegrationUserSessionsConcurrentResolveOrCreate(t *testing.T) {
@@ -657,6 +662,20 @@ func TestIntegrationUserSessionsConcurrentResolveOrCreate(t *testing.T) {
 	const subject = "concurrent@example.com"
 	hasher := userSessionsSubjectHasher(t)
 	subjectHMAC := hasher.Hash(nsID, subject)
+
+	// M4: snapshot the TOTAL users row count before the race, not scoped to
+	// this pair — a loser that rolls back correctly leaves users completely
+	// unchanged; a loser that leaks an orphan grows the table. Scoping this
+	// count to "users WHERE id = $winnerID" (as an earlier version of this
+	// test did) cannot observe that: users.id is the table's PRIMARY KEY, so
+	// a count filtered on one id is structurally 0 or 1 regardless of
+	// whether any other rows were orphaned. Only an unscoped before/after
+	// delta (or the LEFT JOIN orphan-scan below) can catch a losing
+	// goroutine that committed its user without a matching identity row.
+	var usersBefore int
+	if err := deps.pool.QueryRow(ctx, `SELECT count(*) FROM users`).Scan(&usersBefore); err != nil {
+		t.Fatalf("count users before: %v", err)
+	}
 
 	const n = 20
 	var wg sync.WaitGroup
@@ -702,12 +721,28 @@ func TestIntegrationUserSessionsConcurrentResolveOrCreate(t *testing.T) {
 	if err := winnerUUID.Scan(firstID); err != nil {
 		t.Fatalf("parse winner id %q: %v", firstID, err)
 	}
-	var userCount int
-	if err := deps.pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE id = $1`, winnerUUID).Scan(&userCount); err != nil {
+	var winnerCount int
+	if err := deps.pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE id = $1`, winnerUUID).Scan(&winnerCount); err != nil {
 		t.Fatalf("count users: %v", err)
 	}
-	if userCount != 1 {
-		t.Errorf("users rows for %s = %d, want exactly 1 (no orphaned loser row survived rollback)", firstID, userCount)
+	if winnerCount != 1 {
+		t.Errorf("users rows for winner %s = %d, want exactly 1", firstID, winnerCount)
+	}
+
+	// M4: the delta check that actually discriminates. users.id is a PRIMARY
+	// KEY, so "WHERE id = $winner" above can only ever read 0 or 1 — it
+	// can't see a loser that committed a DIFFERENT, orphaned id. Comparing
+	// the unscoped total before/after the race is what proves none of the
+	// 19 losing goroutines left a credential-less "active" user behind: a
+	// no-transaction implementation (create user; INSERT identity; on 23505
+	// re-read the winner) passes every assertion above while leaving 19
+	// orphans, but fails this one because usersAfter - usersBefore = 20, not 1.
+	var usersAfter int
+	if err := deps.pool.QueryRow(ctx, `SELECT count(*) FROM users`).Scan(&usersAfter); err != nil {
+		t.Fatalf("count users after: %v", err)
+	}
+	if usersAfter-usersBefore != 1 {
+		t.Errorf("users row count delta = %d, want exactly 1 (a losing goroutine left an orphaned user row behind instead of rolling back)", usersAfter-usersBefore)
 	}
 
 	var identityCount int

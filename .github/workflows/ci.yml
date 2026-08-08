@@ -28,9 +28,21 @@
 # gate as local — exercising authorize→token→JWKS + the §11.7 negatives against a
 # live harbor-hot on every PR.
 #
-# Branch protection: require BOTH the `agent-check` and `e2e` jobs on the default
-# branch. That is what gives the F5 tamper guards + CODEOWNERS their teeth — a red
-# check-results, a tamper finding, or a broken assembled flow blocks the merge.
+# A third job, `integration`, runs the `-tags=integration` suite (real
+# Postgres/Redis, not Go fakes) against Postgres/Redis services on every PR —
+# see that job's own header comment for why: without it, the real-SQL tests
+# `t.Skip` themselves in every OTHER job (none of which set
+# DATABASE_URL/REDIS_URL) and nothing in the pipeline ever exercises the real
+# queries those tests exist to double-check — including M4's concurrent
+# ResolveOrCreateFederatedUser race, which only a real Postgres transaction
+# can actually exercise (usersessions_test.go's in-memory fake cannot).
+#
+# Branch protection: require the `agent-check`, `e2e`, AND `integration` jobs
+# on the default branch. That is what gives the F5 tamper guards + CODEOWNERS
+# (agent-check), the assembled OIDC flow (e2e), and the real-database
+# federated-identity race guarantee (integration) their teeth — a red
+# check-results, a tamper finding, a broken assembled flow, or a real-SQL
+# regression all block the merge.
 name: ci
 
 on:
@@ -191,3 +203,130 @@ jobs:
       # Runs the F8 Go e2e tests only (not the full OIDF certification suite).
       - name: Run e2e OIDC harness (F8)
         run: nix develop -c make e2e
+
+  # integration — M4: runs the `-tags=integration` suite (real Postgres/Redis,
+  # no fakes) that `agent-check`'s plain `go test ./...` never exercises.
+  # Without this job, internal/cloudapi/integration_test.go's
+  # requireIntegrationDeps (and cmd/harbor-mgmt's equivalent
+  # TestRunBuildsDurableManagementGraph) `t.Skip` themselves the instant
+  # DATABASE_URL/REDIS_URL are unset — which they always were in every
+  # existing CI job — so nothing in the automated pipeline had ever run the
+  # real SQL this branch's SSO user-session handoff depends on (in particular
+  # TestIntegrationUserSessionsConcurrentResolveOrCreate, which proves 20
+  # goroutines racing ResolveOrCreateFederatedUser for the same (namespace,
+  # subject) leave behind exactly one users row and one federated_identities
+  # row — a property only a real Postgres transaction, not the in-memory
+  # fakeFederatedPool usersessions_test.go uses, can actually exercise) —
+  # against a real database.
+  #
+  # Postgres/Redis image tags and health-check parameters mirror
+  # e2e/docker-compose.yml (the `e2e` job's own dependency stack above) — the
+  # existing template for standing up Harbor's durable dependencies in CI.
+  # Migrations are applied with the same pinned `migrate` binary `make
+  # migrate` uses locally (flake.nix), so this job runs against the identical
+  # schema a developer would.
+  #
+  # Two -tags=integration tests need a KMS emulator (LOCALSTACK_ENDPOINT /
+  # KMS_KEY_MAP+AWS_ENDPOINT_URL, satisfied by the `e2e` job's localstack
+  # container above) rather than Postgres/Redis: cmd/harbor-hot's own
+  # main_integration_test.go (TestRunBuildsDurableLiveGraph) and
+  # internal/crypto's kmsclient_aws_test.go
+  # (TestAWSKMSClientLocalStackIntegration). Standing up localstack too is out
+  # of scope for THIS job — it is specifically about the Postgres/Redis-only
+  # cloudapi and harbor-mgmt suites — so those two are known, accepted
+  # exceptions and will continue to report SKIP here. The assertion step below
+  # only fails on a SKIP whose test name matches the Postgres/Redis-only
+  # suites this job IS responsible for, so those two exceptions can never
+  # silently grow to cover — or mask a regression in — a suite this job
+  # actually owns.
+  #
+  # No continue-on-error anywhere in this job: a failing (or silently
+  # skipped) real-Postgres test fails the job directly.
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: harbor
+          POSTGRES_USER: harbor
+          POSTGRES_PASSWORD: harbor
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U harbor -d harbor"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgres://harbor:harbor@localhost:5432/harbor?sslmode=disable
+      REDIS_URL: redis://localhost:6379/0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Actions are pinned to release tags (not @main) — bump deliberately.
+      - name: Install pinned Nix toolchain
+        uses: DeterminateSystems/nix-installer-action@v16
+
+      # No binary-cache action — see the agent-check job above for why
+      # DeterminateSystems/magic-nix-cache-action was removed (deprecated
+      # 2025-02-01; FlakeHub-auth failure red-gated every PR).
+
+      - name: Apply DB migrations
+        run: nix develop -c make migrate
+
+      # `-v` output is required, not cosmetic: the assertion step below greps
+      # it for `--- SKIP` lines, which is what stops a silently-skipped suite
+      # (this job's actual failure mode) from reading as a pass.
+      - name: Run integration tests (real Postgres/Redis; -tags=integration)
+        run: |
+          set -euo pipefail
+          nix develop -c go test -tags=integration -v ./... | tee integration-test.log
+
+      - name: Assert the real-Postgres/Redis suites actually ran (no silent skip)
+        run: |
+          set -euo pipefail
+          # Every TestIntegration* (internal/cloudapi) and
+          # TestRunBuildsDurableManagementGraph (cmd/harbor-mgmt) test's ONLY
+          # external dependency is DATABASE_URL/REDIS_URL, both set above —
+          # neither may legitimately report SKIP in this job. (The two
+          # KMS-emulator-dependent tests named in this job's header comment are
+          # deliberately excluded from this pattern — their names don't start
+          # with "TestIntegration" or equal "TestRunBuildsDurableManagementGraph".)
+          if grep -E '^--- SKIP: (TestIntegration|TestRunBuildsDurableManagementGraph)' integration-test.log; then
+            echo '==> ERROR: a Postgres/Redis-only integration test reported SKIP —'
+            echo '    DATABASE_URL/REDIS_URL were set, so this means requireIntegrationDeps'
+            echo '    (or its cmd/harbor-mgmt equivalent) is skipping for some OTHER reason.'
+            echo '    That is exactly the failure mode this job exists to prevent: a skip'
+            echo '    masquerading as a pass. Fix the dependency wiring above, do not just'
+            echo '    let this check pass.'
+            exit 1
+          fi
+          # Positive control: confirm specific, known tests for the SSO
+          # user-session handoff findings this suite exists to guard actually
+          # executed and passed — proves the grep above isn't vacuously true
+          # because nothing ran at all (e.g. a build failure that produced an
+          # empty log). TestIntegrationUserSessionsConcurrentResolveOrCreate is
+          # M4's core proof and the whole reason this job exists.
+          for want in \
+            'TestIntegrationUserSessionsCreatePath' \
+            'TestIntegrationUserSessionsSameSubjectTwiceOneUser' \
+            'TestIntegrationUserSessionsSameSubjectTwoNamespacesDistinctUsers' \
+            'TestIntegrationUserSessionsErasedUserReturns403' \
+            'TestIntegrationUserSessionsConcurrentResolveOrCreate' \
+            'TestIntegrationCrossTenantSessionRejected' \
+            'TestRunBuildsDurableManagementGraph' \
+          ; do
+            if ! grep -q -- "--- PASS: $want" integration-test.log; then
+              echo "==> ERROR: expected integration test $want did not PASS (or did not run at all)."
+              exit 1
+            fi
+          done

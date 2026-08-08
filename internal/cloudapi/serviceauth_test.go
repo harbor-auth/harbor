@@ -608,6 +608,15 @@ func TestParseTrustAnchorsEnv(t *testing.T) {
 		"ns= with no PEM following":   "user-sessions:mint ns=acme",
 		"empty ns= namespace list":    "user-sessions:mint ns= " + escaped,
 		"empty namespace in ns= list": "user-sessions:mint ns=acme,, " + escaped,
+		// A comma (not the required space) before "ns=" makes it just
+		// another entry in the scope list, e.g. an operator writing
+		// "user-sessions:mint,ns=acme <pem>" when they meant a namespace
+		// restriction. Without rejecting it, that line would silently
+		// parse as an unrestricted (AllowedNamespaces=nil) anchor with a
+		// harmless, never-matching "ns=acme" scope — the same "operator
+		// intends to restrict, silently gets permissive" shape as H2. It
+		// must be a hard parse error, not a silent no-op.
+		"ns= glued onto the scope list with a comma instead of a space": "user-sessions:mint,ns=acme " + escaped,
 	} {
 		t.Run("malformed: "+name, func(t *testing.T) {
 			if _, err := ParseTrustAnchorsEnv(raw); err == nil {

@@ -130,10 +130,15 @@ func WithServiceClaims(ctx context.Context, claims ServiceClaims) context.Contex
 
 // ServiceClaimsFromContext reads the ServiceClaims set by WithServiceClaims.
 // ok is false when none were set (e.g. a unit test that calls a handler
-// directly, bypassing the HTTP auth middleware) — callers must treat that as
-// "no anchor-scoped restriction available to check," not as an implicit
-// grant; see usersessions.go's PostUserSessions for the one caller that
-// currently reads this.
+// directly, bypassing the HTTP auth middleware that sets it in production).
+// This function itself takes no position on what a caller should DO with
+// ok=false — that is a per-caller policy decision. Its one caller today,
+// usersessions.go's PostUserSessions, deliberately treats ok=false as
+// unrestricted (an implicit grant): there is no anchor in context to bind a
+// restriction to, so the M5 namespace check is a no-op, identical to this
+// handler's behavior before M5 existed. See that call site's own comment for
+// the reasoning; do not assume every future caller of this function should
+// make the same choice.
 func ServiceClaimsFromContext(ctx context.Context) (ServiceClaims, bool) {
 	claims, ok := ctx.Value(serviceClaimsContextKey{}).(ServiceClaims)
 	return claims, ok
@@ -376,6 +381,19 @@ func ParseTrustAnchorsEnv(raw string) ([]TrustAnchorConfig, error) {
 			s = strings.TrimSpace(s)
 			if s == "" {
 				return nil, fmt.Errorf("cloudapi: CLOUD_SERVICE_AUTH_PUBLIC_KEYS line %d: empty scope in scope list", i+1)
+			}
+			// Reject anything shaped like a "ns=" token that ended up here
+			// instead of in its own space-delimited field — e.g. an operator
+			// writing "user-sessions:mint,ns=acme <pem>" (comma instead of
+			// the required space before ns=) intends a namespace
+			// restriction but, without this check, silently gets an anchor
+			// with an extra (harmless, never-matching) "ns=acme" scope AND
+			// no namespace restriction at all — the exact "operator intends
+			// to restrict, silently gets permissive" shape as H2. No real
+			// scope name legitimately contains "=", so this can never reject
+			// a valid anchor.
+			if strings.Contains(s, "=") {
+				return nil, fmt.Errorf("cloudapi: CLOUD_SERVICE_AUTH_PUBLIC_KEYS line %d: %q looks like a misplaced ns= restriction (needs its own space-separated field, not a comma-separated scope) — see ParseTrustAnchorsEnv's doc comment for the line format", i+1, s)
 			}
 			scopes = append(scopes, s)
 		}

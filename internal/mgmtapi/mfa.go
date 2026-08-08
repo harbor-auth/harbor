@@ -37,6 +37,27 @@ type MFASessionStamper interface {
 	StampMFAStepUp(ctx context.Context, userID string, verifiedAt time.Time) error
 }
 
+// ErrStepUpNotPermittedForSession is the mgmtapi-level mirror of
+// bff.ErrStepUpNotPermittedForSession (M3): a StampMFAStepUp implementation
+// should return an error satisfying errors.Is(err, ErrStepUpNotPermittedForSession)
+// when the caller's session is not eligible to record a step-up, so
+// PostMFAVerify/PostMFAVerifyRecovery can map it to 403 rather than the
+// generic 503 every OTHER StampMFAStepUp failure gets. mgmtapi deliberately
+// does not import internal/bff (see MFASessionStamper/MFAEnrollmentGuard's
+// adapter pattern — the concrete bff-backed implementations live in
+// cmd/harbor-mgmt), so this is mgmtapi's own sentinel; cmd/harbor-mgmt's
+// bffMFASessionStamper translates bff's sentinel into this one.
+//
+// This is the backstop, not the primary defense: the mfaEnrollmentGuard
+// pre-check in PostMFAVerify/PostMFAVerifyRecovery below refuses an
+// ineligible session BEFORE mfa.Verify/VerifyRecoveryCode ever runs, so the
+// caller's code is never spent on a request that was always going to be
+// refused. This sentinel only matters when that guard is nil (unwired) and
+// the load-bearing bff.RecordTOTPStepUp check is what catches it instead —
+// in that case the code WAS already spent, but the response must still read
+// 403 (a client/session-shape problem), not 503 (an infrastructure fault).
+var ErrStepUpNotPermittedForSession = errors.New("mgmtapi: this session is not permitted to record a step-up verification")
+
 // MFAEnrollmentGuard reports whether the caller's CURRENT session (not just
 // their user account) is permitted to enroll a new TOTP factor (M3). A
 // session this browser never proved ownership of via the /authorize nonce
@@ -211,6 +232,7 @@ func (s *Server) PostMFAActivate(w http.ResponseWriter, r *http.Request) {
 //   - 200 OK                  on success ({status:"verified"})
 //   - 400 Bad Request         malformed body, or no active factor
 //   - 401 Unauthorized        missing authenticated user, or invalid code
+//   - 403 Forbidden           the session is not permitted to record a step-up (M3)
 //   - 503 Service Unavailable MFA not wired
 //   - 500 Internal Server Error verification failure
 func (s *Server) PostMFAVerify(w http.ResponseWriter, r *http.Request) {
@@ -226,6 +248,17 @@ func (s *Server) PostMFAVerify(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "MFA session binding is unavailable")
 		return
 	}
+	// M3: refuse a session RecordTOTPStepUp would never stamp BEFORE the code
+	// is verified, not after — otherwise a real, single-use TOTP code (and,
+	// worse, a burned recovery code — see PostMFAVerifyRecovery) is spent on
+	// a request that was always going to be refused. See
+	// mfaEnrollmentGuard's doc comment for why a nil guard here is safe (the
+	// load-bearing check below still refuses to stamp, it just does so after
+	// the code was already consumed).
+	if s.mfaEnrollmentGuard != nil && !s.mfaEnrollmentGuard.EnrollmentAllowed(r.Context()) {
+		s.writeError(w, http.StatusForbidden, "step_up_not_permitted", "this session is not permitted to record a step-up verification")
+		return
+	}
 	code, ok := s.decodeMFACode(w, r)
 	if !ok {
 		return
@@ -236,7 +269,7 @@ func (s *Server) PostMFAVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.mfaSessionStamper.StampMFAStepUp(r.Context(), userID, time.Now()); err != nil {
-		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "MFA session binding is unavailable")
+		s.writeMFAStepUpStampError(w, r, err)
 		return
 	}
 	s.writeJSON(w, http.StatusOK, mfaStatusResponse{Status: "verified"})
@@ -249,6 +282,7 @@ func (s *Server) PostMFAVerify(w http.ResponseWriter, r *http.Request) {
 //   - 200 OK                  on success ({status:"verified"})
 //   - 400 Bad Request         malformed body
 //   - 401 Unauthorized        missing authenticated user, or invalid code
+//   - 403 Forbidden           the session is not permitted to record a step-up (M3)
 //   - 503 Service Unavailable MFA not wired
 //   - 500 Internal Server Error verification failure
 func (s *Server) PostMFAVerifyRecovery(w http.ResponseWriter, r *http.Request) {
@@ -264,6 +298,16 @@ func (s *Server) PostMFAVerifyRecovery(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "MFA session binding is unavailable")
 		return
 	}
+	// M3: refuse BEFORE the recovery code is verified — a recovery code is
+	// single-use and burned on a successful VerifyRecoveryCode call, so
+	// catching an ineligible session only after that call (as the
+	// StampMFAStepUp error path used to) meant the refusal cost the user one
+	// of their limited recovery codes for nothing. See PostMFAVerify's
+	// matching comment.
+	if s.mfaEnrollmentGuard != nil && !s.mfaEnrollmentGuard.EnrollmentAllowed(r.Context()) {
+		s.writeError(w, http.StatusForbidden, "step_up_not_permitted", "this session is not permitted to record a step-up verification")
+		return
+	}
 	code, ok := s.decodeMFACode(w, r)
 	if !ok {
 		return
@@ -274,7 +318,7 @@ func (s *Server) PostMFAVerifyRecovery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.mfaSessionStamper.StampMFAStepUp(r.Context(), userID, time.Now()); err != nil {
-		s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "MFA session binding is unavailable")
+		s.writeMFAStepUpStampError(w, r, err)
 		return
 	}
 	s.writeJSON(w, http.StatusOK, mfaStatusResponse{Status: "verified"})
@@ -350,6 +394,21 @@ func (s *Server) DeleteMFAFactor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// writeMFAStepUpStampError maps a StampMFAStepUp failure to an HTTP response.
+// ErrStepUpNotPermittedForSession — the M3 backstop for when
+// mfaEnrollmentGuard was nil (unwired) and the pre-check in
+// PostMFAVerify/PostMFAVerifyRecovery never ran — is 403, a session/client
+// problem, distinct from every OTHER StampMFAStepUp failure (missing
+// session, store outage, ...), which stays the generic 503 it always was.
+func (s *Server) writeMFAStepUpStampError(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, ErrStepUpNotPermittedForSession) {
+		s.writeError(w, http.StatusForbidden, "step_up_not_permitted", "this session is not permitted to record a step-up verification")
+		return
+	}
+	s.logger.ErrorContext(r.Context(), "mgmtapi: MFA step-up stamp failed", "error", err)
+	s.writeError(w, http.StatusServiceUnavailable, "service_unavailable", "MFA session binding is unavailable")
 }
 
 // writeMFAVerifyError maps a code-verification error to an HTTP response. A

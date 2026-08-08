@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/harbor-auth/harbor/internal/bff"
+	"github.com/harbor-auth/harbor/internal/mgmtapi"
 	"github.com/harbor-auth/harbor/internal/oidc"
 	bfftest "github.com/harbor-auth/harbor/internal/testsupport/bff"
 )
@@ -90,5 +92,81 @@ func TestBffMFAEnrollmentGuard_NoSessionDenies(t *testing.T) {
 	}
 	if probeEnrollmentAllowed(t, store, "unknown-session-id") {
 		t.Error("EnrollmentAllowed(unknown session id) = true, want false (fail closed)")
+	}
+}
+
+// probeStampMFAStepUp wires bffMFASessionStamper.StampMFAStepUp behind
+// bff.Middleware exactly as production does, mirroring probeEnrollmentAllowed
+// above, and returns the error it produced.
+func probeStampMFAStepUp(t *testing.T, store bff.BFFSessionStore, cookie, userID string) error {
+	t.Helper()
+	stamper := bffMFASessionStamper{store: store}
+	var got error
+	mux := http.NewServeMux()
+	mux.HandleFunc("/probe", func(w http.ResponseWriter, r *http.Request) {
+		got = stamper.StampMFAStepUp(r.Context(), userID, time.Now())
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := bff.Middleware(store)(mux)
+
+	req := httptest.NewRequest(http.MethodGet, "/probe", nil)
+	if cookie != "" {
+		req.AddCookie(&http.Cookie{Name: bff.CookieName, Value: cookie})
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("probe handler status = %d, want 200", rec.Code)
+	}
+	return got
+}
+
+// TestBffMFASessionStamper_TranslatesStepUpNotPermittedError is M3's
+// cmd-level proof that bffMFASessionStamper translates bff's sentinel
+// (bff.ErrStepUpNotPermittedForSession, returned by bff.RecordTOTPStepUp for
+// exactly this federated-session shape) into mgmtapi's own sentinel —
+// internal/mgmtapi deliberately does not import internal/bff (see
+// MFASessionStamper's adapter-pattern doc comment), so
+// internal/mgmtapi/mfa.go's writeMFAStepUpStampError can only ever map THIS
+// package's ErrStepUpNotPermittedForSession to 403, never bff's directly.
+// Without this translation, an ineligible session whose refusal reaches
+// StampMFAStepUp (e.g. mfaEnrollmentGuard unwired) would fall through to the
+// generic 503 branch instead of 403.
+func TestBffMFASessionStamper_TranslatesStepUpNotPermittedError(t *testing.T) {
+	store := bfftest.NewInMemoryBFFSessionStore()
+	if err := store.Create(context.Background(), bff.BFFSessionRecord{
+		RequestID:  "sess-federated",
+		UserID:     "user-1",
+		AuthMethod: oidc.AuthMethodFederated,
+		// BrowserNonceHash deliberately nil, mirroring wireSSOLoginRoute —
+		// bff.SessionEligibleForMFAStepUp is false for this session, so
+		// bff.RecordTOTPStepUp refuses it with ErrStepUpNotPermittedForSession.
+		ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	err := probeStampMFAStepUp(t, store, "sess-federated", "user-1")
+	if !errors.Is(err, mgmtapi.ErrStepUpNotPermittedForSession) {
+		t.Fatalf("StampMFAStepUp(federated session) error = %v, want errors.Is(mgmtapi.ErrStepUpNotPermittedForSession)", err)
+	}
+}
+
+// TestBffMFASessionStamper_AllowsNormalSession proves the translation above
+// does not over-fire: an eligible session still gets stamped without error.
+func TestBffMFASessionStamper_AllowsNormalSession(t *testing.T) {
+	store := bfftest.NewInMemoryBFFSessionStore()
+	if err := store.Create(context.Background(), bff.BFFSessionRecord{
+		RequestID:        "sess-normal",
+		UserID:           "user-1",
+		AuthMethod:       oidc.AuthMethodWebAuthn,
+		BrowserNonceHash: []byte("nonce-hash"),
+		ExpiresAt:        time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	if err := probeStampMFAStepUp(t, store, "sess-normal", "user-1"); err != nil {
+		t.Fatalf("StampMFAStepUp(normal webauthn session) unexpected error: %v", err)
 	}
 }

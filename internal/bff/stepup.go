@@ -114,12 +114,21 @@ var ErrStepUpNotPermittedForSession = errors.New("bff: this session is not permi
 // BrowserNonceHash — the property every other nonce gate in this package
 // (login.go) actually keys off — is the more fundamental one; AuthMethod is
 // the more legible one to read in an audit log or test failure. NOTE: this
-// also excludes the lost-device account-recovery track (its BFF session is
-// promoted to full scope in place via SetUserWithRecoveryStatus without ever
-// acquiring a browser nonce — see cmd/harbor-mgmt/caller.go's
-// recoverySessionIssuer) — a deliberate, accepted trade-off: that session is
-// short-lived, and a fresh, ordinary sign-in restores step-up eligibility
-// immediately.
+// also excludes every session issued via
+// cmd/harbor-mgmt/caller.go's recoverySessionIssuer.IssueEnrollmentSession —
+// which, despite the name, is not only the lost-device account-recovery
+// track. It is also the seam wirePostRegistrationHandoff uses to hand a
+// brand-new signup its FIRST BFF session, immediately after their first
+// passkey registration (both cases promote/create the session without ever
+// acquiring a browser nonce). So the practical cost of this exclusion is
+// broader than "recovering a lost device": every new signup's first session
+// is also ineligible to self-enroll or step-up with TOTP until they sign in
+// again through the ordinary, nonce-acquiring /authorize path. This is a
+// deliberate, accepted trade-off, not a lockout — that session is
+// short-lived, no recovery/enrollment route is itself step-up gated, and a
+// fresh sign-in restores step-up eligibility immediately — but it is a real,
+// user-visible cost (one extra sign-in) for every new signup, not just the
+// rare lost-device path.
 func SessionEligibleForMFAStepUp(session BFFSessionRecord) bool {
 	return session.AuthMethod != oidc.AuthMethodFederated && len(session.BrowserNonceHash) != 0
 }

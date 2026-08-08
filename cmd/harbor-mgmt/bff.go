@@ -12,6 +12,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 
 	"github.com/harbor-auth/harbor/internal/bff"
+	"github.com/harbor-auth/harbor/internal/mgmtapi"
 	"github.com/harbor-auth/harbor/internal/webauthn"
 )
 
@@ -26,7 +27,19 @@ func (s bffMFASessionStamper) StampMFAStepUp(ctx context.Context, userID string,
 	if err != nil || record.UserID != userID {
 		return errors.New("authenticated BFF session does not match MFA user")
 	}
-	return bff.RecordTOTPStepUp(ctx, s.store, requestID, verifiedAt)
+	if err := bff.RecordTOTPStepUp(ctx, s.store, requestID, verifiedAt); err != nil {
+		if errors.Is(err, bff.ErrStepUpNotPermittedForSession) {
+			// Translate to mgmtapi's own sentinel — mgmtapi.PostMFAVerify/
+			// PostMFAVerifyRecovery map THIS to 403, distinct from every
+			// other StampMFAStepUp failure (mapped to 503), without mgmtapi
+			// importing internal/bff (see MFASessionStamper's adapter
+			// pattern: mgmtapi defines the contract, cmd/harbor-mgmt wires
+			// the bff-backed implementation).
+			return mgmtapi.ErrStepUpNotPermittedForSession
+		}
+		return err
+	}
+	return nil
 }
 
 // bffMFAEnrollmentGuard adapts bff.SessionEligibleForMFAStepUp to

@@ -137,12 +137,19 @@ type Server struct {
 	// browser session. Nil makes verification fail closed.
 	mfaSessionStamper MFASessionStamper
 	// mfaEnrollmentGuard, when non-nil, is consulted by PostMFAEnroll before
-	// starting a new TOTP enrollment (M3). This is a defense-in-depth check,
-	// not the load-bearing one — bff.RecordTOTPStepUp independently refuses
-	// to stamp a step-up for the same disqualified sessions regardless of
-	// whether enrollment was ever attempted, so a nil guard here (an
-	// unwired/dev-scaffold instance) does not reopen M3. Nil is therefore
-	// treated as "allow" rather than fail-closed, unlike mfaSessionStamper.
+	// starting a new TOTP enrollment, AND by PostMFAVerify/
+	// PostMFAVerifyRecovery before spending the caller's TOTP/recovery code
+	// (M3) — the same disqualifying-session predicate applies to both: a
+	// session bff.RecordTOTPStepUp will never stamp should neither be able to
+	// self-enroll a factor nor burn a real code trying to step up with one.
+	// This is a defense-in-depth check, not the load-bearing one —
+	// bff.RecordTOTPStepUp independently refuses to stamp a step-up for the
+	// same disqualified sessions regardless of whether this guard ran, so a
+	// nil guard here (an unwired/dev-scaffold instance) does not reopen M3;
+	// it just means an ineligible session's code gets verified (and, for
+	// recovery codes, burned) before the load-bearing check downstream
+	// refuses to stamp it. Nil is therefore treated as "allow" rather than
+	// fail-closed, unlike mfaSessionStamper.
 	mfaEnrollmentGuard MFAEnrollmentGuard
 	// compliance, when non-nil, backs the POST /compliance/export and POST
 	// /compliance/erase endpoints. Nil puts those routes into a 503 state.
@@ -361,9 +368,10 @@ func (s *Server) WithMFA(service MFAService) *Server {
 }
 
 // WithMFAEnrollmentGuard wires the (optional, defense-in-depth) check
-// PostMFAEnroll consults before starting a new TOTP enrollment — see
-// mfaEnrollmentGuard's doc comment for why a nil guard is safe. Returns s
-// for chaining.
+// PostMFAEnroll consults before starting a new TOTP enrollment, and
+// PostMFAVerify/PostMFAVerifyRecovery consult before spending a TOTP/recovery
+// code — see mfaEnrollmentGuard's doc comment for why a nil guard is safe.
+// Returns s for chaining.
 func (s *Server) WithMFAEnrollmentGuard(guard MFAEnrollmentGuard) *Server {
 	s.mfaEnrollmentGuard = guard
 	return s

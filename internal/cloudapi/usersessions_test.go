@@ -604,6 +604,27 @@ func TestPostUserSessionsAnchorNamespaceRestrictionRejectsOtherNamespace(t *test
 			t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
 		}
 	})
+
+	// This is the case that actually pins the no-enumeration-oracle property
+	// the handler's own comment claims: "globex" above was created before
+	// the request, so that subtest alone can't distinguish "rejected because
+	// the namespace check runs first" from "rejected because GetNamespace ran
+	// first and just happened to also find it forbidden" — both orderings
+	// return 403 when the namespace exists. A namespace that was NEVER
+	// created is the only input that tells the two orderings apart: if the
+	// namespace-restriction check ran AFTER GetNamespace, this would 404
+	// (namespace_not_found) instead, leaking to a restricted anchor that the
+	// namespace it can't touch doesn't exist either — exactly the enumeration
+	// oracle M5 exists to close.
+	t.Run("namespace that never existed, outside the anchor's set, still 403s (no enumeration oracle)", func(t *testing.T) {
+		rec := doWithClaims(`{"namespace_id":"does-not-exist","subject":"alice@example.com"}`)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403 (never 404 — that would leak namespace existence to a restricted anchor); body = %s", rec.Code, rec.Body.String())
+		}
+		if got := decodeError(t, rec); got.Code != cloudopenapi.ErrorCodeCrossTenantForbidden {
+			t.Errorf("error.code = %q, want cross_tenant_forbidden", got.Code)
+		}
+	})
 }
 
 // TestPostUserSessionsNoClaimsInContextIsUnrestricted proves the fallback
