@@ -3,6 +3,38 @@
 This directory contains the Kubernetes manifests and configuration for Harbor's
 offsite backup stack (T2.1 infra hardening).
 
+> ## ⚠️ Current state on the production cluster (verified 2026-08-07)
+>
+> **No backup of any kind is running yet.** Two independent reasons, both of
+> which must be resolved before the cluster has a recovery point:
+>
+> **1. The CronJobs were never deployed.** The manifests here existed but no
+> ArgoCD Application referenced them. `deploy/argocd/backup-application.yaml`
+> now does — but it will not produce working backups until the
+> `backup-credentials` Secret holds real R2/S3 credentials (see *Credential
+> Setup* below). Until then both CronJobs fail every run.
+>
+> **2. The etcd half does not apply to this cluster at all.** The production
+> guests run k3s on its **default SQLite datastore** (`state.db`), not etcd.
+> `/etc/rancher/k3s/config.yaml` sets `etcd-snapshot-retention` and
+> `etcd-snapshot-schedule-cron`, but *those settings are inert on SQLite* —
+> there is no `server/db/snapshots/` directory and no snapshot has ever been
+> written. The config reads as though scheduled cluster-state backups exist;
+> they do not.
+>
+> Consequences to plan around:
+>
+> - The **etcd restore runbook below cannot be executed as written** on these
+>   clusters. Restoring cluster state would mean restoring `state.db`, which is
+>   a different procedure and is not yet documented here.
+> - The **PostgreSQL restore path is the one that matters** for Harbor's own
+>   data, and it is the one to get working first — Harbor's durable state lives
+>   in PostgreSQL, not in the Kubernetes API.
+> - Either switch the datastore to embedded etcd (`cluster-init: true`, a
+>   disruptive change to a running single-node cluster) or drop the misleading
+>   `etcd-snapshot-*` keys and back up `state.db` explicitly. Leaving them in
+>   place is the worst option: it advertises a guarantee that does not exist.
+
 ## Contents
 
 | File | Purpose |
