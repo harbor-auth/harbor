@@ -83,6 +83,20 @@
           vendorHash = "sha256-jivqXwuq6wbNQFW8BlBZIKBLpIotA2MMR5iywODycpY=";
         });
 
+        # nixpkgs builds go-migrate with every driver tag it has, including
+        # `snowflake`. gosnowflake v1.6.19 calls readCACerts() from a package
+        # `init`, and that function panics outright when it cannot parse its
+        # baked-in CA bundle — which it cannot, in the Nix sandbox. The panic
+        # therefore fires before main() on every invocation, so the stock
+        # binary cannot even print its own -version, let alone run a migration.
+        #
+        # Harbor only ever migrates PostgreSQL, so we build the drivers we
+        # actually use and drop the rest. Keep `multistmt`: several migrations
+        # send more than one statement per file.
+        migratePinned = pkgs.go-migrate.overrideAttrs (_: {
+          tags = [ "postgres" "pgx" "pgx5" "multistmt" ];
+        });
+
         # The pinned toolchain — one list, mirrored by the Makefile's install
         # hints. Every tool the fail-closed Makefile requires lives here.
         toolchain = [
@@ -91,7 +105,7 @@
           sqlcPinned                    # @codegen: sqlc generate — pinned to v1.30.0 (see above)
           pkgs.oapi-codegen             # @codegen: OpenAPI -> Go stubs
           pkgs.buf                      # @codegen/@validate: proto gen + lint
-          pkgs.go-migrate               # @db-migrate: schema migrations (`migrate`) — nixpkgs renamed golang-migrate -> go-migrate
+          migratePinned                 # @db-migrate: schema migrations (`migrate`) — nixpkgs renamed golang-migrate -> go-migrate
           pkgs.k6                       # @load-test: hot-path load tests
           pkgs.nodejs                   # web codegen runtime (also Node>=20.19 for openspec)
           pkgs.pnpm                     # @codegen: pnpm codegen (web client)
