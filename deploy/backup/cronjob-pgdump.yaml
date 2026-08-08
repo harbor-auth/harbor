@@ -26,6 +26,11 @@ metadata:
     app.kubernetes.io/part-of: harbor
 spec:
   schedule: "0 3 * * *"
+  # Suspended until the backup-credentials Secret holds real R2/S3 keys.
+  # Without them every run fails at the rclone step, which would produce a
+  # daily failed Job and train operators to ignore backup alerts. Unsuspend in
+  # the same change that installs the credentials.
+  suspend: true
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
@@ -87,8 +92,8 @@ spec:
                   pg_dump \
                     --host="${PGHOST}" \
                     --port="${PGPORT:-5432}" \
-                    --username="${PGUSER:-postgres}" \
-                    --dbname="${PGDATABASE:-registry}" \
+                    --username="${PGUSER:-harbor}" \
+                    --dbname="${PGDATABASE:-harbor}" \
                     --format=custom \
                     --no-password \
                     | gzip \
@@ -108,15 +113,22 @@ spec:
                   value: harbor-postgresql.harbor.svc.cluster.local
                 - name: PGPORT
                   value: "5432"
+                # Must match deploy/platform/postgresql.yaml, which provisions
+                # the database as user "harbor", database "harbor", with the
+                # password in Secret harbor-postgresql-auth under key
+                # "password". The previous values here (postgres/registry and
+                # Secret harbor-postgresql/postgres-password) matched none of
+                # those, so this job could never have authenticated even once
+                # its rclone credentials existed.
                 - name: PGUSER
-                  value: postgres
+                  value: harbor
                 - name: PGDATABASE
-                  value: registry
+                  value: harbor
                 - name: PGPASSWORD
                   valueFrom:
                     secretKeyRef:
-                      name: harbor-postgresql
-                      key: postgres-password
+                      name: harbor-postgresql-auth
+                      key: password
               envFrom:
                 - secretRef:
                     name: backup-credentials
