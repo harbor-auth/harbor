@@ -1,0 +1,51 @@
+{
+  "name": "client_cross_tenant_read_not_found",
+  "spec_scenario": "Cross-tenant client read is not_found, never forbidden",
+  "steps": [
+    {
+      "method": "POST",
+      "path": "/admin/v1/namespaces",
+      "auth": "valid",
+      "scope": "namespaces:write",
+      "idempotency_key": "cross-tenant-ns-a-key",
+      "request_body": {
+        "id": "contract-tenant-a"
+      },
+      "want_status": 201
+    },
+    {
+      "method": "POST",
+      "path": "/admin/v1/namespaces",
+      "auth": "valid",
+      "scope": "namespaces:write",
+      "idempotency_key": "cross-tenant-ns-b-key",
+      "request_body": {
+        "id": "contract-tenant-b"
+      },
+      "want_status": 201
+    },
+    {
+      "method": "POST",
+      "path": "/admin/v1/namespaces/contract-tenant-a/clients",
+      "auth": "valid",
+      "scope": "clients:write",
+      "idempotency_key": "cross-tenant-client-key",
+      "request_body": {
+        "client_id": "cross-tenant-client-1",
+        "redirect_uris": [
+          "https://cross-tenant.example.com/cb"
+        ],
+        "token_endpoint_auth_method": "none"
+      },
+      "want_status": 201
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/namespaces/contract-tenant-b/clients/cross-tenant-client-1",
+      "auth": "valid",
+      "scope": "clients:read",
+      "want_status": 404,
+      "want_error_code": "client_not_found"
+    }
+  ]
+}

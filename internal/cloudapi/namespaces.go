@@ -16,8 +16,21 @@ import (
 	"net/http"
 	"regexp"
 
+	"github.com/harbor-auth/harbor/internal/clients"
 	cloudopenapi "github.com/harbor-auth/harbor/internal/gen/openapi/cloud"
 )
+
+// ClientProvisioningStore is the narrow behaviour clients.go's five handlers
+// need from a namespace-scoped OIDC client store. Depending on the interface
+// (not clients.DBNamespacedClientStore directly) keeps this package testable
+// with a fake and mirrors mgmtapi.ClientRegistrationStore's seam.
+type ClientProvisioningStore interface {
+	Create(ctx context.Context, c clients.NewNamespacedClient) (clients.NamespacedClient, error)
+	Get(ctx context.Context, clientID, namespaceID string) (clients.NamespacedClient, error)
+	List(ctx context.Context, namespaceID string) ([]clients.NamespacedClient, error)
+	Update(ctx context.Context, c clients.UpdateNamespacedClient) (clients.NamespacedClient, error)
+	SoftDelete(ctx context.Context, clientID, namespaceID string) error
+}
 
 // maxNamespaceRequestBodyBytes caps the namespace create request body (an id
 // and an optional display name — a tiny JSON object), preventing a flooded
@@ -42,20 +55,25 @@ var namespaceIDPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?
 const maxIdempotencyKeyLength = 255
 
 // Server implements the cloudopenapi.ServerInterface operations backed by a
-// *Store. It holds no auth state itself — service-JWT verification
-// (serviceauth.go) runs as HTTP middleware ahead of these handlers, wired in
-// a later task.
+// *Store and a ClientProvisioningStore. It holds no auth state itself —
+// service-JWT verification (serviceauth.go) runs as HTTP middleware ahead of
+// these handlers, wired in a later task.
 type Server struct {
-	store *Store
+	store       *Store
+	clientStore ClientProvisioningStore
 }
 
-// NewServer wraps a *Store. Panics if store is nil — callers must ensure the
-// server is wired before startup (mirrors NewStore's nil-querier panic).
-func NewServer(store *Store) *Server {
+// NewServer wraps a *Store and a ClientProvisioningStore. Panics if either is
+// nil — callers must ensure the server is wired before startup (mirrors
+// NewStore's nil-querier panic).
+func NewServer(store *Store, clientStore ClientProvisioningStore) *Server {
 	if store == nil {
 		panic("cloudapi: nil store")
 	}
-	return &Server{store: store}
+	if clientStore == nil {
+		panic("cloudapi: nil client store")
+	}
+	return &Server{store: store, clientStore: clientStore}
 }
 
 // storedResponse is the JSON envelope persisted in

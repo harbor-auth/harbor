@@ -1,0 +1,52 @@
+{
+  "name": "client_create_idempotent_retry",
+  "spec_scenario": "Client create is idempotent on retry",
+  "steps": [
+    {
+      "method": "POST",
+      "path": "/admin/v1/namespaces",
+      "auth": "valid",
+      "scope": "namespaces:write",
+      "idempotency_key": "client-ns-key-1",
+      "request_body": {
+        "id": "contract-client-ns-1"
+      },
+      "want_status": 201
+    },
+    {
+      "method": "POST",
+      "path": "/admin/v1/namespaces/contract-client-ns-1/clients",
+      "auth": "valid",
+      "scope": "clients:write",
+      "idempotency_key": "client-create-key-1",
+      "request_body": {
+        "client_id": "contract-client-1",
+        "redirect_uris": [
+          "https://contract-client.example.com/cb"
+        ],
+        "token_endpoint_auth_method": "none"
+      },
+      "want_status": 201,
+      "want_body_contains": {
+        "client_id": "contract-client-1",
+        "namespace_id": "contract-client-ns-1"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/admin/v1/namespaces/contract-client-ns-1/clients",
+      "auth": "valid",
+      "scope": "clients:write",
+      "idempotency_key": "client-create-key-1",
+      "request_body": {
+        "client_id": "contract-client-1",
+        "redirect_uris": [
+          "https://contract-client.example.com/cb"
+        ],
+        "token_endpoint_auth_method": "none"
+      },
+      "want_status": 201,
+      "want_same_body_as_step": 2
+    }
+  ]
+}

@@ -10,13 +10,14 @@ import (
 	cloudopenapi "github.com/harbor-auth/harbor/internal/gen/openapi/cloud"
 )
 
-// newTestServer builds a Server over a fresh memQuerier-backed Store.
-// memQuerier (the stateful in-memory querier fake multi-call sequences like
-// idempotent retry need) is defined once, in sessions_test.go, and shared by
-// every *_test.go file in this package.
+// newTestServer builds a Server over a fresh memQuerier-backed Store and a
+// fresh fakeClientStore. memQuerier (the stateful in-memory querier fake
+// multi-call sequences like idempotent retry need) is defined once, in
+// sessions_test.go, and shared by every *_test.go file in this package;
+// fakeClientStore is defined once, in clients_test.go, likewise shared.
 func newTestServer() (*Server, *memQuerier) {
 	q := newMemQuerier()
-	return NewServer(NewStore(q)), q
+	return NewServer(NewStore(q), newFakeClientStore()), q
 }
 
 func doPostNamespace(t *testing.T, srv *Server, idempotencyKey, body string) *httptest.ResponseRecorder {
@@ -55,10 +56,19 @@ func decodeError(t *testing.T, rec *httptest.ResponseRecorder) cloudopenapi.Erro
 func TestNewServerPanicsOnNilStore(t *testing.T) {
 	defer func() {
 		if recover() == nil {
-			t.Fatal("NewServer(nil) did not panic")
+			t.Fatal("NewServer(nil, ...) did not panic")
 		}
 	}()
-	NewServer(nil)
+	NewServer(nil, newFakeClientStore())
+}
+
+func TestNewServerPanicsOnNilClientStore(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("NewServer(..., nil) did not panic")
+		}
+	}()
+	NewServer(NewStore(newMemQuerier()), nil)
 }
 
 func TestPostAdminV1NamespacesCreatesNamespace(t *testing.T) {

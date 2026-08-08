@@ -45,6 +45,8 @@ tags:
     description: Namespace-scoped management session minting.
   - name: namespaces
     description: Namespace provisioning lifecycle.
+  - name: clients
+    description: Namespace-scoped OIDC relying-party (client) provisioning.
   - name: keys
     description: Privileged signing-key rotation (proxied to harbor-hot).
 paths:
@@ -214,6 +216,236 @@ paths:
           $ref: "#/components/responses/IdempotencyKeyReused"
         "429":
           $ref: "#/components/responses/RateLimited"
+  /admin/v1/namespaces/{namespace}/clients:
+    parameters:
+      - name: namespace
+        in: path
+        required: true
+        description: Owning namespace identifier.
+        schema:
+          type: string
+    post:
+      operationId: postAdminV1NamespacesClients
+      summary: Provision an OIDC client in a namespace
+      description: >-
+        Creates a relying party (OIDC client) owned by `namespace`. Requires
+        the `clients:write` scope. Idempotent on `Idempotency-Key`: retrying
+        the same key with the same request body returns the original
+        response verbatim; the same key with a different body is rejected
+        with `idempotency_key_reused`. Creating a `client_id` that already
+        exists — under this namespace, another namespace, or no namespace at
+        all — is rejected with `client_already_exists`, regardless of who
+        owns it. `client_secret_hash`, when supplied, MUST be paired with a
+        `token_endpoint_auth_method` of `client_secret_basic` or
+        `client_secret_post`; omitting `client_secret_hash` MUST leave
+        `token_endpoint_auth_method` at its default or explicit `none` — a
+        confidential auth method with no hash, or `none` with a hash, is
+        rejected as `invalid_request` (a client that /token would silently
+        admit with no credential is worse than a rejected request).
+      tags:
+        - clients
+      security:
+        - cloudServiceAuth: [clients:write]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClientCreateRequest"
+      responses:
+        "201":
+          description: Client created (or, on idempotent replay, the original client).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClientResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The namespace does not exist or is deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: >-
+            Either `client_id` already exists (`client_already_exists`,
+            naming neither the id nor its owner) or the `Idempotency-Key` was
+            reused with a different request body (`idempotency_key_reused`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    get:
+      operationId: getAdminV1NamespacesClients
+      summary: List OIDC clients in a namespace
+      description: >-
+        Returns every live (non-deleted) client owned by `namespace`.
+        Requires the `clients:read` scope. A namespace that does not exist,
+        or is deleted, is itself reported as `namespace_not_found` rather
+        than an empty list.
+      tags:
+        - clients
+      security:
+        - cloudServiceAuth: [clients:read]
+      responses:
+        "200":
+          description: The namespace's clients.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClientListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: The namespace does not exist or is deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+  /admin/v1/namespaces/{namespace}/clients/{client_id}:
+    parameters:
+      - name: namespace
+        in: path
+        required: true
+        description: Owning namespace identifier.
+        schema:
+          type: string
+      - name: client_id
+        in: path
+        required: true
+        description: Client identifier.
+        schema:
+          type: string
+    get:
+      operationId: getAdminV1NamespacesClient
+      summary: Get an OIDC client
+      description: >-
+        Returns a client owned by `namespace`. Requires the `clients:read`
+        scope. A `client_id` that does not exist, or exists but is owned by a
+        different namespace, or has been deleted, is reported identically as
+        `client_not_found` — never `403`, which would confirm the id exists
+        under someone else.
+      tags:
+        - clients
+      security:
+        - cloudServiceAuth: [clients:read]
+      responses:
+        "200":
+          description: Client found.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClientResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: >-
+            The client does not exist, is owned by a different namespace, or
+            has been deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    put:
+      operationId: putAdminV1NamespacesClient
+      summary: Update an OIDC client
+      description: >-
+        Updates a client owned by `namespace`. Requires the `clients:write`
+        scope. Idempotent on `Idempotency-Key`, identically to client create.
+        The same `client_not_found` conditions as GET apply — a request
+        targeting a client owned by a different namespace, or absent, or
+        deleted, is rejected with `404 client_not_found` and leaves the
+        target row (if any, under its actual owner) unchanged. The same
+        `client_secret_hash` / `token_endpoint_auth_method` pairing rule as
+        create applies.
+      tags:
+        - clients
+      security:
+        - cloudServiceAuth: [clients:write]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClientUpdateRequest"
+      responses:
+        "200":
+          description: Client updated (or, on idempotent replay, the original response).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClientResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: >-
+            The client does not exist, is owned by a different namespace, or
+            has been deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          $ref: "#/components/responses/IdempotencyKeyReused"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    delete:
+      operationId: deleteAdminV1NamespacesClient
+      summary: Delete an OIDC client
+      description: >-
+        Soft-deletes a client owned by `namespace`. Requires the
+        `clients:write` scope. This operation is naturally idempotent: it
+        ALWAYS returns `204`, including when `client_id` is absent, already
+        deleted, or owned by a DIFFERENT namespace — a cross-tenant delete
+        attempt is a silent no-op against the actual owner's row, never a
+        `404` (which would confirm the id's existence) and never an actual
+        deletion of someone else's client. An `Idempotency-Key` is still
+        required and honored the same way as namespace delete.
+      tags:
+        - clients
+      security:
+        - cloudServiceAuth: [clients:write]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "204":
+          description: >-
+            Client deleted (or confirmed absent/already-deleted/foreign).
+            Always the outcome for a well-formed, authorized request — never
+            `404`.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          $ref: "#/components/responses/IdempotencyKeyReused"
+        "429":
+          $ref: "#/components/responses/RateLimited"
   /admin/v1/keys/rotate:
     post:
       operationId: postAdminV1KeysRotate
@@ -271,12 +503,12 @@ components:
         secret, never the operator `ADMIN_API_TOKEN`, never the RFC 7591
         client initial-access token. Required claims: `iss` (Harbor Cloud's
         service identity), `aud` (must equal `harbor-mgmt-cloudapi`), `sub`
-        (caller service id), `scope` (space-delimited, e.g.
-        `sessions:mint namespaces:read namespaces:write keys:rotate`), `exp`
-        (60-120s lifetime), `iat`, and `jti` (single-use — a reused `jti` is
-        rejected as `token_replayed`). Verified against a configured
-        trust-anchor public key; verification is fail-closed when
-        unconfigured.
+        (caller service id), `scope` (space-delimited, e.g. `sessions:mint
+        namespaces:read namespaces:write clients:read clients:write
+        keys:rotate`), `exp` (60-120s lifetime), `iat`, and `jti`
+        (single-use — a reused `jti` is rejected as `token_replayed`).
+        Verified against a configured trust-anchor public key; verification
+        is fail-closed when unconfigured.
   parameters:
     IdempotencyKey:
       name: Idempotency-Key
@@ -376,6 +608,152 @@ components:
           type: string
           format: date-time
           description: Present only once the namespace has been deleted.
+    ClientCreateRequest:
+      type: object
+      description: >-
+        Request to provision an OIDC relying party (client) in a namespace.
+        `client_secret_hash` and `token_endpoint_auth_method` must be
+        consistent: a confidential auth method (`client_secret_basic` /
+        `client_secret_post`) requires `client_secret_hash`; `none` (or
+        omitting the field, which defaults away from `none` per below)
+        forbids it. An inconsistent pairing is rejected as `invalid_request`.
+      required:
+        - client_id
+        - redirect_uris
+      properties:
+        client_id:
+          type: string
+          description: Caller-chosen client identifier, immutable once created.
+          pattern: "^[A-Za-z0-9._~-]{8,128}$"
+          example: "acme-prod-web-8f2c1a9d"
+        client_name:
+          type: string
+          description: Human-readable display name.
+        redirect_uris:
+          type: array
+          description: OAuth 2.0 redirect URIs, exact-matched at `/authorize`.
+          items:
+            type: string
+          minItems: 1
+          maxItems: 8
+        client_secret_hash:
+          type: string
+          description: >-
+            Lowercase hex-encoded SHA-256 digest of the client secret. Harbor
+            stores this value VERBATIM and applies no further transform (no
+            additional hashing, no KDF) — the caller must submit the digest
+            of a high-entropy secret, never a low-entropy password's hash.
+          pattern: "^[0-9a-f]{64}$"
+        token_endpoint_auth_method:
+          type: string
+          description: Client authentication method at the token endpoint.
+          enum:
+            - client_secret_basic
+            - client_secret_post
+            - none
+          default: client_secret_basic
+        grant_types:
+          type: array
+          items:
+            type: string
+            enum:
+              - authorization_code
+              - refresh_token
+          default:
+            - authorization_code
+            - refresh_token
+        response_types:
+          type: array
+          items:
+            type: string
+            enum:
+              - code
+          default:
+            - code
+        scope:
+          type: string
+          description: Space-delimited OAuth 2.0 scopes the client may request.
+          default: openid
+    ClientUpdateRequest:
+      type: object
+      description: >-
+        Request to update a namespace-owned client's mutable metadata. The
+        same `client_secret_hash` / `token_endpoint_auth_method` consistency
+        rule as create applies. Omitting `client_secret_hash` leaves the
+        stored hash unchanged (it does NOT clear it) — there is no way to
+        move a client from confidential to public via this route without
+        also changing `token_endpoint_auth_method`.
+      required:
+        - redirect_uris
+      properties:
+        client_name:
+          type: string
+        redirect_uris:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          maxItems: 8
+        client_secret_hash:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        token_endpoint_auth_method:
+          type: string
+          enum:
+            - client_secret_basic
+            - client_secret_post
+            - none
+        scope:
+          type: string
+    ClientResponse:
+      type: object
+      description: >-
+        A namespace-owned client's current state. NEVER carries a secret or
+        secret hash, in either direction — this response shape is used for
+        create, get, update, and list, and none of those operations echo
+        `client_secret_hash` back.
+      required:
+        - client_id
+        - namespace_id
+        - redirect_uris
+        - token_endpoint_auth_method
+        - created_at
+      properties:
+        client_id:
+          type: string
+        namespace_id:
+          type: string
+        client_name:
+          type: string
+        redirect_uris:
+          type: array
+          items:
+            type: string
+        token_endpoint_auth_method:
+          type: string
+        grant_types:
+          type: array
+          items:
+            type: string
+        response_types:
+          type: array
+          items:
+            type: string
+        scope:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    ClientListResponse:
+      type: object
+      description: The clients owned by a namespace.
+      required:
+        - clients
+      properties:
+        clients:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClientResponse"
     SessionMintRequest:
       type: object
       description: Request to mint a namespace-scoped management session.
@@ -478,6 +856,8 @@ components:
             - cross_tenant_forbidden
             - namespace_already_exists
             - namespace_not_found
+            - client_already_exists
+            - client_not_found
             - idempotency_key_reused
             - rate_limited
         message:

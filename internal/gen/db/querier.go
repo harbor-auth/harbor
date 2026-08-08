@@ -64,6 +64,19 @@ type Querier interface {
 	CreateCredential(ctx context.Context, arg CreateCredentialParams) (Credential, error)
 	CreateGrant(ctx context.Context, arg CreateGrantParams) (Grant, error)
 	CreateMFAFactor(ctx context.Context, arg CreateMFAFactorParams) (MfaFactor, error)
+	// Namespace-scoped OIDC client CRUD (Harbor Cloud management API contract,
+	// feat/cloud-oidc-client-provisioning). Every query below takes namespace_id
+	// IN THE WHERE CLAUSE, not just as a post-hoc check, so a namespace can never
+	// read, update, or delete a client it does not own — cross-tenant access is
+	// structurally impossible rather than merely checked.
+	// CreateNamespacedClient inserts a client owned by a Harbor Cloud namespace.
+	// client_id is caller-supplied (Harbor Cloud mints it per its own scheme,
+	// like NamespaceCreateRequest.id) and is the table's primary key, so a
+	// duplicate id violates it regardless of which namespace (or no namespace)
+	// already owns it; the caller maps that to 409 client_already_exists.
+	// registration_access_token_hash is left NULL — this is not an RFC 7591
+	// registration, so there is no RFC 7592 configuration-endpoint token.
+	CreateNamespacedClient(ctx context.Context, arg CreateNamespacedClientParams) (RelyingParty, error)
 	// CreateRegisteredClient inserts a dynamically-registered client (RFC 7591).
 	// Includes all new columns from migration 0012 for dynamic registration.
 	CreateRegisteredClient(ctx context.Context, arg CreateRegisteredClientParams) (RelyingParty, error)
@@ -193,6 +206,12 @@ type Querier interface {
 	// codes; DESIGN §10). The query IS the contract (DESIGN §1.3): `sqlc generate`
 	// (via @codegen) produces typed Go — never hand-write DB types.
 	GetMFAFactor(ctx context.Context, id pgtype.UUID) (MfaFactor, error)
+	// GetNamespacedClient looks up a client by (client_id, namespace_id). A
+	// client_id that exists but is owned by a different namespace, or is
+	// soft-deleted, returns sql.ErrNoRows exactly like an absent client_id — the
+	// caller must map both to 404 client_not_found, never 403 (403 would confirm
+	// the id exists under someone else).
+	GetNamespacedClient(ctx context.Context, arg GetNamespacedClientParams) (RelyingParty, error)
 	// Gets the current lockout state for a user. Returns NULL if no record
 	// exists (user has never failed a recovery attempt).
 	GetRecoveryAttempts(ctx context.Context, userID pgtype.UUID) (RecoveryAttempt, error)
@@ -212,6 +231,10 @@ type Querier interface {
 	// Queries for the relying_parties table (RP/client registry; DESIGN §10, §3.2).
 	// The query IS the contract (DESIGN §1.3): `sqlc generate` (via @codegen)
 	// produces typed Go — never hand-write DB types.
+	// GetRelyingParty backs client authentication on the hot path (/token,
+	// /authorize, /introspect, /revoke), so the deleted_at filter is not
+	// cosmetic: it is what makes a namespaced client's soft-delete
+	// (SoftDeleteNamespacedClient) actually stop that client from authenticating.
 	GetRelyingParty(ctx context.Context, clientID string) (RelyingParty, error)
 	// Get a single revocation entry by ID (for debugging/admin).
 	GetRevocation(ctx context.Context, id pgtype.UUID) (RevocationOutbox, error)
@@ -278,10 +301,11 @@ type Querier interface {
 	// excluded — tokens signed by retired keys will fail verification.
 	ListLiveSigningKeys(ctx context.Context) ([]SigningKey, error)
 	ListMFAFactorsByUser(ctx context.Context, userID pgtype.UUID) ([]MfaFactor, error)
+	// ListNamespacedClients returns every live client owned by namespace_id.
+	ListNamespacedClients(ctx context.Context, namespaceID *string) ([]RelyingParty, error)
 	// Lists all relay addresses for a user, ordered by most recent first.
 	// Used by harbor-mgmt to show the user their relay addresses per RP.
 	ListRelayAddressesByUser(ctx context.Context, userID pgtype.UUID) ([]RelayAddress, error)
-	ListRelyingParties(ctx context.Context) ([]RelyingParty, error)
 	ListSessionsByUser(ctx context.Context, userID pgtype.UUID) ([]Session, error)
 	// MarkMFAFactorUsed burns a one-time factor (e.g. a recovery code) so it can't
 	// be replayed. Only flips unused → used, so a double-spend is a no-op.
@@ -342,6 +366,16 @@ type Querier interface {
 	// already-deleted namespace — the caller's DELETE handler treats that as
 	// success (idempotent delete: 204, always).
 	SoftDeleteCloudNamespace(ctx context.Context, id string) error
+	// SoftDeleteNamespacedClient marks a namespaced client deleted. It affects
+	// zero rows for an absent client_id, a client owned by a different
+	// namespace, or an already-deleted client — the caller's DELETE handler
+	// treats all three the same as success (204, always; DESIGN mirrors
+	// SoftDeleteCloudNamespace's idempotent-delete contract). A hard DELETE is
+	// not possible here: grants.client_id and relay_addresses.client_id
+	// reference this table with no ON DELETE CASCADE (0001_init.up.sql,
+	// 0016_relay_addresses.up.sql), so deleting a client any user has consented
+	// to, or that has an active relay address, would raise SQLSTATE 23503.
+	SoftDeleteNamespacedClient(ctx context.Context, arg SoftDeleteNamespacedClientParams) error
 	UpdateBYODomainState(ctx context.Context, arg UpdateBYODomainStateParams) (ByoDomain, error)
 	// UpdateCredentialSignCount advances a passkey's signature counter after an
 	// assertion — a monotonically increasing counter is how WebAuthn detects a
@@ -353,6 +387,14 @@ type Querier interface {
 	// deliberately cannot create a grant because region and pairwise_sub must come
 	// from the PPID grant flow, not from consent input.
 	UpdateGrantScopes(ctx context.Context, arg UpdateGrantScopesParams) (Grant, error)
+	// UpdateNamespacedClient updates a namespaced client's mutable metadata.
+	// client_secret_hash uses COALESCE over a nullable (sqlc.narg) argument: a
+	// NULL argument leaves the stored hash untouched, so a caller rotating only
+	// redirect_uris does not have to re-submit (or blank out) the secret hash.
+	// The WHERE clause requires namespace_id = $2 AND deleted_at IS NULL, so
+	// updating a client owned by another namespace, or already deleted, affects
+	// zero rows — the caller maps that to 404 client_not_found.
+	UpdateNamespacedClient(ctx context.Context, arg UpdateNamespacedClientParams) (RelyingParty, error)
 	// UpdateRegisteredClient updates a dynamically-registered client's metadata
 	// (RFC 7592 PUT). Only fields that can be updated post-registration are
 	// included; client_id, sector_id, and created_at are immutable.

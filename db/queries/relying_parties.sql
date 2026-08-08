@@ -2,13 +2,14 @@
 -- The query IS the contract (DESIGN §1.3): `sqlc generate` (via @codegen)
 -- produces typed Go — never hand-write DB types.
 
+-- GetRelyingParty backs client authentication on the hot path (/token,
+-- /authorize, /introspect, /revoke), so the deleted_at filter is not
+-- cosmetic: it is what makes a namespaced client's soft-delete
+-- (SoftDeleteNamespacedClient) actually stop that client from authenticating.
 -- name: GetRelyingParty :one
 SELECT * FROM relying_parties
-WHERE client_id = $1;
-
--- name: ListRelyingParties :many
-SELECT * FROM relying_parties
-ORDER BY client_id;
+WHERE client_id = $1
+  AND deleted_at IS NULL;
 
 -- name: UpsertRelyingParty :one
 INSERT INTO relying_parties (
@@ -64,3 +65,79 @@ RETURNING *;
 -- name: DeleteRelyingParty :exec
 DELETE FROM relying_parties
 WHERE client_id = $1;
+
+-- Namespace-scoped OIDC client CRUD (Harbor Cloud management API contract,
+-- feat/cloud-oidc-client-provisioning). Every query below takes namespace_id
+-- IN THE WHERE CLAUSE, not just as a post-hoc check, so a namespace can never
+-- read, update, or delete a client it does not own — cross-tenant access is
+-- structurally impossible rather than merely checked.
+
+-- CreateNamespacedClient inserts a client owned by a Harbor Cloud namespace.
+-- client_id is caller-supplied (Harbor Cloud mints it per its own scheme,
+-- like NamespaceCreateRequest.id) and is the table's primary key, so a
+-- duplicate id violates it regardless of which namespace (or no namespace)
+-- already owns it; the caller maps that to 409 client_already_exists.
+-- registration_access_token_hash is left NULL — this is not an RFC 7591
+-- registration, so there is no RFC 7592 configuration-endpoint token.
+-- name: CreateNamespacedClient :one
+INSERT INTO relying_parties (
+    client_id, name, sector_id, redirect_uris, token_format, scopes_allowed,
+    client_secret_hash, grant_types, response_types, token_endpoint_auth_method,
+    created_at, namespace_id
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+)
+RETURNING *;
+
+-- GetNamespacedClient looks up a client by (client_id, namespace_id). A
+-- client_id that exists but is owned by a different namespace, or is
+-- soft-deleted, returns sql.ErrNoRows exactly like an absent client_id — the
+-- caller must map both to 404 client_not_found, never 403 (403 would confirm
+-- the id exists under someone else).
+-- name: GetNamespacedClient :one
+SELECT * FROM relying_parties
+WHERE client_id = $1
+  AND namespace_id = $2
+  AND deleted_at IS NULL;
+
+-- ListNamespacedClients returns every live client owned by namespace_id.
+-- name: ListNamespacedClients :many
+SELECT * FROM relying_parties
+WHERE namespace_id = $1
+  AND deleted_at IS NULL
+ORDER BY client_id;
+
+-- UpdateNamespacedClient updates a namespaced client's mutable metadata.
+-- client_secret_hash uses COALESCE over a nullable (sqlc.narg) argument: a
+-- NULL argument leaves the stored hash untouched, so a caller rotating only
+-- redirect_uris does not have to re-submit (or blank out) the secret hash.
+-- The WHERE clause requires namespace_id = $2 AND deleted_at IS NULL, so
+-- updating a client owned by another namespace, or already deleted, affects
+-- zero rows — the caller maps that to 404 client_not_found.
+-- name: UpdateNamespacedClient :one
+UPDATE relying_parties
+SET name                       = $3,
+    redirect_uris              = $4,
+    scopes_allowed             = $5,
+    token_endpoint_auth_method = $6,
+    client_secret_hash         = COALESCE(sqlc.narg('client_secret_hash'), client_secret_hash)
+WHERE client_id = $1
+  AND namespace_id = $2
+  AND deleted_at IS NULL
+RETURNING *;
+
+-- SoftDeleteNamespacedClient marks a namespaced client deleted. It affects
+-- zero rows for an absent client_id, a client owned by a different
+-- namespace, or an already-deleted client — the caller's DELETE handler
+-- treats all three the same as success (204, always; DESIGN mirrors
+-- SoftDeleteCloudNamespace's idempotent-delete contract). A hard DELETE is
+-- not possible here: grants.client_id and relay_addresses.client_id
+-- reference this table with no ON DELETE CASCADE (0001_init.up.sql,
+-- 0016_relay_addresses.up.sql), so deleting a client any user has consented
+-- to, or that has an active relay address, would raise SQLSTATE 23503.
+-- name: SoftDeleteNamespacedClient :exec
+UPDATE relying_parties
+SET deleted_at = now()
+WHERE client_id = $1
+  AND namespace_id = $2
+  AND deleted_at IS NULL;

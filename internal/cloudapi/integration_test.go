@@ -43,7 +43,8 @@ import (
 // dependency is unavailable, mirroring cmd/harbor-mgmt's
 // TestRunBuildsDurableManagementGraph.
 type integrationDeps struct {
-	store *Store
+	store       *Store
+	clientStore ClientProvisioningStore
 }
 
 func requireIntegrationDeps(t *testing.T) integrationDeps {
@@ -70,7 +71,8 @@ func requireIntegrationDeps(t *testing.T) integrationDeps {
 	}
 	t.Cleanup(pool.Close)
 
-	return integrationDeps{store: NewStore(db.New(pool))}
+	q := db.New(pool)
+	return integrationDeps{store: NewStore(q), clientStore: clients.NewDBNamespacedClientStore(q)}
 }
 
 // newIntegrationReplayGuard connects a fresh Redis client for the replay
@@ -128,7 +130,7 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 	}
 
 	hot := newRecordingHotServer(t)
-	router := newContractRouter(deps.store, verifier, hot.URL, "integration-proxy-token", hot.Client())
+	router := newContractRouter(deps.store, deps.clientStore, verifier, hot.URL, "integration-proxy-token", hot.Client())
 	ts := httptest.NewServer(router)
 	t.Cleanup(ts.Close)
 

@@ -11,6 +11,81 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const createNamespacedClient = `-- name: CreateNamespacedClient :one
+
+INSERT INTO relying_parties (
+    client_id, name, sector_id, redirect_uris, token_format, scopes_allowed,
+    client_secret_hash, grant_types, response_types, token_endpoint_auth_method,
+    created_at, namespace_id
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+)
+RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at
+`
+
+type CreateNamespacedClientParams struct {
+	ClientID                string             `json:"client_id"`
+	Name                    string             `json:"name"`
+	SectorID                string             `json:"sector_id"`
+	RedirectUris            []string           `json:"redirect_uris"`
+	TokenFormat             string             `json:"token_format"`
+	ScopesAllowed           []string           `json:"scopes_allowed"`
+	ClientSecretHash        []byte             `json:"client_secret_hash"`
+	GrantTypes              []string           `json:"grant_types"`
+	ResponseTypes           []string           `json:"response_types"`
+	TokenEndpointAuthMethod *string            `json:"token_endpoint_auth_method"`
+	CreatedAt               pgtype.Timestamptz `json:"created_at"`
+	NamespaceID             *string            `json:"namespace_id"`
+}
+
+// Namespace-scoped OIDC client CRUD (Harbor Cloud management API contract,
+// feat/cloud-oidc-client-provisioning). Every query below takes namespace_id
+// IN THE WHERE CLAUSE, not just as a post-hoc check, so a namespace can never
+// read, update, or delete a client it does not own — cross-tenant access is
+// structurally impossible rather than merely checked.
+// CreateNamespacedClient inserts a client owned by a Harbor Cloud namespace.
+// client_id is caller-supplied (Harbor Cloud mints it per its own scheme,
+// like NamespaceCreateRequest.id) and is the table's primary key, so a
+// duplicate id violates it regardless of which namespace (or no namespace)
+// already owns it; the caller maps that to 409 client_already_exists.
+// registration_access_token_hash is left NULL — this is not an RFC 7591
+// registration, so there is no RFC 7592 configuration-endpoint token.
+func (q *Queries) CreateNamespacedClient(ctx context.Context, arg CreateNamespacedClientParams) (RelyingParty, error) {
+	row := q.db.QueryRow(ctx, createNamespacedClient,
+		arg.ClientID,
+		arg.Name,
+		arg.SectorID,
+		arg.RedirectUris,
+		arg.TokenFormat,
+		arg.ScopesAllowed,
+		arg.ClientSecretHash,
+		arg.GrantTypes,
+		arg.ResponseTypes,
+		arg.TokenEndpointAuthMethod,
+		arg.CreatedAt,
+		arg.NamespaceID,
+	)
+	var i RelyingParty
+	err := row.Scan(
+		&i.ClientID,
+		&i.Name,
+		&i.SectorID,
+		&i.RedirectUris,
+		&i.TokenFormat,
+		&i.ScopesAllowed,
+		&i.ClientSecretHash,
+		&i.RegistrationAccessTokenHash,
+		&i.GrantTypes,
+		&i.ResponseTypes,
+		&i.TokenEndpointAuthMethod,
+		&i.CreatedAt,
+		&i.LogoutUris,
+		&i.NamespaceID,
+		&i.DeletedAt,
+	)
+	return i, err
+}
+
 const createRegisteredClient = `-- name: CreateRegisteredClient :one
 INSERT INTO relying_parties (
     client_id, name, sector_id, redirect_uris, token_format, scopes_allowed,
@@ -19,7 +94,7 @@ INSERT INTO relying_parties (
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 )
-RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris
+RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at
 `
 
 type CreateRegisteredClientParams struct {
@@ -69,6 +144,8 @@ func (q *Queries) CreateRegisteredClient(ctx context.Context, arg CreateRegister
 		&i.TokenEndpointAuthMethod,
 		&i.CreatedAt,
 		&i.LogoutUris,
+		&i.NamespaceID,
+		&i.DeletedAt,
 	)
 	return i, err
 }
@@ -85,8 +162,48 @@ func (q *Queries) DeleteRelyingParty(ctx context.Context, clientID string) error
 	return err
 }
 
+const getNamespacedClient = `-- name: GetNamespacedClient :one
+SELECT client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at FROM relying_parties
+WHERE client_id = $1
+  AND namespace_id = $2
+  AND deleted_at IS NULL
+`
+
+type GetNamespacedClientParams struct {
+	ClientID    string  `json:"client_id"`
+	NamespaceID *string `json:"namespace_id"`
+}
+
+// GetNamespacedClient looks up a client by (client_id, namespace_id). A
+// client_id that exists but is owned by a different namespace, or is
+// soft-deleted, returns sql.ErrNoRows exactly like an absent client_id — the
+// caller must map both to 404 client_not_found, never 403 (403 would confirm
+// the id exists under someone else).
+func (q *Queries) GetNamespacedClient(ctx context.Context, arg GetNamespacedClientParams) (RelyingParty, error) {
+	row := q.db.QueryRow(ctx, getNamespacedClient, arg.ClientID, arg.NamespaceID)
+	var i RelyingParty
+	err := row.Scan(
+		&i.ClientID,
+		&i.Name,
+		&i.SectorID,
+		&i.RedirectUris,
+		&i.TokenFormat,
+		&i.ScopesAllowed,
+		&i.ClientSecretHash,
+		&i.RegistrationAccessTokenHash,
+		&i.GrantTypes,
+		&i.ResponseTypes,
+		&i.TokenEndpointAuthMethod,
+		&i.CreatedAt,
+		&i.LogoutUris,
+		&i.NamespaceID,
+		&i.DeletedAt,
+	)
+	return i, err
+}
+
 const getRegisteredClient = `-- name: GetRegisteredClient :one
-SELECT client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris FROM relying_parties
+SELECT client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at FROM relying_parties
 WHERE registration_access_token_hash = $1
 `
 
@@ -109,19 +226,26 @@ func (q *Queries) GetRegisteredClient(ctx context.Context, registrationAccessTok
 		&i.TokenEndpointAuthMethod,
 		&i.CreatedAt,
 		&i.LogoutUris,
+		&i.NamespaceID,
+		&i.DeletedAt,
 	)
 	return i, err
 }
 
 const getRelyingParty = `-- name: GetRelyingParty :one
 
-SELECT client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris FROM relying_parties
+SELECT client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at FROM relying_parties
 WHERE client_id = $1
+  AND deleted_at IS NULL
 `
 
 // Queries for the relying_parties table (RP/client registry; DESIGN §10, §3.2).
 // The query IS the contract (DESIGN §1.3): `sqlc generate` (via @codegen)
 // produces typed Go — never hand-write DB types.
+// GetRelyingParty backs client authentication on the hot path (/token,
+// /authorize, /introspect, /revoke), so the deleted_at filter is not
+// cosmetic: it is what makes a namespaced client's soft-delete
+// (SoftDeleteNamespacedClient) actually stop that client from authenticating.
 func (q *Queries) GetRelyingParty(ctx context.Context, clientID string) (RelyingParty, error) {
 	row := q.db.QueryRow(ctx, getRelyingParty, clientID)
 	var i RelyingParty
@@ -139,17 +263,22 @@ func (q *Queries) GetRelyingParty(ctx context.Context, clientID string) (Relying
 		&i.TokenEndpointAuthMethod,
 		&i.CreatedAt,
 		&i.LogoutUris,
+		&i.NamespaceID,
+		&i.DeletedAt,
 	)
 	return i, err
 }
 
-const listRelyingParties = `-- name: ListRelyingParties :many
-SELECT client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris FROM relying_parties
+const listNamespacedClients = `-- name: ListNamespacedClients :many
+SELECT client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at FROM relying_parties
+WHERE namespace_id = $1
+  AND deleted_at IS NULL
 ORDER BY client_id
 `
 
-func (q *Queries) ListRelyingParties(ctx context.Context) ([]RelyingParty, error) {
-	rows, err := q.db.Query(ctx, listRelyingParties)
+// ListNamespacedClients returns every live client owned by namespace_id.
+func (q *Queries) ListNamespacedClients(ctx context.Context, namespaceID *string) ([]RelyingParty, error) {
+	rows, err := q.db.Query(ctx, listNamespacedClients, namespaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -171,6 +300,8 @@ func (q *Queries) ListRelyingParties(ctx context.Context) ([]RelyingParty, error
 			&i.TokenEndpointAuthMethod,
 			&i.CreatedAt,
 			&i.LogoutUris,
+			&i.NamespaceID,
+			&i.DeletedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -180,6 +311,94 @@ func (q *Queries) ListRelyingParties(ctx context.Context) ([]RelyingParty, error
 		return nil, err
 	}
 	return items, nil
+}
+
+const softDeleteNamespacedClient = `-- name: SoftDeleteNamespacedClient :exec
+UPDATE relying_parties
+SET deleted_at = now()
+WHERE client_id = $1
+  AND namespace_id = $2
+  AND deleted_at IS NULL
+`
+
+type SoftDeleteNamespacedClientParams struct {
+	ClientID    string  `json:"client_id"`
+	NamespaceID *string `json:"namespace_id"`
+}
+
+// SoftDeleteNamespacedClient marks a namespaced client deleted. It affects
+// zero rows for an absent client_id, a client owned by a different
+// namespace, or an already-deleted client — the caller's DELETE handler
+// treats all three the same as success (204, always; DESIGN mirrors
+// SoftDeleteCloudNamespace's idempotent-delete contract). A hard DELETE is
+// not possible here: grants.client_id and relay_addresses.client_id
+// reference this table with no ON DELETE CASCADE (0001_init.up.sql,
+// 0016_relay_addresses.up.sql), so deleting a client any user has consented
+// to, or that has an active relay address, would raise SQLSTATE 23503.
+func (q *Queries) SoftDeleteNamespacedClient(ctx context.Context, arg SoftDeleteNamespacedClientParams) error {
+	_, err := q.db.Exec(ctx, softDeleteNamespacedClient, arg.ClientID, arg.NamespaceID)
+	return err
+}
+
+const updateNamespacedClient = `-- name: UpdateNamespacedClient :one
+UPDATE relying_parties
+SET name                       = $3,
+    redirect_uris              = $4,
+    scopes_allowed             = $5,
+    token_endpoint_auth_method = $6,
+    client_secret_hash         = COALESCE($7, client_secret_hash)
+WHERE client_id = $1
+  AND namespace_id = $2
+  AND deleted_at IS NULL
+RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at
+`
+
+type UpdateNamespacedClientParams struct {
+	ClientID                string   `json:"client_id"`
+	NamespaceID             *string  `json:"namespace_id"`
+	Name                    string   `json:"name"`
+	RedirectUris            []string `json:"redirect_uris"`
+	ScopesAllowed           []string `json:"scopes_allowed"`
+	TokenEndpointAuthMethod *string  `json:"token_endpoint_auth_method"`
+	ClientSecretHash        []byte   `json:"client_secret_hash"`
+}
+
+// UpdateNamespacedClient updates a namespaced client's mutable metadata.
+// client_secret_hash uses COALESCE over a nullable (sqlc.narg) argument: a
+// NULL argument leaves the stored hash untouched, so a caller rotating only
+// redirect_uris does not have to re-submit (or blank out) the secret hash.
+// The WHERE clause requires namespace_id = $2 AND deleted_at IS NULL, so
+// updating a client owned by another namespace, or already deleted, affects
+// zero rows — the caller maps that to 404 client_not_found.
+func (q *Queries) UpdateNamespacedClient(ctx context.Context, arg UpdateNamespacedClientParams) (RelyingParty, error) {
+	row := q.db.QueryRow(ctx, updateNamespacedClient,
+		arg.ClientID,
+		arg.NamespaceID,
+		arg.Name,
+		arg.RedirectUris,
+		arg.ScopesAllowed,
+		arg.TokenEndpointAuthMethod,
+		arg.ClientSecretHash,
+	)
+	var i RelyingParty
+	err := row.Scan(
+		&i.ClientID,
+		&i.Name,
+		&i.SectorID,
+		&i.RedirectUris,
+		&i.TokenFormat,
+		&i.ScopesAllowed,
+		&i.ClientSecretHash,
+		&i.RegistrationAccessTokenHash,
+		&i.GrantTypes,
+		&i.ResponseTypes,
+		&i.TokenEndpointAuthMethod,
+		&i.CreatedAt,
+		&i.LogoutUris,
+		&i.NamespaceID,
+		&i.DeletedAt,
+	)
+	return i, err
 }
 
 const updateRegisteredClient = `-- name: UpdateRegisteredClient :one
@@ -194,7 +413,7 @@ SET name                           = $2,
     response_types                 = $9,
     token_endpoint_auth_method     = $10
 WHERE client_id = $1
-RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris
+RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at
 `
 
 type UpdateRegisteredClientParams struct {
@@ -241,6 +460,8 @@ func (q *Queries) UpdateRegisteredClient(ctx context.Context, arg UpdateRegister
 		&i.TokenEndpointAuthMethod,
 		&i.CreatedAt,
 		&i.LogoutUris,
+		&i.NamespaceID,
+		&i.DeletedAt,
 	)
 	return i, err
 }
@@ -257,7 +478,7 @@ ON CONFLICT (client_id) DO UPDATE
         redirect_uris  = EXCLUDED.redirect_uris,
         token_format   = EXCLUDED.token_format,
         scopes_allowed = EXCLUDED.scopes_allowed
-RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris
+RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at
 `
 
 type UpsertRelyingPartyParams struct {
@@ -293,6 +514,8 @@ func (q *Queries) UpsertRelyingParty(ctx context.Context, arg UpsertRelyingParty
 		&i.TokenEndpointAuthMethod,
 		&i.CreatedAt,
 		&i.LogoutUris,
+		&i.NamespaceID,
+		&i.DeletedAt,
 	)
 	return i, err
 }

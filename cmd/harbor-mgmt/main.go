@@ -292,8 +292,9 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			return fmt.Errorf("configure cloud service auth verifier: %w", err)
 		}
 		cloudStore := cloudapi.NewStore(q)
+		cloudClientStore := clients.NewDBNamespacedClientStore(q)
 		cloudKeysHandler := cloudapi.NewKeysHandler(cloudVerifier, cloudHotInternalURL, cloudHotProxyToken, nil)
-		registerCloudAPIRoutes(mux, cloudVerifier, cloudStore, cloudKeysHandler, newCloudAPILimiters(redisClient, logger))
+		registerCloudAPIRoutes(mux, cloudVerifier, cloudStore, cloudClientStore, cloudKeysHandler, newCloudAPILimiters(redisClient, logger))
 	}
 	signupHandler.Routes(mux)
 	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(webauthnService), bff.DiscoverableUserResolver{}, authorizeCompleteURL)

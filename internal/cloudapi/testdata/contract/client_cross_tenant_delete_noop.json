@@ -1,0 +1,62 @@
+{
+  "name": "client_cross_tenant_delete_noop",
+  "spec_scenario": "Cross-tenant client delete is a silent no-op, never a real deletion",
+  "steps": [
+    {
+      "method": "POST",
+      "path": "/admin/v1/namespaces",
+      "auth": "valid",
+      "scope": "namespaces:write",
+      "idempotency_key": "cross-del-ns-a-key",
+      "request_body": {
+        "id": "contract-tenant-a2"
+      },
+      "want_status": 201
+    },
+    {
+      "method": "POST",
+      "path": "/admin/v1/namespaces",
+      "auth": "valid",
+      "scope": "namespaces:write",
+      "idempotency_key": "cross-del-ns-b-key",
+      "request_body": {
+        "id": "contract-tenant-b2"
+      },
+      "want_status": 201
+    },
+    {
+      "method": "POST",
+      "path": "/admin/v1/namespaces/contract-tenant-a2/clients",
+      "auth": "valid",
+      "scope": "clients:write",
+      "idempotency_key": "cross-del-client-key",
+      "request_body": {
+        "client_id": "cross-tenant-client-2",
+        "redirect_uris": [
+          "https://cross-tenant.example.com/cb"
+        ],
+        "token_endpoint_auth_method": "none"
+      },
+      "want_status": 201
+    },
+    {
+      "method": "DELETE",
+      "path": "/admin/v1/namespaces/contract-tenant-b2/clients/cross-tenant-client-2",
+      "auth": "valid",
+      "scope": "clients:write",
+      "idempotency_key": "cross-del-attempt-key",
+      "want_status": 204
+    },
+    {
+      "method": "GET",
+      "path": "/admin/v1/namespaces/contract-tenant-a2/clients/cross-tenant-client-2",
+      "auth": "valid",
+      "scope": "clients:read",
+      "want_status": 200,
+      "want_body_contains": {
+        "client_id": "cross-tenant-client-2",
+        "namespace_id": "contract-tenant-a2"
+      }
+    }
+  ]
+}
