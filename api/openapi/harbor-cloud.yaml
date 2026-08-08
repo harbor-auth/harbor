@@ -335,12 +335,14 @@ paths:
         description: Owning namespace identifier.
         schema:
           type: string
+          pattern: "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
       - name: client_id
         in: path
         required: true
         description: Client identifier.
         schema:
           type: string
+          pattern: "^[A-Za-z0-9._~-]{8,128}$"
     get:
       operationId: getAdminV1NamespacesClient
       summary: Get an OIDC client
@@ -429,13 +431,20 @@ paths:
       summary: Delete an OIDC client
       description: >-
         Soft-deletes a client owned by `namespace`. Requires the
-        `clients:write` scope. This operation is naturally idempotent: it
-        ALWAYS returns `204`, including when `client_id` is absent, already
-        deleted, or owned by a DIFFERENT namespace — a cross-tenant delete
-        attempt is a silent no-op against the actual owner's row, never a
-        `404` (which would confirm the id's existence) and never an actual
-        deletion of someone else's client. An `Idempotency-Key` is still
-        required and honored the same way as namespace delete.
+        `clients:write` scope. For any SYNTACTICALLY VALID `namespace` and
+        `client_id` (matching the patterns on this path's parameters above),
+        this operation is naturally idempotent: it ALWAYS returns `204`,
+        including when `client_id` is absent, already deleted, or owned by a
+        DIFFERENT namespace — a cross-tenant delete attempt is a silent no-op
+        against the actual owner's row, never a `404` (which would confirm
+        the id's existence) and never an actual deletion of someone else's
+        client. An `Idempotency-Key` is still required and honored the same
+        way as namespace delete.
+
+        A `namespace` or `client_id` that does NOT match its documented
+        pattern is rejected with `400 invalid_request` before anything is
+        looked up — malformed input is never treated as "absent" for the
+        purposes of the `204`-always contract above.
 
         A deleted `client_id` is burned PERMANENTLY: it can never be reused,
         by this namespace or any other. `client_id` remains the underlying
@@ -454,8 +463,8 @@ paths:
         "204":
           description: >-
             Client deleted (or confirmed absent/already-deleted/foreign).
-            Always the outcome for a well-formed, authorized request — never
-            `404`.
+            Always the outcome for a request whose `namespace`/`client_id`
+            are syntactically valid and authorized — never `404`.
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":

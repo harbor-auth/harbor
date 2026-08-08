@@ -211,6 +211,19 @@ func (s *Server) PostAdminV1NamespacesClients(w http.ResponseWriter, r *http.Req
 			writeCloudError(w, http.StatusConflict, "client_already_exists", "a client with this id already exists")
 			return
 		}
+		// H2 TOCTOU backstop: the namespaceActive check above and this Create
+		// call are two separate statements, so a concurrent
+		// DELETE /admin/v1/namespaces/{namespace} can soft-delete namespace in
+		// between. clientStore.Create's INSERT ... WHERE EXISTS
+		// (db/queries/relying_parties.sql) closes that window at the SQL
+		// level: a namespace that is no longer live at insert time yields
+		// ErrNamespaceInactive instead of a row, which this maps to the same
+		// 404 namespaceActive would have returned had the delete landed a
+		// moment earlier.
+		if errors.Is(err, clients.ErrNamespaceInactive) {
+			writeCloudError(w, http.StatusNotFound, "namespace_not_found", "namespace does not exist")
+			return
+		}
 		writeInternalError(w, "cloudapi: create namespaced client", err)
 		return
 	}

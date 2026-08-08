@@ -20,6 +20,14 @@ import (
 type fakeClientStore struct {
 	mu      sync.Mutex
 	clients map[string]clients.NamespacedClient // keyed by client_id
+	// createErrOverride, if non-nil, is returned (and cleared) by the next
+	// Create call instead of the normal in-memory logic. Used to deterministically
+	// exercise cloudapi's mapping of clients.ErrNamespaceInactive to 404
+	// namespace_not_found (H2 TOCTOU backstop) without needing an actual
+	// concurrent race — the real race-closure proof runs against real
+	// Postgres in internal/cloudapi/integration_test.go, since a fake this
+	// simple cannot reproduce a genuine INSERT ... WHERE EXISTS race.
+	createErrOverride error
 }
 
 func newFakeClientStore() *fakeClientStore {
@@ -29,6 +37,11 @@ func newFakeClientStore() *fakeClientStore {
 func (f *fakeClientStore) Create(_ context.Context, c clients.NewNamespacedClient) (clients.NamespacedClient, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.createErrOverride != nil {
+		err := f.createErrOverride
+		f.createErrOverride = nil
+		return clients.NamespacedClient{}, err
+	}
 	if _, exists := f.clients[c.ClientID]; exists {
 		return clients.NamespacedClient{}, clients.ErrNamespacedClientExists
 	}
@@ -211,6 +224,35 @@ func TestPostAdminV1NamespacesClientsCreatesClient(t *testing.T) {
 	}
 	if resp.GrantTypes == nil || len(*resp.GrantTypes) != 2 {
 		t.Errorf("GrantTypes = %v, want [authorization_code refresh_token] default", resp.GrantTypes)
+	}
+}
+
+// TestPostAdminV1NamespacesClientsNamespaceDeletedBetweenCheckAndInsertReturns404
+// is the deterministic half of H2's TOCTOU fix (the real race-closure proof,
+// against actual concurrent goroutines and real Postgres, lives in
+// internal/cloudapi/integration_test.go). namespaceActive above passes (the
+// fake namespace is active), but clientStore.Create simulates a namespace
+// that was deleted in the window between that check and the store call — the
+// exact interleaving a concurrent DELETE /admin/v1/namespaces/{id} produces
+// against the real INSERT ... WHERE EXISTS query
+// (db/queries/relying_parties.sql). The handler must map
+// clients.ErrNamespaceInactive to the same 404 namespace_not_found
+// namespaceActive itself would have produced, and must not persist anything.
+func TestPostAdminV1NamespacesClientsNamespaceDeletedBetweenCheckAndInsertReturns404(t *testing.T) {
+	srv, q, cs := newTestServerWithClients()
+	q.putNamespace("tenant-a", "active")
+	cs.createErrOverride = clients.ErrNamespaceInactive
+
+	rec := doPostClient(t, srv, "tenant-a", "toctou-key",
+		`{"client_id":"client-toctou1","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
+	}
+	if got := decodeError(t, rec).Code; got != cloudopenapi.ErrorCodeNamespaceNotFound {
+		t.Fatalf("error code = %q, want namespace_not_found", got)
+	}
+	if _, ok := cs.row("client-toctou1"); ok {
+		t.Fatal("client-toctou1 was persisted despite Create() reporting the namespace inactive")
 	}
 }
 

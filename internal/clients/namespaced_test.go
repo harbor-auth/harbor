@@ -19,6 +19,13 @@ import (
 // update, create then soft-delete then get again.
 type fakeNamespacedClientQuerier struct {
 	rows map[string]db.RelyingParty // keyed by client_id
+	// nextCreateErr, if non-nil, is returned (and cleared) by the next
+	// CreateNamespacedClient call — used to simulate the real
+	// INSERT ... WHERE EXISTS query returning pgx.ErrNoRows when the target
+	// namespace is absent or soft-deleted at insert time (H2 TOCTOU), which
+	// this in-memory fake has no cloud_namespaces table to reproduce
+	// organically.
+	nextCreateErr error
 }
 
 func newFakeNamespacedClientQuerier() *fakeNamespacedClientQuerier {
@@ -26,6 +33,11 @@ func newFakeNamespacedClientQuerier() *fakeNamespacedClientQuerier {
 }
 
 func (f *fakeNamespacedClientQuerier) CreateNamespacedClient(_ context.Context, arg db.CreateNamespacedClientParams) (db.RelyingParty, error) {
+	if f.nextCreateErr != nil {
+		err := f.nextCreateErr
+		f.nextCreateErr = nil
+		return db.RelyingParty{}, err
+	}
 	if _, exists := f.rows[arg.ClientID]; exists {
 		return db.RelyingParty{}, &pgconn.PgError{Code: "23505"}
 	}
@@ -172,6 +184,34 @@ func TestDBNamespacedClientStoreCreateDuplicateReturnsErrExists(t *testing.T) {
 	_, err := store.Create(ctx, newClient)
 	if !errors.Is(err, ErrNamespacedClientExists) {
 		t.Fatalf("Create() error = %v, want ErrNamespacedClientExists", err)
+	}
+}
+
+// TestDBNamespacedClientStoreCreateNamespaceInactiveReturnsErrNamespaceInactive
+// is the Go-layer half of H2's TOCTOU fix: CreateNamespacedClient's
+// INSERT ... WHERE EXISTS (db/queries/relying_parties.sql) returns zero rows
+// — surfaced by pgx as pgx.ErrNoRows on a :one query — when the target
+// namespace is absent or soft-deleted at insert time, and Create must map
+// that to ErrNamespaceInactive rather than a generic wrapped error, so
+// cloudapi can in turn map it to 404 namespace_not_found. See
+// internal/cloudapi/integration_test.go for the real-Postgres proof that the
+// race this closes is actually closed under concurrent goroutines, not just
+// this in-memory simulation of the query's zero-rows outcome.
+func TestDBNamespacedClientStoreCreateNamespaceInactiveReturnsErrNamespaceInactive(t *testing.T) {
+	store, q := newTestNamespacedClientStore()
+	q.nextCreateErr = pgx.ErrNoRows
+
+	_, err := store.Create(context.Background(), NewNamespacedClient{
+		ClientID:      "client-race",
+		NamespaceID:   "deleted-tenant",
+		SectorID:      "client-race",
+		RedirectURIs:  []string{"https://a.example.com/cb"},
+		TokenFormat:   "jwt",
+		ScopesAllowed: []string{"openid"},
+		CreatedAt:     time.Now(),
+	})
+	if !errors.Is(err, ErrNamespaceInactive) {
+		t.Fatalf("Create() error = %v, want ErrNamespaceInactive", err)
 	}
 }
 

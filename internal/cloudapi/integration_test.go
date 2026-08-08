@@ -31,6 +31,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -669,10 +670,23 @@ func TestIntegrationClientCredentialPairingRejections(t *testing.T) {
 	}
 
 	// M1 on update: a present-but-empty client_secret_hash must be rejected,
-	// never silently ignored via UpdateNamespacedClient's COALESCE.
+	// never silently ignored via UpdateNamespacedClient's COALESCE. This MUST
+	// pair the empty hash with token_endpoint_auth_method "none": without
+	// M1's explicit check, "" would be treated as "hash omitted" and
+	// COALESCE would leave the stored hash untouched, so
+	// validateAuthMethodSecretPairing("none", hasSecretHash=false) would see
+	// no conflict and the request would be ACCEPTED — silently leaving a
+	// "none" client with its old confidential hash still live underneath
+	// (exactly the state H1 forbids). Omitting token_endpoint_auth_method
+	// (as an earlier version of this test did) leaves the client's EXISTING
+	// client_secret_basic auth method in place, which independently demands
+	// a hash and would already 400 even without the M1 fix — proving
+	// nothing about M1 specifically. This body is the same one
+	// TestPutAdminV1NamespacesClientEmptySecretHashIsRejected (clients_test.go)
+	// uses for the same reason.
 	putEmptyHashRes := env.do(t, http.MethodPut, "/admin/v1/namespaces/"+ns+"/clients/"+clientID,
 		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"),
-		`{"redirect_uris":["https://a.example.com/cb2"],"client_secret_hash":""}`)
+		`{"redirect_uris":["https://a.example.com/cb2"],"token_endpoint_auth_method":"none","client_secret_hash":""}`)
 	defer func() { _ = putEmptyHashRes.Body.Close() }()
 	if putEmptyHashRes.StatusCode != http.StatusBadRequest {
 		t.Fatalf("PUT with empty client_secret_hash status = %d, want 400", putEmptyHashRes.StatusCode)
@@ -682,5 +696,173 @@ func TestIntegrationClientCredentialPairingRejections(t *testing.T) {
 	// exactly as originally configured, with its ORIGINAL secret.
 	if _, ok := oidc.AuthenticateClient(context.Background(), env.deps.registry, clientID, oidc.ClientAuthSecretBasic, secret); !ok {
 		t.Fatal("client_secret_basic client stopped authenticating with its original secret after two rejected PUTs")
+	}
+}
+
+// --- H2 TOCTOU: concurrent client create vs. namespace delete --------------
+//
+// The finding: cloudapi.PostAdminV1NamespacesClients checks namespaceActive,
+// THEN calls clientStore.Create as a SEPARATE statement — a concurrent
+// DELETE /admin/v1/namespaces/{id} can fully soft-delete the namespace (its
+// client cascade AND its own row) in between, leaving a live client owned by
+// a dead tenant: invisible to every namespaced route (namespaceActive 404s
+// on the deleted namespace) yet never stopped from authenticating at
+// /token. Two scenarios below, both against real Postgres with genuine
+// concurrent goroutines/connections (not one goroutine calling things back
+// to back, which would prove nothing about the atomicity of the SQL itself):
+//
+//  1. TestIntegrationClientCreateRaceAgainstNamespaceDeleteIsClosed pins the
+//     EXACT interleaving the finding describes, deterministically, via
+//     channels forcing goroutine B's full delete to commit strictly between
+//     goroutine A's precheck and its insert — every run, no timing luck.
+//  2. TestIntegrationClientCreateInGapBetweenNamespaceDeleteStatementsStillFailsToAuthenticate
+//     covers the narrower residual window inside DeleteAdminV1Namespace's
+//     OWN two-statement, non-transactional cascade (documented in
+//     namespaces.go): a client created strictly between
+//     SoftDeleteAllForNamespace and SoftDeleteNamespace is, correctly, not
+//     rejected by the create-time guard (the namespace genuinely is still
+//     live at that instant) and is not covered by the cascade (which already
+//     ran). GetRelyingParty's independent cloud_namespaces join is what
+//     stops THAT client from authenticating once the namespace finishes
+//     deleting a moment later.
+
+// TestIntegrationClientCreateRaceAgainstNamespaceDeleteIsClosed is H2's
+// primary TOCTOU proof. It calls the exact two real store methods
+// PostAdminV1NamespacesClients and DeleteAdminV1Namespace call
+// (store.GetNamespace / clientStore.Create, and
+// clientStore.SoftDeleteAllForNamespace / store.SoftDeleteNamespace) from
+// two independent goroutines, synchronized with channels so goroutine B's
+// delete is GUARANTEED to fully commit, on a real Postgres connection,
+// strictly between goroutine A's precheck and its insert on another real
+// connection. Before the H2 fix (CreateNamespacedClient's
+// INSERT ... WHERE EXISTS, db/queries/relying_parties.sql), this Create call
+// would have unconditionally succeeded here, producing exactly the orphan
+// the finding describes — see this test's companion run against the
+// pre-fix query in the fix commit's description for that proof.
+func TestIntegrationClientCreateRaceAgainstNamespaceDeleteIsClosed(t *testing.T) {
+	deps := requireIntegrationDeps(t)
+	ctx := context.Background()
+	ns := uniqueID("it-h2-toctou-ns")
+	if _, err := deps.store.CreateNamespace(ctx, ns, "active"); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+
+	checked := make(chan struct{})
+	deleted := make(chan struct{})
+	clientID := uniqueID("it-h2-toctou-client")
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	var createErr error
+	var created clients.NamespacedClient
+	go func() {
+		defer wg.Done()
+		// Step 1: the exact precheck PostAdminV1NamespacesClients performs
+		// (namespaceActive), via the real store, against real Postgres.
+		gotNs, err := deps.store.GetNamespace(ctx, ns)
+		if err != nil || gotNs.DeletedAt != nil {
+			t.Errorf("namespaceActive precheck: unexpectedly not live: ns=%+v err=%v", gotNs, err)
+		}
+		close(checked)
+		<-deleted // block until goroutine B's delete has FULLY committed
+
+		// Step 2: the real INSERT — the exact call
+		// PostAdminV1NamespacesClients makes after its precheck passes.
+		created, createErr = deps.rawClientStore.Create(ctx, clients.NewNamespacedClient{
+			ClientID:      clientID,
+			NamespaceID:   ns,
+			SectorID:      clientID,
+			RedirectURIs:  []string{"https://a.example.com/cb"},
+			TokenFormat:   "jwt",
+			ScopesAllowed: []string{"openid"},
+			CreatedAt:     time.Now().UTC(),
+		})
+	}()
+
+	go func() {
+		defer wg.Done()
+		<-checked // wait until A's precheck already observed the namespace live
+		// The real two-statement cascade DeleteAdminV1Namespace performs, in
+		// the same order (clients first, namespace second — see
+		// namespaces.go's doc comment for why).
+		if err := deps.rawClientStore.SoftDeleteAllForNamespace(ctx, ns); err != nil {
+			t.Errorf("cascade soft delete: %v", err)
+		}
+		if err := deps.store.SoftDeleteNamespace(ctx, ns); err != nil {
+			t.Errorf("soft delete namespace: %v", err)
+		}
+		close(deleted)
+	}()
+
+	wg.Wait()
+
+	if createErr == nil {
+		t.Fatalf("Create() succeeded for a namespace deleted between the precheck and the insert — H2 TOCTOU race is NOT closed; got %+v", created)
+	}
+	if !errors.Is(createErr, clients.ErrNamespaceInactive) {
+		t.Fatalf("Create() error = %v, want ErrNamespaceInactive", createErr)
+	}
+
+	// Belt and suspenders: INSERT ... WHERE EXISTS selecting zero rows must
+	// mean nothing was persisted, not merely that RETURNING came back empty.
+	if _, err := deps.rawClientStore.Get(ctx, clientID, ns); !errors.Is(err, clients.ErrClientNotFound) {
+		t.Fatalf("client row exists despite Create() reporting ErrNamespaceInactive: Get err=%v", err)
+	}
+}
+
+// TestIntegrationClientCreateInGapBetweenNamespaceDeleteStatementsStillFailsToAuthenticate
+// is the defence-in-depth proof: GetRelyingParty's cloud_namespaces join
+// (db/queries/relying_parties.sql) stops a client created in the narrow,
+// documented, non-transactional gap inside DeleteAdminV1Namespace's own
+// cascade — AFTER SoftDeleteAllForNamespace has already run, BEFORE
+// SoftDeleteNamespace commits — from authenticating, even though the
+// create-time guard correctly allows it (the namespace genuinely is still
+// live at that instant, so rejecting it there would be wrong).
+func TestIntegrationClientCreateInGapBetweenNamespaceDeleteStatementsStillFailsToAuthenticate(t *testing.T) {
+	deps := requireIntegrationDeps(t)
+	ctx := context.Background()
+	ns := uniqueID("it-h2-gap-ns")
+	if _, err := deps.store.CreateNamespace(ctx, ns, "active"); err != nil {
+		t.Fatalf("create namespace: %v", err)
+	}
+
+	clientID := uniqueID("it-h2-gap-client")
+	secret := "gap-secret-" + clientID
+	secretHash := sha256.Sum256([]byte(secret))
+
+	// The cascade runs first, as DeleteAdminV1Namespace does — no live
+	// clients yet under ns, so this is a no-op.
+	if err := deps.rawClientStore.SoftDeleteAllForNamespace(ctx, ns); err != nil {
+		t.Fatalf("cascade soft delete: %v", err)
+	}
+
+	// A client created NOW, in the gap: the namespace is still genuinely
+	// live (only the cascade ran; the namespace's own soft-delete has not),
+	// so this Create legitimately succeeds.
+	if _, err := deps.rawClientStore.Create(ctx, clients.NewNamespacedClient{
+		ClientID:                clientID,
+		NamespaceID:             ns,
+		SectorID:                clientID,
+		RedirectURIs:            []string{"https://a.example.com/cb"},
+		TokenFormat:             "jwt",
+		ScopesAllowed:           []string{"openid"},
+		ClientSecretHash:        secretHash[:],
+		TokenEndpointAuthMethod: "client_secret_basic",
+		CreatedAt:               time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Create in the delete's gap: %v (should succeed — the namespace is genuinely still live at this instant)", err)
+	}
+
+	// The namespace's own soft-delete now lands, completing the DELETE.
+	if err := deps.store.SoftDeleteNamespace(ctx, ns); err != nil {
+		t.Fatalf("soft delete namespace: %v", err)
+	}
+
+	// The client created in the gap was NOT covered by the (already-run)
+	// cascade. If it can still authenticate here, the only remaining guard —
+	// GetRelyingParty's cloud_namespaces join — has failed.
+	if _, ok := oidc.AuthenticateClient(ctx, deps.registry, clientID, oidc.ClientAuthSecretBasic, secret); ok {
+		t.Fatal("client created in the delete's two-statement gap still authenticates after its namespace finished deleting — GetRelyingParty's cloud_namespaces join did not close it")
 	}
 }

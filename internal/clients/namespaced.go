@@ -20,6 +20,16 @@ import (
 // cloudapi maps it to 409 client_already_exists without naming the owner.
 var ErrNamespacedClientExists = errors.New("clients: namespaced client already exists")
 
+// ErrNamespaceInactive is returned when creating a namespaced client whose
+// target namespace does not exist, or is soft-deleted, at the instant
+// CreateNamespacedClient's INSERT ... WHERE EXISTS runs (db/queries/relying_parties.sql).
+// This is the race-proof backstop for cloudapi's namespaceActive pre-check
+// (H2 TOCTOU): a namespace can be soft-deleted between that check and this
+// Create call, and without this the INSERT would otherwise succeed
+// unconditionally, leaving a live client owned by a dead tenant. cloudapi
+// maps this to the same 404 namespace_not_found the pre-check produces.
+var ErrNamespaceInactive = errors.New("clients: namespace does not exist or is not active")
+
 // NamespacedClient is an OIDC relying party owned by a Harbor Cloud
 // namespace (internal/cloudapi's /admin/v1/namespaces/{namespace}/clients).
 // It is the same relying_parties row RegisteredClient and oidc.Client read,
@@ -131,6 +141,15 @@ func (s *DBNamespacedClientStore) Create(ctx context.Context, c NewNamespacedCli
 	if err != nil {
 		if isUniqueViolation(err) {
 			return NamespacedClient{}, ErrNamespacedClientExists
+		}
+		// CreateNamespacedClient's INSERT ... WHERE EXISTS (cloud_namespaces
+		// live) returns zero rows rather than erroring when the namespace is
+		// absent or soft-deleted — that is the ONLY way this :one query
+		// returns no row, since a client_id collision surfaces as the unique
+		// violation handled above instead. pgx reports "no rows" as
+		// pgx.ErrNoRows on QueryRow.Scan.
+		if errors.Is(err, pgx.ErrNoRows) {
+			return NamespacedClient{}, ErrNamespaceInactive
 		}
 		return NamespacedClient{}, fmt.Errorf("namespaced client: create: %w", err)
 	}

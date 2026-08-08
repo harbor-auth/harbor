@@ -251,22 +251,40 @@ func (s *Server) GetAdminV1Namespace(w http.ResponseWriter, r *http.Request, id 
 // owns (clientStore.SoftDeleteAllForNamespace), via
 // db/queries/relying_parties.sql's SoftDeleteNamespaceClients — otherwise a
 // deleted tenant's clients keep authenticating at /token, /authorize,
-// /introspect, and /revoke forever (GetRelyingParty filters
-// relying_parties.deleted_at but has no reason to know about
-// cloud_namespaces), and the namespaced routes 404 on the now-deleted
-// namespace before an operator could even enumerate them to clean up by
-// hand. The two soft-deletes below are sequential statements, NOT one
-// database transaction: cloudapi.Store and clients.DBNamespacedClientStore
-// are separate packages, each behind its own narrow querier interface, with
-// no shared transaction handle threaded through Server — making this
-// atomic would require restructuring both stores (and every test that
-// constructs a Server) to share a transaction-capable handle, which is out
-// of scope here. Given that constraint, clients are cascaded FIRST: if the
-// process dies between the two statements, the namespace is left live with
-// zero working clients (annoying, safely recoverable by retrying the same
-// Idempotency-Key) rather than the reverse ordering's failure mode — a
-// namespace reported deleted whose clients are still silently live, which is
-// the exact bug this fix closes.
+// /introspect, and /revoke forever. (GetRelyingParty also independently
+// joins cloud_namespaces as defense in depth as of the H2 TOCTOU fix — see
+// that query's doc comment — but this cascade remains the primary
+// mechanism: it is what lets an operator actually SEE zero live clients on a
+// later GET .../namespaces/{namespace}/clients, not merely fail to
+// authenticate.) The namespaced routes 404 on the now-deleted namespace
+// before an operator could even enumerate them to clean up by hand. The two
+// soft-deletes below are sequential statements, NOT one database
+// transaction: cloudapi.Store and clients.DBNamespacedClientStore are
+// separate packages, each behind its own narrow querier interface, with no
+// shared transaction handle threaded through Server — making this atomic
+// would require restructuring both stores (and every test that constructs a
+// Server) to share a transaction-capable handle, which is out of scope here.
+// Given that constraint, clients are cascaded FIRST: if the process dies
+// between the two statements, the namespace is left live with zero working
+// clients rather than the reverse ordering's failure mode — a namespace
+// reported deleted whose clients are still silently live, which is the exact
+// bug this fix closes.
+//
+// Idempotency-Key recovery, precisely (do not oversimplify this during an
+// incident): recordOperation below only runs after BOTH statements succeed,
+// so a crash strictly BETWEEN them leaves no ledger entry yet — retrying
+// with the SAME key is genuinely safe in that narrow window (checkIdempotency
+// reports idempotencyProceed and simply re-runs both steps, each already a
+// no-op-safe idempotent UPDATE on its own). That is NOT the same as "the
+// same key always re-triggers the cascade": once this handler has fully
+// succeeded and recorded its ledger entry, replaying that SAME key only ever
+// returns the stored 204 (idempotencyReplay) — it does NOT touch the
+// database again, so it will NOT re-run SoftDeleteAllForNamespace. If a live
+// client is later found under a namespace whose delete already succeeded and
+// was recorded (for example, one created by a race this code did not
+// anticipate), recovering it requires calling DELETE again with a NEW
+// Idempotency-Key: checkIdempotency then treats it as a fresh operation and
+// genuinely re-executes the cascade. Retrying the OLD key will not help.
 func (s *Server) DeleteAdminV1Namespace(w http.ResponseWriter, r *http.Request, id string, params cloudopenapi.DeleteAdminV1NamespaceParams) {
 	idempotencyKey := params.IdempotencyKey
 	if !validIdempotencyKey(idempotencyKey) {

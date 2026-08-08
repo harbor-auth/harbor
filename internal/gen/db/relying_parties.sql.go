@@ -17,8 +17,10 @@ INSERT INTO relying_parties (
     client_id, name, sector_id, redirect_uris, token_format, scopes_allowed,
     client_secret_hash, grant_types, response_types, token_endpoint_auth_method,
     created_at, namespace_id
-) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+)
+SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+WHERE EXISTS (
+    SELECT 1 FROM cloud_namespaces WHERE id = $12 AND deleted_at IS NULL
 )
 RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at
 `
@@ -50,6 +52,20 @@ type CreateNamespacedClientParams struct {
 // already owns it; the caller maps that to 409 client_already_exists.
 // registration_access_token_hash is left NULL — this is not an RFC 7591
 // registration, so there is no RFC 7592 configuration-endpoint token.
+//
+// H2 TOCTOU: cloudapi.PostAdminV1NamespacesClients checks namespaceActive
+// BEFORE calling this, but that check and this INSERT are two separate
+// statements — a concurrent DELETE /admin/v1/namespaces/{id} can soft-delete
+// the namespace in between, producing a live client owned by a dead tenant
+// (invisible to every namespaced route, since namespaceActive 404s on the
+// now-deleted namespace, and never stopped from authenticating at /token).
+// The WHERE EXISTS below makes the liveness check and the insert ONE atomic
+// statement: if cloud_namespaces has no live row for namespace_id at the
+// instant this runs, zero rows are selected and nothing is inserted — a
+// concurrent DELETE either fully happens-before or fully happens-after this
+// statement under Postgres's read-committed snapshot per statement, with no
+// window in between. The Go layer's pre-check stays (fast, clear 404 for the
+// common non-racing case); this is the race-proof backstop.
 func (q *Queries) CreateNamespacedClient(ctx context.Context, arg CreateNamespacedClientParams) (RelyingParty, error) {
 	row := q.db.QueryRow(ctx, createNamespacedClient,
 		arg.ClientID,
@@ -234,9 +250,11 @@ func (q *Queries) GetRegisteredClient(ctx context.Context, registrationAccessTok
 
 const getRelyingParty = `-- name: GetRelyingParty :one
 
-SELECT client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at FROM relying_parties
-WHERE client_id = $1
-  AND deleted_at IS NULL
+SELECT relying_parties.client_id, relying_parties.name, relying_parties.sector_id, relying_parties.redirect_uris, relying_parties.token_format, relying_parties.scopes_allowed, relying_parties.client_secret_hash, relying_parties.registration_access_token_hash, relying_parties.grant_types, relying_parties.response_types, relying_parties.token_endpoint_auth_method, relying_parties.created_at, relying_parties.logout_uris, relying_parties.namespace_id, relying_parties.deleted_at FROM relying_parties
+LEFT JOIN cloud_namespaces ON cloud_namespaces.id = relying_parties.namespace_id
+WHERE relying_parties.client_id = $1
+  AND relying_parties.deleted_at IS NULL
+  AND (relying_parties.namespace_id IS NULL OR cloud_namespaces.deleted_at IS NULL)
 `
 
 // Queries for the relying_parties table (RP/client registry; DESIGN §10, §3.2).
@@ -246,6 +264,28 @@ WHERE client_id = $1
 // /authorize, /introspect, /revoke), so the deleted_at filter is not
 // cosmetic: it is what makes a namespaced client's soft-delete
 // (SoftDeleteNamespacedClient) actually stop that client from authenticating.
+//
+// H2 defence in depth: also reject a client whose OWNING namespace is
+// soft-deleted, not just a client that is itself soft-deleted. The primary
+// fix for the create-time TOCTOU race is CreateNamespacedClient's
+// INSERT ... WHERE EXISTS (this file) — that closes the race at the source,
+// so this join should never actually reject anything in steady state. It is
+// here anyway as a second, independent line of defense: it is what stops
+// ANY orphan (a live relying_parties row under a dead cloud_namespaces row,
+// however it came to exist — a bug elsewhere, a manual DB fix gone wrong,
+// future code that inserts into relying_parties without this guard) from
+// authenticating, mirroring the two-layer pattern H1 already uses for
+// token_endpoint_auth_method (resolveExplicitAuthMethod +
+// validateAuthMethodSecretPairing in internal/cloudapi/clients.go). The LEFT
+// JOIN is a single indexed primary-key lookup against cloud_namespaces (a
+// small table), so the added cost on this hot path is one extra index probe,
+// not a scan — mirrors GetActiveSession's identical
+// LEFT-JOIN-plus-NULL-tolerant-filter shape (db/queries/sessions.sql).
+// The `namespace_id IS NULL OR cloud_namespaces.deleted_at IS NULL` clause is
+// required, not optional: namespace_id IS NULL is the PERMANENT, legitimate
+// state for every operator-registered or dynamically-RFC-7591-registered
+// client (0020_relying_parties_namespace.up.sql) — without the IS NULL
+// escape hatch this join would reject every non-cloud client in the system.
 func (q *Queries) GetRelyingParty(ctx context.Context, clientID string) (RelyingParty, error) {
 	row := q.db.QueryRow(ctx, getRelyingParty, clientID)
 	var i RelyingParty
