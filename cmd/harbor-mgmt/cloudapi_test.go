@@ -69,6 +69,36 @@ func (unusedCloudQuerier) DeleteFederatedIdentitiesByNamespace(context.Context, 
 	panic("unusedCloudQuerier: DeleteFederatedIdentitiesByNamespace should not be reached in wiring tests")
 }
 
+// unusedCloudClientStore is unusedCloudQuerier's counterpart for
+// cloudapi.ClientProvisioningStore: every method panics, so these wiring
+// tests fail loudly if a request ever reaches past auth/scope/rate-limit
+// into the actual client-provisioning handler logic.
+type unusedCloudClientStore struct{}
+
+func (unusedCloudClientStore) Create(context.Context, clients.NewNamespacedClient) (clients.NamespacedClient, error) {
+	panic("unusedCloudClientStore: Create should not be reached in wiring tests")
+}
+
+func (unusedCloudClientStore) Get(context.Context, string, string) (clients.NamespacedClient, error) {
+	panic("unusedCloudClientStore: Get should not be reached in wiring tests")
+}
+
+func (unusedCloudClientStore) List(context.Context, string) ([]clients.NamespacedClient, error) {
+	panic("unusedCloudClientStore: List should not be reached in wiring tests")
+}
+
+func (unusedCloudClientStore) Update(context.Context, clients.UpdateNamespacedClient) (clients.NamespacedClient, error) {
+	panic("unusedCloudClientStore: Update should not be reached in wiring tests")
+}
+
+func (unusedCloudClientStore) SoftDelete(context.Context, string, string) error {
+	panic("unusedCloudClientStore: SoftDelete should not be reached in wiring tests")
+}
+
+func (unusedCloudClientStore) SoftDeleteAllForNamespace(context.Context, string) error {
+	panic("unusedCloudClientStore: SoftDeleteAllForNamespace should not be reached in wiring tests")
+}
+
 // --- fake rate limiter --------------------------------------------------
 
 type fakeRateLimiter struct {
@@ -114,6 +144,7 @@ func cloudTestSignES256(t *testing.T, priv *ecdsa.PrivateKey, header, claims map
 type cloudTestEnv struct {
 	verifier     *cloudapi.ServiceAuthVerifier
 	store        *cloudapi.Store
+	clientStore  cloudapi.ClientProvisioningStore
 	userSessions *cloudapi.UserSessionsHandler
 	keys         *cloudapi.KeysHandler
 	ecPriv       *ecdsa.PrivateKey
@@ -147,6 +178,7 @@ func newCloudTestEnv(t *testing.T) *cloudTestEnv {
 	}
 
 	store := cloudapi.NewStore(unusedCloudQuerier{})
+	clientStore := unusedCloudClientStore{}
 	// A fixed 32+ byte test key — never production material, only long
 	// enough to satisfy NewSubjectHasher's floor. The store above has no
 	// WithFederatedIdentities pool wired, so — mirroring unusedCloudQuerier
@@ -162,7 +194,7 @@ func newCloudTestEnv(t *testing.T) *cloudTestEnv {
 	userSessions := cloudapi.NewUserSessionsHandler(store, hasher, cloudapi.NewRedisLoginCodeStore(redisClient), "EU")
 	keys := cloudapi.NewKeysHandler(verifier, "http://harbor-hot.internal:8080", "cloud-proxy-token", nil)
 
-	return &cloudTestEnv{verifier: verifier, store: store, userSessions: userSessions, keys: keys, ecPriv: priv, now: now}
+	return &cloudTestEnv{verifier: verifier, store: store, clientStore: clientStore, userSessions: userSessions, keys: keys, ecPriv: priv, now: now}
 }
 
 // token mints a cloudServiceAuth bearer JWT valid against env's trust anchor.
@@ -185,7 +217,7 @@ func (e *cloudTestEnv) token(t *testing.T, scope, jti string) string {
 func (e *cloudTestEnv) mux(t *testing.T, limiters cloudAPILimiters) *http.ServeMux {
 	t.Helper()
 	mux := http.NewServeMux()
-	registerCloudAPIRoutes(mux, e.verifier, e.store, e.userSessions, e.keys, limiters)
+	registerCloudAPIRoutes(mux, e.verifier, e.store, e.clientStore, e.userSessions, e.keys, limiters)
 	return mux
 }
 
@@ -196,11 +228,15 @@ func allowAllLimiters() cloudAPILimiters {
 		namespacesCreate: alwaysAllow(),
 		namespacesGet:    alwaysAllow(),
 		namespacesDelete: alwaysAllow(),
+		clientsCreate:    alwaysAllow(),
+		clientsRead:      alwaysAllow(),
+		clientsUpdate:    alwaysAllow(),
+		clientsDelete:    alwaysAllow(),
 		keysRotate:       alwaysAllow(),
 	}
 }
 
-// cloudAuthedRoutes are the four routes registerCloudAPIRoutes wraps in
+// cloudAuthedRoutes are the nine routes registerCloudAPIRoutes wraps in
 // cloudAuthorized (i.e. every route except keys/rotate, which self-verifies —
 // see registerCloudAPIRoutes's comment).
 var cloudAuthedRoutes = []struct {
@@ -214,6 +250,11 @@ var cloudAuthedRoutes = []struct {
 	{"namespaces create", http.MethodPost, "/admin/v1/namespaces", scopeNamespacesWrite},
 	{"namespaces get", http.MethodGet, "/admin/v1/namespaces/ns-1", scopeNamespacesRead},
 	{"namespaces delete", http.MethodDelete, "/admin/v1/namespaces/ns-1", scopeNamespacesWrite},
+	{"clients create", http.MethodPost, "/admin/v1/namespaces/ns-1/clients", scopeClientsWrite},
+	{"clients list", http.MethodGet, "/admin/v1/namespaces/ns-1/clients", scopeClientsRead},
+	{"clients get", http.MethodGet, "/admin/v1/namespaces/ns-1/clients/client-1", scopeClientsRead},
+	{"clients update", http.MethodPut, "/admin/v1/namespaces/ns-1/clients/client-1", scopeClientsWrite},
+	{"clients delete", http.MethodDelete, "/admin/v1/namespaces/ns-1/clients/client-1", scopeClientsWrite},
 }
 
 func TestRegisterCloudAPIRoutesRejectsMissingBearer(t *testing.T) {

@@ -334,6 +334,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		// regular signup's, only the persistence path and recovery_required
 		// policy differ (identity.EnrollFederated).
 		cloudStore := cloudapi.NewStore(q).WithFederatedIdentities(cloudapi.NewPgxFederatedPool(pool), kp, crypto.NewCipher())
+		cloudClientStore := clients.NewDBNamespacedClientStore(q)
 		subjectHasher, err := cloudapi.NewSubjectHasher(ssoSubjectHMACKey)
 		if err != nil {
 			return fmt.Errorf("configure SSO subject hasher: %w", err)
@@ -344,7 +345,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		ssoLoginCodes := cloudapi.NewRedisLoginCodeStore(redisClient)
 		userSessionsHandler := cloudapi.NewUserSessionsHandler(cloudStore, subjectHasher, ssoLoginCodes, string(reg))
 		cloudKeysHandler := cloudapi.NewKeysHandler(cloudVerifier, cloudHotInternalURL, cloudHotProxyToken, nil)
-		registerCloudAPIRoutes(mux, cloudVerifier, cloudStore, userSessionsHandler, cloudKeysHandler, newCloudAPILimiters(redisClient, logger))
+		registerCloudAPIRoutes(mux, cloudVerifier, cloudStore, cloudClientStore, userSessionsHandler, cloudKeysHandler, newCloudAPILimiters(redisClient, logger))
 
 		// GET /login/sso is registered INSIDE this same gate: with cloud
 		// integration off, it must 404 like every other /admin/v1/* route,

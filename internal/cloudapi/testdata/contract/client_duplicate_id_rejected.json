@@ -1,0 +1,48 @@
+{
+  "name": "client_duplicate_id_rejected",
+  "spec_scenario": "Duplicate client id is rejected",
+  "steps": [
+    {
+      "method": "POST",
+      "path": "/admin/v1/namespaces",
+      "auth": "valid",
+      "scope": "namespaces:write",
+      "idempotency_key": "client-ns-key-2",
+      "request_body": {
+        "id": "contract-client-ns-2"
+      },
+      "want_status": 201
+    },
+    {
+      "method": "POST",
+      "path": "/admin/v1/namespaces/contract-client-ns-2/clients",
+      "auth": "valid",
+      "scope": "clients:write",
+      "idempotency_key": "client-dup-key-1",
+      "request_body": {
+        "client_id": "contract-client-dup",
+        "redirect_uris": [
+          "https://contract-client.example.com/cb"
+        ],
+        "token_endpoint_auth_method": "none"
+      },
+      "want_status": 201
+    },
+    {
+      "method": "POST",
+      "path": "/admin/v1/namespaces/contract-client-ns-2/clients",
+      "auth": "valid",
+      "scope": "clients:write",
+      "idempotency_key": "client-dup-key-2-fresh",
+      "request_body": {
+        "client_id": "contract-client-dup",
+        "redirect_uris": [
+          "https://contract-client.example.com/cb"
+        ],
+        "token_endpoint_auth_method": "none"
+      },
+      "want_status": 409,
+      "want_error_code": "client_already_exists"
+    }
+  ]
+}

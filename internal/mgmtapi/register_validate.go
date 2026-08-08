@@ -4,41 +4,46 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"errors"
-	"net"
-	"net/url"
-	"strings"
+
+	"github.com/harbor-auth/harbor/internal/clients"
 )
 
-// RFC 7591/7592 client-metadata validation and credential helpers. Everything
-// in this file is PURE (no DB, no clock, no network) so it is exhaustively
-// table-testable and safe to call from the /register hot path. The HTTP handler
-// (later task) parses the request body, calls ValidateClientMetadata, then mints
+// RFC 7591/7592 client-metadata validation and credential helpers. Credential
+// minting/hashing is PURE (no DB, no clock, no network) so it is exhaustively
+// table-testable and safe to call from the /register hot path. The HTTP
+// handler parses the request body, calls ValidateClientMetadata, then mints
 // and hashes credentials here before handing the sealed record to
 // clients.DBClientRegistrationStore.
+//
+// The metadata validation rules themselves (ValidateRedirectURIs and
+// friends) live in internal/clients/validate.go — cloudapi's namespace-scoped
+// client provisioning needs the exact same rules and must not import mgmtapi
+// (see that file's doc comment). These are thin delegating wrappers so this
+// package's exported API, and its tests, are unchanged.
 
 // Validation errors. These are sentinels so the handler can map each to the
 // RFC 7591 §3.2.2 error code (invalid_redirect_uri / invalid_client_metadata)
-// without string matching.
+// without string matching. Aliased from internal/clients so errors.Is works
+// identically whether the caller imports mgmtapi or clients.
 var (
 	// ErrNoRedirectURIs is returned when a registration omits redirect_uris.
 	// At least one is required — Harbor only supports the authorization-code
 	// flow, which is a redirect flow (docs/DESIGN.md §3.1).
-	ErrNoRedirectURIs = errors.New("mgmtapi: at least one redirect_uri is required")
+	ErrNoRedirectURIs = clients.ErrNoRedirectURIs
 	// ErrRedirectURIInvalid is returned for a malformed or non-absolute URI.
-	ErrRedirectURIInvalid = errors.New("mgmtapi: redirect_uri is not a valid absolute URI")
+	ErrRedirectURIInvalid = clients.ErrRedirectURIInvalid
 	// ErrRedirectURINotHTTPS is returned for a non-HTTPS URI whose host is not
 	// a loopback address (RFC 8252 §7.3 allows http only for loopback).
-	ErrRedirectURINotHTTPS = errors.New("mgmtapi: redirect_uri must use https (http allowed only for loopback)")
+	ErrRedirectURINotHTTPS = clients.ErrRedirectURINotHTTPS
 	// ErrRedirectURIFragment is returned when a redirect_uri carries a fragment,
 	// which OAuth 2.0 forbids (RFC 6749 §3.1.2).
-	ErrRedirectURIFragment = errors.New("mgmtapi: redirect_uri must not contain a fragment")
+	ErrRedirectURIFragment = clients.ErrRedirectURIFragment
 	// ErrUnsupportedGrantType is returned for a grant_type Harbor does not issue.
-	ErrUnsupportedGrantType = errors.New("mgmtapi: unsupported grant_type")
+	ErrUnsupportedGrantType = clients.ErrUnsupportedGrantType
 	// ErrUnsupportedResponseType is returned for a response_type Harbor does not support.
-	ErrUnsupportedResponseType = errors.New("mgmtapi: unsupported response_type")
+	ErrUnsupportedResponseType = clients.ErrUnsupportedResponseType
 	// ErrUnsupportedAuthMethod is returned for a token_endpoint_auth_method Harbor rejects.
-	ErrUnsupportedAuthMethod = errors.New("mgmtapi: unsupported token_endpoint_auth_method")
+	ErrUnsupportedAuthMethod = clients.ErrUnsupportedAuthMethod
 )
 
 // ClientMetadata is the subset of RFC 7591 §2 registration request fields that
@@ -52,29 +57,6 @@ type ClientMetadata struct {
 	TokenEndpointAuthMethod string
 	Scopes                  []string
 	ClientName              string
-}
-
-// allowedGrantTypes is the set of grant types Harbor can issue. Harbor is an
-// authorization-code + refresh-token provider (docs/DESIGN.md §3.1, §3.5);
-// implicit / password / client_credentials are intentionally unsupported.
-var allowedGrantTypes = map[string]bool{
-	"authorization_code": true,
-	"refresh_token":      true,
-}
-
-// allowedResponseTypes is the set of response types Harbor supports. Only
-// "code" — Harbor is authorization-code-only (PKCE-protected; docs/DESIGN.md
-// §3.1, §11.7). The implicit flow ("token") is deliberately excluded.
-var allowedResponseTypes = map[string]bool{
-	"code": true,
-}
-
-// allowedAuthMethods is the set of token-endpoint client authentication methods
-// Harbor accepts (RFC 7591 §2). "none" is for public clients (PKCE-protected).
-var allowedAuthMethods = map[string]bool{
-	"client_secret_basic": true,
-	"client_secret_post":  true,
-	"none":                true,
 }
 
 // ValidateClientMetadata runs every metadata check and returns the first
@@ -97,100 +79,26 @@ func ValidateClientMetadata(m ClientMetadata) error {
 	return nil
 }
 
-// ValidateRedirectURIs requires at least one redirect_uri and validates each
-// one. The exact-match invariant Harbor enforces at /authorize (see
-// oidc.Client.HasRedirectURI) means we must store precisely what the client
-// registers — so we reject anything that could never match safely (non-HTTPS
-// non-loopback, fragments, relative URIs) at registration time.
+// ValidateRedirectURIs delegates to internal/clients.ValidateRedirectURIs —
+// see this file's doc comment for why the rule lives there.
 func ValidateRedirectURIs(uris []string) error {
-	if len(uris) == 0 {
-		return ErrNoRedirectURIs
-	}
-	for _, u := range uris {
-		if err := validateRedirectURI(u); err != nil {
-			return err
-		}
-	}
-	return nil
+	return clients.ValidateRedirectURIs(uris)
 }
 
-// validateRedirectURI enforces the per-URI rules: absolute URI, no fragment,
-// and https-only except for loopback hosts (RFC 8252 §7.3).
-func validateRedirectURI(raw string) error {
-	if raw == "" {
-		return ErrRedirectURIInvalid
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return ErrRedirectURIInvalid
-	}
-	// Must be absolute with a scheme and host. A relative URI, or one missing
-	// the authority (e.g. "https:///cb"), can never be exact-matched safely.
-	if !u.IsAbs() || u.Host == "" {
-		return ErrRedirectURIInvalid
-	}
-	// No fragment allowed (RFC 6749 §3.1.2). url.Parse strips a trailing "#"
-	// into an empty Fragment, so also guard the raw string for a bare "#".
-	if u.Fragment != "" || strings.Contains(raw, "#") {
-		return ErrRedirectURIFragment
-	}
-	switch u.Scheme {
-	case "https":
-		return nil
-	case "http":
-		if isLoopbackHost(u.Hostname()) {
-			return nil
-		}
-		return ErrRedirectURINotHTTPS
-	default:
-		return ErrRedirectURINotHTTPS
-	}
-}
-
-// isLoopbackHost reports whether host is a loopback destination for which
-// RFC 8252 permits plain http: the literal "localhost", or any IP in the
-// loopback range (127.0.0.0/8 or ::1).
-func isLoopbackHost(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
-}
-
-// ValidateGrantTypes accepts an empty list (the handler applies the RFC 7591
-// default of ["authorization_code"]) and otherwise requires every entry to be
-// a grant type Harbor can issue.
+// ValidateGrantTypes delegates to internal/clients.ValidateGrantTypes.
 func ValidateGrantTypes(grantTypes []string) error {
-	for _, gt := range grantTypes {
-		if !allowedGrantTypes[gt] {
-			return ErrUnsupportedGrantType
-		}
-	}
-	return nil
+	return clients.ValidateGrantTypes(grantTypes)
 }
 
-// ValidateResponseTypes accepts an empty list (default ["code"]) and otherwise
-// requires every entry to be a response type Harbor supports.
+// ValidateResponseTypes delegates to internal/clients.ValidateResponseTypes.
 func ValidateResponseTypes(responseTypes []string) error {
-	for _, rt := range responseTypes {
-		if !allowedResponseTypes[rt] {
-			return ErrUnsupportedResponseType
-		}
-	}
-	return nil
+	return clients.ValidateResponseTypes(responseTypes)
 }
 
-// ValidateTokenEndpointAuthMethod accepts the empty string (default
-// "client_secret_basic") and otherwise requires a method Harbor accepts.
+// ValidateTokenEndpointAuthMethod delegates to
+// internal/clients.ValidateTokenEndpointAuthMethod.
 func ValidateTokenEndpointAuthMethod(method string) error {
-	if method == "" {
-		return nil
-	}
-	if !allowedAuthMethods[method] {
-		return ErrUnsupportedAuthMethod
-	}
-	return nil
+	return clients.ValidateTokenEndpointAuthMethod(method)
 }
 
 // Credential byte lengths. All credentials are high-entropy random tokens, so a

@@ -33,14 +33,15 @@
 # see that job's own header comment for why: without it, the real-SQL tests
 # `t.Skip` themselves in every OTHER job (none of which set
 # DATABASE_URL/REDIS_URL) and nothing in the pipeline ever exercises the real
-# queries those tests exist to double-check — including M4's concurrent
+# queries those tests exist to double-check — including the concurrent
 # ResolveOrCreateFederatedUser race, which only a real Postgres transaction
 # can actually exercise (usersessions_test.go's in-memory fake cannot).
 #
 # Branch protection: require the `agent-check`, `e2e`, AND `integration` jobs
 # on the default branch. That is what gives the F5 tamper guards + CODEOWNERS
 # (agent-check), the assembled OIDC flow (e2e), and the real-database
-# federated-identity race guarantee (integration) their teeth — a red
+# namespace/client provisioning contract and the federated-identity race
+# guarantee (integration) their teeth — a red
 # check-results, a tamper finding, a broken assembled flow, or a real-SQL
 # regression all block the merge.
 name: ci
@@ -204,20 +205,28 @@ jobs:
       - name: Run e2e OIDC harness (F8)
         run: nix develop -c make e2e
 
-  # integration — M4: runs the `-tags=integration` suite (real Postgres/Redis,
+  # integration: runs the `-tags=integration` suite (real Postgres/Redis,
   # no fakes) that `agent-check`'s plain `go test ./...` never exercises.
   # Without this job, internal/cloudapi/integration_test.go's
   # requireIntegrationDeps (and cmd/harbor-mgmt's equivalent
   # TestRunBuildsDurableManagementGraph) `t.Skip` themselves the instant
   # DATABASE_URL/REDIS_URL are unset — which they always were in every
   # existing CI job — so nothing in the automated pipeline had ever run the
-  # real SQL this branch's SSO user-session handoff depends on (in particular
-  # TestIntegrationUserSessionsConcurrentResolveOrCreate, which proves 20
-  # goroutines racing ResolveOrCreateFederatedUser for the same (namespace,
-  # subject) leave behind exactly one users row and one federated_identities
-  # row — a property only a real Postgres transaction, not the in-memory
-  # fakeFederatedPool usersessions_test.go uses, can actually exercise) —
-  # against a real database.
+  # real SQL against a real database. Two things depend on that:
+  #
+  #   - db/queries/relying_parties.sql's namespace-scoped client queries,
+  #     including CreateNamespacedClient's TOCTOU guard and GetRelyingParty's
+  #     cloud_namespaces join. Without this the Go fakes those tests exist to
+  #     double-check (fakeClientStore, fakeNamespacedClientQuerier, ...) could
+  #     silently drift from the real queries with nothing turning red.
+  #
+  #   - the SSO user-session handoff, in particular
+  #     TestIntegrationUserSessionsConcurrentResolveOrCreate, which proves 20
+  #     goroutines racing ResolveOrCreateFederatedUser for the same
+  #     (namespace, subject) leave behind exactly one users row and one
+  #     federated_identities row — a property only a real Postgres
+  #     transaction, not the in-memory fakeFederatedPool usersessions_test.go
+  #     uses, can actually exercise.
   #
   # Postgres/Redis image tags and health-check parameters mirror
   # e2e/docker-compose.yml (the `e2e` job's own dependency stack above) — the
@@ -310,13 +319,19 @@ jobs:
             echo '    let this check pass.'
             exit 1
           fi
-          # Positive control: confirm specific, known tests for the SSO
-          # user-session handoff findings this suite exists to guard actually
-          # executed and passed — proves the grep above isn't vacuously true
-          # because nothing ran at all (e.g. a build failure that produced an
-          # empty log). TestIntegrationUserSessionsConcurrentResolveOrCreate is
-          # M4's core proof and the whole reason this job exists.
+          # Positive control: confirm specific, known tests for the findings
+          # this suite exists to guard actually executed and passed — proves
+          # the grep above isn't vacuously true because nothing ran at all
+          # (e.g. a build failure that produced an empty log). The first group
+          # covers namespace/client provisioning; the second covers the SSO
+          # user-session handoff, where
+          # TestIntegrationUserSessionsConcurrentResolveOrCreate is the core
+          # proof that the resolve-or-create path is genuinely transactional.
           for want in \
+            'TestIntegrationNamespaceDeleteCascadesToClientSoftDeleteAndStopsAuthentication' \
+            'TestIntegrationClientCreateRaceAgainstNamespaceDeleteIsClosed' \
+            'TestIntegrationClientCreateInGapBetweenNamespaceDeleteStatementsStillFailsToAuthenticate' \
+            'TestIntegrationClientCredentialPairingRejections' \
             'TestIntegrationUserSessionsCreatePath' \
             'TestIntegrationUserSessionsSameSubjectTwiceOneUser' \
             'TestIntegrationUserSessionsSameSubjectTwoNamespacesDistinctUsers' \

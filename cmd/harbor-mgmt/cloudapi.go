@@ -31,6 +31,8 @@ const (
 	scopeSessionsMint     = "sessions:mint"
 	scopeNamespacesRead   = "namespaces:read"
 	scopeNamespacesWrite  = "namespaces:write"
+	scopeClientsRead      = "clients:read"
+	scopeClientsWrite     = "clients:write"
 	scopeUserSessionsMint = "user-sessions:mint"
 )
 
@@ -43,15 +45,21 @@ type cloudAPILimiters struct {
 	namespacesCreate clients.RateLimiter
 	namespacesGet    clients.RateLimiter
 	namespacesDelete clients.RateLimiter
+	clientsCreate    clients.RateLimiter
+	clientsRead      clients.RateLimiter
+	clientsUpdate    clients.RateLimiter
+	clientsDelete    clients.RateLimiter
 	keysRotate       clients.RateLimiter
 }
 
-// newCloudAPILimiters builds the five route limiters over the shared Redis
+// newCloudAPILimiters builds the route limiters over the shared Redis
 // client already required by harbor-mgmt for BFF/enrollment state. Limits are
 // generous relative to Harbor Cloud's expected call volume (a single
 // provisioning-automation caller over one private tunnel) but bounded so a
-// misbehaving or compromised caller cannot flood namespace/session/key-rotate
-// operations.
+// misbehaving or compromised caller cannot flood namespace/client/session/
+// key-rotate operations. clients_read shares namespaces_get's ceiling (both
+// are simple read paths a provisioning UI might poll); the three client
+// write paths get namespaces_create's tighter ceiling.
 func newCloudAPILimiters(client *redis.Client, logger *slog.Logger) cloudAPILimiters {
 	limiter := func(name string, limit int, window time.Duration) clients.RateLimiter {
 		return clients.NewRedisRateLimiter(client, clients.RateLimiterConfig{
@@ -66,18 +74,23 @@ func newCloudAPILimiters(client *redis.Client, logger *slog.Logger) cloudAPILimi
 		namespacesCreate: limiter("namespaces_create", 30, time.Minute),
 		namespacesGet:    limiter("namespaces_get", 300, time.Minute),
 		namespacesDelete: limiter("namespaces_delete", 30, time.Minute),
+		clientsCreate:    limiter("clients_create", 60, time.Minute),
+		clientsRead:      limiter("clients_read", 300, time.Minute),
+		clientsUpdate:    limiter("clients_update", 60, time.Minute),
+		clientsDelete:    limiter("clients_delete", 60, time.Minute),
 		keysRotate:       limiter("keys_rotate", 10, time.Minute),
 	}
 }
 
-// registerCloudAPIRoutes registers the internal, service-JWT-authenticated
-// /admin/v1/* routes on mux: session minting, the SSO user-session handoff,
-// namespace create/get/delete, and the key-rotation proxy. Callers gate this
-// behind CLOUD_INTEGRATION_ENABLED — harbor-hot's public listener never
-// calls this, and when unregistered the mux 404s every /admin/v1/* path.
-func registerCloudAPIRoutes(mux *http.ServeMux, verifier *cloudapi.ServiceAuthVerifier, store *cloudapi.Store, userSessionsHandler *cloudapi.UserSessionsHandler, keysHandler *cloudapi.KeysHandler, limiters cloudAPILimiters) {
+// registerCloudAPIRoutes registers the eleven internal,
+// service-JWT-authenticated /admin/v1/* routes on mux: session minting, the
+// SSO user-session handoff, namespace create/get/delete, namespace-scoped
+// client create/list/get/update/delete, and the key-rotation proxy. Callers
+// gate this behind CLOUD_INTEGRATION_ENABLED — harbor-hot's public listener
+// never calls this, and when unregistered the mux 404s every /admin/v1/* path.
+func registerCloudAPIRoutes(mux *http.ServeMux, verifier *cloudapi.ServiceAuthVerifier, store *cloudapi.Store, clientStore cloudapi.ClientProvisioningStore, userSessionsHandler *cloudapi.UserSessionsHandler, keysHandler *cloudapi.KeysHandler, limiters cloudAPILimiters) {
 	sessionsHandler := cloudapi.NewSessionsHandler(store)
-	server := cloudapi.NewServer(store)
+	server := cloudapi.NewServer(store, clientStore)
 
 	mux.HandleFunc("POST /admin/v1/sessions", cloudRateLimited(limiters.sessionsMint, "sessions_mint",
 		cloudAuthorized(verifier, "POST /admin/v1/sessions", scopeSessionsMint, sessionsHandler.PostSessions)))
@@ -98,6 +111,31 @@ func registerCloudAPIRoutes(mux *http.ServeMux, verifier *cloudapi.ServiceAuthVe
 	mux.HandleFunc("DELETE /admin/v1/namespaces/{id}", cloudRateLimited(limiters.namespacesDelete, "namespaces_delete",
 		cloudAuthorized(verifier, "DELETE /admin/v1/namespaces/{id}", scopeNamespacesWrite, func(w http.ResponseWriter, r *http.Request) {
 			server.DeleteAdminV1Namespace(w, r, r.PathValue("id"), cloudopenapi.DeleteAdminV1NamespaceParams{IdempotencyKey: r.Header.Get("Idempotency-Key")})
+		})))
+
+	mux.HandleFunc("POST /admin/v1/namespaces/{namespace}/clients", cloudRateLimited(limiters.clientsCreate, "clients_create",
+		cloudAuthorized(verifier, "POST /admin/v1/namespaces/{namespace}/clients", scopeClientsWrite, func(w http.ResponseWriter, r *http.Request) {
+			server.PostAdminV1NamespacesClients(w, r, r.PathValue("namespace"), cloudopenapi.PostAdminV1NamespacesClientsParams{IdempotencyKey: r.Header.Get("Idempotency-Key")})
+		})))
+
+	mux.HandleFunc("GET /admin/v1/namespaces/{namespace}/clients", cloudRateLimited(limiters.clientsRead, "clients_read",
+		cloudAuthorized(verifier, "GET /admin/v1/namespaces/{namespace}/clients", scopeClientsRead, func(w http.ResponseWriter, r *http.Request) {
+			server.GetAdminV1NamespacesClients(w, r, r.PathValue("namespace"))
+		})))
+
+	mux.HandleFunc("GET /admin/v1/namespaces/{namespace}/clients/{client_id}", cloudRateLimited(limiters.clientsRead, "clients_read",
+		cloudAuthorized(verifier, "GET /admin/v1/namespaces/{namespace}/clients/{client_id}", scopeClientsRead, func(w http.ResponseWriter, r *http.Request) {
+			server.GetAdminV1NamespacesClient(w, r, r.PathValue("namespace"), r.PathValue("client_id"))
+		})))
+
+	mux.HandleFunc("PUT /admin/v1/namespaces/{namespace}/clients/{client_id}", cloudRateLimited(limiters.clientsUpdate, "clients_update",
+		cloudAuthorized(verifier, "PUT /admin/v1/namespaces/{namespace}/clients/{client_id}", scopeClientsWrite, func(w http.ResponseWriter, r *http.Request) {
+			server.PutAdminV1NamespacesClient(w, r, r.PathValue("namespace"), r.PathValue("client_id"), cloudopenapi.PutAdminV1NamespacesClientParams{IdempotencyKey: r.Header.Get("Idempotency-Key")})
+		})))
+
+	mux.HandleFunc("DELETE /admin/v1/namespaces/{namespace}/clients/{client_id}", cloudRateLimited(limiters.clientsDelete, "clients_delete",
+		cloudAuthorized(verifier, "DELETE /admin/v1/namespaces/{namespace}/clients/{client_id}", scopeClientsWrite, func(w http.ResponseWriter, r *http.Request) {
+			server.DeleteAdminV1NamespacesClient(w, r, r.PathValue("namespace"), r.PathValue("client_id"), cloudopenapi.DeleteAdminV1NamespacesClientParams{IdempotencyKey: r.Header.Get("Idempotency-Key")})
 		})))
 
 	// No cloudAuthorized wrapper here: KeysHandler.PostKeysRotate already

@@ -23,6 +23,12 @@ metadata:
     app.kubernetes.io/part-of: harbor
 spec:
   schedule: "0 */6 * * *"
+  # Suspended for two reasons, both of which must be resolved before it can
+  # work: it needs real R2/S3 credentials, and it syncs
+  # /var/lib/rancher/k3s/server/db/snapshots, which does not exist on these
+  # guests because k3s is running on its default SQLite datastore rather than
+  # etcd. See README.md.
+  suspend: true
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3

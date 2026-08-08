@@ -1,0 +1,158 @@
+# CronJob: harbor-pgdump-local — on-cluster PostgreSQL backup
+#
+# WHY THIS EXISTS ALONGSIDE harbor-pgdump
+#
+# harbor-pgdump ships offsite to R2/S3 and is the real disaster-recovery
+# mechanism, but it cannot run until object-storage credentials are issued.
+# This CronJob needs no credentials, so it gives the cluster a recovery point
+# today instead of whenever those arrive.
+#
+# WHAT IT DOES NOT PROTECT AGAINST
+#
+# The dumps land on a local-path PVC — the same physical host as the database,
+# and both guests share one hypervisor. This covers the failure modes that
+# actually happen day to day: a bad migration, an accidental DELETE, an
+# application bug corrupting a table, a dropped column. It does NOT cover loss
+# of the host or the disk. It is a complement to offsite backup, never a
+# replacement, and it should not be read as satisfying a durability
+# requirement on its own.
+#
+# Retention is by count of files rather than age, so a period where the job
+# fails cannot silently age out every remaining copy.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: harbor-backup-local
+  namespace: harbor-backup
+  labels:
+    app.kubernetes.io/name: harbor-pgdump-local
+    app.kubernetes.io/component: backup
+    app.kubernetes.io/part-of: harbor
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      # Dumps are custom-format and compress well; the harbor database is
+      # currently well under 1 MiB. 5Gi leaves several years of daily retention
+      # of headroom while staying small next to the 147G free on the node.
+      storage: 5Gi
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: harbor-pgdump-local
+  namespace: harbor-backup
+  labels:
+    app.kubernetes.io/name: harbor-pgdump-local
+    app.kubernetes.io/component: backup
+    app.kubernetes.io/part-of: harbor
+spec:
+  # 02:00 UTC — an hour ahead of the offsite dump so the two never contend for
+  # the database at the same moment.
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  # A missed window must not be silently skipped forever.
+  startingDeadlineSeconds: 3600
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 3600
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: harbor-pgdump-local
+            app.kubernetes.io/component: backup
+            app.kubernetes.io/part-of: harbor
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            fsGroup: 999
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: pgdump
+              image: postgres:16.14-bookworm@sha256:92620daddcd947f8d5ab5ba66e848702fe443d87fed30c4cea8e389fd78dfc55
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/sh
+                - -euc
+                - |
+                  STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+                  DEST="/backups/harbor-${STAMP}.dump"
+                  KEEP="${RETAIN_COPIES:-14}"
+
+                  echo "[$(date -u +%FT%TZ)] dumping ${PGDATABASE} -> ${DEST}"
+                  # Write to a .partial name first and rename only on success,
+                  # so an interrupted run can never leave a truncated file that
+                  # later looks like a valid recovery point.
+                  pg_dump --format=custom --no-password > "${DEST}.partial"
+                  mv "${DEST}.partial" "${DEST}"
+
+                  # Prove the dump is readable before it is allowed to count
+                  # towards retention. A dump that cannot be listed cannot be
+                  # restored, and finding that out during an incident is too
+                  # late.
+                  pg_restore --list "${DEST}" > /dev/null
+                  echo "[$(date -u +%FT%TZ)] verified $(du -h "${DEST}" | cut -f1) ${DEST}"
+
+                  # Retain by count, not age: if the job breaks for a fortnight,
+                  # age-based pruning would delete the last good copy while
+                  # producing no new ones.
+                  cd /backups
+                  ls -1t harbor-*.dump 2>/dev/null | tail -n "+$((KEEP + 1))" | while read -r old; do
+                    echo "[$(date -u +%FT%TZ)] pruning ${old}"
+                    rm -f -- "${old}"
+                  done
+
+                  # Clear any .partial left by a previously killed run.
+                  find . -name 'harbor-*.dump.partial' -mmin +120 -delete 2>/dev/null || true
+
+                  echo "[$(date -u +%FT%TZ)] done; $(ls -1 harbor-*.dump | wc -l) copies retained"
+              env:
+                - name: PGHOST
+                  value: harbor-postgresql.harbor.svc.cluster.local
+                - name: PGPORT
+                  value: "5432"
+                # These must match deploy/platform/postgresql.yaml, which
+                # provisions the database as user "harbor", database "harbor".
+                - name: PGUSER
+                  value: harbor
+                - name: PGDATABASE
+                  value: harbor
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: harbor-postgresql-auth
+                      key: password
+                - name: RETAIN_COPIES
+                  value: "14"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 64Mi
+                limits:
+                  cpu: 500m
+                  memory: 512Mi
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: harbor-backup-local
+            - name: tmp
+              emptyDir: {}

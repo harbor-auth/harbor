@@ -136,17 +136,18 @@ const contractSubjectHMACKey = "contract-test-subject-hmac-key-32b!"
 const contractUserSessionRegion = "EU"
 
 // newContractRouter assembles the real /admin/v1/* http.Handler over the
-// given store and verifier — the same composition every scenario in this
-// package's tests (fixture-driven and integration) exercises requests
-// through. redisClient backs the user-sessions route's one-time login code
-// store (logincode.go) exactly as cmd/harbor-mgmt wires it in production.
-func newContractRouter(store *Store, verifier *ServiceAuthVerifier, hotBaseURL, proxyToken string, hotClient *http.Client, redisClient *redis.Client) http.Handler {
+// given store, client store, and verifier — the same composition every
+// scenario in this package's tests (fixture-driven and integration)
+// exercises requests through. redisClient backs the user-sessions route's
+// one-time login code store (logincode.go) exactly as cmd/harbor-mgmt wires
+// it in production.
+func newContractRouter(store *Store, clientStore ClientProvisioningStore, verifier *ServiceAuthVerifier, hotBaseURL, proxyToken string, hotClient *http.Client, redisClient *redis.Client) http.Handler {
 	hasher, err := NewSubjectHasher([]byte(contractSubjectHMACKey))
 	if err != nil {
 		panic(err) // fixed constant above; a failure here is a test bug, not a runtime condition
 	}
 	adapter := &contractAdapter{
-		Server:       NewServer(store),
+		Server:       NewServer(store, clientStore),
 		sessions:     NewSessionsHandler(store),
 		userSessions: NewUserSessionsHandler(store, hasher, NewRedisLoginCodeStore(redisClient), contractUserSessionRegion),
 		keys:         NewKeysHandler(verifier, hotBaseURL, proxyToken, hotClient),
@@ -300,7 +301,7 @@ func newContractEnv(t *testing.T) *contractEnv {
 	hot := newRecordingHotServer(t)
 
 	env := &contractEnv{
-		router: newContractRouter(store, verifier, hot.URL, "contract-proxy-token", hot.Client(), redisClient),
+		router: newContractRouter(store, newFakeClientStore(), verifier, hot.URL, "contract-proxy-token", hot.Client(), redisClient),
 		ecPriv: priv,
 		now:    now,
 		q:      q,
@@ -313,7 +314,7 @@ func newContractEnv(t *testing.T) *contractEnv {
 	if err != nil {
 		t.Fatalf("NewServiceAuthVerifier (unconfigured): %v", err)
 	}
-	env.unconfR = newContractRouter(NewStore(newMemQuerier()), unconfVerifier, hot.URL, "contract-proxy-token", hot.Client(), redisClient)
+	env.unconfR = newContractRouter(NewStore(newMemQuerier()), newFakeClientStore(), unconfVerifier, hot.URL, "contract-proxy-token", hot.Client(), redisClient)
 
 	return env
 }
@@ -473,6 +474,8 @@ func validErrorCode(code cloudopenapi.ErrorCode) bool {
 		cloudopenapi.ErrorCodeCrossTenantForbidden,
 		cloudopenapi.ErrorCodeNamespaceAlreadyExists,
 		cloudopenapi.ErrorCodeNamespaceNotFound,
+		cloudopenapi.ErrorCodeClientAlreadyExists,
+		cloudopenapi.ErrorCodeClientNotFound,
 		cloudopenapi.ErrorCodeIdempotencyKeyReused,
 		cloudopenapi.ErrorCodeRateLimited,
 		cloudopenapi.ErrorCodeSubjectUnavailable,
@@ -534,7 +537,7 @@ func TestContractAuditEventsEmitted(t *testing.T) {
 		t.Fatalf("NewServiceAuthVerifier: %v", err)
 	}
 	hot := newRecordingHotServer(t)
-	router := newContractRouter(NewStore(newMemQuerier()), verifier, hot.URL, "contract-proxy-token", hot.Client(), redisClient)
+	router := newContractRouter(NewStore(newMemQuerier()), newFakeClientStore(), verifier, hot.URL, "contract-proxy-token", hot.Client(), redisClient)
 
 	claims := map[string]any{
 		"iss": "harbor-cloud", "sub": "harbor-cloud-svc-audit", "aud": ExpectedAudience,
@@ -667,7 +670,7 @@ func TestContractUserSessionsAnchorNamespaceBindingEndToEnd(t *testing.T) {
 		t.Fatalf("CreateNamespace globex: %v", err)
 	}
 	hot := newRecordingHotServer(t)
-	router := newContractRouter(store, verifier, hot.URL, "contract-proxy-token", hot.Client(), redisClient)
+	router := newContractRouter(store, newFakeClientStore(), verifier, hot.URL, "contract-proxy-token", hot.Client(), redisClient)
 
 	sign := func(jti string) string {
 		claims := map[string]any{
