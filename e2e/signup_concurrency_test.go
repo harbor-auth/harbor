@@ -118,7 +118,7 @@ func TestSignupConcurrentSessions_SignupRacesLostDeviceRecoveryForDifferentUser(
 			errRecoverB = err
 			return
 		}
-		ok, _, _ := registerPasskeyWithKey(t, recoverClientB)
+		ok, _, _, _ := registerPasskeyWithKey(t, recoverClientB)
 		if !ok {
 			errRecoverB = fmt.Errorf("fresh passkey enrollment during recovery did not complete")
 		}

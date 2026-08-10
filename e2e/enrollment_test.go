@@ -372,7 +372,7 @@ func TestPasskeyFailureLeavesPendingUserWithNoCredential(t *testing.T) {
 // the caller can skip rather than fail.
 func registerPasskey(t *testing.T, client *http.Client) bool {
 	t.Helper()
-	ok, _, _ := registerPasskeyWithKey(t, client)
+	ok, _, _, _ := registerPasskeyWithKey(t, client)
 	return ok
 }
 
@@ -439,23 +439,23 @@ func TestEnrollmentCeremonyCrossReplicaRedisOnly(t *testing.T) {
 // subsequent passkey login (e.g. the BFF flow) need them. On any failure it
 // returns ok=false so the caller can skip rather than fail (matches
 // registerPasskey's CI-safe contract).
-func registerPasskeyWithKey(t *testing.T, client *http.Client) (ok bool, key *ecdsa.PrivateKey, credID []byte) {
+func registerPasskeyWithKey(t *testing.T, client *http.Client) (ok bool, key *ecdsa.PrivateKey, credID, userHandle []byte) {
 	t.Helper()
 
 	beginResp, err := client.Post(mgmtBaseURL()+registerBeginPath, "application/json", nil)
 	if err != nil {
 		t.Logf("register/begin unreachable: %v", err)
-		return false, nil, nil
+		return false, nil, nil, nil
 	}
 	defer func() { _ = beginResp.Body.Close() }()
 	if beginResp.StatusCode != http.StatusOK {
 		t.Logf("register/begin = %d (ceremony not wired)", beginResp.StatusCode)
-		return false, nil, nil
+		return false, nil, nil, nil
 	}
 	beginBody, err := io.ReadAll(beginResp.Body)
 	if err != nil {
 		t.Logf("read register/begin body: %v", err)
-		return false, nil, nil
+		return false, nil, nil, nil
 	}
 
 	var opts struct {
@@ -464,11 +464,18 @@ func registerPasskeyWithKey(t *testing.T, client *http.Client) (ok bool, key *ec
 			RP        struct {
 				ID string `json:"id"`
 			} `json:"rp"`
+			// User.ID is the WebAuthn user handle. A discoverable-credential
+			// login sends no allowCredentials, so the server resolves the user
+			// from the handle the authenticator echoes back
+			// (FinishDiscoverableLogin) — verification fails without it.
+			User struct {
+				ID string `json:"id"`
+			} `json:"user"`
 		} `json:"publicKey"`
 	}
 	if err := json.Unmarshal(beginBody, &opts); err != nil {
 		t.Logf("register/begin response not parseable: %v\n%s", err, beginBody)
-		return false, nil, nil
+		return false, nil, nil, nil
 	}
 	rpID := opts.PublicKey.RP.ID
 	if rpID == "" {
@@ -476,31 +483,37 @@ func registerPasskeyWithKey(t *testing.T, client *http.Client) (ok bool, key *ec
 	}
 	if opts.PublicKey.Challenge == "" {
 		t.Logf("register/begin response missing challenge\n%s", beginBody)
-		return false, nil, nil
+		return false, nil, nil, nil
 	}
 
 	attestation, key, credID, err := makeAttestation(rpID, opts.PublicKey.Challenge)
 	if err != nil {
 		t.Logf("build attestation: %v", err)
-		return false, nil, nil
+		return false, nil, nil, nil
 	}
 
 	finishResp, err := client.Post(mgmtBaseURL()+registerFinishPath, "application/json", strings.NewReader(attestation))
 	if err != nil {
 		t.Logf("register/finish: %v", err)
-		return false, nil, nil
+		return false, nil, nil, nil
 	}
 	defer func() { _ = finishResp.Body.Close() }()
 	finishBody, err := io.ReadAll(finishResp.Body)
 	if err != nil {
 		t.Logf("read register/finish body: %v", err)
-		return false, nil, nil
+		return false, nil, nil, nil
 	}
 	if finishResp.StatusCode < 200 || finishResp.StatusCode >= 300 {
 		t.Logf("register/finish = %d (likely origin/RP mismatch on this stack)\n%s", finishResp.StatusCode, finishBody)
-		return false, nil, nil
+		return false, nil, nil, nil
 	}
-	return true, key, credID
+	// Decode the user handle so the login assertion can echo it back.
+	userHandle, err = base64.RawURLEncoding.DecodeString(opts.PublicKey.User.ID)
+	if err != nil {
+		t.Logf("register/begin user.id not base64url: %v", err)
+		return false, nil, nil, nil
+	}
+	return true, key, credID, userHandle
 }
 
 // makeAttestation produces a WebAuthn "none"-format registration response for a
