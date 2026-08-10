@@ -240,6 +240,33 @@ func TestProductionValuesOverrideEveryScaffoldURL(t *testing.T) {
 		}
 	}
 
+	// loginURL is where /authorize sends a BROWSER, so it must name a route
+	// that renders HTML. Pointing it at GET /login — loginHandler.BeginLogin,
+	// the WebAuthn ceremony API — makes every sign-in land on a raw JSON
+	// challenge instead of a form. That is what production shipped: the
+	// redirect was correct, the endpoint returned 200, and the user saw
+	// {"publicKey":{"challenge":...}}.
+	//
+	// Cross-check the configured path against the routes harbor-mgmt actually
+	// registers, so this cannot drift if a route is renamed.
+	main, err := os.ReadFile(filepath.Join("..", "..", "cmd", "harbor-mgmt", "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loginPath := regexp.MustCompile(`(?m)^\s*loginURL:\s*\S+?://[^/\s]+(/\S*)`).FindSubmatch(values)
+	if loginPath == nil {
+		t.Fatal("could not read a path out of values-prod.yaml's loginURL")
+	}
+	path := string(loginPath[1])
+	if !bytes.Contains(main, []byte(`"GET `+path+`"`)) {
+		t.Errorf("values-prod.yaml points loginURL at %q, which cmd/harbor-mgmt registers no GET route for", path)
+	}
+	if path == "/login" {
+		t.Error("loginURL points at GET /login, which is the WebAuthn ceremony API " +
+			"(loginHandler.BeginLogin) — a browser sent there renders a JSON challenge, " +
+			"not a sign-in page; use the server-rendered page route instead")
+	}
+
 	// Guard the guard: the chart must still HAVE scaffold defaults, or this
 	// test protects against a hazard that no longer exists.
 	//
