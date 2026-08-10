@@ -241,14 +241,20 @@ func TestProductionValuesOverrideEveryScaffoldURL(t *testing.T) {
 	}
 
 	// Guard the guard: the chart must still HAVE scaffold defaults, or this
-	// test is protecting against a hazard that no longer exists and should be
-	// re-examined rather than left passing.
+	// test protects against a hazard that no longer exists.
+	//
+	// Deliberately a failure rather than a t.Skip. A skip here would leave the
+	// suite green while silently guarding nothing, which is the exact shape of
+	// bug this test exists to catch. Failing forces someone to decide: either
+	// the scaffolds moved and the check should follow them, or they are gone
+	// and this test should be deleted.
 	chart, err := os.ReadFile(filepath.Join("..", "helm", "values.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Contains(chart, []byte("example.com")) {
-		t.Skip("chart no longer ships example.com scaffolds; this test no longer guards anything")
+		t.Error("deploy/helm/values.yaml no longer ships example.com scaffolds — this test now " +
+			"guards nothing; point it at the current placeholders or delete it")
 	}
 }
 
