@@ -204,6 +204,60 @@ func assertHelmSourceSecurityContract(t *testing.T) {
 //
 // Asserted against template source rather than a render so it holds without a
 // helm binary, and so a NEW workload template cannot quietly skip it.
+// TestProductionValuesOverrideEveryScaffoldURL keeps deployment placeholders
+// out of production.
+//
+// The chart ships scaffold URLs on the example.com domain — loginURL,
+// authorizeCompleteURL, registrationBaseURL. values-prod.yaml set the issuer
+// but not those three, so they silently kept their defaults and the deployed
+// system 302'd every real sign-in to https://auth.example.com/login. Nothing
+// failed: the OIDC provider answered correctly, JWKS served, healthz was 200 —
+// it just handed the browser to a domain nobody owns.
+//
+// A placeholder that still renders is worse than one that breaks the render.
+func TestProductionValuesOverrideEveryScaffoldURL(t *testing.T) {
+	values, err := os.ReadFile(filepath.Join("..", "argocd", "values-prod.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Comments legitimately name the scaffold they are warning about, so only
+	// the value side of each line counts.
+	for number, line := range strings.Split(string(values), "\n") {
+		code := line
+		if hash := strings.Index(code, "#"); hash >= 0 {
+			code = code[:hash]
+		}
+		if strings.Contains(code, "example.com") {
+			t.Errorf("values-prod.yaml:%d still sets an example.com host: %q", number+1, strings.TrimSpace(line))
+		}
+	}
+
+	// The three the chart defaults to example.com. Each must be set explicitly,
+	// because an unset key inherits the placeholder without any error.
+	for _, key := range []string{"loginURL:", "authorizeCompleteURL:", "registrationBaseURL:", "issuer:"} {
+		if !bytes.Contains(values, []byte(key)) {
+			t.Errorf("values-prod.yaml does not set %s, so it inherits the chart's example.com default", key)
+		}
+	}
+
+	// Guard the guard: the chart must still HAVE scaffold defaults, or this
+	// test protects against a hazard that no longer exists.
+	//
+	// Deliberately a failure rather than a t.Skip. A skip here would leave the
+	// suite green while silently guarding nothing, which is the exact shape of
+	// bug this test exists to catch. Failing forces someone to decide: either
+	// the scaffolds moved and the check should follow them, or they are gone
+	// and this test should be deleted.
+	chart, err := os.ReadFile(filepath.Join("..", "helm", "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(chart, []byte("example.com")) {
+		t.Error("deploy/helm/values.yaml no longer ships example.com scaffolds — this test now " +
+			"guards nothing; point it at the current placeholders or delete it")
+	}
+}
+
 func TestEveryWorkloadCanPullItsImage(t *testing.T) {
 	templates, err := filepath.Glob(filepath.Join("..", "helm", "templates", "*.yaml"))
 	if err != nil {
