@@ -37,6 +37,11 @@ hot:
   # Single node — one replica. HPA/PDB are meaningless here and are disabled.
   replicaCount: 1
   issuer: https://auth.harborauth.com
+  # Where /authorize sends an unauthenticated user. The chart default is the
+  # scaffold https://auth.example.com/login, and leaving it unset meant every
+  # real sign-in 302'd to a domain that does not exist — the OIDC provider
+  # answered correctly and then handed the browser nowhere.
+  loginURL: https://auth.harborauth.com/login
   hpa:
     enabled: false
   pdb:
@@ -58,6 +63,11 @@ hot:
       tokenAudience: openbao
       tokenExpirationSeconds: 600
 mgmt:
+  # Both default to the scaffold auth.example.com in the chart. Unset, the
+  # post-authentication hand-back and the RFC 7591 registration responses point
+  # at a domain nobody owns.
+  authorizeCompleteURL: https://auth.harborauth.com/authorize/complete
+  registrationBaseURL: https://auth.harborauth.com
   image:
     digest: sha256:275326f248e7a74338c5aa09fefa579f9225f0889ad326a25d076ccc7aa9cc32
   replicaCount: 1
