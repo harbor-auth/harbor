@@ -15,12 +15,45 @@ Not "deployed" — verified by exercising it:
 | Capability | Evidence |
 | --- | --- |
 | OIDC provider | `auth.harborauth.com/healthz` 200, discovery 200, JWKS serves the live key |
+| Sign-in redirect | `/authorize` 302s to `auth.harborauth.com/login` — see the correction below |
+| Public site | apex `harborauth.com` and `demo.` resolve and serve 200 |
 | Cloud → Harbor API | `POST /admin/v1/namespaces` → 201; replayed token → 401 `token_replayed` |
 | Enterprise SSO | mint → 201, repeat → `created:false`, `/login/sso` → 303 `/dashboard` + cookie, replay → 400 |
 | Tenant provisioning | provisioner reports `harbor namespace registration enabled` |
 | Public site | funnel, api, billing, bridge, portal, admin-ui all 200 / Running |
 | Backups | ran a real dump: `verified 84K … 1 copies retained` |
 | Registry auth | deleted a cached image, cluster pulled it back: `PULL_OK` |
+
+### A correction, and the lesson in it
+
+An earlier version of this file claimed the OIDC provider was "verified by
+exercising it". That was **not true in the way it mattered**, and the gap is
+worth keeping on the record.
+
+Everything I had checked was a health endpoint. `/healthz` was 200, discovery
+was 200, JWKS served the live key, and every one of those was genuinely
+passing — while **every real sign-in redirected to
+`https://auth.example.com/login`**, a domain nobody owns.
+
+`values-prod.yaml` set `hot.issuer` but never `loginURL`,
+`authorizeCompleteURL` or `registrationBaseURL`, so all three silently kept the
+chart's scaffold defaults. Nothing failed. The provider answered correctly and
+then handed the browser nowhere.
+
+It surfaced only when someone said "I don't think it's working" and I followed
+the actual user journey instead of probing endpoints.
+
+**Two things to take from that:**
+
+1. A placeholder that still *renders* is more dangerous than one that breaks
+   the render, because every check stays green.
+2. "Verified" has to mean the journey a user takes, not the endpoints a monitor
+   scrapes. Health checks confirm a process is alive; they say nothing about
+   whether the product works.
+
+Fixed, with a test that reproduces the bug when reverted. A scan of both
+clusters for other placeholder values (`example.com`, `REPLACE`, `CHANGEME`,
+`TODO`) found nothing else in ConfigMaps or Secrets.
 
 ---
 
@@ -84,12 +117,21 @@ git would have produced a database no service could log into.
 Corrected, but nothing has ever rehearsed a restore. Untested backups are
 hope, not recovery.
 
-### 6. `harborauth.com` and `demo.harborauth.com` do not resolve — MEDIUM
+### 6. harbor-cloud's auto-sync is still off — MEDIUM
 
-**Order matters:** DNS first, then restore harbor-cloud's auto-sync. Doing it
-the other way applies a Certificate naming two hosts that do not resolve,
-cert-manager opens a permanently failing ACME order, and it burns Let's Encrypt
-rate limit against the whole account.
+**Resolved:** `harborauth.com` and `demo.harborauth.com` now resolve. The
+records were missing, not blocked — the token in `~/.harbor.env`
+(`CLOUDFLARE_DNS_ZONE_KEY`) covers this zone and had simply been mis-recorded
+as empty. Both are proxied CNAMEs to `origin-cloud.harborauth.com`, matching
+the existing `api`/`portal`/`billing`/`bridge` records.
+
+**Still outstanding:** harbor-cloud's Argo auto-sync remains off, so every
+change there is applied by hand and nothing self-heals. Now that DNS resolves,
+the Certificate covering the apex should issue cleanly and auto-sync can be
+restored — verify the Certificate goes Ready first.
+
+`www.harborauth.com` deliberately has no record: there is no Ingress for it, so
+pointing DNS at the origin would serve a 404.
 
 ### 7. harbor-cloud is not self-healing — MEDIUM
 
