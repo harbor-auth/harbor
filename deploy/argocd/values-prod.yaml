@@ -37,11 +37,15 @@ hot:
   # Single node — one replica. HPA/PDB are meaningless here and are disabled.
   replicaCount: 1
   issuer: https://auth.harborauth.com
-  # Where /authorize sends an unauthenticated user. The chart default is the
-  # scaffold https://auth.example.com/login, and leaving it unset meant every
-  # real sign-in 302'd to a domain that does not exist — the OIDC provider
-  # answered correctly and then handed the browser nowhere.
-  loginURL: https://auth.harborauth.com/login
+  # Where /authorize sends an unauthenticated user. This is a BROWSER
+  # destination, so it must be the server-rendered page (GET /signin,
+  # signinHandler.ServeSignin) and not GET /login — that route is
+  # loginHandler.BeginLogin, the WebAuthn ceremony API, and navigating to it
+  # renders a raw JSON challenge instead of a sign-in form.
+  #
+  # The chart default is the scaffold https://auth.example.com/login, which is
+  # wrong twice over: the host does not exist, and /login is the API.
+  loginURL: https://auth.harborauth.com/signin
   hpa:
     enabled: false
   pdb:
