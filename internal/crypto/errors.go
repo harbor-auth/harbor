@@ -17,6 +17,15 @@ var (
 	// ErrEmptySecret is returned by NewLocalKeyProvider when the secret is empty.
 	ErrEmptySecret = errors.New("crypto: key provider secret must be non-empty")
 
+	// ErrWeakSecret is returned by NewLocalKeyProvider when the secret is
+	// present but too short, or is one of the placeholder values the
+	// deployment manifests ship. Both are fail-open hazards rather than
+	// outages: HKDF happily derives a KEK from "changeme", so without this
+	// check every user DEK would be wrapped under a guessable — or, for the
+	// published placeholder, an entirely known — key, with nothing in the
+	// logs to say so.
+	ErrWeakSecret = errors.New("crypto: key provider secret is too short or is a known placeholder")
+
 	// ErrKMSNotImplemented is returned by kmsKeyProvider methods until the
 	// regional KMS/HSM integration is implemented.
 	ErrKMSNotImplemented = errors.New("crypto: KMS key provider is not yet implemented")

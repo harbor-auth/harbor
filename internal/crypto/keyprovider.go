@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 
 	"golang.org/x/crypto/hkdf"
 )
@@ -44,12 +45,63 @@ type localKeyProvider struct {
 	cipher *Cipher
 }
 
+// MinKeyProviderSecretBytes is the minimum accepted length for the user-DEK
+// KEK secret (HARBOR_KMS_SECRET). It mirrors harbor-hot's minAdminTokenBytes:
+// this secret is the root of the envelope-encryption chain protecting every
+// user's pairwise secret and relay mapping, so it must carry at least as much
+// entropy as the admin bearer token does.
+const MinKeyProviderSecretBytes = 32
+
+// placeholderSecretMarkers identify the stand-in values shipped in the
+// deployment manifests. Every one of them is non-empty and longer than the
+// length floor — deploy/helm/values.yaml carried
+// "REPLACE_WITH_SHARED_32_BYTE_USER_DEK_KEK" (40 bytes) and
+// deploy/k8s/secret-*.yaml carry "REPLACE_ME_WITH_SHARED_32_BYTE_USER_DEK_KEK"
+// (43 bytes) — so neither an emptiness nor a length check catches them, yet a
+// KEK whose value is printed in a public repository offers no protection at
+// all.
+//
+// Matching on markers rather than an exact-value list is deliberate: the two
+// manifests already disagree on the exact spelling, so an exhaustive list
+// silently misses the next variant someone writes. No real secret can collide
+// with these — hex output cannot contain them, and a generated base64 secret
+// beginning "REPLACE" is not a value anyone should be allowed to ship anyway.
+var placeholderSecretMarkers = []string{"REPLACE", "CHANGEME", "CHANGE_ME", "YOUR_", "EXAMPLE", "PLACEHOLDER"}
+
+// looksLikePlaceholder reports whether secret is a deployment-manifest
+// stand-in rather than a real generated key. The comparison is
+// case-insensitive so "changeme" and "CHANGEME" are treated alike.
+func looksLikePlaceholder(secret string) bool {
+	upper := strings.ToUpper(secret)
+	for _, marker := range placeholderSecretMarkers {
+		if strings.Contains(upper, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // NewLocalKeyProvider constructs a dev-only localKeyProvider from the given
-// secret. Returns [ErrEmptySecret] if the secret is empty. Logs a loud warning
-// on every construction — if this appears in a production log, it is a bug.
+// secret. Returns [ErrEmptySecret] if the secret is empty, or [ErrWeakSecret]
+// if it is shorter than [MinKeyProviderSecretBytes] or is one of the manifest
+// placeholders. Logs a loud warning on every construction — if this appears in
+// a production log, it is a bug.
+//
+// The validation lives here rather than in each binary's startup so that all
+// three callers (harbor-hot, harbor-mgmt, harbor-relay) are covered by
+// construction and a fourth cannot be added without it. Each previously
+// checked only `secret == ""`, which the shipped placeholder passes.
 func NewLocalKeyProvider(secret string) (KeyProvider, error) {
 	if secret == "" {
 		return nil, ErrEmptySecret
+	}
+	if len(secret) < MinKeyProviderSecretBytes {
+		return nil, fmt.Errorf("%w: need at least %d bytes, got %d",
+			ErrWeakSecret, MinKeyProviderSecretBytes, len(secret))
+	}
+	if looksLikePlaceholder(secret) {
+		return nil, fmt.Errorf("%w: the configured value looks like a deployment-manifest placeholder — "+
+			"generate a real one (openssl rand -hex 32)", ErrWeakSecret)
 	}
 	log.Printf("[WARN] harbor/crypto: localKeyProvider(DEV-ONLY) constructed — " +
 		"this provider is NOT safe for production (keys are software-derived, " +

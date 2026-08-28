@@ -31,7 +31,7 @@ func TestKMSBackedSignerNewAndLoad(t *testing.T) {
 	region := "us-east-1"
 
 	// Use localKeyProvider for testing (simulates KMS).
-	kp, err := NewLocalKeyProvider("test-secret-32-bytes-long!!!!!")
+	kp, err := NewLocalKeyProvider("test-secret-32-bytes-long!!!!!!!")
 	if err != nil {
 		t.Fatalf("NewLocalKeyProvider: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestKMSBackedSignerKeyIDStability(t *testing.T) {
 	ctx := context.Background()
 	region := "us-east-1"
 
-	kp, err := NewLocalKeyProvider("test-secret-for-stability-test!")
+	kp, err := NewLocalKeyProvider("test-secret-for-stability-test!!")
 	if err != nil {
 		t.Fatalf("NewLocalKeyProvider: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestKMSBackedSignerRegionIsolation(t *testing.T) {
 	regionA := "us-east-1"
 	regionB := "eu-west-1"
 
-	kp, err := NewLocalKeyProvider("test-secret-for-region-test!!!!")
+	kp, err := NewLocalKeyProvider("test-secret-for-region-test!!!!!")
 	if err != nil {
 		t.Fatalf("NewLocalKeyProvider: %v", err)
 	}
@@ -147,7 +147,7 @@ func TestKMSBackedSignerTamperedWrappedKey(t *testing.T) {
 	ctx := context.Background()
 	region := "us-east-1"
 
-	kp, err := NewLocalKeyProvider("test-secret-for-tamper-test!!!!")
+	kp, err := NewLocalKeyProvider("test-secret-for-tamper-test!!!!!")
 	if err != nil {
 		t.Fatalf("NewLocalKeyProvider: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestKMSBackedSignerInvalidWrappedKey(t *testing.T) {
 	ctx := context.Background()
 	region := "us-east-1"
 
-	kp, err := NewLocalKeyProvider("test-secret-for-invalid-test!!!")
+	kp, err := NewLocalKeyProvider("test-secret-for-invalid-test!!!!")
 	if err != nil {
 		t.Fatalf("NewLocalKeyProvider: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestKMSBackedSignerString(t *testing.T) {
 	ctx := context.Background()
 	region := "us-east-1"
 
-	kp, err := NewLocalKeyProvider("test-secret-for-string-test!!!!")
+	kp, err := NewLocalKeyProvider("test-secret-for-string-test!!!!!")
 	if err != nil {
 		t.Fatalf("NewLocalKeyProvider: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestKMSBackedSignerSignatureFormat(t *testing.T) {
 	ctx := context.Background()
 	region := "us-east-1"
 
-	kp, err := NewLocalKeyProvider("test-secret-for-sig-format-test")
+	kp, err := NewLocalKeyProvider("test-secret-for-sig-format-test!")
 	if err != nil {
 		t.Fatalf("NewLocalKeyProvider: %v", err)
 	}
@@ -245,7 +245,7 @@ func TestKMSBackedSignerJWKRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	region := "us-east-1"
 
-	kp, err := NewLocalKeyProvider("test-secret-for-jwk-roundtrip!!")
+	kp, err := NewLocalKeyProvider("test-secret-for-jwk-roundtrip!!!")
 	if err != nil {
 		t.Fatalf("NewLocalKeyProvider: %v", err)
 	}
@@ -299,7 +299,7 @@ func TestVerifySignature(t *testing.T) {
 	ctx := context.Background()
 	region := "us-east-1"
 
-	kp, err := NewLocalKeyProvider("test-secret-for-verify-sig-test")
+	kp, err := NewLocalKeyProvider("test-secret-for-verify-sig-test!")
 	if err != nil {
 		t.Fatalf("NewLocalKeyProvider: %v", err)
 	}
@@ -550,7 +550,7 @@ func TestKMSBackedSignerWrongRegionNoOracle(t *testing.T) {
 	regionA := "us-east-1"
 	regionB := "eu-west-1"
 
-	kp, err := NewLocalKeyProvider("test-secret-for-no-oracle-sign!")
+	kp, err := NewLocalKeyProvider("test-secret-for-no-oracle-sign!!")
 	if err != nil {
 		t.Fatalf("NewLocalKeyProvider: %v", err)
 	}
@@ -594,7 +594,7 @@ func TestLoadKMSBackedSignerNoPanicOnMalformedInput(t *testing.T) {
 	ctx := context.Background()
 	region := "us-east-1"
 
-	kp, err := NewLocalKeyProvider("test-secret-for-panic-safety!!!")
+	kp, err := NewLocalKeyProvider("test-secret-for-panic-safety!!!!")
 	if err != nil {
 		t.Fatalf("NewLocalKeyProvider: %v", err)
 	}
@@ -631,7 +631,7 @@ func TestLoadKMSBackedSignerNoPanicOnMalformedInput(t *testing.T) {
 func TestKMSBackedSignerDifferentKeysPerRegion(t *testing.T) {
 	ctx := context.Background()
 
-	kp, err := NewLocalKeyProvider("test-secret-for-multi-region-!!")
+	kp, err := NewLocalKeyProvider("test-secret-for-multi-region-!!!")
 	if err != nil {
 		t.Fatalf("NewLocalKeyProvider: %v", err)
 	}
