@@ -11,7 +11,7 @@ created: 2026-07-27
 # Plan — Kyverno Policy-as-Code (`kyverno-policies`)
 
 > **Status:** draft · **Tier:** T2.4 (infra-hardening) · **Target:** cluster-wide on
-> `51.89.98.90` (RKE2, single-node, ArgoCD GitOps) · **Parent doc:** [`infra-hardening.md`](infra-hardening.md#t24--kyverno-policy-as-code)
+> `<NODE_IP>` (RKE2, single-node, ArgoCD GitOps) · **Parent doc:** [`infra-hardening.md`](infra-hardening.md#t24--kyverno-policy-as-code)
 
 ## Problem
 

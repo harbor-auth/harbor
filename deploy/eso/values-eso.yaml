@@ -1,5 +1,5 @@
 # External Secrets Operator — Helm values for the single-node RKE2 cluster
-# (ns31170412 / 51.89.98.90, harbor namespace).
+# (<NODE_HOSTNAME> / <NODE_IP>, harbor namespace).
 #
 # Bootstrap command (run once, before applying ESO manifests):
 #   helm repo add external-secrets https://charts.external-secrets.io

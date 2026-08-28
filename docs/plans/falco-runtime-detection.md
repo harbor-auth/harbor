@@ -1,6 +1,6 @@
 # Plan — Falco Runtime Threat Detection (`falco-runtime-detection`)
 
-> **Status:** draft · **Tier:** T3.3 (infra-hardening) · **Target:** `51.89.98.90`
+> **Status:** draft · **Tier:** T3.3 (infra-hardening) · **Target:** `<NODE_IP>`
 > (RKE2 v1.35.6, single-node, Ubuntu) · **Parent doc:** [`infra-hardening.md`](infra-hardening.md#t33--falco-runtime-threat-detection)
 
 ## 1. Problem statement

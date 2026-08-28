@@ -1,7 +1,7 @@
 # Plan — Linkerd mTLS East-West Encryption (`linkerd-mtls`)
 
 > **Status:** in-progress · **Tier:** T2.3 (infra-hardening) · **Target:** `harbor` namespace on
-> `51.89.98.90` (RKE2 v1.35.6, Calico CNI, PSA `restricted`) · **Parent doc:** [`infra-hardening.md`](infra-hardening.md#t23--linkerd-mtls-east-west-encryption)
+> `<NODE_IP>` (RKE2 v1.35.6, Calico CNI, PSA `restricted`) · **Parent doc:** [`infra-hardening.md`](infra-hardening.md#t23--linkerd-mtls-east-west-encryption)
 
 ## 1. Purpose
 

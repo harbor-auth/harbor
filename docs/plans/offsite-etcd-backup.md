@@ -1,7 +1,7 @@
 # Plan — Offsite etcd + PostgreSQL Backup (`offsite-etcd-backup`)
 
-> **Status:** draft · **Tier:** T2.1 (infra-hardening) · **Target cluster:** `51.89.98.90`
-> (`ns31170412`, RKE2 v1.35.6, single-node) · **Parent doc:** [`infra-hardening.md`](infra-hardening.md#t21--offsite-etcd-backup)
+> **Status:** draft · **Tier:** T2.1 (infra-hardening) · **Target cluster:** `<NODE_IP>`
+> (`<NODE_HOSTNAME>`, RKE2 v1.35.6, single-node) · **Parent doc:** [`infra-hardening.md`](infra-hardening.md#t21--offsite-etcd-backup)
 
 ## 1. Problem statement
 
@@ -35,7 +35,7 @@ etcd-s3: true
 etcd-s3-endpoint: <R2-or-S3-endpoint>         # R2: <accountid>.r2.cloudflarestorage.com
 etcd-s3-bucket: harbor-etcd-backups
 etcd-s3-region: auto                          # R2 uses "auto"; S3 uses real region
-etcd-s3-folder: ns31170412
+etcd-s3-folder: <NODE_HOSTNAME>
 etcd-s3-access-key: <from ~/.harbor.env — never commit>
 etcd-s3-secret-key: <from ~/.harbor.env — never commit>
 ```

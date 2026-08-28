@@ -36,7 +36,7 @@ Key Encryption Key (KEK) now lives in AWS KMS and signs tokens via the
 | Option | Verdict |
 |---|---|
 | **IRSA** (`eks.amazonaws.com/role-arn` on the `harbor-hot` ServiceAccount) | ❌ EKS-only — requires the EKS OIDC provider and AWS-managed pod identity webhook. This cluster is RKE2 on OVH bare metal. |
-| **EC2 instance profile** (node IAM role) | ❌ The node is an OVH bare-metal server (`51.89.98.90`), not EC2 — no instance metadata service, no instance role. |
+| **EC2 instance profile** (node IAM role) | ❌ The node is an OVH bare-metal server (`<NODE_IP>`), not EC2 — no instance metadata service, no instance role. |
 | **Self-hosted OIDC federation / Kiam** | ⚠️ Technically possible (project SA token, register cluster OIDC issuer JWKS with AWS IAM as an OIDC provider) but requires publicly serving API server OIDC discovery docs, adds a pod-creation webhook to the critical path, and Kiam is deprecated. Rejected. |
 | **External Secrets Operator + AWS SSM Parameter Store** | ✅ **Chosen.** Right pattern for non-EKS clusters: the AWS credential moves out of etcd-as-source-of-truth; ESO syncs it on a schedule, rotation upstream propagates automatically, every read is CloudTrail-audited. |
 | **Sealed Secrets alone** | ⚠️ Solves *git* storage only — the credential is still static and unrotated at runtime. Used as the ESO bootstrap mechanism (see §2 below), not the rotation solution. |

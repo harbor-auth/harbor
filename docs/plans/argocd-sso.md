@@ -1,7 +1,7 @@
 # Plan — ArgoCD SSO via Dex + GitHub OAuth (`argocd-sso`)
 
 > **Status:** in-progress · **Tier:** T2.2 (infra-hardening) · **Target:** ArgoCD in
-> `argocd` namespace on `51.89.98.90` · **Parent doc:**
+> `argocd` namespace on `<NODE_IP>` · **Parent doc:**
 > [`infra-hardening.md`](infra-hardening.md#t22--argocd-sso-replace-admin-account)
 >
 > **Design refs:** [`DESIGN.md §Authentication`](../DESIGN.md) ·

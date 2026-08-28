@@ -1,6 +1,6 @@
 # Helm values for the linkerd-control-plane chart.
 #
-# Target: harbor namespace on 51.89.98.90 (RKE2 v1.35.6, single-node,
+# Target: harbor namespace on <NODE_IP> (RKE2 v1.35.6, single-node,
 # Calico CNI, PSA restricted on harbor namespace).
 #
 # Install order: linkerd-crds → linkerd-cni → linkerd-control-plane
