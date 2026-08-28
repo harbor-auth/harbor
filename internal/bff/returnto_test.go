@@ -28,6 +28,17 @@ func TestValidateReturnTo(t *testing.T) {
 		{"userinfo host-confusion rejected", "https://harborcloud.example.com@evil.example.com/", defaultReturnTo, false},
 		{"backslash-obfuscated host rejected", "/\\evil.example.com", defaultReturnTo, false},
 		{"double-backslash host rejected", "\\\\evil.example.com", defaultReturnTo, false},
+		// Parser-differential guards: Go's net/url reports an empty Host for
+		// each of these (they look like relative paths), but a browser's WHATWG
+		// parser collapses the slashes and resolves them to https://evil.example.com/.
+		{"triple-slash host rejected", "///evil.example.com", defaultReturnTo, false},
+		{"quad-slash host rejected", "////evil.example.com", defaultReturnTo, false},
+		{"scheme with empty authority rejected", "https:///evil.example.com", defaultReturnTo, false},
+		{"scheme with single-slash path rejected", "https:/evil.example.com", defaultReturnTo, false},
+		{"triple-slash to an allowlisted host is still rejected", "///harborcloud.example.com", defaultReturnTo, false},
+		// Positive control: an interior "//" is a legitimate path, not an
+		// authority, and must keep working.
+		{"same-origin path with interior double slash accepted", "/dashboard//apps", "/dashboard//apps", true},
 		{"embedded CRLF rejected", "/x\r\nSet-Cookie: evil=1", defaultReturnTo, false},
 		{"embedded NUL rejected", "/x\x00evil", defaultReturnTo, false},
 		{"query-only value rejected", "?next=evil", defaultReturnTo, false},
