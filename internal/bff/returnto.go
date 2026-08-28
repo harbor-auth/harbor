@@ -62,7 +62,20 @@ func ValidateReturnTo(raw string, allowlist []string) (string, bool) {
 		// leading "/" so it resolves against our own root rather than the
 		// current path, and reject scheme-only oddities like "javascript:...",
 		// which url.Parse reports with an empty Host but a non-empty Opaque.
-		if u.Opaque != "" || !strings.HasPrefix(u.Path, "/") {
+		//
+		// The scheme and "//" path guards close a PARSER DIFFERENTIAL. Go's
+		// net/url follows RFC 3986: it only treats "//" as introducing an
+		// authority immediately after the scheme delimiter, so "///evil.com"
+		// and "https:///evil.com" both parse with an EMPTY Host and land here
+		// looking like innocent relative paths. Browsers use the WHATWG URL
+		// parser, which collapses the leading slashes and reads the next token
+		// as the HOST — so both navigate to https://evil.com/. Accepting them
+		// here would hand an attacker an off-origin redirect out of the
+		// post-login navigation, which is exactly what this function exists to
+		// prevent. A genuine same-origin reference never carries a scheme and
+		// never begins "//".
+		if u.Scheme != "" || u.Opaque != "" ||
+			!strings.HasPrefix(u.Path, "/") || strings.HasPrefix(u.Path, "//") {
 			return defaultReturnTo, false
 		}
 		return raw, true
