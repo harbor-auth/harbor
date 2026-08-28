@@ -169,6 +169,18 @@ func (s *Server) PostAdminV1Namespaces(w http.ResponseWriter, r *http.Request, p
 	}
 
 	ctx := r.Context()
+
+	// M5 — per-anchor namespace binding. The id being created lives in the
+	// body, so the auth middleware cannot check it. Without this, an anchor
+	// restricted to one tenant could create a namespace named for another and
+	// then operate on it freely. Checked before the idempotency ledger so a
+	// restricted anchor cannot use key collisions as a probe. ok=false means
+	// the handler was invoked directly, bypassing the middleware that sets the
+	// claims (a unit test) — no anchor to bind to, treated as unrestricted.
+	if claims, ok := ServiceClaimsFromContext(ctx); ok && !claims.NamespacePermitted(req.Id) {
+		writeCloudError(w, http.StatusForbidden, "cross_tenant_forbidden", "this signing key is not permitted to create the requested namespace")
+		return
+	}
 	reqHash, err := hashNamespaceCreateRequest(req)
 	if err != nil {
 		writeInternalError(w, "cloudapi: hash namespace create request", err)
@@ -223,6 +235,9 @@ func (s *Server) PostAdminV1Namespaces(w http.ResponseWriter, r *http.Request, p
 // soft-deleted, returns 404 namespace_not_found — deletion is never
 // distinguishable from absence on this route.
 func (s *Server) GetAdminV1Namespace(w http.ResponseWriter, r *http.Request, id string) {
+	if !namespacePermitted(r.Context(), w, id) {
+		return
+	}
 	ns, err := s.store.GetNamespace(r.Context(), id)
 	if errors.Is(err, ErrNamespaceNotFound) {
 		writeCloudError(w, http.StatusNotFound, "namespace_not_found", "namespace does not exist")
@@ -286,6 +301,9 @@ func (s *Server) GetAdminV1Namespace(w http.ResponseWriter, r *http.Request, id 
 // Idempotency-Key: checkIdempotency then treats it as a fresh operation and
 // genuinely re-executes the cascade. Retrying the OLD key will not help.
 func (s *Server) DeleteAdminV1Namespace(w http.ResponseWriter, r *http.Request, id string, params cloudopenapi.DeleteAdminV1NamespaceParams) {
+	if !namespacePermitted(r.Context(), w, id) {
+		return
+	}
 	idempotencyKey := params.IdempotencyKey
 	if !validIdempotencyKey(idempotencyKey) {
 		writeCloudError(w, http.StatusBadRequest, "invalid_request", "missing or invalid Idempotency-Key header")
