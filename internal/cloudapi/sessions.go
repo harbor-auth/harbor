@@ -148,6 +148,18 @@ func (h *SessionsHandler) PostSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// M5 — per-anchor namespace binding. The namespace lives in the body, so
+	// the auth middleware cannot check it; this mirrors PostUserSessions.
+	// Checked before the idempotency ledger and the namespace lookup below so
+	// an anchor restricted away from a namespace cannot use either one as an
+	// existence oracle. ok=false means the handler was called directly,
+	// bypassing the middleware that sets the claims (a unit test), so there is
+	// no anchor to bind to and the call is treated as unrestricted.
+	if claims, ok := ServiceClaimsFromContext(ctx); ok && !claims.NamespacePermitted(req.NamespaceID) {
+		writeCloudAPIError(w, http.StatusForbidden, "cross_tenant_forbidden", "this signing key is not permitted to mint sessions for the requested namespace")
+		return
+	}
+
 	// Hash the NORMALIZED body (re-marshaled from the parsed request, not the
 	// caller's raw bytes) so whitespace/key-order differences between two
 	// otherwise-identical requests don't spuriously look like a body change.
