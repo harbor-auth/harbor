@@ -9,7 +9,7 @@ import (
 
 var testCtx = context.Background()
 
-const testSecret = "test-secret-32byteslong!!!!!!!!"
+const testSecret = "test-secret-32byteslong!!!!!!!!!"
 
 // --- localKeyProvider tests ---
 
@@ -17,6 +17,64 @@ func TestNewLocalKeyProviderEmptySecretFails(t *testing.T) {
 	_, err := NewLocalKeyProvider("")
 	if !errors.Is(err, ErrEmptySecret) {
 		t.Fatalf("expected ErrEmptySecret, got %v", err)
+	}
+}
+
+// TestNewLocalKeyProviderRejectsWeakSecret pins the fail-CLOSED boot guard on
+// the user-DEK KEK. HKDF derives a usable key from any non-empty input, so
+// without this every user's DEK would be wrapped under a guessable — or, for
+// the manifest placeholder, a publicly published — key, and nothing would say
+// so at runtime. The three binaries that build this provider previously
+// checked only `secret == ""`.
+func TestNewLocalKeyProviderRejectsWeakSecret(t *testing.T) {
+	cases := []struct {
+		name   string
+		secret string
+	}{
+		{"one byte short of the floor", "abcdefghijklmnopqrstuvwxyz12345"},
+		{"short human-chosen value", "hunter2"},
+		// Both shipped placeholders clear the 32-byte floor (40 and 43 bytes),
+		// so only the placeholder check catches them. The two manifests spell
+		// it differently, which is why the check matches markers rather than
+		// an exhaustive list of exact values.
+		{"deploy/helm/values.yaml placeholder", "REPLACE_WITH_SHARED_32_BYTE_USER_DEK_KEK"},
+		{"deploy/k8s/secret-*.yaml placeholder", "REPLACE_ME_WITH_SHARED_32_BYTE_USER_DEK_KEK"},
+		{"long-but-obviously-a-placeholder", "CHANGEME_CHANGEME_CHANGEME_CHANGEME"},
+		{"lowercase changeme is caught too", "changeme-changeme-changeme-changeme"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := NewLocalKeyProvider(tc.secret); !errors.Is(err, ErrWeakSecret) {
+				t.Fatalf("NewLocalKeyProvider(%q) err = %v, want ErrWeakSecret", tc.secret, err)
+			}
+		})
+	}
+}
+
+// TestNewLocalKeyProviderAcceptsStrongSecret is the false-positive guard: a
+// real generated secret (the shape `openssl rand -hex 32` produces) must still
+// be accepted, so the new check cannot break a correctly-configured install.
+func TestNewLocalKeyProviderAcceptsStrongSecret(t *testing.T) {
+	// 64 hex chars — the documented way to generate this value.
+	const generated = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+	if _, err := NewLocalKeyProvider(generated); err != nil {
+		t.Fatalf("NewLocalKeyProvider(generated secret) err = %v, want nil", err)
+	}
+}
+
+// TestNewLocalKeyProviderAcceptsE2EFixture pins the local-dev fixture in
+// e2e/docker-compose.yml. It reads as placeholder-ish ("change-me") but is
+// hyphenated, which the marker list deliberately does NOT match: that stack is
+// ephemeral, local-only, and never holds real user data, so rejecting it would
+// break `docker compose up` for every developer to no security benefit.
+//
+// If you are here because you added "CHANGE-ME" to placeholderSecretMarkers
+// and this test failed: that is the trade-off firing. Change the compose
+// fixture to a generated value first, then extend the markers.
+func TestNewLocalKeyProviderAcceptsE2EFixture(t *testing.T) {
+	const e2eFixture = "e2e-shared-user-dek-kek-change-me" // e2e/docker-compose.yml
+	if _, err := NewLocalKeyProvider(e2eFixture); err != nil {
+		t.Fatalf("NewLocalKeyProvider(e2e fixture) err = %v, want nil — this would break the e2e stack", err)
 	}
 }
 
