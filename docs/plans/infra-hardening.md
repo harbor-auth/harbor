@@ -1,7 +1,7 @@
 # Harbor — Infrastructure Hardening Plan
 
 > **Authored:** 2026-07-23 · **Revised:** 2026-07-23 (post Fable analysis + live cluster
-> verification) · **Target cluster:** `<NODE_IP>` (`<NODE_HOSTNAME>`) · RKE2 v1.35.6
+> verification) · **Target cluster:** the single-node Harbor cluster
 > · single-node · Calico CNI · ArgoCD GitOps
 >
 > **Bottom line:** the cluster has solid L3/L4 micro-segmentation and enforces Pod
@@ -22,7 +22,7 @@
 | **etcd encryption at rest** | Enabled with **secretbox** (XSalsa20+Poly1305 AEAD) as of 2026-07-24. Custom encryption config at `/etc/rancher/rke2/encryption-config-custom.json`; kube-apiserver pointed to it via `kube-apiserver-arg`. All 33 cluster secrets re-encrypted. |
 | **Egress NetworkPolicies** | harbor-hot and harbor-mgmt both have egress rules applied in the `harbor` namespace, locking egress to DNS (53), Redis (6379), PostgreSQL (5432), HTTPS/443, and SMTP (587/465). Applied 2026-07-24. |
 | **Host firewall (iptables)** | iptables INPUT chain DROP rules applied for ports 6443, 9345, 10250, 10255, 2379, 2380, 9091. Saved via `iptables-persistent`. Applied 2026-07-24. |
-| **etcd localhost-only binding** | etcd confirmed listening on `127.0.0.1:2379` only (was `<NODE_IP>:2379`). Applied 2026-07-24. |
+| **etcd localhost-only binding** | etcd confirmed listening on `127.0.0.1:2379` only (was the node's public IP). Applied 2026-07-24. |
 | **API audit logging** | Audit policy and log path configured in RKE2 (`/etc/rancher/rke2/audit-policy.yaml`). rke2-server restarted 2026-07-24. Log at `/var/lib/rancher/rke2/server/logs/audit.log`. |
 | **ArgoCD initial admin secret** | `argocd-initial-admin-secret` deleted 2026-07-24. |
 | **nginx allow-snippet-annotations** | ConfigMap `rke2-ingress-nginx-controller` patched with `allow-snippet-annotations: true` 2026-07-24. |
@@ -73,8 +73,8 @@ shows `cali-INPUT` (Calico) runs as **rule #1** before any UFW chain — meaning
 for its own ports. **UFW alone is not a reliable layer here.** Use a combination
 of:
 
-**Option A (recommended): OVH/cloud security group or firewall-as-a-service**
-If the hosting provider (OVH for `<NODE_IP>`) offers a cloud firewall / security
+**Option A (recommended): provider security group or firewall-as-a-service**
+If the hosting provider offers a cloud firewall / security
 group, configure it to allow only:
 - Port 22/tcp (SSH, ideally restricted to your IP)
 - Port 80/tcp (nginx ingress HTTP)
@@ -89,20 +89,20 @@ same iptables chain that processes host traffic:
 apiVersion: crd.projectcalico.org/v1
 kind: HostEndpoint
 metadata:
-  name: <NODE_HOSTNAME>-eth0
+  name: <node-name>-eth0
   labels:
-    host: <NODE_HOSTNAME>
+    host: <node-name>
 spec:
   interfaceName: eth0
-  node: <NODE_HOSTNAME>
-  expectedIPs: ["<NODE_IP>"]
+  node: <node-name>
+  expectedIPs: ["<node-public-ip>"]
 ---
 apiVersion: crd.projectcalico.org/v1
 kind: GlobalNetworkPolicy
 metadata:
   name: deny-external-k8s-ports
 spec:
-  selector: host == '<NODE_HOSTNAME>'
+  selector: host == '<node-name>'
   order: 10
   ingress:
     - action: Allow
@@ -138,13 +138,13 @@ after enabling. If pods go unhealthy, UFW is interfering with Calico.
 
 #### T0.2 — Bind etcd to localhost only
 
-**What:** etcd is currently listening on the public IP `<NODE_IP>:2379`, making the
+**What:** etcd is currently listening on the node's public IP on port 2379, making the
 cluster state directly reachable from the internet. It should only listen on loopback.
 
 **Verify the exposure:**
 ```bash
-ssh ubuntu@<NODE_IP> "ss -tlnp | grep 2379"
-# Shows: <NODE_IP>:2379 — this is the problem
+ssh <user>@<node> "ss -tlnp | grep 2379"
+# Shows the public IP bound on 2379 — this is the problem
 ```
 
 **How:** In RKE2, this is controlled by the etcd listen address. Add to
@@ -648,7 +648,8 @@ application controls defend the protocol. Neither substitutes for the other.
 > **Anti-drift note:** when a Tier-0, Tier-1, or Tier-2 item is completed, strike it
 > here and note the completion date — same discipline as `production-readiness.md`.
 >
-> **Cluster context:** target machine is `<NODE_IP>` (`<NODE_HOSTNAME>`, Ubuntu,
-> RKE2 v1.35.6). Always SSH as `ubuntu` — `ssh ubuntu@<NODE_IP>`. Cloudflare
+> **Cluster context:** the target is the single-node Harbor cluster running
+> Linux. Host and SSH details are deliberately kept out of this repository —
+> see your local deployment notes. Cloudflare
 > DNS key is in `~/.harbor.env` on the local machine. Do not run destructive
 > commands (e.g. `ufw enable`) without a tested rollback path.
