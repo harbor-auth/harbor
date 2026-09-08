@@ -24,7 +24,8 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
 
 FROM alpine:3.24.1
 # Non-root uid/gid matches the Deployment securityContext (runAsUser 65532).
-RUN addgroup -g 65532 nonroot && adduser -u 65532 -G nonroot -D -H nonroot
+RUN apk upgrade --no-cache \
+    && addgroup -g 65532 nonroot && adduser -u 65532 -G nonroot -D -H nonroot
 COPY --from=build /out/migrate /migrate
 # Embed all migration files. golang-migrate only runs *.up.sql when invoked
 # with "up"; *.down.sql files are present for the rare out-of-band rollback
