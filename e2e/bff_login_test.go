@@ -324,6 +324,35 @@ func runBFFPasskeyFlowDetailedAt(t *testing.T, scope, tokenEndpoint string) (bff
 		}
 		return bffFlowResult{}, bffNonceFlowState{}, false
 	}
+
+	// Fresh users must explicitly approve this RP before a code is issued.
+	consentURL, err := compResp.Location()
+	if err == nil && consentURL.Path == "/consent" {
+		issuerURL, err := url.Parse(baseURL())
+		if err != nil || consentURL.Scheme != issuerURL.Scheme || consentURL.Host != issuerURL.Host {
+			t.Fatal("consent redirect left the issuer origin")
+		}
+		if consentURL.Query().Get("request_id") != requestID {
+			t.Fatal("consent redirect changed the authorization request")
+		}
+		page, err := hc.Get(consentURL.String())
+		if err != nil {
+			t.Fatal("consent page request failed")
+		}
+		_ = page.Body.Close()
+		if page.StatusCode != http.StatusOK {
+			t.Fatalf("consent page = %d, want 200", page.StatusCode)
+		}
+		_ = compResp.Body.Close()
+		form := url.Values{"request_id": {requestID}, "decision": {"approve"}}
+		compResp, err = hc.Post(baseURL()+"/consent/complete", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+		if err != nil {
+			t.Fatal("consent approval request failed")
+		}
+		if compResp.StatusCode != http.StatusFound {
+			t.Fatalf("consent approval = %d, want 302", compResp.StatusCode)
+		}
+	}
 	if loc := compResp.Header.Get("Location"); !strings.HasPrefix(loc, e2eRedirectURI()) {
 		t.Logf("/authorize/complete redirected to %q, want prefix %q", loc, e2eRedirectURI())
 		return bffFlowResult{}, bffNonceFlowState{}, false
