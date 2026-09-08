@@ -22,7 +22,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     && test -x /out/migrate \
     && /out/migrate -help 2>&1 | grep -Eq 'Database drivers:.*postgres'
 
-FROM alpine:3.20
+FROM alpine:3.24.1
 # Non-root uid/gid matches the Deployment securityContext (runAsUser 65532).
 RUN addgroup -g 65532 nonroot && adduser -u 65532 -G nonroot -D -H nonroot
 COPY --from=build /out/migrate /migrate
