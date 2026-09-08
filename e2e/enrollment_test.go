@@ -39,6 +39,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/jackc/pgx/v5"
@@ -118,6 +119,18 @@ func enroll(t *testing.T, client *http.Client) (userID, region string) {
 	resp, err := client.Post(mgmtBaseURL()+enrollPath, "application/json", strings.NewReader(string(body)))
 	if err != nil {
 		unavailable(t, "harbor-mgmt unreachable at %s: %v", mgmtBaseURL(), err)
+	}
+	// Journey setup shares one IP across the suite. Respect the production
+	// enrollment quota instead of treating an exhausted window as a login bug.
+	// Dedicated abuse tests send their own requests and still assert 429.
+	deadline := time.Now().Add(65 * time.Second)
+	for resp.StatusCode == http.StatusTooManyRequests && time.Now().Before(deadline) {
+		_ = resp.Body.Close()
+		time.Sleep(time.Second)
+		resp, err = client.Post(mgmtBaseURL()+enrollPath, "application/json", strings.NewReader(string(body)))
+		if err != nil {
+			t.Fatal("enrollment retry request failed")
+		}
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
