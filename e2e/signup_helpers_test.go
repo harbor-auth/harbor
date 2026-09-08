@@ -293,7 +293,7 @@ func driveFullSignup(t *testing.T, client *http.Client) (userID string, err erro
 	if err != nil {
 		return "", err
 	}
-	ok, _, _ := registerPasskeyWithKey(t, client)
+	ok, _, _, _ := registerPasskeyWithKey(t, client)
 	if !ok {
 		return userID, fmt.Errorf("first passkey registration did not complete")
 	}

@@ -5,6 +5,8 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"github.com/google/uuid"
 	"io"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -184,7 +186,7 @@ func (s *Service) BeginDiscoverableLogin(ctx context.Context) (*protocol.Credent
 // FinishDiscoverableLogin verifies the authenticator's discoverable assertion
 // response. The authenticator supplies the userHandle so no prior user identity
 // is needed. On success it persists the advanced signature counter and returns
-// the base64url-encoded userHandle as the resolved userID, plus the resolved
+// the resolved user's canonical UUID as the userID, plus the resolved
 // user's recovery_required flag (docs/DESIGN.md §11.1) so callers can scope the
 // resulting session correctly instead of defaulting to full access.
 //
@@ -219,7 +221,23 @@ func (s *Service) FinishDiscoverableLogin(ctx context.Context, sessionKey string
 	if err := s.store.UpdateCredential(ctx, user.WebAuthnID(), *credential); err != nil {
 		return "", false, nil, err
 	}
-	return base64.RawURLEncoding.EncodeToString(user.WebAuthnID()), resolved.RecoveryRequired(), credential, nil
+	// Return the CANONICAL user id — the UUID string — not the raw WebAuthn
+	// handle.
+	//
+	// This previously returned base64.RawURLEncoding of the handle. Every
+	// consumer downstream treats the returned value as a user id: the BFF
+	// writes it into the session (SetUserWithRecoveryStatus), and the OIDC
+	// service then hands it to GrantStore.FindGrant, which parses it as a
+	// UUID. base64url output contains no dashes, so it can never parse — and
+	// the whole authorize flow failed at the consent lookup with
+	// "could not check consent status" AFTER a completely successful passkey
+	// ceremony. Discoverable credentials are the default login path, so this
+	// broke sign-in for every user while looking like a server fault.
+	canonical, err := canonicalUserID(user.WebAuthnID())
+	if err != nil {
+		return "", false, nil, fmt.Errorf("webauthn: resolve canonical user id: %w", err)
+	}
+	return canonical, resolved.RecoveryRequired(), credential, nil
 }
 
 // FinishLogin verifies the authenticator's assertion response. On success it
@@ -273,4 +291,20 @@ func newSessionKey() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// canonicalUserID converts a WebAuthn user handle into the canonical user id
+// string the rest of Harbor uses — a UUID.
+//
+// The handle is whatever was registered: 16 raw UUID bytes, or the UUID's
+// string form as bytes. Both normalise to the same UUID. Returning anything
+// else (this once returned base64url of the raw handle) breaks every consumer
+// that parses the value as a UUID, most visibly GrantStore.FindGrant during
+// the consent check.
+func canonicalUserID(handle []byte) (string, error) {
+	parsed, err := parseWebAuthnUserID(handle)
+	if err != nil {
+		return "", err
+	}
+	return uuid.UUID(parsed.Bytes).String(), nil
 }

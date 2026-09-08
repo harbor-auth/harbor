@@ -188,7 +188,7 @@ func runBFFPasskeyFlowDetailedAt(t *testing.T, scope, tokenEndpoint string) (bff
 	//    can sign the login assertion.
 	mgmt := jarClient(t)
 	userID, _ := enroll(t, mgmt)
-	ok, key, credID := registerPasskeyWithKey(t, mgmt)
+	ok, key, credID, userHandle := registerPasskeyWithKey(t, mgmt)
 	if !ok {
 		t.Logf("passkey registration did not complete — cannot drive login")
 		return bffFlowResult{}, bffNonceFlowState{}, false
@@ -202,8 +202,8 @@ func runBFFPasskeyFlowDetailedAt(t *testing.T, scope, tokenEndpoint string) (bff
 	// page carrying request_id.
 	q := url.Values{}
 	q.Set("response_type", "code")
-	q.Set("client_id", e2eClientID)
-	q.Set("redirect_uri", e2eRedirectURI)
+	q.Set("client_id", e2eClientID())
+	q.Set("redirect_uri", e2eRedirectURI())
 	q.Set("scope", scope)
 	q.Set("state", "bff-nonce-state")
 	q.Set("code_challenge", challenge)
@@ -238,15 +238,19 @@ func runBFFPasskeyFlowDetailedAt(t *testing.T, scope, tokenEndpoint string) (bff
 		}
 	}
 
-	// /login begin — obtain assertion options.
-	beginResp, err := hc.Post(baseURL()+bffLoginBeginPath+"?request_id="+url.QueryEscape(requestID), "application/json", nil)
+	// /login begin — obtain assertion options. This is a GET: harbor-mgmt
+	// registers `GET /login` (loginHandler.BeginLogin). It was a POST here,
+	// which production answers 405 — and because a non-200 returns false and
+	// the caller turns that into t.Skip, the most valuable test in this suite
+	// reported PASS while never running the ceremony at all.
+	beginResp, err := hc.Get(baseURL() + bffLoginBeginPath + "?request_id=" + url.QueryEscape(requestID))
 	if err != nil {
-		t.Logf("POST /login (begin): %v", err)
+		t.Logf("GET /login (begin): %v", err)
 		return bffFlowResult{}, bffNonceFlowState{}, false
 	}
 	defer func() { _ = beginResp.Body.Close() }()
 	if beginResp.StatusCode != http.StatusOK {
-		t.Logf("POST /login begin = %d — skipping", beginResp.StatusCode)
+		t.Logf("GET /login begin = %d — skipping", beginResp.StatusCode)
 		return bffFlowResult{}, bffNonceFlowState{}, false
 	}
 	beginBody, err := io.ReadAll(beginResp.Body)
@@ -274,7 +278,7 @@ func runBFFPasskeyFlowDetailedAt(t *testing.T, scope, tokenEndpoint string) (bff
 	}
 
 	// Sign the assertion.
-	assertion, err := makeAssertion(rpID, opts.PublicKey.Challenge, key, credID)
+	assertion, err := makeAssertion(rpID, opts.PublicKey.Challenge, key, credID, userHandle)
 	if err != nil {
 		t.Logf("build assertion: %v", err)
 		return bffFlowResult{}, bffNonceFlowState{}, false
@@ -319,8 +323,8 @@ func runBFFPasskeyFlowDetailedAt(t *testing.T, scope, tokenEndpoint string) (bff
 		}
 		return bffFlowResult{}, bffNonceFlowState{}, false
 	}
-	if loc := compResp.Header.Get("Location"); !strings.HasPrefix(loc, e2eRedirectURI) {
-		t.Logf("/authorize/complete redirected to %q, want prefix %q", loc, e2eRedirectURI)
+	if loc := compResp.Header.Get("Location"); !strings.HasPrefix(loc, e2eRedirectURI()) {
+		t.Logf("/authorize/complete redirected to %q, want prefix %q", loc, e2eRedirectURI())
 		return bffFlowResult{}, bffNonceFlowState{}, false
 	}
 
@@ -337,12 +341,12 @@ func runBFFPasskeyFlowDetailedAt(t *testing.T, scope, tokenEndpoint string) (bff
 
 	code := codeFromLocation(t, compResp)
 	if code == "" {
-		t.Logf("/authorize/complete 302 carried no code")
+		t.Logf("/authorize/complete 302 carried no code; Location=%q", compResp.Header.Get("Location"))
 		return bffFlowResult{}, bffNonceFlowState{}, false
 	}
 
 	// Exchange the code for tokens.
-	tokenResp := postTokenAt(t, tokenEndpoint, code, verifier, e2eRedirectURI)
+	tokenResp := postTokenAt(t, tokenEndpoint, code, verifier, e2eRedirectURI())
 	defer func() { _ = tokenResp.Body.Close() }()
 	if tokenResp.StatusCode != http.StatusOK {
 		body, readErr := io.ReadAll(tokenResp.Body)
@@ -443,7 +447,7 @@ func subFromJWT(t *testing.T, token string) string {
 // SAME private key used at registration. The signature covers
 // authenticatorData ‖ SHA-256(clientDataJSON) and is ASN.1/DER encoded, as the
 // go-webauthn verifier expects. The body is ready to POST to /login/complete.
-func makeAssertion(rpID, challengeB64 string, key *ecdsa.PrivateKey, credID []byte) (string, error) {
+func makeAssertion(rpID, challengeB64 string, key *ecdsa.PrivateKey, credID, userHandle []byte) (string, error) {
 	// authenticatorData = rpIdHash(32) | flags(1) | signCount(4). No attested
 	// credential data is present in an assertion. UP|UV are set; signCount is
 	// incremented past the registration value (0) to satisfy clone detection.
@@ -484,6 +488,12 @@ func makeAssertion(rpID, challengeB64 string, key *ecdsa.PrivateKey, credID []by
 			"authenticatorData": base64.RawURLEncoding.EncodeToString(authData),
 			"clientDataJSON":    base64.RawURLEncoding.EncodeToString(clientData),
 			"signature":         base64.RawURLEncoding.EncodeToString(sig),
+			// Required by the discoverable-credential path: with no
+			// allowCredentials in the options, FinishDiscoverableLogin
+			// resolves the user from this handle. Omitting it fails
+			// verification with "passkey verification failed", which is what
+			// this helper did until now.
+			"userHandle": base64.RawURLEncoding.EncodeToString(userHandle),
 		},
 	}
 	out, err := json.Marshal(resp)
