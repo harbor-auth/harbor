@@ -124,10 +124,10 @@ kmsKeyMap: EU=harbor-eu
 # own. Verify current state with:
 #   kubectl exec -n harbor harbor-postgresql-0 -- \
 #     psql -U harbor -d harbor -h 127.0.0.1 -tAc "SELECT version, dirty FROM schema_migrations;"
-# migrate:
-#   secrets:
-#     existingSecret: harbor-hot-secrets   # default; explicit override not needed
 migrate:
+  # Runtime connections use a non-owner role; only migrations receive DDL credentials.
+  secrets:
+    existingSecret: harbor-migrate-secrets
   image:
     digest: sha256:37a8cdcadfda3cc7e85cf06362ab2c138089c585e4c7adc2cc8618dfd29a9030
 # The harbor namespace already exists (created by the initial install); ArgoCD
