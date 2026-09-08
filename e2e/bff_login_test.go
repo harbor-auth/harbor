@@ -57,6 +57,7 @@ const (
 type bffFlowResult struct {
 	userID       string // opaque enrollment user id (must NOT equal the PPID)
 	sub          string // the per-RP PPID from the issued token
+	idToken      string // signed token for RP-initiated logout
 	refreshToken string // present only when offline_access was requested
 }
 
@@ -323,6 +324,35 @@ func runBFFPasskeyFlowDetailedAt(t *testing.T, scope, tokenEndpoint string) (bff
 		}
 		return bffFlowResult{}, bffNonceFlowState{}, false
 	}
+
+	// Fresh users must explicitly approve this RP before a code is issued.
+	consentURL, err := compResp.Location()
+	if err == nil && consentURL.Path == "/consent" {
+		issuerURL, err := url.Parse(baseURL())
+		if err != nil || consentURL.Scheme != issuerURL.Scheme || consentURL.Host != issuerURL.Host {
+			t.Fatal("consent redirect left the issuer origin")
+		}
+		if consentURL.Query().Get("request_id") != requestID {
+			t.Fatal("consent redirect changed the authorization request")
+		}
+		page, err := hc.Get(consentURL.String())
+		if err != nil {
+			t.Fatal("consent page request failed")
+		}
+		_ = page.Body.Close()
+		if page.StatusCode != http.StatusOK {
+			t.Fatalf("consent page = %d, want 200", page.StatusCode)
+		}
+		_ = compResp.Body.Close()
+		form := url.Values{"request_id": {requestID}, "decision": {"approve"}}
+		compResp, err = hc.Post(baseURL()+"/consent/complete", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+		if err != nil {
+			t.Fatal("consent approval request failed")
+		}
+		if compResp.StatusCode != http.StatusFound {
+			t.Fatalf("consent approval = %d, want 302", compResp.StatusCode)
+		}
+	}
 	if loc := compResp.Header.Get("Location"); !strings.HasPrefix(loc, e2eRedirectURI()) {
 		t.Logf("/authorize/complete redirected to %q, want prefix %q", loc, e2eRedirectURI())
 		return bffFlowResult{}, bffNonceFlowState{}, false
@@ -371,6 +401,7 @@ func runBFFPasskeyFlowDetailedAt(t *testing.T, scope, tokenEndpoint string) (bff
 		t.Logf("decode /token response: %v", err)
 		return bffFlowResult{}, bffNonceFlowState{}, false
 	}
+	verifyTokensAgainstJWKS(t, tok.IDToken, tok.AccessToken)
 	jwt := tok.IDToken
 	if jwt == "" {
 		jwt = tok.AccessToken
@@ -385,7 +416,7 @@ func runBFFPasskeyFlowDetailedAt(t *testing.T, scope, tokenEndpoint string) (bff
 		responseBodies:         []string{string(beginBody), string(tokenBody)},
 		nonceClearedInComplete: nonceClearedInComplete,
 	}
-	return bffFlowResult{userID: userID, sub: subFromJWT(t, jwt), refreshToken: tok.RefreshToken}, state, true
+	return bffFlowResult{userID: userID, sub: subFromJWT(t, jwt), refreshToken: tok.RefreshToken, idToken: tok.IDToken}, state, true
 }
 
 // jarNoRedirectClient returns an HTTP client with a cookie jar that captures 3xx

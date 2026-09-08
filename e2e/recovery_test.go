@@ -271,6 +271,9 @@ func TestRecoveryCeremonyEndToEnd(t *testing.T) {
 func TestRecoveryCodeSingleUseEndToEnd(t *testing.T) {
 	client := jarClient(t)
 	userID, _ := enroll(t, client)
+	if !registerPasskey(t, client) {
+		unavailable(t, "passkey registration did not complete")
+	}
 
 	codes := generateRecoveryCodes(t, client)
 
@@ -282,7 +285,7 @@ func TestRecoveryCodeSingleUseEndToEnd(t *testing.T) {
 	status1 := resp1.StatusCode
 	_ = resp1.Body.Close()
 	if status1 != http.StatusOK {
-		t.Skipf("first /recovery/complete = %d (recovery not fully wired) — skipping replay assertion", status1)
+		t.Fatalf("first /recovery/complete = %d, want 200", status1)
 	}
 
 	// Replaying the same ceremony + code must fail uniformly (401): the ceremony
@@ -293,6 +296,15 @@ func TestRecoveryCodeSingleUseEndToEnd(t *testing.T) {
 	if status2 != http.StatusUnauthorized {
 		t.Errorf("replayed /recovery/complete = %d, want 401 (single-use ceremony)", status2)
 	}
+	// A new ceremony must not make the already consumed code usable again.
+	freshClient := jarClient(t)
+	freshID := beginRecovery(t, freshClient, userID)
+	resp3 := completeRecovery(t, freshClient, freshID, codes[0])
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusUnauthorized {
+		t.Errorf("used code in new ceremony = %d, want 401", resp3.StatusCode)
+	}
+
 }
 
 // --- Test: an invalid code fails closed with a uniform response -------------
