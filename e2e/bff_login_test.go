@@ -57,6 +57,7 @@ const (
 type bffFlowResult struct {
 	userID       string // opaque enrollment user id (must NOT equal the PPID)
 	sub          string // the per-RP PPID from the issued token
+	idToken      string // signed token for RP-initiated logout
 	refreshToken string // present only when offline_access was requested
 }
 
@@ -371,6 +372,7 @@ func runBFFPasskeyFlowDetailedAt(t *testing.T, scope, tokenEndpoint string) (bff
 		t.Logf("decode /token response: %v", err)
 		return bffFlowResult{}, bffNonceFlowState{}, false
 	}
+	verifyTokensAgainstJWKS(t, tok.IDToken, tok.AccessToken)
 	jwt := tok.IDToken
 	if jwt == "" {
 		jwt = tok.AccessToken
@@ -385,7 +387,7 @@ func runBFFPasskeyFlowDetailedAt(t *testing.T, scope, tokenEndpoint string) (bff
 		responseBodies:         []string{string(beginBody), string(tokenBody)},
 		nonceClearedInComplete: nonceClearedInComplete,
 	}
-	return bffFlowResult{userID: userID, sub: subFromJWT(t, jwt), refreshToken: tok.RefreshToken}, state, true
+	return bffFlowResult{userID: userID, sub: subFromJWT(t, jwt), refreshToken: tok.RefreshToken, idToken: tok.IDToken}, state, true
 }
 
 // jarNoRedirectClient returns an HTTP client with a cookie jar that captures 3xx

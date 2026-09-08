@@ -551,6 +551,11 @@ func TestJWKSSignatureVerification(t *testing.T) {
 		t.Fatalf("token response missing id_token or access_token: %s", body)
 	}
 
+	verifyTokensAgainstJWKS(t, tok.IDToken, tok.AccessToken)
+}
+
+func verifyTokensAgainstJWKS(t *testing.T, idToken, accessToken string) {
+	t.Helper()
 	// Step 2: fetch JWKS.
 	jwksResp, err := http.Get(baseURL() + "/jwks.json")
 	if err != nil {
@@ -580,7 +585,7 @@ func TestJWKSSignatureVerification(t *testing.T) {
 
 	// Step 3: for each token, locate the signing key by kid and verify the
 	// ES256 signature cryptographically (ecdsa.Verify on SHA-256(header.payload)).
-	for name, rawToken := range map[string]string{"id_token": tok.IDToken, "access_token": tok.AccessToken} {
+	for name, rawToken := range map[string]string{"id_token": idToken, "access_token": accessToken} {
 		parts := strings.Split(rawToken, ".")
 		if len(parts) != 3 {
 			t.Fatalf("%s: not a 3-part compact JWT (got %d parts)", name, len(parts))
