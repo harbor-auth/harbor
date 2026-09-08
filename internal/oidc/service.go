@@ -260,10 +260,23 @@ func (s *Service) ApproveConsent(ctx context.Context, userID, clientID, scope st
 	if found {
 		scopes = mergeScopes(grant.Scopes, scopes)
 	}
-	// On first approval the resolver creates the canonical grant after PPID
+	// On first approval the resolver creates the canonical grant through PPID
 	// derivation. Existing grants are updated in place so session grant_ids
 	// remain stable across scope escalation.
 	if !found {
+		client, ok := s.clients.Lookup(ctx, clientID)
+		if !ok {
+			return redirectErr(ErrCodeUnauthorizedClient, "unknown client")
+		}
+		// Explicit approval has occurred. Derive the PPID and create the
+		// canonical grant before updating the consent_grants compatibility view.
+		_, resolvedUser, approved, err := s.sessions.Resolve(ctx, client, scope)
+		if err != nil {
+			return redirectErr(ErrCodeServerError, "could not create consent grant")
+		}
+		if !approved || resolvedUser != userID {
+			return redirectErr(ErrCodeAccessDenied, "the user did not grant consent")
+		}
 		if _, err := s.consents.Upsert(ctx, userID, clientID, scopes); err != nil {
 			s.logger.ErrorContext(ctx, "consent upsert failed",
 				slog.String("client_id", clientID), slog.Any("error", err))

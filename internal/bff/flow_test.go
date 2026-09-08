@@ -118,12 +118,19 @@ func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bffte
 		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
 	})
 	consents := oidc.NewInMemoryConsentStore()
+	grants := oidctest.NewInMemoryGrantStore()
+	loader := oidctest.NewInMemorySecretLoader()
+	loader.Put(itUserID, oidc.UserSecret{Region: "EU", Secret: []byte("0123456789abcdef0123456789abcdef")})
+	resolver := oidc.NewPPIDSessionResolver(oidc.PPIDSessionResolverConfig{
+		Auth: bff.NewBFFAuthSource(), Loader: loader, Grants: grants,
+	})
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    oidctest.NewInMemoryAuthCodeStore(),
 		Tokens:   oidctest.NewPlaceholderIssuer(),
-		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
+		Sessions: resolver,
+		Grants:   grants,
 		Consents: consents,
 	})
 

@@ -334,7 +334,8 @@ func (s *Server) PostConsentComplete(w http.ResponseWriter, r *http.Request) {
 		writeAuthorizeErrorPage(w)
 		return
 	}
-	if aerr := s.svc.ApproveConsent(r.Context(), session.UserID, session.ClientID, session.Scope); aerr != nil {
+	ctx := bff.ContextWithUserID(r.Context(), session.UserID)
+	if aerr := s.svc.ApproveConsent(ctx, session.UserID, session.ClientID, session.Scope); aerr != nil {
 		redirectAuthorizeError(w, r, session, aerr)
 		return
 	}
