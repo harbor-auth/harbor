@@ -87,6 +87,9 @@ const (
 // or no namespace at all — is rejected with 409 client_already_exists,
 // naming neither the id nor its owner.
 func (s *Server) PostAdminV1NamespacesClients(w http.ResponseWriter, r *http.Request, namespace string, params cloudopenapi.PostAdminV1NamespacesClientsParams) {
+	if !namespacePermitted(r.Context(), w, namespace) {
+		return
+	}
 	idempotencyKey := params.IdempotencyKey
 	if !validIdempotencyKey(idempotencyKey) {
 		writeCloudError(w, http.StatusBadRequest, "invalid_request", "missing or invalid Idempotency-Key header")
@@ -243,6 +246,9 @@ func (s *Server) PostAdminV1NamespacesClients(w http.ResponseWriter, r *http.Req
 // namespace_not_found rather than an empty list.
 func (s *Server) GetAdminV1NamespacesClients(w http.ResponseWriter, r *http.Request, namespace string) {
 	ctx := r.Context()
+	if !namespacePermitted(ctx, w, namespace) {
+		return
+	}
 	if !s.namespaceActive(ctx, w, namespace) {
 		return
 	}
@@ -267,6 +273,9 @@ func (s *Server) GetAdminV1NamespacesClients(w http.ResponseWriter, r *http.Requ
 // someone else.
 func (s *Server) GetAdminV1NamespacesClient(w http.ResponseWriter, r *http.Request, namespace string, clientId string) {
 	ctx := r.Context()
+	if !namespacePermitted(ctx, w, namespace) {
+		return
+	}
 	if !s.namespaceActive(ctx, w, namespace) {
 		return
 	}
@@ -296,6 +305,9 @@ func (s *Server) GetAdminV1NamespacesClient(w http.ResponseWriter, r *http.Reque
 // AND deleted_at IS NULL) makes a cross-tenant or already-deleted update
 // affect zero rows rather than someone else's client.
 func (s *Server) PutAdminV1NamespacesClient(w http.ResponseWriter, r *http.Request, namespace string, clientId string, params cloudopenapi.PutAdminV1NamespacesClientParams) {
+	if !namespacePermitted(r.Context(), w, namespace) {
+		return
+	}
 	idempotencyKey := params.IdempotencyKey
 	if !validIdempotencyKey(idempotencyKey) {
 		writeCloudError(w, http.StatusBadRequest, "invalid_request", "missing or invalid Idempotency-Key header")
@@ -456,6 +468,9 @@ func (s *Server) PutAdminV1NamespacesClient(w http.ResponseWriter, r *http.Reque
 // else's client — clients.DBNamespacedClientStore.SoftDelete's WHERE clause
 // makes that structural, not just checked.
 func (s *Server) DeleteAdminV1NamespacesClient(w http.ResponseWriter, r *http.Request, namespace string, clientId string, params cloudopenapi.DeleteAdminV1NamespacesClientParams) {
+	if !namespacePermitted(r.Context(), w, namespace) {
+		return
+	}
 	idempotencyKey := params.IdempotencyKey
 	if !validIdempotencyKey(idempotencyKey) {
 		writeCloudError(w, http.StatusBadRequest, "invalid_request", "missing or invalid Idempotency-Key header")
@@ -500,6 +515,38 @@ func (s *Server) DeleteAdminV1NamespacesClient(w http.ResponseWriter, r *http.Re
 
 	s.recordOperation(ctx, idempotencyKey, opClientDelete, reqHash, http.StatusNoContent, nil)
 	writeCloudBody(w, http.StatusNoContent, nil)
+}
+
+// namespacePermitted enforces the M5 per-anchor namespace binding: it reports
+// whether the trust anchor that signed the caller's bearer token is permitted
+// to act on namespace, writing 403 cross_tenant_forbidden itself and returning
+// false when it is not — so a caller can simply
+// `if !namespacePermitted(ctx, w, ns) { return }`.
+//
+// Scope alone cannot express this boundary: two tenants legitimately hold the
+// same clients:write scope, and the namespace is the only thing separating
+// them. Without this check the `ns=` restriction in
+// CLOUD_SERVICE_AUTH_PUBLIC_KEYS would bind only POST /admin/v1/user-sessions,
+// and one tenant's bridge key could read, create, repoint, or delete every
+// other tenant's OIDC clients just by naming their namespace in the path.
+//
+// It lives in the handler rather than the route wiring deliberately: the
+// binding is a property of the operation, so a handler cannot later be
+// re-wired or re-mounted and silently lose it. Call it BEFORE any store
+// lookup, so an anchor restricted away from a namespace cannot use the
+// handler's own 404 as an existence oracle.
+//
+// ok=false from ServiceClaimsFromContext means the handler was invoked
+// directly, bypassing the auth middleware that attaches the claims (a unit
+// test in isolation): there is no anchor to bind to, so the call is treated as
+// unrestricted — the same convention PostUserSessions already uses.
+func namespacePermitted(ctx context.Context, w http.ResponseWriter, namespace string) bool {
+	if claims, ok := ServiceClaimsFromContext(ctx); ok && !claims.NamespacePermitted(namespace) {
+		writeCloudError(w, http.StatusForbidden, string(cloudopenapi.ErrorCodeCrossTenantForbidden),
+			"this signing key is not permitted to act on the requested namespace")
+		return false
+	}
+	return true
 }
 
 // namespaceActive reports whether namespace exists and is not soft-deleted.

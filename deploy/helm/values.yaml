@@ -50,7 +50,15 @@ global:
   # Generate: openssl rand -hex 32
   # This is NOT signing-key configuration; signing keys are selected by
   # kmsKeyMap below.
-  userDekKekSecret: "REPLACE_WITH_SHARED_32_BYTE_USER_DEK_KEK"
+  #
+  # Deliberately EMPTY so the `required` in secret-hot.yaml/secret-mgmt.yaml
+  # fails the install when it is not set. It previously defaulted to a literal
+  # placeholder, which is non-empty and therefore satisfied `required` — so an
+  # operator who skipped this value got a successful install in which every
+  # user DEK was wrapped under a string published in this repository. The
+  # binaries now reject that value at boot too (crypto.NewLocalKeyProvider),
+  # but the chart should never get far enough to hand it to them.
+  userDekKekSecret: ""
 
 # ---------------------------------------------------------------------------
 # Region this deployment serves. Binds the issuer/RP-origin hosts to a region

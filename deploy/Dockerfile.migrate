@@ -11,7 +11,7 @@
 # Run (manually):
 #   docker run --rm -e DATABASE_URL=postgres://... harbor-migrate:local \
 #     -path /migrations -database "$DATABASE_URL" up
-FROM --platform=$BUILDPLATFORM golang:1.26 AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.8 AS build
 # Pin golang-migrate at a known-good release. Bump here to upgrade.
 ARG MIGRATE_VERSION=v4.18.1
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
@@ -22,9 +22,10 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     && test -x /out/migrate \
     && /out/migrate -help 2>&1 | grep -Eq 'Database drivers:.*postgres'
 
-FROM alpine:3.20
+FROM alpine:3.24.1
 # Non-root uid/gid matches the Deployment securityContext (runAsUser 65532).
-RUN addgroup -g 65532 nonroot && adduser -u 65532 -G nonroot -D -H nonroot
+RUN apk upgrade --no-cache \
+    && addgroup -g 65532 nonroot && adduser -u 65532 -G nonroot -D -H nonroot
 COPY --from=build /out/migrate /migrate
 # Embed all migration files. golang-migrate only runs *.up.sql when invoked
 # with "up"; *.down.sql files are present for the rare out-of-band rollback

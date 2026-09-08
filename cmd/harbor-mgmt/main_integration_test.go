@@ -15,7 +15,7 @@ import (
 
 func setValidManagementEnvironment(t *testing.T) {
 	t.Helper()
-	t.Setenv("HARBOR_KMS_SECRET", "integration-user-dek-kek")
+	t.Setenv("HARBOR_KMS_SECRET", "integration-user-dek-kek-at-least-32-bytes")
 	t.Setenv("AUTHORIZE_COMPLETE_URL", "https://login.integration.harbor.test/complete")
 	t.Setenv("REGISTRATION_BASE_URL", "https://mgmt.integration.harbor.test")
 	t.Setenv("WEBAUTHN_RP_ID", "mgmt.integration.harbor.test")
