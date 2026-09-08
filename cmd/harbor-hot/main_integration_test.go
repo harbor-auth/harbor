@@ -21,7 +21,7 @@ func TestRunBuildsDurableLiveGraph(t *testing.T) {
 			t.Skipf("%s is not set; start the containerised integration dependencies", name)
 		}
 	}
-	t.Setenv("HARBOR_KMS_SECRET", "integration-user-dek-kek")
+	t.Setenv("HARBOR_KMS_SECRET", "integration-user-dek-kek-at-least-32-bytes")
 	t.Setenv("ISSUER", "http://127.0.0.1:18080")
 	t.Setenv("LOGIN_URL", "http://127.0.0.1:18081/login")
 	t.Setenv("ADMIN_API_TOKEN", "integration-admin-token-at-least-32-bytes")

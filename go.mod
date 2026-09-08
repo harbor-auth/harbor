@@ -2,8 +2,6 @@ module github.com/harbor-auth/harbor
 
 go 1.25.0
 
-toolchain go1.26.8
-
 require (
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/aws/aws-sdk-go-v2 v1.43.0
