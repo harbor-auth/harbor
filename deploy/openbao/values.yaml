@@ -85,6 +85,21 @@ server:
 
         service_registration "kubernetes" {}
 
+        plugin_directory = "/openbao/data/plugins"
+        plugin_auto_register = true
+        plugin "kms" "ovhcloud" {
+          command = "openbao-plugin-kms-ovhcloud"
+          version = "v0.0.1"
+          sha256sum = "653ed969ae963caa3622c4505be401756a91c8cd2145ac83b83249648b60f76c"
+        }
+        seal "ovhcloud" {
+          endpoint = "https://us-east-vin.okms.ovh.us"
+          kms_id = "a7b3358b-a826-4f57-a325-6104b017b168"
+          key_id = "b3c12d4d-d734-49ac-90e4-46545deb1a51"
+          client_cert = "/openbao/ovh/client.crt"
+          client_key = "/openbao/ovh/client.key"
+        }
+
   affinity: ""
 
   service:
@@ -115,16 +130,23 @@ server:
         defaultMode: 0440
     - name: tmp
       emptyDir: {}
+    - name: ovh-client
+      secret:
+        secretName: openbao-ovh-client
+        defaultMode: 0440
   volumeMounts:
     - name: openbao-server-tls
       mountPath: /openbao/tls
       readOnly: true
     - name: tmp
       mountPath: /tmp
+    - name: ovh-client
+      mountPath: /openbao/ovh
+      readOnly: true
 
   readinessProbe:
     enabled: true
-    path: /v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204
+    path: /v1/sys/health?standbyok=true
     initialDelaySeconds: 5
   livenessProbe:
     enabled: true
@@ -221,4 +243,12 @@ server:
           - port: 8200
             protocol: TCP
           - port: 8201
+            protocol: TCP
+
+      # OVH US KMS endpoint address. Reconcile this allowlist if DNS changes.
+      - to:
+          - ipBlock:
+              cidr: 147.135.24.44/32
+        ports:
+          - port: 443
             protocol: TCP

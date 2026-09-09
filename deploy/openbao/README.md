@@ -1,75 +1,73 @@
-# In-cluster OpenBao Transit KMS
+# OpenBao Transit and OVH auto-unseal
 
-This is Harbor's interim KMS. It runs only in the isolated Harbor K3s cluster;
-Harbor Cloud has no route, Kubernetes identity, policy, token, or key access.
+OpenBao runs as a single TLS-only Raft pod in the isolated Harbor core cluster.
+It encrypts stored signing keys with Transit. Harbor unwraps a signing key at
+startup or rotation and signs locally; ordinary signing does not contact OVH.
+The OVH KMS wraps OpenBao's storage root and is needed for auto-unseal after a
+restart. It does not prevent a compromised running Harbor process from using
+its authorized signing material.
 
-OpenBao is configured as a one-pod Raft service because the current Harbor
-cluster has one node. It is durable, TLS-only, audited, and network-isolated,
-but it is **not** an independent security or availability boundary from the
-Harbor cluster/physical host. Move to a managed or separately hosted KMS before
-requiring host-compromise resistance or high availability.
+`values.yaml` contains the production OVH seal configuration, pinned plugin
+checksum, credential mount, readiness probe, and network egress rules. Runtime
+certificate/private-key values are held only in the `openbao-ovh-client`
+Secret. The Git configuration must match production; no live Argo values
+patch is needed after adopting this version.
 
-## Security properties
+## Installation prerequisites
 
-- OpenBao 2.6.1 and chart 0.28.6 are pinned; the server image is digest-pinned.
-- Transit key `harbor-eu` is non-exportable. `harbor-hot` can only call its
-  encrypt and decrypt endpoints.
-- `harbor-hot` authenticates with a 10-minute projected service-account token;
-  OpenBao returns a 15-minute token. No static OpenBao token is mounted.
-- End-to-end TLS is mandatory. Only the public internal CA is copied to Harbor.
-- Five Shamir unseal shares are created with a threshold of three. Shares and
-  the initial root token must never be stored in Kubernetes, git, or together.
-- NetworkPolicy permits port 8200 only from `harbor-hot`, the OpenBao pod, and
-  the Harbor node's kubelet probes. OpenBao egress is limited to DNS, the K3s
-  API, and itself.
-- Raft data and audit logs use separate retained PVCs.
+The OVH service key must exist with encrypt/decrypt permissions for the runtime
+identity. Production currently uses the US Vint Hill endpoint and an
+unexportable AES-256 key. The access certificate must be valid and permitted
+by OVH IAM. Keep key administration separate from this runtime identity.
 
-## Install and initialize
+Before startup, provision the checksum-verified plugin release on the data PVC:
+`/openbao/data/plugins/openbao-plugin-kms-ovhcloud`, owned by the OpenBao user,
+mode 0750. The required binary is v0.0.1, SHA-256
+`653ed969ae963caa3622c4505be401756a91c8cd2145ac83b83249648b60f76c`.
+The server verifies the configured checksum. A replacement PVC needs this
+binary restored separately; the chart does not download executables at boot.
 
-1. Merge the deployment branch, then apply `application.yaml` to the Harbor
-   ArgoCD instance. Do not apply it to Harbor Cloud.
-2. Wait for cert-manager to create `openbao-server-tls` and for `openbao-0` to
-   enter Running state. It will remain sealed until initialized.
-3. Ensure the `harbor` namespace exists.
-4. On encrypted operator storage, choose an absolute output path outside the
-   repository and run:
+Apply `application.yaml` only to Harbor core. Supply the OVH mTLS Secret
+through a protected operator session, never through Git, command arguments,
+or chat. For a new, uninitialized OVH-sealed instance, run `bootstrap.sh` with
+`OPENBAO_INIT_OUTPUT` set to an absolute path on encrypted operator storage.
+The script creates five recovery shares with a threshold of three, then waits
+for automatic unseal. It refuses other seal types and never attempts manual
+unseal. Do not initialize or change the seal of an existing cluster with this
+script: seal migration requires its own reviewed procedure.
 
-   ```sh
-   cd deploy/openbao
-   OPENBAO_INIT_OUTPUT=/secure/offline/openbao-init.json ./bootstrap.sh
-   ```
+Distribute recovery shares among separate custodians. They authorize recovery
+operations; they cannot decrypt this cluster without OVH. Retain an initial
+root token only until durable operator authentication and recovery access are
+established, then revoke it. Never store root/recovery credentials in Kubernetes.
 
-5. Immediately split the five unseal shares among separate custodians. Retain
-   the initial root token only until a durable human/operator auth method and
-   narrowly scoped recovery procedure have been established, then revoke it.
+## Runtime controls
 
-The bootstrap is fail-closed: it refuses to initialize without an absolute
-protected output path and refuses to overwrite an existing init file.
+Harbor hot authenticates using its projected Kubernetes identity and receives
+a short-lived OpenBao token. Its policy permits only encrypt/decrypt on the
+non-exportable Transit key `harbor-eu`. Public internal CA material is copied
+to Harbor; the OpenBao server private key stays in its namespace.
 
-## Restart / unseal
+Readiness fails while sealed. Liveness permits a sealed response so an external
+KMS outage does not cause a restart loop. Raft and audit data use separate
+retained PVCs. This single-host deployment has no host-level availability
+redundancy, and a compromised host can access an already-unsealed process.
 
-OpenBao deliberately does not auto-unseal with a key stored on the same
-cluster. After the pod or node restarts, three custodians must each provide a
-share:
+NetworkPolicy restricts ingress to authorized workloads and node probes. OVH
+HTTPS egress is currently pinned to `147.135.24.44/32`; reconcile the allowlist
+if `us-east-vin.okms.ovh.us` changes its addresses. Monitor DNS changes, access
+certificate expiration, and sealed state before relying on unattended reboots.
 
-```sh
-kubectl exec -it -n openbao openbao-0 -- \
-  env BAO_ADDR=https://openbao.openbao.svc:8200 BAO_CACERT=/openbao/tls/ca.crt \
-  bao operator unseal
-```
+## Restart and recovery
 
-Do not place shares on a command line, in chat, or in shell history; enter them
-at the prompt.
+A healthy restart automatically unseals through OVH. If it remains sealed,
+check OVH connectivity, IAM permissions, certificate validity, plugin checksum,
+and logs. Do not feed recovery shares to `operator unseal` or revert the Git
+configuration to Shamir. An OVH outage can block restart recovery; there is
+currently no independent offline key backup or tested recovery shim.
 
-## Backup and recovery
-
-Take an encrypted Raft snapshot after initialization and before every upgrade
-or key-policy change. Run the snapshot command through `kubectl exec`, write it
-directly to encrypted operator storage, and test restoration in an isolated
-cluster. Backing up only the PVC is not enough; recovery also requires three
-unseal shares and the internal TLS/PKI configuration.
-
-OpenBao upgrades use an `OnDelete` StatefulSet strategy. Review release notes,
-take and verify a snapshot, sync the new pinned chart/image, then explicitly
-delete the old pod. Never attempt an in-place downgrade without restoring the
-matching pre-upgrade snapshot.
+Encrypted Raft snapshot restoration needs the matching OVH key, valid access,
+plugin binary and TLS/PKI material. Backups and an offline recovery shim were
+explicitly deferred by the owner; this configuration does not close those gates.
+OpenBao upgrades use OnDelete: review the release, sync the pinned configuration,
+then restart deliberately. A downgrade needs a compatible recovery procedure.

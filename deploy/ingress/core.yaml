@@ -1,0 +1,213 @@
+# Traefik replaces the retired controller; release and class names preserve routing.
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: ingress-nginx
+  namespace: kube-system
+spec:
+  chart: traefik
+  repo: https://traefik.github.io/charts
+  version: 41.5.0
+  targetNamespace: ingress-nginx
+  createNamespace: true
+  failurePolicy: abort
+  valuesContent: |
+    image:
+      tag: v3.7.12
+      digest: sha256:7523e37d0694ff940ee9cefe2184c5869dd0c0db7d6c5ee78254f7d985deecc6
+    versionOverride: v3.7.12
+    deployment:
+      kind: DaemonSet
+      dnsPolicy: ClusterFirstWithHostNet
+    hostNetwork: true
+    ingressClass:
+      enabled: false
+    api:
+      dashboard: false
+    providers:
+      kubernetesCRD:
+        enabled: false
+      kubernetesIngress:
+        enabled: false
+      kubernetesIngressNGINX:
+        enabled: true
+        watchNamespace: harbor
+        disableSvcExternalName: true
+        allowSnippetAnnotations: true
+    ports:
+      web:
+        port: 18081
+      websecure:
+        port: 18444
+        http:
+          aliasHeadersStrategy: reject
+      traefik:
+        port: 19091
+      metrics:
+        port: 19101
+    service:
+      enabled: false
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+      limits:
+        cpu: '1'
+        memory: 512Mi
+    log:
+      format: json
+      level: INFO
+    updateStrategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxUnavailable: 1
+        maxSurge: 0
+    rbac:
+      enabled: false
+    extraObjects:
+    - kind: ClusterRole
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: ingress-nginx-traefik-ingress-nginx
+        labels:
+          app.kubernetes.io/name: traefik
+          app.kubernetes.io/instance: ingress-nginx-ingress-nginx
+          helm.sh/chart: traefik-41.5.0
+          app.kubernetes.io/managed-by: Helm
+      rules:
+      - apiGroups: &id001
+        - ''
+        resources:
+        - nodes
+        verbs: &id002
+        - get
+        - list
+        - watch
+      - apiGroups: &id003
+        - extensions
+        - networking.k8s.io
+        resources:
+        - ingressclasses
+        verbs: &id004
+        - get
+        - list
+        - watch
+      - apiGroups:
+        - ''
+        resources:
+        - namespaces
+        verbs:
+        - list
+        - watch
+    - kind: ClusterRoleBinding
+      apiVersion: rbac.authorization.k8s.io/v1
+      metadata:
+        name: ingress-nginx-traefik-ingress-nginx
+        labels:
+          app.kubernetes.io/name: traefik
+          app.kubernetes.io/instance: ingress-nginx-ingress-nginx
+          helm.sh/chart: traefik-41.5.0
+          app.kubernetes.io/managed-by: Helm
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: ingress-nginx-traefik-ingress-nginx
+      subjects: &id005
+      - kind: ServiceAccount
+        name: ingress-nginx-traefik
+        namespace: ingress-nginx
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: ingress-nginx-traefik
+        namespace: harbor
+      rules:
+      - apiGroups: *id001
+        resources:
+        - configmaps
+        - services
+        verbs: *id002
+      - apiGroups:
+        - discovery.k8s.io
+        resources:
+        - endpointslices
+        verbs:
+        - list
+        - watch
+      - apiGroups:
+        - ''
+        resources:
+        - pods
+        verbs:
+        - get
+      - apiGroups:
+        - ''
+        resources:
+        - secrets
+        verbs:
+        - get
+        - list
+        - watch
+      - apiGroups: *id003
+        resources:
+        - ingresses
+        verbs: *id004
+      - apiGroups:
+        - extensions
+        - networking.k8s.io
+        resources:
+        - ingresses/status
+        verbs:
+        - update
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: ingress-nginx-traefik
+        namespace: harbor
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: Role
+        name: ingress-nginx-traefik
+      subjects: *id005
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: ingress-nginx-traefik
+        namespace: ingress-nginx
+      rules:
+      - apiGroups:
+        - ''
+        resources:
+        - pods
+        verbs:
+        - get
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: ingress-nginx-traefik
+        namespace: ingress-nginx
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: Role
+        name: ingress-nginx-traefik
+      subjects:
+      - kind: ServiceAccount
+        name: ingress-nginx-traefik
+        namespace: ingress-nginx
+    - apiVersion: networking.k8s.io/v1
+      kind: IngressClass
+      metadata:
+        name: nginx
+        annotations:
+          ingressclass.kubernetes.io/is-default-class: 'true'
+      spec:
+        controller: k8s.io/ingress-nginx
+    global:
+      checkNewVersion: false
+      sendAnonymousUsage: false
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop:
+        - ALL
