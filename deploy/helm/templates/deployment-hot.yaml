@@ -28,6 +28,7 @@ spec:
       labels:
         {{- include "harbor.hot.labels" . | nindent 8 }}
       annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-hot.yaml") . | sha256sum }}
         # Hold the app container until the Linkerd proxy sidecar is ready, so
         # early outbound connections (Redis/DB) aren't dropped on startup while
         # the mesh warms up. See linkerd.io/2/features/proxy-injection.

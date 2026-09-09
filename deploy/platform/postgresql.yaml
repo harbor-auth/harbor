@@ -1,4 +1,22 @@
 apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: harbor-postgresql-hba
+  namespace: harbor
+data:
+  pg_hba.conf: |
+    # Local pod administration and health checks retain socket/loopback access.
+    local all all trust
+    host all all 127.0.0.1/32 trust
+    host all all ::1/128 trust
+    local replication all trust
+    host replication all 127.0.0.1/32 trust
+    host replication all ::1/128 trust
+    # Reject plaintext remote connections before password authentication.
+    hostnossl all all all reject
+    hostssl all all all scram-sha-256
+---
+apiVersion: v1
 kind: Service
 metadata:
   name: harbor-postgresql
@@ -82,6 +100,8 @@ spec:
             - ssl_ca_file=/etc/postgresql/tls/ca.crt
             - -c
             - password_encryption=scram-sha-256
+            - -c
+            - hba_file=/etc/postgresql/hba/pg_hba.conf
           env:
             - name: POSTGRES_DB
               value: harbor
@@ -121,6 +141,9 @@ spec:
             capabilities:
               drop: [ALL]
           volumeMounts:
+            - name: hba
+              mountPath: /etc/postgresql/hba
+              readOnly: true
             - name: data
               mountPath: /var/lib/postgresql/data
             - name: auth
@@ -134,6 +157,9 @@ spec:
             - name: tmp
               mountPath: /tmp
       volumes:
+        - name: hba
+          configMap:
+            name: harbor-postgresql-hba
         - name: auth
           secret:
             secretName: harbor-postgresql-auth
