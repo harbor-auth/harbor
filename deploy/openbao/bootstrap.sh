@@ -28,32 +28,38 @@ bao() {
 "$KUBECTL_BIN" wait -n "$OPENBAO_NAMESPACE" --for=jsonpath='{.status.phase}'=Running \
   "pod/$OPENBAO_POD" --timeout=5m
 
-status_json=$(bao status -format=json 2>/dev/null || true)
+if status_json=$(bao status -format=json); then
+  :
+else
+  status_code=$?
+  if [[ "$status_code" != 2 ]]; then
+    echo "cannot read OpenBao status; refusing initialization" >&2
+    exit 1
+  fi
+fi
+if ! jq -e '.type == "ovhcloudkms"' <<<"$status_json" >/dev/null; then
+  echo "bootstrap requires the configured OVH auto-unseal seal; use a reviewed migration for an existing Shamir cluster" >&2
+  exit 1
+fi
 if [[ "$status_json" != *'"initialized": true'* ]]; then
   if [[ -e "$INIT_OUTPUT" ]]; then
     echo "refusing to overwrite existing init output: $INIT_OUTPUT" >&2
     exit 1
   fi
   umask 077
-  bao operator init -key-shares=5 -key-threshold=3 -format=json >"$INIT_OUTPUT"
-  echo "OpenBao initialized; split and move the five unseal shares offline: $INIT_OUTPUT"
+  bao operator init -recovery-shares=5 -recovery-threshold=3 -format=json >"$INIT_OUTPUT"
+  echo "OpenBao initialized; split and move the five recovery shares offline: $INIT_OUTPUT"
 fi
 
 if [[ ! -s "$INIT_OUTPUT" ]]; then
-  echo "OpenBao is initialized; point OPENBAO_INIT_OUTPUT at its protected init JSON to unseal/configure" >&2
+  echo "OpenBao is initialized; point OPENBAO_INIT_OUTPUT at its protected init JSON to configure" >&2
   exit 1
 fi
 
-if bao status -format=json 2>/dev/null | grep -q '"sealed": true'; then
-  for index in 0 1 2; do
-    # The OpenBao CLI deliberately rejects piped shares. Expanding a shell
-    # variable keeps the share out of shell history and script output, though
-    # it is briefly visible in the local process table during this call.
-    unseal_share=$(jq -r ".unseal_keys_b64[$index]" "$INIT_OUTPUT")
-    bao operator unseal "$unseal_share" >/dev/null
-    unset unseal_share
-  done
-fi
+# An OVH-sealed cluster must recover through OVH, not through recovery shares.
+# Never put recovery shares into command arguments or attempt manual unseal.
+"$KUBECTL_BIN" wait -n "$OPENBAO_NAMESPACE" --for=condition=Ready \
+  "pod/$OPENBAO_POD" --timeout=2m
 
 root_token=$(jq -r '.root_token' "$INIT_OUTPUT")
 if [[ -z "$root_token" || "$root_token" == null ]]; then

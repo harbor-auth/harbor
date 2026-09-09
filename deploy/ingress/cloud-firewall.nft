@@ -1,0 +1,38 @@
+#!/usr/sbin/nft -f
+destroy table inet harbor_integration
+table inet harbor_integration {
+  # https://www.cloudflare.com/ips-v6 — verified 2026-09-08
+  set cloudflare_v6 {
+    type ipv6_addr; flags interval;
+    elements = { 2400:cb00::/32, 2606:4700::/32, 2803:f800::/32, 2405:b500::/32, 2405:8100::/32, 2a06:98c0::/29, 2c0f:f248::/32 }
+  }
+  chain input {
+    type filter hook input priority 20; policy accept;
+    ct state established,related accept
+    iifname "ens3" ip6 saddr @cloudflare_v6 ct status dnat tcp dport { 18081, 18444 } counter accept
+    iifname "ens3" ip saddr 10.77.2.1 tcp dport 22 accept
+    iifname "ens3" ip6 saddr @cloudflare_v6 ip6 daddr 2a01:4f8:140:4423:2::10 tcp dport { 80, 443 } accept
+    iifname "ens3" meta l4proto { icmp, ipv6-icmp } accept
+    iifname "ens3" drop
+    iifname "ens4" ip saddr 169.254.77.1 udp dport 51820 accept
+    iifname { "ens4", "wg0" } drop
+  }
+  chain forward {
+    type filter hook forward priority 20; policy accept;
+    ct state established,related accept
+    oifname "wg0" ip daddr 10.88.0.1 tcp dport 30081 accept
+    iifname "wg0" drop
+    oifname "wg0" drop
+    iifname "ens4" drop
+  }
+}
+
+# Forward public web ports to an unprivileged ingress listener.
+destroy table inet harbor_ingress_ports
+table inet harbor_ingress_ports {
+  chain prerouting {
+    type nat hook prerouting priority dstnat; policy accept;
+    iifname "ens3" tcp dport 80 redirect to :18081
+    iifname "ens3" tcp dport 443 redirect to :18444
+  }
+}
