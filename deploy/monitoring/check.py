@@ -11,7 +11,8 @@ import urllib.request
 
 
 def request(url, data=None, headers=None, context=None):
-    req = urllib.request.Request(url, data=data, headers=headers or {})
+    req = urllib.request.Request(url, data=data,
+                                 headers={"User-Agent": "HarborProductionMonitor/1.0", **(headers or {})})
     with urllib.request.urlopen(req, timeout=10, context=context) as response:
         return response.read(1024 * 1024)
 
