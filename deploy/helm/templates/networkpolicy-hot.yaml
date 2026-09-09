@@ -69,7 +69,7 @@ spec:
       ports:
         - port: 5432
           protocol: TCP
-    {{- if eq (.Values.hot.kms.provider | default "aws") "openbao" }}
+    {{- if or (eq (.Values.hot.kms.provider | default "aws") "openbao") (eq .Values.userDEK.provider "openbao") }}
     # OpenBao Transit KMS. Both selectors are required, so this does not allow
     # arbitrary traffic to the OpenBao namespace or to same-named pods elsewhere.
     - to:

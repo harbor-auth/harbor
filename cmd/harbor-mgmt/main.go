@@ -67,7 +67,7 @@ func main() {
 // from this graph is shared by all replicas.
 func run(ctx context.Context, logger *slog.Logger) error {
 	userDEKKEK := os.Getenv("HARBOR_KMS_SECRET")
-	if userDEKKEK == "" {
+	if userDEKKEK == "" && os.Getenv("USER_DEK_PROVIDER") != "openbao" {
 		return errors.New("harbor-mgmt requires HARBOR_KMS_SECRET for the shared user-DEK KEK")
 	}
 	if envBool("RATE_LIMIT_DISABLED") {
@@ -167,9 +167,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		}
 	}()
 
-	// The local provider is the documented crypto-only exception until the HSM
-	// signing-key plan supplies an external backend for user-DEK wrapping.
-	kp, err := crypto.NewLocalKeyProvider(userDEKKEK)
+	// The selected user-DEK provider is shared by enrollment and all readers.
+	kp, err := crypto.NewUserKeyProviderFromEnv()
 	if err != nil {
 		return fmt.Errorf("configure user-DEK key provider: %w", err)
 	}

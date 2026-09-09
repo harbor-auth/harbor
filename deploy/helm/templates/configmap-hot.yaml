@@ -3,6 +3,12 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
+  USER_DEK_PROVIDER: {{ .Values.userDEK.provider | quote }}
+  USER_DEK_LEGACY_READ_ENABLED: {{ .Values.userDEK.legacyReadEnabled | quote }}
+  USER_DEK_WRITE_EXTERNAL_ENABLED: {{ .Values.userDEK.writeExternalEnabled | quote }}
+  {{- if eq .Values.userDEK.provider "openbao" }}
+  USER_DEK_KEY_MAP: {{ required "userDEK.keyMap is required for OpenBao user data" .Values.userDEK.keyMap | quote }}
+  {{- end }}
   name: {{ include "harbor.fullname" . }}-hot-config
   namespace: {{ .Release.Namespace }}
   labels:
@@ -19,7 +25,7 @@ data:
   REGION: {{ .Values.region | default "EU" | quote }}
   KMS_KEY_MAP: {{ required "kmsKeyMap is required in production" .Values.kmsKeyMap | quote }}
   KMS_PROVIDER: {{ .Values.hot.kms.provider | default "aws" | quote }}
-  {{- if eq (.Values.hot.kms.provider | default "aws") "openbao" }}
+  {{- if or (eq (.Values.hot.kms.provider | default "aws") "openbao") (eq .Values.userDEK.provider "openbao") }}
   OPENBAO_ADDR: {{ required "hot.kms.openbao.address is required for OpenBao" .Values.hot.kms.openbao.address | quote }}
   OPENBAO_KUBERNETES_ROLE: {{ required "hot.kms.openbao.kubernetesRole is required for OpenBao" .Values.hot.kms.openbao.kubernetesRole | quote }}
   OPENBAO_TOKEN_PATH: "/var/run/secrets/openbao/token"

@@ -15,11 +15,15 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags='-s -w' -o /out/harbor-hot ./cmd/harbor-hot
 
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -trimpath -ldflags='-s -w' -o /out/harbor-rewrap-user-deks ./cmd/harbor-rewrap-user-deks
+
 FROM alpine:3.24.1
 # Non-root uid/gid matches the Deployment securityContext (runAsUser 65532).
 RUN apk upgrade --no-cache \
     && addgroup -g 65532 nonroot && adduser -u 65532 -G nonroot -D -H nonroot
 COPY --from=build /out/harbor-hot /harbor-hot
+COPY --from=build /out/harbor-rewrap-user-deks /harbor-rewrap-user-deks
 USER 65532
 EXPOSE 8080
 ENTRYPOINT ["/harbor-hot"]

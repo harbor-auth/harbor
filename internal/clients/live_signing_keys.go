@@ -45,7 +45,7 @@ func (s *LiveSigningKeys) Initialize(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer rollbackSigningRotation(tx)
+	defer rollbackTransaction(tx)
 	q := db.New(tx)
 	if err = q.LockSigningKeyRotation(ctx); err != nil {
 		return err
@@ -105,7 +105,7 @@ func (s *LiveSigningKeys) Rotate(ctx context.Context, opts crypto.RotateOptions)
 	if err != nil {
 		return crypto.RotateResult{}, err
 	}
-	defer rollbackSigningRotation(tx)
+	defer rollbackTransaction(tx)
 	q := db.New(tx)
 	if err = q.LockSigningKeyRotation(ctx); err != nil {
 		return crypto.RotateResult{}, err
@@ -170,7 +170,7 @@ func (s *LiveSigningKeys) Reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer rollbackSigningRotation(tx)
+	defer rollbackTransaction(tx)
 	q := db.New(tx)
 	if err = q.LockSigningKeyRotation(ctx); err != nil {
 		return err
@@ -215,10 +215,10 @@ func (s *LiveSigningKeys) Run(ctx context.Context, logger *slog.Logger) {
 
 func stamp(t time.Time) pgtype.Timestamptz { return pgtype.Timestamptz{Time: t, Valid: true} }
 
-func rollbackSigningRotation(tx pgx.Tx) {
+func rollbackTransaction(tx pgx.Tx) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
-		slog.Error("signing rotation rollback failed", "error", err)
+		slog.Error("database transaction rollback failed", "error", err)
 	}
 }

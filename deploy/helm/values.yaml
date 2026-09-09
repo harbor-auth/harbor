@@ -436,3 +436,12 @@ serviceAccount:
 
 # Extra labels merged onto every chart-managed resource.
 extraLabels: {}
+
+# User data wraps separately from signing keys. Migrate in two phases: enable
+# both readers with legacy writes first, then enable external writes everywhere.
+userDEK:
+  provider: local
+  keyMap: ""
+  legacyReadEnabled: false
+  writeExternalEnabled: true
+  mgmtRole: harbor-mgmt

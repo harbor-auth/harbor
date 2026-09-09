@@ -143,6 +143,62 @@ func (q *Queries) GetUser(ctx context.Context, id pgtype.UUID) (User, error) {
 	return i, err
 }
 
+const listUserDEKsToRewrap = `-- name: ListUserDEKsToRewrap :many
+SELECT id, region, dek_wrapped FROM users
+WHERE octet_length(dek_wrapped) > 0
+  AND substring(dek_wrapped FROM 1 FOR $1::integer) <> $2::bytea
+ORDER BY id
+LIMIT 50
+FOR UPDATE
+`
+
+type ListUserDEKsToRewrapParams struct {
+	PrefixLength   int32  `json:"prefix_length"`
+	EnvelopePrefix []byte `json:"envelope_prefix"`
+}
+
+type ListUserDEKsToRewrapRow struct {
+	ID         pgtype.UUID `json:"id"`
+	Region     string      `json:"region"`
+	DekWrapped []byte      `json:"dek_wrapped"`
+}
+
+// Row locks prevent a concurrent crypto-shred from being overwritten.
+func (q *Queries) ListUserDEKsToRewrap(ctx context.Context, arg ListUserDEKsToRewrapParams) ([]ListUserDEKsToRewrapRow, error) {
+	rows, err := q.db.Query(ctx, listUserDEKsToRewrap, arg.PrefixLength, arg.EnvelopePrefix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUserDEKsToRewrapRow
+	for rows.Next() {
+		var i ListUserDEKsToRewrapRow
+		if err := rows.Scan(&i.ID, &i.Region, &i.DekWrapped); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const replaceUserDEK = `-- name: ReplaceUserDEK :exec
+UPDATE users SET dek_wrapped = $1::bytea
+WHERE id = $2::uuid
+`
+
+type ReplaceUserDEKParams struct {
+	DekWrapped []byte      `json:"dek_wrapped"`
+	ID         pgtype.UUID `json:"id"`
+}
+
+func (q *Queries) ReplaceUserDEK(ctx context.Context, arg ReplaceUserDEKParams) error {
+	_, err := q.db.Exec(ctx, replaceUserDEK, arg.DekWrapped, arg.ID)
+	return err
+}
+
 const setRecoveryComplete = `-- name: SetRecoveryComplete :exec
 UPDATE users
 SET recovery_required = false

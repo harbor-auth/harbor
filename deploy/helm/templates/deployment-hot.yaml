@@ -122,7 +122,7 @@ spec:
               mountPath: {{ .Values.global.postgresTLS.mountPath }}
               readOnly: true
             {{- end }}
-            {{- if eq (.Values.hot.kms.provider | default "aws") "openbao" }}
+            {{- if or (eq (.Values.hot.kms.provider | default "aws") "openbao") (eq .Values.userDEK.provider "openbao") }}
             - name: openbao-token
               mountPath: /var/run/secrets/openbao
               readOnly: true
@@ -141,7 +141,7 @@ spec:
               - key: ca.crt
                 path: ca.crt
         {{- end }}
-        {{- if eq (.Values.hot.kms.provider | default "aws") "openbao" }}
+        {{- if or (eq (.Values.hot.kms.provider | default "aws") "openbao") (eq .Values.userDEK.provider "openbao") }}
         - name: openbao-token
           projected:
             defaultMode: 0440

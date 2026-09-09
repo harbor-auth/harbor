@@ -60,3 +60,16 @@ UPDATE users
 SET dek_wrapped = '\x'::bytea,
     status      = 'erased'
 WHERE id = $1;
+
+-- name: ListUserDEKsToRewrap :many
+-- Row locks prevent a concurrent crypto-shred from being overwritten.
+SELECT id, region, dek_wrapped FROM users
+WHERE octet_length(dek_wrapped) > 0
+  AND substring(dek_wrapped FROM 1 FOR sqlc.arg(prefix_length)::integer) <> sqlc.arg(envelope_prefix)::bytea
+ORDER BY id
+LIMIT 50
+FOR UPDATE;
+
+-- name: ReplaceUserDEK :exec
+UPDATE users SET dek_wrapped = sqlc.arg(dek_wrapped)::bytea
+WHERE id = sqlc.arg(id)::uuid;
