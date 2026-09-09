@@ -87,7 +87,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: postgresql
-          image: postgres:16.14-bookworm@sha256:92620daddcd947f8d5ab5ba66e848702fe443d87fed30c4cea8e389fd78dfc55
+          image: postgres:16.15-bookworm@sha256:bb3e1a57e5407e0a5280b4211980a5e537f4abd234a87014ac979849a78dd825
           imagePullPolicy: IfNotPresent
           args:
             - -c
