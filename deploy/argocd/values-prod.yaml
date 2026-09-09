@@ -2,9 +2,8 @@
 # (harbor-core VM / auth.harborauth.com), consumed by the ArgoCD Application
 # in this directory.
 #
-# Per-component image digests are pinned automatically by
-# .github/workflows/publish.yml on every relevant push to main. Do not edit
-# them manually — CI overwrites them with the signed image manifests it built.
+# Per-component image digests are proposed by .github/workflows/publish.yml
+# in checked pull requests. Review signatures and source provenance before merge.
 # The all-zero bootstrap digests deliberately resolve to no image; production
 # remains fail-closed until the first successful signed publish replaces them.
 
@@ -15,7 +14,7 @@ global:
   # SHORTCUT — NOT PRODUCTION READY: the token currently in this Secret is a
   # personal OAuth token that also carries admin:enterprise, repo and workflow.
   # It works, but it is far broader than a pull credential needs to be. Replace
-  # it with a fine-grained PAT limited to read:packages, or make the packages
+  # it with a classic PAT limited to read:packages, or make the packages
   # public. See SHORTCUTS in docs/.
   imagePullSecrets:
     - ghcr-pull
