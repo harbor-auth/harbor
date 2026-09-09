@@ -9,6 +9,9 @@ metadata:
     app.kubernetes.io/name: harbor-hot
     app.kubernetes.io/part-of: harbor
 data:
+  USER_DEK_PROVIDER: "local"
+  USER_DEK_LEGACY_READ_ENABLED: "false"
+  USER_DEK_WRITE_EXTERNAL_ENABLED: "true"
   PORT: "8080"
   # ISSUER anchors the OIDC discovery document (docs/DESIGN.md §3.4). MUST be
   # the public HTTPS URL clients reach (matches the Ingress host below), and
