@@ -15,7 +15,7 @@ if [[ -z "$INIT_OUTPUT" || "$INIT_OUTPUT" != /* ]]; then
   echo "OPENBAO_INIT_OUTPUT must be an absolute path on encrypted operator storage" >&2
   exit 1
 fi
-if [[ ! -f "$POLICY_FILE" ]]; then
+if [[ ! -f "$POLICY_FILE" || ! -f harbor-mgmt-policy.hcl ]]; then
   echo "policy file not found: $POLICY_FILE" >&2
   exit 1
 fi
@@ -77,6 +77,7 @@ if ! root_bao secrets list -format=json | grep -q '"transit/"'; then
   root_bao secrets enable -path=transit transit >/dev/null
 fi
 root_bao write -f transit/keys/harbor-eu >/dev/null
+root_bao write -f transit/keys/harbor-users-eu >/dev/null
 
 {
   printf '%s\n' "$root_token"
@@ -99,6 +100,17 @@ root_bao write auth/kubernetes/role/harbor-hot \
   policies=harbor-hot \
   token_ttl=15m \
   token_max_ttl=1h >/dev/null
+
+# Management uses an independent role and cannot reach the signing key.
+{
+  printf '%s\n' "$root_token"
+  cat harbor-mgmt-policy.hcl
+} | "$KUBECTL_BIN" exec -i -n "$OPENBAO_NAMESPACE" "$OPENBAO_POD" -- \
+  sh -ec 'IFS= read -r BAO_TOKEN; export BAO_TOKEN BAO_ADDR=https://openbao.openbao.svc:8200 BAO_CACERT=/openbao/tls/ca.crt; exec bao policy write harbor-mgmt -' >/dev/null
+root_bao write auth/kubernetes/role/harbor-mgmt \
+  bound_service_account_names=harbor-mgmt-sa \
+  bound_service_account_namespaces="$HARBOR_NAMESPACE" \
+  audience=openbao policies=harbor-mgmt token_ttl=15m token_max_ttl=1h >/dev/null
 
 # Copy only the public CA certificate into Harbor. No OpenBao token, unseal
 # share, server key, or root token crosses the namespace boundary.

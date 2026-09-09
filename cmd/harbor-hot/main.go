@@ -72,7 +72,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 // dependency; it only receives the fully assembled durable graph immediately
 // before the HTTP server starts accepting traffic.
 func runWithGraphObserver(ctx context.Context, logger *slog.Logger, observe func(hotGraph)) error {
-	if os.Getenv("HARBOR_KMS_SECRET") == "" {
+	if os.Getenv("HARBOR_KMS_SECRET") == "" && os.Getenv("USER_DEK_PROVIDER") != "openbao" {
 		return errors.New("harbor-hot requires HARBOR_KMS_SECRET for the shared user-DEK KEK")
 	}
 	if envBool("RATE_LIMIT_DISABLED") {
@@ -395,22 +395,13 @@ type hotGraph = bffDeps
 // already-opened DB pool. The caller (run) manages the pool lifecycle; this
 // function does not open or close it. A nil pool is rejected.
 //
-// A configured pool REQUIRES HARBOR_KMS_SECRET: the secret loader unwraps DEKs
-// that harbor-mgmt's enrollment sealed under that same KMS secret, so the two
-// binaries MUST derive the regional KEK identically or every unwrap fails. A
-// missing secret against a real DB is therefore fatal — falling back to a
-// hardcoded dev key would let anyone with the source re-derive every enrolled
-// user's pairwise secret.
+// User DEKs use the selected provider, including the explicit migration reader.
 func buildBFFDepsFromPool(pool *pgxpool.Pool, logger *slog.Logger) (bffDeps, error) {
 	if pool == nil {
 		return bffDeps{}, errors.New("build BFF dependencies: PostgreSQL is required")
 	}
 
-	kmsSecret := os.Getenv("HARBOR_KMS_SECRET")
-	if kmsSecret == "" {
-		return bffDeps{}, fmt.Errorf("HARBOR_KMS_SECRET must be set when DATABASE_URL is configured — refusing to unwrap user secrets with a dev key against a real DB")
-	}
-	keys, err := crypto.NewLocalKeyProvider(kmsSecret)
+	keys, err := crypto.NewUserKeyProviderFromEnv()
 	if err != nil {
 		return bffDeps{}, fmt.Errorf("create BFF key provider: %w", err)
 	}

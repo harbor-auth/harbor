@@ -53,3 +53,8 @@ The first direct-low-port cutover failed because NET_BIND_SERVICE alone did
 not allow this image to bind privileged ports with host networking. Production
 uses the unprivileged listener arrangement above; do not reintroduce a root
 runtime or privilege escalation to work around that failure.
+
+On the hypervisor, install `host-routing-retry.conf` under
+`/etc/systemd/system/harbor-network-routes.service.d/retry.conf`. Libvirt may
+create the VM bridges after its service reports ready. Retrying a failed route
+setup avoids a failed boot unit; successful setup remains a one-shot operation.

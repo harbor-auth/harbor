@@ -393,6 +393,8 @@ type Querier interface {
 	// Used by harbor-mgmt to show the user their relay addresses per RP.
 	ListRelayAddressesByUser(ctx context.Context, userID pgtype.UUID) ([]RelayAddress, error)
 	ListSessionsByUser(ctx context.Context, userID pgtype.UUID) ([]Session, error)
+	// Row locks prevent a concurrent crypto-shred from being overwritten.
+	ListUserDEKsToRewrap(ctx context.Context, arg ListUserDEKsToRewrapParams) ([]ListUserDEKsToRewrapRow, error)
 	// Serializes rotation/seed/scheduler transactions across replicas.
 	LockSigningKeyRotation(ctx context.Context) error
 	// MarkMFAFactorUsed burns a one-time factor (e.g. a recovery code) so it can't
@@ -407,6 +409,7 @@ type Querier interface {
 	// Reactivates a previously deactivated relay address. Clears deactivated_at
 	// and sets state back to 'active'.
 	ReactivateRelayAddress(ctx context.Context, id pgtype.UUID) error
+	ReplaceUserDEK(ctx context.Context, arg ReplaceUserDEKParams) error
 	// Resets the lockout state for a user after successful recovery.
 	// Clears failed_count and locked_until.
 	ResetRecoveryAttempts(ctx context.Context, userID pgtype.UUID) error
