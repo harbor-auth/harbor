@@ -54,6 +54,7 @@ type accessTokenClaims struct {
 // the /token exchange logic never touches key material.
 type JWTIssuer struct {
 	signer crypto.Signer
+	keys   crypto.SigningKeySource
 	now    func() time.Time
 }
 
@@ -63,6 +64,7 @@ var _ TokenIssuer = (*JWTIssuer)(nil)
 // JWTIssuerConfig configures a JWTIssuer.
 type JWTIssuerConfig struct {
 	Signer crypto.Signer
+	Keys   crypto.SigningKeySource
 	// Now overrides the clock for deterministic tests. Defaults to time.Now.
 	Now func() time.Time
 }
@@ -73,7 +75,7 @@ func NewJWTIssuer(cfg JWTIssuerConfig) *JWTIssuer {
 	if now == nil {
 		now = time.Now
 	}
-	return &JWTIssuer{signer: cfg.Signer, now: now}
+	return &JWTIssuer{signer: cfg.Signer, keys: cfg.Keys, now: now}
 }
 
 // Issue implements [TokenIssuer]: mints a signed ID token and access token.
@@ -82,7 +84,16 @@ func NewJWTIssuer(cfg JWTIssuerConfig) *JWTIssuer {
 //
 //harbor:invariant INV-JWT-SUB-IS-PPID
 //harbor:invariant INV-JWT-NO-PII
-func (j *JWTIssuer) Issue(_ context.Context, p IssueParams) (IssuedTokens, error) {
+func (j *JWTIssuer) Issue(ctx context.Context, p IssueParams) (IssuedTokens, error) {
+	if j.keys != nil {
+		snapshot, err := j.keys.Snapshot(ctx)
+		if err != nil {
+			return IssuedTokens{}, fmt.Errorf("jwt: load current signing keys: %w", err)
+		}
+		// Both tokens and both JOSE headers must use the same captured signer.
+		issuer := &JWTIssuer{signer: snapshot.ActiveSigner(), now: j.now}
+		return issuer.Issue(ctx, p)
+	}
 	now := j.now()
 	idTokenJTI, err := newJTI()
 	if err != nil {

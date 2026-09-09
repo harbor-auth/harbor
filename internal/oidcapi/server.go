@@ -43,6 +43,7 @@ type Server struct {
 	issuer    string
 	svc       *oidc.Service
 	jwksBytes []byte
+	keys      crypto.SigningKeySource
 	// signers are the public signing keys used to verify inbound access tokens
 	// on the /userinfo endpoint. The first is the active signer; additional
 	// entries support rotation overlap (§7.3).
@@ -52,7 +53,7 @@ type Server struct {
 	bffSessionTTL time.Duration
 	// rotator drives POST /admin/keys/rotate (§7.3, §3.5.4). May be nil, in
 	// which case the rotate endpoint reports 501 Not Implemented.
-	rotator *crypto.KeyRotator
+	rotator KeyRotator
 
 	// Emergency JWT revocation (docs/DESIGN.md §3.5). All three may be nil in
 	// discovery-only tests, in which case POST /admin/revoke-jwt returns 503.
@@ -92,6 +93,7 @@ type Config struct {
 	// the active signer; additional entries support rotation overlap (§7.3).
 	// May be empty for discovery-only tests (served as {"keys":[]}).
 	Signers []crypto.Signer
+	Keys    crypto.SigningKeySource
 	// BFFSessions is the BFF session store. When non-nil, /authorize creates a
 	// BFF session and redirects to LoginURL rather than issuing a code directly.
 	BFFSessions bff.BFFSessionStore
@@ -102,7 +104,7 @@ type Config struct {
 	BFFSessionTTL time.Duration
 	// Rotator drives POST /admin/keys/rotate (§7.3, §3.5.4). May be nil, in
 	// which case the rotate endpoint reports 501 Not Implemented.
-	Rotator *crypto.KeyRotator
+	Rotator KeyRotator
 	// RevokedJTIStore persists emergency JWT revocations (docs/DESIGN.md §3.5).
 	// May be nil, in which case POST /admin/revoke-jwt returns 503.
 	RevokedJTIStore RevokedJTIStore
@@ -169,9 +171,9 @@ func New(cfg Config) *Server {
 	// Build the Introspector if signers are configured.
 	var introspector *oidc.Introspector
 	var jwtVerifier *oidc.JWTVerifier
-	if len(cfg.Signers) > 0 {
+	if len(cfg.Signers) > 0 || cfg.Keys != nil {
 		var verifierErr error
-		jwtVerifier, verifierErr = oidc.NewJWTVerifier(oidc.JWTVerifierConfig{Signers: cfg.Signers,
+		jwtVerifier, verifierErr = oidc.NewJWTVerifier(oidc.JWTVerifierConfig{Signers: cfg.Signers, Keys: cfg.Keys,
 			Filter: cfg.RevocationFilter, RevokedChecker: cfg.RevokedJTIChecker, ExpectedIssuer: cfg.Issuer})
 		if verifierErr == nil {
 			introspector = oidc.NewIntrospector(oidc.IntrospectConfig{Verifier: jwtVerifier})
@@ -186,6 +188,7 @@ func New(cfg Config) *Server {
 		issuer:         cfg.Issuer,
 		svc:            cfg.Service,
 		jwksBytes:      jwksBytes,
+		keys:           cfg.Keys,
 		signers:        cfg.Signers,
 		bffSessions:    cfg.BFFSessions,
 		loginURL:       parsedLoginURL,
@@ -300,4 +303,9 @@ func WithRateLimits(base http.Handler, limits []EndpointRateLimit) http.Handler 
 		}
 		base.ServeHTTP(w, r)
 	})
+}
+
+// KeyRotator persists a scheduled or emergency key rotation.
+type KeyRotator interface {
+	Rotate(context.Context, crypto.RotateOptions) (crypto.RotateResult, error)
 }

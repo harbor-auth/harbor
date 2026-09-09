@@ -33,7 +33,7 @@ WHERE state = 'active';
 -- awaiting promotion) and active (the current signer). Retired keys are
 -- excluded — tokens signed by retired keys will fail verification.
 SELECT * FROM signing_keys
-WHERE state IN ('pending', 'active')
+WHERE state IN ('pending', 'active', 'draining')
 ORDER BY created_at DESC;
 
 -- name: UpdateSigningKeyState :one
@@ -55,5 +55,23 @@ UPDATE signing_keys
 SET state = 'retired',
     retired_at = now()
 WHERE kid = $1
-  AND state IN ('pending', 'active')
+  AND state IN ('pending', 'active', 'draining')
 RETURNING *;
+
+-- name: LockSigningKeyRotation :exec
+-- Serializes rotation/seed/scheduler transactions across replicas.
+SELECT pg_advisory_xact_lock(7241926080922);
+
+-- name: ScheduleSigningKey :exec
+UPDATE signing_keys SET promote_after = $2 WHERE kid = $1 AND state = 'pending';
+
+-- name: DrainActiveSigningKey :exec
+UPDATE signing_keys SET state = 'draining', retire_after = $1 WHERE state = 'active';
+
+-- name: RetireAllLiveSigningKeys :exec
+UPDATE signing_keys SET state = 'retired', retired_at = $1
+WHERE state IN ('pending', 'active', 'draining');
+
+-- name: RetireDueSigningKeys :exec
+UPDATE signing_keys SET state = 'retired', retired_at = $1
+WHERE state = 'draining' AND retire_after <= $1;

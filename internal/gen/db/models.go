@@ -198,6 +198,8 @@ type SigningKey struct {
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 	PromotedAt        pgtype.Timestamptz `json:"promoted_at"`
 	RetiredAt         pgtype.Timestamptz `json:"retired_at"`
+	PromoteAfter      pgtype.Timestamptz `json:"promote_after"`
+	RetireAfter       pgtype.Timestamptz `json:"retire_after"`
 }
 
 type User struct {

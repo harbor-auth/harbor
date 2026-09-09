@@ -181,6 +181,7 @@ type Querier interface {
 	// DeleteRelyingParty removes a client registration (RFC 7592 DELETE). Used for
 	// dynamic client de-registration. Cascades to grants via FK.
 	DeleteRelyingParty(ctx context.Context, clientID string) error
+	DrainActiveSigningKey(ctx context.Context, retireAfter pgtype.Timestamptz) error
 	// Queries for the revocation_outbox table (durable theft-signal delivery;
 	// DESIGN §3.5, §3.5.2, §10). The query IS the contract (DESIGN §1.3):
 	// `sqlc generate` (via @codegen) produces typed Go — never hand-write DB types.
@@ -392,6 +393,8 @@ type Querier interface {
 	// Used by harbor-mgmt to show the user their relay addresses per RP.
 	ListRelayAddressesByUser(ctx context.Context, userID pgtype.UUID) ([]RelayAddress, error)
 	ListSessionsByUser(ctx context.Context, userID pgtype.UUID) ([]Session, error)
+	// Serializes rotation/seed/scheduler transactions across replicas.
+	LockSigningKeyRotation(ctx context.Context) error
 	// MarkMFAFactorUsed burns a one-time factor (e.g. a recovery code) so it can't
 	// be replayed. Only flips unused → used, so a double-spend is a no-op.
 	MarkMFAFactorUsed(ctx context.Context, id pgtype.UUID) error
@@ -407,6 +410,8 @@ type Querier interface {
 	// Resets the lockout state for a user after successful recovery.
 	// Clears failed_count and locked_until.
 	ResetRecoveryAttempts(ctx context.Context, userID pgtype.UUID) error
+	RetireAllLiveSigningKeys(ctx context.Context, retiredAt pgtype.Timestamptz) error
+	RetireDueSigningKeys(ctx context.Context, retiredAt pgtype.Timestamptz) error
 	// Convenience query to retire a key by kid. Sets state to 'retired' and
 	// retired_at to now(). Used during scheduled rotation (after overlap window)
 	// or emergency rotation (immediate).
@@ -440,6 +445,7 @@ type Querier interface {
 	// single RP so a compromised token at one RP does not force re-auth at others.
 	// The partial index idx_sessions_user_client (migration 0005) makes this fast.
 	RevokeSessionsByUserClient(ctx context.Context, arg RevokeSessionsByUserClientParams) error
+	ScheduleSigningKey(ctx context.Context, arg ScheduleSigningKeyParams) error
 	// Marks a user as having completed account recovery setup (REQ-005).
 	// Called after the user enrolls their recovery credential(s).
 	SetRecoveryComplete(ctx context.Context, id pgtype.UUID) error
