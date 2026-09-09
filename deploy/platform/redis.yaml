@@ -50,7 +50,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: redis
-          image: redis:7.4.10-bookworm@sha256:595cc6f2bb3af6e03347b90deb6123c6aa2c81dea05ce08128de8a174b6ac67b
+          image: redis:7.4.11-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
           imagePullPolicy: IfNotPresent
           command: [redis-server]
           args: [/etc/redis-auth/redis.conf]
