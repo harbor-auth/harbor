@@ -39,6 +39,20 @@ func TestUserDEKMigrationPreservesKeysAndFailsClosed(t *testing.T) {
 	if got, err := final.UnwrapDEK(ctx, "EU", wrapped); err != nil || got != dek {
 		t.Fatal("external reader changed DEK", err)
 	}
+	bridge.writeLegacy = true
+	phaseOne, err := bridge.WrapDEK(ctx, "EU", dek)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.UnwrapDEK(ctx, "EU", phaseOne); err != nil {
+		t.Fatal("phase-one writes broke existing readers", err)
+	}
+	if got, err := bridge.UnwrapDEK(ctx, "EU", wrapped); err != nil || got != dek {
+		t.Fatal("phase-one reader cannot read phase-two writes", err)
+	}
+	if _, err := bridge.UnwrapDEK(ctx, "EU", append(UserDEKEnvelopePrefix(), old...)); !errors.Is(err, ErrDecryptFailed) {
+		t.Fatal("external failure fell back to the legacy key")
+	}
 	if _, err := legacy.UnwrapDEK(ctx, "EU", wrapped); err == nil {
 		t.Fatal("legacy root can decrypt external envelope")
 	}

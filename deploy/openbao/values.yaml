@@ -179,6 +179,12 @@ server:
             podSelector:
               matchLabels:
                 app.kubernetes.io/name: harbor-hot
+          - namespaceSelector:
+              matchLabels:
+                kubernetes.io/metadata.name: harbor
+            podSelector:
+              matchLabels:
+                app.kubernetes.io/name: harbor-mgmt
         ports:
           - port: 8200
             protocol: TCP

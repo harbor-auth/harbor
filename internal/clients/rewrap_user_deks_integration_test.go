@@ -102,11 +102,21 @@ func TestIntegrationUserDEKRewrapPreservesCiphertextAndErasure(t *testing.T) {
 	if remaining != 0 {
 		t.Fatal("erased DEK was resurrected")
 	}
-	// Unknown nonempty envelopes must stop migration, never be reported complete.
-	if _, err := pool.Exec(ctx, "UPDATE users SET dek_wrapped=$1 WHERE id=$2", []byte("corrupt"), active); err != nil {
+	// Failure on a later row rolls back the whole batch, including a valid
+	// envelope that was already rewrapped in memory.
+	if _, err := pool.Exec(ctx, "UPDATE users SET dek_wrapped=$1,status='active' WHERE id=$2", old, active); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := clients.RewrapUserDEKs(ctx, pool, bridge); err == nil {
-		t.Fatal("corrupt envelope silently skipped")
+	if _, err := pool.Exec(ctx, "UPDATE users SET dek_wrapped=$1,status='active' WHERE id=$2", []byte("corrupt"), erased); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := clients.RewrapUserDEKs(ctx, pool, bridge); err == nil || count != 0 {
+		t.Fatal("corrupt envelope silently skipped or partially committed")
+	}
+	if err := pool.QueryRow(ctx, "SELECT dek_wrapped FROM users WHERE id=$1", active).Scan(&wrapped); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(wrapped, old) {
+		t.Fatal("failed batch partially committed")
 	}
 }
