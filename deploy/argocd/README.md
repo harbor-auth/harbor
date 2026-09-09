@@ -2,15 +2,15 @@
 
 This directory holds the GitOps configuration that drives the running Harbor
 deployment on the dedicated `harbor-core` K3s cluster. Git is the source of
-truth: a push to `main`
-deploys itself.
+truth: merging production values into `main` triggers reconciliation. Source
+changes first publish signed images and propose their digests in a separate PR.
 
 ## Contents
 
 | File | Purpose |
 |------|---------|
 | `application.yaml` | ArgoCD `Application` — points at `deploy/helm` with `values-prod.yaml`, auto-syncs with prune + self-heal. |
-| `values-prod.yaml` | Production Helm overrides (domain, single-node replicas, existing secrets). `global.image.tag` is **managed by CI** — do not edit it by hand. |
+| `values-prod.yaml` | Production Helm overrides (domain, single-node replicas, existing secrets). Per-component digests are proposed by CI and reviewed before deployment. |
 | `argocd-cm-patch.yaml` | Strategic-merge patch adding Dex GitHub OAuth connector to `argocd-cm`. |
 | `argocd-rbac-cm-patch.yaml` | Strategic-merge patch adding RBAC policy (`policy.default: role:readonly`, `harbor-auth:ops` → deploy rights). |
 | `dex-secret-template.yaml` | SealedSecret template for the GitHub OAuth client secret. **Operator must run kubeseal before applying.** |
@@ -21,19 +21,32 @@ deploys itself.
 ## CI/CD flow (Harbor app)
 
 ```
-git push to main (Go / Dockerfile change)
-    └─▶ .github/workflows/publish.yml
-          ├─ builds harbor-hot + harbor-mgmt images
-          ├─ pushes ghcr.io/harbor-auth/harbor/<svc>:<sha> and :latest
-          └─ pins global.image.tag → <sha> in values-prod.yaml, commits [skip ci]
-              └─▶ ArgoCD (Application `harbor`) sees the git change
-                    └─ runs `helm upgrade` (deploy/helm + values-prod.yaml)
-                        └─▶ K3s rolls out the new images
+source PR passes CI and merges to main
+    └─▶ publish.yml builds and signs hot, management and migration images
+          └─▶ bot opens an image-digest PR and dispatches CI
+                └─▶ CI verifies source equality and signatures bound to that commit
+                      └─▶ operator reviews and merges the digest PR
+                            └─▶ ArgoCD applies the pinned manifests
 ```
 
-Images are pinned to the **immutable commit SHA** (not `:latest`) in
-`values-prod.yaml`, so every deploy is reproducible and rollbacks are just a
-revert of the pinning commit.
+Production uses immutable manifest digests. The publishing bot has no branch
+protection bypass and never pushes directly to main. Required checks include
+`deployment-provenance`, `agent-check`, `e2e`, `integration`, and both Helm checks.
+The provenance check verifies that every image signature identifies the declared
+main commit, and that its source matches the proposed deployment. An older
+source build cannot be disguised by editing the metadata field. Deployment PRs
+must be updated and rechecked when main changes.
+
+GitHub Actions needs permission to create pull requests in this repository.
+The publish job has `pull-requests: write` and `actions: write` to open the PR
+and dispatch CI; it does not approve or merge its own PR. A main-only manual
+publish trigger permits verification without a source change. Web asset changes
+also trigger publishing because they are embedded in the runtime images.
+
+Reverting image pins is subject to the same source/signature checks. Roll back
+source and publish a matching signed image set instead of silently deploying
+binaries that differ from the repository. Schema/data migration compatibility
+must still be assessed separately.
 
 ---
 

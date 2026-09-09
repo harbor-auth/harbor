@@ -6,24 +6,18 @@
 # immutable 12-char commit SHA and the moving `latest` tag. Each pushed image
 # is keyless-signed at its canonical digest with GitHub's OIDC identity.
 #
-# It then pins deploy/argocd/values-prod.yaml's per-component image digests and
-# commits the change back to main with [skip ci]. ArgoCD watches the repo, sees
-# the values change, and runs `helm upgrade` — so a push to main deploys itself
-# without any imperative kubectl/helm step. The [skip ci] marker (plus the paths
-# filter below, which excludes the values file) prevents the config commit from
-# re-triggering this workflow.
-#
-# GITHUB_TOKEN needs `packages: write` to push to GHCR and `contents: write` to
-# commit the pinned tag back to main. If branch protection blocks the bot push,
-# swap the checkout/login token for a PAT with those scopes.
+# Signed digests are proposed in a pull request. Main stays protected, including
+# against the publishing bot; CI and an operator review precede deployment.
 name: publish
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
       - 'cmd/**'
       - 'internal/**'
+      - 'web/**'
       - 'deploy/Dockerfile.hot'
       - 'deploy/Dockerfile.mgmt'
       - 'deploy/Dockerfile.migrate'
@@ -33,20 +27,28 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
+  actions: write
   id-token: write
   packages: write
 
 env:
   REGISTRY: ghcr.io/harbor-auth/harbor
 
+concurrency:
+  group: production-image-publish
+  cancel-in-progress: false
+
 jobs:
   build-push:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
 
       - name: Compute short SHA
         id: sha
@@ -134,26 +136,42 @@ jobs:
           MIGRATE_DIGEST: ${{ steps.build-migrate.outputs.digest }}
         run: |
           yq -i '
+            .global.image.sourceRevision = strenv(GITHUB_SHA) |
             .hot.image.digest = env(HOT_DIGEST) |
             .mgmt.image.digest = env(MGMT_DIGEST) |
             .migrate.image.digest = env(MIGRATE_DIGEST) |
             del(.global.image.tag)
           ' deploy/argocd/values-prod.yaml
 
-      # Commit the pinned digests back to main for ArgoCD. [skip ci] + the paths
-      # filter (which excludes deploy/argocd/**) keep this from looping.
-      - name: Commit pinned digests
+      # Do not grant this bot a main-branch bypass. The explicit dispatch
+      # supplies CI even when token-created PR events need GitHub approval.
+      - name: Propose signed digests for production
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          if ! git diff --quiet "$GITHUB_SHA" origin/main -- cmd internal web db/migrations go.mod go.sum deploy/Dockerfile.hot deploy/Dockerfile.mgmt deploy/Dockerfile.migrate; then
+            echo "A newer source revision exists; refusing to propose stale images."
+            exit 1
+          fi
+          pin_branch="deploy/images-${GITHUB_SHA}-${GITHUB_RUN_ID}"
+          git switch -c "$pin_branch"
           git add deploy/argocd/values-prod.yaml
           if git diff --staged --quiet; then
-            echo "Image digests already pinned; nothing to commit."
-          else
-            git commit -m "chore(deploy): pin signed image digests [skip ci]"
-            git pull --rebase origin main
-            git push
+            echo "Image digests already pinned."
+            exit 0
           fi
+          git commit -m "chore(deploy): propose signed image digests"
+          git push origin "$pin_branch"
+          cat > "$RUNNER_TEMP/deploy-pr.md" <<EOF
+          Deploy signed runtime images built from main revision $GITHUB_SHA.
+
+          Review the pinned digests and successful CI before merging. ArgoCD deploys the merged values; publishing alone does not change production.
+          EOF
+          gh pr create --base main --head "$pin_branch" --title "chore(deploy): signed images for ${GITHUB_SHA::12}" --body-file "$RUNNER_TEMP/deploy-pr.md"
+          gh workflow run ci.yml --ref "$pin_branch"
 
       # Package visibility is an explicit owner decision. Publishing a release
       # must not turn private runtime images into publicly downloadable packages.

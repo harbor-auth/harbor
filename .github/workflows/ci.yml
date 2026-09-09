@@ -47,6 +47,7 @@
 name: ci
 
 on:
+  workflow_dispatch:
   pull_request:
   push:
     branches: [main]
@@ -56,6 +57,36 @@ permissions:
   pull-requests: write
 
 jobs:
+  deployment-provenance:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reject stale or untraceable production image pins
+        id: source
+        env:
+          BASE_REF: origin/${{ github.base_ref || github.event.repository.default_branch }}
+        run: python3 tools/check-deployment-provenance.py "$BASE_REF"
+      - name: Log in for private release verification
+        if: steps.source.outputs.changed == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install Cosign
+        if: steps.source.outputs.changed == 'true'
+        uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+      - name: Verify image signatures bind the declared source revision
+        if: steps.source.outputs.changed == 'true'
+        env:
+          BASE_REF: origin/${{ github.base_ref || github.event.repository.default_branch }}
+        run: python3 tools/check-deployment-provenance.py "$BASE_REF" --verify-signatures
+
   agent-check:
     runs-on: ubuntu-latest
     steps:
@@ -116,6 +147,7 @@ jobs:
         if: always()
         run: |
           {
+            # shellcheck disable=SC2016 # Markdown code span, not shell expansion.
             echo '## Harbor `agent-check`'
             echo ''
             echo "- agent-check: **${{ steps.agentcheck.outcome }}**"
