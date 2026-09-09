@@ -24,6 +24,9 @@ const (
 	// KeyStateRetired indicates a key that has been rotated out. Retired keys
 	// are removed from JWKS; tokens signed by retired keys will fail verification.
 	KeyStateRetired KeyState = "retired"
+
+	// KeyStateDraining is published for verification but no longer signs new tokens.
+	KeyStateDraining KeyState = "draining"
 )
 
 // String returns the string representation of the KeyState.
@@ -32,7 +35,7 @@ func (s KeyState) String() string { return string(s) }
 // IsValid reports whether s is a recognized KeyState value.
 func (s KeyState) IsValid() bool {
 	switch s {
-	case KeyStatePending, KeyStateActive, KeyStateRetired:
+	case KeyStatePending, KeyStateActive, KeyStateDraining, KeyStateRetired:
 		return true
 	default:
 		return false
@@ -64,7 +67,7 @@ type SigningKeyMetadata struct {
 // IsLive reports whether the key should appear in the JWKS endpoint.
 // Live keys are those in pending or active state.
 func (m SigningKeyMetadata) IsLive() bool {
-	return m.State == KeyStatePending || m.State == KeyStateActive
+	return m.State == KeyStatePending || m.State == KeyStateActive || m.State == KeyStateDraining
 }
 
 // MultiKeySigner manages multiple signing keys for JWKS kid rotation

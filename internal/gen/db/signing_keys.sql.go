@@ -18,7 +18,7 @@ INSERT INTO signing_keys (
 ) VALUES (
     $1, $2, 'pending', $3, $4, $5
 )
-RETURNING id, kid, state, public_key_bytes, private_key_wrapped, region, created_at, promoted_at, retired_at
+RETURNING id, kid, state, public_key_bytes, private_key_wrapped, region, created_at, promoted_at, retired_at, promote_after, retire_after
 `
 
 type CreateSigningKeyParams struct {
@@ -57,12 +57,23 @@ func (q *Queries) CreateSigningKey(ctx context.Context, arg CreateSigningKeyPara
 		&i.CreatedAt,
 		&i.PromotedAt,
 		&i.RetiredAt,
+		&i.PromoteAfter,
+		&i.RetireAfter,
 	)
 	return i, err
 }
 
+const drainActiveSigningKey = `-- name: DrainActiveSigningKey :exec
+UPDATE signing_keys SET state = 'draining', retire_after = $1 WHERE state = 'active'
+`
+
+func (q *Queries) DrainActiveSigningKey(ctx context.Context, retireAfter pgtype.Timestamptz) error {
+	_, err := q.db.Exec(ctx, drainActiveSigningKey, retireAfter)
+	return err
+}
+
 const getActiveSigningKey = `-- name: GetActiveSigningKey :one
-SELECT id, kid, state, public_key_bytes, private_key_wrapped, region, created_at, promoted_at, retired_at FROM signing_keys
+SELECT id, kid, state, public_key_bytes, private_key_wrapped, region, created_at, promoted_at, retired_at, promote_after, retire_after FROM signing_keys
 WHERE state = 'active'
 `
 
@@ -81,12 +92,14 @@ func (q *Queries) GetActiveSigningKey(ctx context.Context) (SigningKey, error) {
 		&i.CreatedAt,
 		&i.PromotedAt,
 		&i.RetiredAt,
+		&i.PromoteAfter,
+		&i.RetireAfter,
 	)
 	return i, err
 }
 
 const getSigningKeyByKid = `-- name: GetSigningKeyByKid :one
-SELECT id, kid, state, public_key_bytes, private_key_wrapped, region, created_at, promoted_at, retired_at FROM signing_keys
+SELECT id, kid, state, public_key_bytes, private_key_wrapped, region, created_at, promoted_at, retired_at, promote_after, retire_after FROM signing_keys
 WHERE kid = $1
 `
 
@@ -105,13 +118,15 @@ func (q *Queries) GetSigningKeyByKid(ctx context.Context, kid string) (SigningKe
 		&i.CreatedAt,
 		&i.PromotedAt,
 		&i.RetiredAt,
+		&i.PromoteAfter,
+		&i.RetireAfter,
 	)
 	return i, err
 }
 
 const listLiveSigningKeys = `-- name: ListLiveSigningKeys :many
-SELECT id, kid, state, public_key_bytes, private_key_wrapped, region, created_at, promoted_at, retired_at FROM signing_keys
-WHERE state IN ('pending', 'active')
+SELECT id, kid, state, public_key_bytes, private_key_wrapped, region, created_at, promoted_at, retired_at, promote_after, retire_after FROM signing_keys
+WHERE state IN ('pending', 'active', 'draining')
 ORDER BY created_at DESC
 `
 
@@ -137,6 +152,8 @@ func (q *Queries) ListLiveSigningKeys(ctx context.Context) ([]SigningKey, error)
 			&i.CreatedAt,
 			&i.PromotedAt,
 			&i.RetiredAt,
+			&i.PromoteAfter,
+			&i.RetireAfter,
 		); err != nil {
 			return nil, err
 		}
@@ -148,13 +165,43 @@ func (q *Queries) ListLiveSigningKeys(ctx context.Context) ([]SigningKey, error)
 	return items, nil
 }
 
+const lockSigningKeyRotation = `-- name: LockSigningKeyRotation :exec
+SELECT pg_advisory_xact_lock(7241926080922)
+`
+
+// Serializes rotation/seed/scheduler transactions across replicas.
+func (q *Queries) LockSigningKeyRotation(ctx context.Context) error {
+	_, err := q.db.Exec(ctx, lockSigningKeyRotation)
+	return err
+}
+
+const retireAllLiveSigningKeys = `-- name: RetireAllLiveSigningKeys :exec
+UPDATE signing_keys SET state = 'retired', retired_at = $1
+WHERE state IN ('pending', 'active', 'draining')
+`
+
+func (q *Queries) RetireAllLiveSigningKeys(ctx context.Context, retiredAt pgtype.Timestamptz) error {
+	_, err := q.db.Exec(ctx, retireAllLiveSigningKeys, retiredAt)
+	return err
+}
+
+const retireDueSigningKeys = `-- name: RetireDueSigningKeys :exec
+UPDATE signing_keys SET state = 'retired', retired_at = $1
+WHERE state = 'draining' AND retire_after <= $1
+`
+
+func (q *Queries) RetireDueSigningKeys(ctx context.Context, retiredAt pgtype.Timestamptz) error {
+	_, err := q.db.Exec(ctx, retireDueSigningKeys, retiredAt)
+	return err
+}
+
 const retireSigningKey = `-- name: RetireSigningKey :one
 UPDATE signing_keys
 SET state = 'retired',
     retired_at = now()
 WHERE kid = $1
-  AND state IN ('pending', 'active')
-RETURNING id, kid, state, public_key_bytes, private_key_wrapped, region, created_at, promoted_at, retired_at
+  AND state IN ('pending', 'active', 'draining')
+RETURNING id, kid, state, public_key_bytes, private_key_wrapped, region, created_at, promoted_at, retired_at, promote_after, retire_after
 `
 
 // Convenience query to retire a key by kid. Sets state to 'retired' and
@@ -173,8 +220,24 @@ func (q *Queries) RetireSigningKey(ctx context.Context, kid string) (SigningKey,
 		&i.CreatedAt,
 		&i.PromotedAt,
 		&i.RetiredAt,
+		&i.PromoteAfter,
+		&i.RetireAfter,
 	)
 	return i, err
+}
+
+const scheduleSigningKey = `-- name: ScheduleSigningKey :exec
+UPDATE signing_keys SET promote_after = $2 WHERE kid = $1 AND state = 'pending'
+`
+
+type ScheduleSigningKeyParams struct {
+	Kid          string             `json:"kid"`
+	PromoteAfter pgtype.Timestamptz `json:"promote_after"`
+}
+
+func (q *Queries) ScheduleSigningKey(ctx context.Context, arg ScheduleSigningKeyParams) error {
+	_, err := q.db.Exec(ctx, scheduleSigningKey, arg.Kid, arg.PromoteAfter)
+	return err
 }
 
 const updateSigningKeyState = `-- name: UpdateSigningKeyState :one
@@ -183,7 +246,7 @@ SET state = $2,
     promoted_at = $3,
     retired_at = $4
 WHERE id = $1
-RETURNING id, kid, state, public_key_bytes, private_key_wrapped, region, created_at, promoted_at, retired_at
+RETURNING id, kid, state, public_key_bytes, private_key_wrapped, region, created_at, promoted_at, retired_at, promote_after, retire_after
 `
 
 type UpdateSigningKeyStateParams struct {
@@ -214,6 +277,8 @@ func (q *Queries) UpdateSigningKeyState(ctx context.Context, arg UpdateSigningKe
 		&i.CreatedAt,
 		&i.PromotedAt,
 		&i.RetiredAt,
+		&i.PromoteAfter,
+		&i.RetireAfter,
 	)
 	return i, err
 }

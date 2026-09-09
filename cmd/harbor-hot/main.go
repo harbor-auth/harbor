@@ -40,6 +40,7 @@ import (
 	gendb "github.com/harbor-auth/harbor/internal/gen/db"
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
 	"github.com/harbor-auth/harbor/internal/httpserver"
+	"github.com/harbor-auth/harbor/internal/identity"
 	"github.com/harbor-auth/harbor/internal/oidc"
 	"github.com/harbor-auth/harbor/internal/oidcapi"
 	"github.com/harbor-auth/harbor/internal/region"
@@ -272,7 +273,7 @@ func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redis
 		return oidcapi.Config{}, hotGraph{}, err
 	}
 	q := gendb.New(pool)
-	tokenIssuer, signers, rotator, err := buildSigningStackWithProvider(ctx, pool, keyProvider, logger)
+	tokenIssuer, signingKeys, rotator, err := buildSigningStackWithProvider(ctx, pool, keyProvider, logger)
 	if err != nil {
 		return oidcapi.Config{}, hotGraph{}, err
 	}
@@ -295,7 +296,7 @@ func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redis
 	}()
 	worker := oidc.NewRevocationWorker(oidc.RevocationWorkerConfig{Outbox: outbox, SessionStore: sessionStore, Logger: logger})
 	go worker.Run(ctx)
-	verifier, err := oidc.NewJWTVerifier(oidc.JWTVerifierConfig{Signer: signers[0], Filter: filter, RevokedChecker: revokedJTIChecker{revokedStore}, ExpectedIssuer: issuer})
+	verifier, err := oidc.NewJWTVerifier(oidc.JWTVerifierConfig{Keys: signingKeys, Filter: filter, RevokedChecker: revokedJTIChecker{revokedStore}, ExpectedIssuer: issuer})
 	if err != nil {
 		return oidcapi.Config{}, hotGraph{}, fmt.Errorf("harbor-hot: build JWT verifier: %w", err)
 	}
@@ -307,10 +308,11 @@ func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redis
 	if err != nil {
 		return oidcapi.Config{}, hotGraph{}, fmt.Errorf("harbor-hot: build OIDC service: %w", err)
 	}
-	return oidcapi.Config{Issuer: issuer, Service: svc, Signers: signers, Rotator: rotator, RevokedJTIStore: revokedStore, RevocationFilter: filter, RevocationPublisher: redisRevocationPublisher{redisClient}, RevokedJTIChecker: revokedJTIChecker{revokedStore}, LogoutVerifier: verifier, Grants: grants, Clients: registry, SessionRevoker: sessionStore}, hotGraph{
-		secretLoader: deps.secretLoader,
-		grantStore:   deps.grantStore,
-		postgres:     true, redis: true, externalKMS: true,
+	return oidcapi.Config{Issuer: issuer, Service: svc, Keys: signingKeys, Rotator: rotator, AuditRecorder: deps.auditRecorder, RevokedJTIStore: revokedStore, RevocationFilter: filter, RevocationPublisher: redisRevocationPublisher{redisClient}, RevokedJTIChecker: revokedJTIChecker{revokedStore}, LogoutVerifier: verifier, Grants: grants, Clients: registry, SessionRevoker: sessionStore}, hotGraph{
+		secretLoader:  deps.secretLoader,
+		auditRecorder: deps.auditRecorder,
+		grantStore:    deps.grantStore,
+		postgres:      true, redis: true, externalKMS: true,
 		clientRegistry: true, authCodes: true, grants: true, sessions: true,
 		revocations: true, outboxWorker: true, jwtVerifier: true,
 		logoutVerifier: true, sessionRevoker: true,
@@ -356,33 +358,27 @@ func buildExternalKeyProvider(ctx context.Context, kmsConfig crypto.KMSConfig) (
 	}
 }
 
-func buildSigningStackWithProvider(ctx context.Context, pool *pgxpool.Pool, kp crypto.KeyProvider, logger *slog.Logger) (oidc.TokenIssuer, []crypto.Signer, *crypto.KeyRotator, error) {
-	reg := envString("REGION", "EU")
-
-	keyStore := clients.NewDBSigningKeyStore(gendb.New(pool))
-	loader := clients.NewSigningKeyLoader(keyStore, kp, reg)
-
-	provider, err := loader.SeedAndLoad(ctx)
-	if err != nil {
+func buildSigningStackWithProvider(ctx context.Context, pool *pgxpool.Pool, kp crypto.KeyProvider, logger *slog.Logger) (oidc.TokenIssuer, crypto.SigningKeySource, oidcapi.KeyRotator, error) {
+	// JWKS max-age is 5 minutes; allow a full cache interval before signing.
+	keys := clients.NewLiveSigningKeys(pool, kp, envString("REGION", "EU"), crypto.RotationConfig{GracePeriod: 6 * time.Minute, OverlapWindow: 15 * time.Minute})
+	if err := keys.Initialize(ctx); err != nil {
+		return nil, nil, nil, fmt.Errorf("harbor-hot: initialize signing keys: %w", err)
+	}
+	if err := keys.Reconcile(ctx); err != nil {
+		return nil, nil, nil, fmt.Errorf("harbor-hot: recover key rotation: %w", err)
+	}
+	if _, err := keys.Snapshot(ctx); err != nil {
 		return nil, nil, nil, fmt.Errorf("harbor-hot: load signing keys: %w", err)
 	}
-	signers := provider.AllSigners()
-	logger.Info("signing keys loaded", "count", len(signers), "active_kid", provider.ActiveSigner().KeyID())
-
-	issuer := oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: provider.ActiveSigner()})
-
-	rotStore := clients.NewDBRotationStore(keyStore, reg)
-	mgr := crypto.NewRotationManager(crypto.DefaultRotationConfig())
-	rotator := crypto.NewKeyRotator(mgr, provider, rotStore).
-		WithPrivateKeyWrapper(clients.NewPrivateKeyWrapper(kp, reg))
-
-	return issuer, signers, rotator, nil
+	go keys.Run(ctx, logger)
+	return oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Keys: keys}), keys, keys, nil
 }
 
 // bffDeps bundles the DB-backed dependencies the PPIDSessionResolver needs to
 // replace the insecure demo-user stub resolver (docs/DESIGN.md §9, audit
 // blocker 1.1). They are constructed once at startup from required storage.
 type bffDeps struct {
+	auditRecorder *identity.AuditRecorder
 	// secretLoader decrypts a user's pairwise secret for PPID derivation.
 	secretLoader *clients.DBSecretLoader
 	// grantStore reads and writes consent grants (the pairwise_sub an RP sees).
@@ -421,8 +417,9 @@ func buildBFFDepsFromPool(pool *pgxpool.Pool, logger *slog.Logger) (bffDeps, err
 
 	q := gendb.New(pool)
 	return bffDeps{
-		secretLoader: clients.NewDBSecretLoader(q, keys, crypto.NewCipher()),
-		grantStore:   clients.NewDBGrantStore(q),
+		secretLoader:  clients.NewDBSecretLoader(q, keys, crypto.NewCipher()),
+		auditRecorder: identity.NewAuditRecorder(clients.NewDBComplianceUserLoader(q), q, keys, crypto.NewCipher(), logger),
+		grantStore:    clients.NewDBGrantStore(q),
 	}, nil
 }
 

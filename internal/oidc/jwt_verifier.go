@@ -53,6 +53,7 @@ type RevokedJTIChecker interface {
 // Step 4 adds ~100ns overhead. Step 5 only fires on bloom filter hits
 // (target: 1 in 1,000,000 with default configuration).
 type JWTVerifier struct {
+	keys           crypto.SigningKeySource
 	pubKeys        map[string]*ecdsa.PublicKey
 	filter         RevocationFilter
 	revokedChecker RevokedJTIChecker // nil = skip DB introspection (test mode)
@@ -70,6 +71,7 @@ type JWTVerifierConfig struct {
 	// overlap window during key rotation. Signer is retained for callers that
 	// only have one key; when Signers is non-empty it takes precedence.
 	Signers []crypto.Signer
+	Keys    crypto.SigningKeySource
 
 	// Filter is the in-process bloom filter for revoked JTIs.
 	// If nil, revocation checking is skipped.
@@ -118,6 +120,7 @@ func NewJWTVerifier(cfg JWTVerifierConfig) (*JWTVerifier, error) {
 
 	return &JWTVerifier{
 		pubKeys:        pubKeys,
+		keys:           cfg.Keys,
 		filter:         cfg.Filter,
 		revokedChecker: cfg.RevokedChecker,
 		expectedIssuer: cfg.ExpectedIssuer,
@@ -183,6 +186,22 @@ func (v *JWTVerifier) verify(ctx context.Context, token string, policy verificat
 
 	// Step 2: Verify signature
 	pubKey := v.pubKeys[h.Kid]
+	if v.keys != nil {
+		snapshot, err := v.keys.Snapshot(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("jwt verifier: load current signing keys: %w", err)
+		}
+		pubKey = nil
+		for _, signer := range snapshot.AllSigners() {
+			if signer.KeyID() == h.Kid {
+				pubKey, err = signer.PublicJWK().ToPublicKey()
+				if err != nil {
+					return nil, err
+				}
+				break
+			}
+		}
+	}
 	if pubKey == nil {
 		return nil, fmt.Errorf("%w: unknown signing key", ErrTokenInvalid)
 	}

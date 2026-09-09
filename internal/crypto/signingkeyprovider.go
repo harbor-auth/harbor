@@ -1,6 +1,7 @@
 package crypto
 
 import (
+	"context"
 	"fmt"
 	"sync"
 )
@@ -161,4 +162,24 @@ func (p *MultiKeyProvider) addLocked(s Signer) error {
 	p.byKid[kid] = s
 	p.order = append(p.order, kid)
 	return nil
+}
+
+// SigningKeySource returns one coherent view of the current signing keys.
+// Production implementations refresh durable metadata and fail closed on errors.
+// Private key material can be cached; the live/retired decision cannot.
+type SigningKeySource interface {
+	Snapshot(context.Context) (SigningKeyProvider, error)
+}
+
+// Snapshot copies the live set and active key together for a single operation.
+func (p *MultiKeyProvider) Snapshot(context.Context) (SigningKeyProvider, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	others := make([]Signer, 0, len(p.byKid)-1)
+	for _, kid := range p.order {
+		if kid != p.active.KeyID() {
+			others = append(others, p.byKid[kid])
+		}
+	}
+	return NewMultiKeyProvider(p.active, others...)
 }

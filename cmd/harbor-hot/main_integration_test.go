@@ -49,6 +49,9 @@ func TestRunBuildsDurableLiveGraph(t *testing.T) {
 		t.Fatalf("run did not assemble the live graph: %v", ctx.Err())
 	}
 
+	if graph.auditRecorder == nil {
+		t.Fatal("production token audit recorder is missing")
+	}
 	want := map[string]string{
 		"clients":       "*clients.DBClientRegistry",
 		"codes":         "*clients.RedisAuthCodeStore",
