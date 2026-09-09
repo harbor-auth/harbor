@@ -40,7 +40,7 @@ func rotationPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	url := os.Getenv("DATABASE_URL")
 	if url == "" {
-		t.Skip("DATABASE_URL required for real PostgreSQL rotation test")
+		t.Fatal("DATABASE_URL required for real PostgreSQL rotation test")
 	}
 	ctx := context.Background()
 	admin, err := pgxpool.New(ctx, url)
