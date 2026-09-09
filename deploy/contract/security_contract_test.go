@@ -61,6 +61,31 @@ func TestHelmSecurityContract(t *testing.T) {
 	assertEnvNameParity(t, loadFiles(t, filepath.Join("..", "k8s", "*.yaml")), objects)
 	assertPublicLoginRoute(t, objects)
 	assertServiceAccountsExist(t, objects)
+	assertConfigMapData(t, objects)
+}
+
+// ConfigMap environment values must be strings under data; Helm accepts
+// arbitrary metadata fields that the Kubernetes API subsequently rejects.
+func assertConfigMapData(t *testing.T, objects []object) {
+	t.Helper()
+	for _, item := range objects {
+		if item["kind"] != "ConfigMap" {
+			continue
+		}
+		metadata := pathMap(t, item, "metadata")
+		for key := range metadata {
+			switch key {
+			case "name", "namespace", "labels", "annotations", "generateName", "ownerReferences", "finalizers":
+			default:
+				t.Errorf("ConfigMap %v has unexpected metadata field %q", metadata["name"], key)
+			}
+		}
+		for key, value := range pathMap(t, item, "data") {
+			if _, ok := value.(string); !ok {
+				t.Errorf("ConfigMap %v data[%q] must be a string", metadata["name"], key)
+			}
+		}
+	}
 }
 
 // assertServiceAccountsExist checks that every workload's serviceAccountName is
