@@ -33,7 +33,7 @@ global:
 region: EU
 hot:
   image:
-    digest: sha256:dfb25a722d613951ac949ccfcc205f2efeeab561451e711c91da26eba87daf69
+    digest: sha256:12cfd319f20b2247e4335a0bc9364bc7b19b2ecc65dcbd3be6db57a8f09994ef
   # Single node — one replica. HPA/PDB are meaningless here and are disabled.
   replicaCount: 1
   issuer: https://auth.harborauth.com
@@ -73,7 +73,7 @@ mgmt:
   authorizeCompleteURL: https://auth.harborauth.com/authorize/complete
   registrationBaseURL: https://auth.harborauth.com
   image:
-    digest: sha256:f60377810416c8473a4ddb8b560eee26d594bd27378e6286b0dce60073dc9dce
+    digest: sha256:7c774597c38f4e51037fd726db58fa486072f40d4859e0fb0b64642dbf1be88b
   replicaCount: 1
   webauthn:
     rpId: auth.harborauth.com
@@ -129,7 +129,7 @@ migrate:
   secrets:
     existingSecret: harbor-migrate-secrets
   image:
-    digest: sha256:af88d00363a60f84bd9f6a4ccce49b9e03468b86f302f7f5f4d9598d1cf6d26f
+    digest: sha256:447e128e5e4e2cb52abcb72e429972a2e0ad8bf0650b3b2fe2ae6fb0cd6dad03
 # The harbor namespace already exists (created by the initial install); ArgoCD
 # manages resources inside it but must not try to re-create it.
 namespace:
