@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Harbor production every minute
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=60
+AccuracySec=5
+Persistent=yes
+
+[Install]
+WantedBy=timers.target
