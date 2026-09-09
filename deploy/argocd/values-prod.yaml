@@ -55,7 +55,7 @@ hot:
   # (DATABASE_URL / REDIS_URL / HARBOR_KMS_SECRET / ADMIN_API_TOKEN) rather
   # than committing credentials.
   secrets:
-    existingSecret: harbor-hot-secrets
+    existingSecret: harbor-hot-secrets-v2
   kms:
     provider: openbao
     openbao:
@@ -81,7 +81,7 @@ mgmt:
   pdb:
     enabled: false
   secrets:
-    existingSecret: harbor-mgmt-secrets
+    existingSecret: harbor-mgmt-secrets-v2
   cloudIntegration:
     enabled: true
     nodePort: 30081
@@ -133,3 +133,11 @@ migrate:
 # manages resources inside it but must not try to re-create it.
 namespace:
   create: false
+
+# User-data wrapping roots remain in OpenBao Transit after the staged migration.
+userDEK:
+  provider: openbao
+  keyMap: EU=harbor-users-eu
+  legacyReadEnabled: false
+  writeExternalEnabled: true
+  mgmtRole: harbor-mgmt

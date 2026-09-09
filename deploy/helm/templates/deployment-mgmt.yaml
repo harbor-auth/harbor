@@ -26,6 +26,7 @@ spec:
       labels:
         {{- include "harbor.mgmt.labels" . | nindent 8 }}
       annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-mgmt.yaml") . | sha256sum }}
         # Hold the app container until the Linkerd proxy sidecar is ready, so
         # early outbound connections (PostgreSQL/Redis) aren't dropped on
         # startup while the mesh warms up.
