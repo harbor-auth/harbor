@@ -8,6 +8,9 @@ metadata:
     app.kubernetes.io/name: harbor-mgmt
     app.kubernetes.io/part-of: harbor
 data:
+  USER_DEK_PROVIDER: "local"
+  USER_DEK_LEGACY_READ_ENABLED: "false"
+  USER_DEK_WRITE_EXTERNAL_ENABLED: "true"
   PORT: "8081"
   REGION: "EU"
   KMS_KEY_MAP: "EU=REPLACE_WITH_REGIONAL_KMS_KEY_ID"
