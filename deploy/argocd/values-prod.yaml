@@ -23,6 +23,7 @@ global:
   image:
     registry: ghcr.io/harbor-auth/harbor
     pullPolicy: IfNotPresent
+    sourceRevision: 381f666ff0830a735f22e8d2f0a0365babe6c2a3
   postgresTLS:
     enabled: true
     secretName: harbor-postgresql-tls
@@ -32,7 +33,7 @@ global:
 region: EU
 hot:
   image:
-    digest: sha256:c2e4c7af511b000e3fd75f12adc8bef2ada5001745a65ada547f7b264bfb81a6
+    digest: sha256:876337884a1c526266ebaf720060858b122cd7cea892c3c476b94395e361835c
   # Single node — one replica. HPA/PDB are meaningless here and are disabled.
   replicaCount: 1
   issuer: https://auth.harborauth.com
@@ -72,7 +73,7 @@ mgmt:
   authorizeCompleteURL: https://auth.harborauth.com/authorize/complete
   registrationBaseURL: https://auth.harborauth.com
   image:
-    digest: sha256:2593418bd8f9e3473fd157a4e011a6fd3bf042f5da93d3605abebaf715d7c14f
+    digest: sha256:1dae9cbc325c0d72e45f715ea6ad12adc0573b9ce1dbb7636eec2ac1d0feb9b4
   replicaCount: 1
   webauthn:
     rpId: auth.harborauth.com
@@ -128,12 +129,11 @@ migrate:
   secrets:
     existingSecret: harbor-migrate-secrets
   image:
-    digest: sha256:8b8b28800d702f491394c4c38a11e0331bed79920215f0e9ca2ac8b5f492ffa3
+    digest: sha256:9c51368c68eb38690fb92362b02877768a2ed66058cbc4859e9c19e90a425617
 # The harbor namespace already exists (created by the initial install); ArgoCD
 # manages resources inside it but must not try to re-create it.
 namespace:
   create: false
-
 # User-data wrapping roots remain in OpenBao Transit after the staged migration.
 userDEK:
   provider: openbao
