@@ -1,0 +1,20 @@
+name: production-monitor
+on:
+  schedule:
+    - cron: '2-59/5 * * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: production-monitor
+  cancel-in-progress: false
+jobs:
+  external-availability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check public availability and report to ilert
+        env:
+          ILERT_EXTERNAL_KEY: ${{ secrets.ILERT_EXTERNAL_KEY }}
+        run: python3 deploy/monitoring/check.py external

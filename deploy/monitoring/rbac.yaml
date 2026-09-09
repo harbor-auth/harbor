@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: harbor-monitor
+  namespace: harbor
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: harbor-monitor-metadata
+rules:
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [list]
+  - apiGroups: [cert-manager.io]
+    resources: [certificates]
+    verbs: [list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: harbor-monitor-metadata
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: harbor-monitor-metadata
+subjects:
+  - kind: ServiceAccount
+    name: harbor-monitor
+    namespace: harbor
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: harbor-monitor-workloads
+rules:
+  - apiGroups: [apps]
+    resources: [deployments, statefulsets, daemonsets]
+    resourceNames: [harbor-hot, harbor-mgmt, harbor-postgresql, harbor-redis, openbao, ingress-nginx-traefik]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: harbor-monitor
+  namespace: harbor
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: harbor-monitor-workloads
+subjects:
+  - kind: ServiceAccount
+    name: harbor-monitor
+    namespace: harbor
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: harbor-monitor
+  namespace: openbao
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: harbor-monitor-workloads
+subjects:
+  - kind: ServiceAccount
+    name: harbor-monitor
+    namespace: harbor
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: harbor-monitor
+  namespace: ingress-nginx
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: harbor-monitor-workloads
+subjects:
+  - kind: ServiceAccount
+    name: harbor-monitor
+    namespace: harbor

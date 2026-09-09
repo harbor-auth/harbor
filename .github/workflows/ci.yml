@@ -57,6 +57,12 @@ permissions:
   pull-requests: write
 
 jobs:
+  monitoring-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s deploy/monitoring -p 'test_*.py'
+
   deployment-provenance:
     runs-on: ubuntu-latest
     permissions:
