@@ -30,10 +30,10 @@ spec:
         # early outbound connections (PostgreSQL/Redis) aren't dropped on
         # startup while the mesh warms up.
         config.linkerd.io/proxy-await: enabled
-        # PostgreSQL (5432) and Redis (6379) are server-speaks-first protocols
+        # PostgreSQL, Redis, and SMTP are server-speaks-first protocols
         # that Linkerd cannot proxy cleanly here; connect to them directly.
         # mTLS still covers hot↔mgmt and ingress↔mgmt edges.
-        config.linkerd.io/skip-outbound-ports: "5432,6379"
+        config.linkerd.io/skip-outbound-ports: "5432,6379,{{ .Values.mgmt.signup.smtpPort }}"
     spec:
       # Dedicated SA with no auto-mounted API token (harbor-mgmt never calls the
       # K8s API).

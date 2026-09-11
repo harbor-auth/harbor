@@ -408,7 +408,7 @@ func assertWorkloadContract(t *testing.T, variant string, objects []object) {
 				}
 			}
 			for port := range ports {
-				if port != 53 && port != 5432 && port != 6379 && port != 443 && port != 8080 && port != 8086 && port != 8090 && port != 8200 {
+				if (component != "harbor-mgmt" || port != 587) && port != 53 && port != 5432 && port != 6379 && port != 443 && port != 8080 && port != 8086 && port != 8090 && port != 8200 {
 					t.Errorf("unexpected egress port %d", port)
 				}
 			}
@@ -420,11 +420,11 @@ func assertRuntimeConfigurationContract(t *testing.T, objects []object, requireS
 	t.Helper()
 	requiredConfig := map[string][]string{
 		"harbor-hot":  {"ISSUER", "LOGIN_URL", "REGION"},
-		"harbor-mgmt": {"AUTHORIZE_COMPLETE_URL", "REGISTRATION_BASE_URL", "REGION", "WEBAUTHN_RP_DISPLAY_NAME", "WEBAUTHN_RP_ID", "WEBAUTHN_RP_ORIGINS"},
+		"harbor-mgmt": {"SIGNUP_SMTP_ADDR", "SIGNUP_SMTP_FROM", "AUTHORIZE_COMPLETE_URL", "REGISTRATION_BASE_URL", "REGION", "WEBAUTHN_RP_DISPLAY_NAME", "WEBAUTHN_RP_ID", "WEBAUTHN_RP_ORIGINS"},
 	}
 	requiredSecrets := map[string][]string{
 		"harbor-hot":  {"DATABASE_URL", "HARBOR_KMS_SECRET", "REDIS_URL"},
-		"harbor-mgmt": {"DATABASE_URL", "HARBOR_KMS_SECRET", "INITIAL_ACCESS_TOKEN", "REDIS_URL"},
+		"harbor-mgmt": {"SIGNUP_IDENTIFIER_KEY", "DATABASE_URL", "HARBOR_KMS_SECRET", "INITIAL_ACCESS_TOKEN", "REDIS_URL"},
 	}
 
 	for _, component := range []string{"harbor-hot", "harbor-mgmt"} {

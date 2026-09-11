@@ -263,3 +263,48 @@ header (`TRUSTED_FORWARDED_HEADER`) that clients cannot pre-set.
 
 Apache-2.0 (see `LICENSE` in this directory). Self-hosters can derive their
 own production infra from these templates without AGPL obligations.
+
+
+## Email signup
+
+Public signup requires verified email before account creation. Deploy migration
+`0022_account_identifiers` before the updated management binary. This is a clean
+cutover, with no existing-user backfill or email-free public enrollment path.
+
+Configure every management replica with:
+
+| Setting | Purpose |
+|---|---|
+| `SIGNUP_IDENTIFIER_KEY` | Stable random 32-byte hex HMAC key (`openssl rand -hex 32`); protect in the regional secret manager. |
+| `SIGNUP_SMTP_ADDR` | Regional SMTP submission host and port, e.g. `smtp.provider.example:587`. |
+| `SIGNUP_SMTP_FROM` | Provider-authorized sender mailbox. |
+| `SIGNUP_SMTP_USERNAME`, `SIGNUP_SMTP_PASSWORD` | Optional SMTP AUTH pair; both set or both empty. |
+
+STARTTLS and trusted certificate validation are mandatory (TLS 1.2 minimum).
+Port 465 implicit TLS is not supported. Configure SPF/DKIM and sender authorization
+with the submission provider. Mail attempts are bounded to eight seconds and
+fail closed; no plaintext fallback or verification bypass exists. Addresses,
+codes and provider errors containing recipients are not logged by signup.
+
+In Helm, set `mgmt.signup.smtpHost`, `smtpPort`, `smtpFrom`, and the exact provider
+CIDRs in `smtpEgressCIDRs`. Empty CIDRs deny SMTP egress. Supply
+`mgmt.secrets.signupIdentifierKey` and optional `signupSmtpUsername` /
+`signupSmtpPassword`, or include their corresponding environment keys in
+`mgmt.secrets.existingSecret`. The chart exempts the SMTP port from Linkerd
+protocol detection and permits only the configured SMTP egress destinations.
+Raw Kubernetes manifests carry documentation placeholders: replace the SMTP
+host, sender, secret values, and `192.0.2.1/32` NetworkPolicy destination; keep
+its SMTP port and `skip-outbound-ports` annotation aligned.
+
+Keep the identifier key stable across replicas and restarts. Blindly rotating
+it breaks duplicate detection; a future key rotation must reindex encrypted
+identifiers. Uniqueness is regional, with no global user/email directory.
+
+For local e2e tests, the compose stack starts Mailpit with a generated, temporary
+CA/server certificate and makes the certificate trusted by harbor-mgmt using
+`SSL_CERT_FILE`. The test helpers read codes through `HARBOR_E2E_MAILPIT_URL`
+(default `http://localhost:8025`); they exercise actual SMTP delivery. This is
+an isolated test inbox, never a production mail provider. Mailpit configuration
+follows its [STARTTLS documentation](https://mailpit.axllent.org/docs/configuration/smtp/).
+
+Verification policy and tests: [email-first signup](../docs/features/email-first-signup.md).

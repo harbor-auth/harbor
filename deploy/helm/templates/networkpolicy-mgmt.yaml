@@ -49,6 +49,17 @@ spec:
           protocol: TCP
     {{- end }}
   egress:
+    {{- if .Values.mgmt.signup.smtpEgressCIDRs }}
+    # Regional verification mail only; STARTTLS enforced by the application.
+    - to:
+        {{- range .Values.mgmt.signup.smtpEgressCIDRs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - port: {{ .Values.mgmt.signup.smtpPort }}
+          protocol: TCP
+    {{- end }}
     # DNS resolution (kube-dns / CoreDNS). Both UDP and TCP on 53.
     - to:
         - namespaceSelector: {}

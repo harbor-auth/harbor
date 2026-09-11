@@ -8,6 +8,8 @@ metadata:
     app.kubernetes.io/name: harbor-mgmt
     app.kubernetes.io/part-of: harbor
 data:
+  SIGNUP_SMTP_ADDR: "smtp.example.com:587" # Replace with regional submission host.
+  SIGNUP_SMTP_FROM: "signup@example.com"
   PORT: "8081"
   REGION: "EU"
   KMS_KEY_MAP: "EU=REPLACE_WITH_REGIONAL_KMS_KEY_ID"

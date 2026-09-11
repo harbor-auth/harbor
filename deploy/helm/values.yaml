@@ -260,9 +260,18 @@ mgmt:
     # successful corporate-SSO handoff. Must start with "/", no scheme, no
     # "//" (cmd/harbor-mgmt/sso.go validates this at boot).
     ssoDashboardPath: "/dashboard"
+  signup:
+    # Regional SMTP submission service with STARTTLS and a trusted certificate.
+    smtpHost: "smtp.example.com"
+    smtpPort: 587
+    smtpFrom: "signup@example.com"
+    # Pin these to your regional submission service. Empty denies SMTP egress.
+    smtpEgressCIDRs: []
+
   secrets:
     # When set, this Secret must expose DATABASE_URL / REDIS_URL /
-    # HARBOR_KMS_SECRET / INITIAL_ACCESS_TOKEN, and, when cloudIntegration is
+    # HARBOR_KMS_SECRET / INITIAL_ACCESS_TOKEN / SIGNUP_IDENTIFIER_KEY /
+    # SIGNUP_SMTP_USERNAME / SIGNUP_SMTP_PASSWORD, and, when cloudIntegration is
     # enabled, CLOUD_SERVICE_AUTH_PUBLIC_KEY / MGMT_HOT_PROXY_TOKEN /
     # SSO_SUBJECT_HMAC_KEY. Its HARBOR_KMS_SECRET must equal the value in
     # harbor-hot's Secret.
@@ -273,6 +282,12 @@ mgmt:
     # Bearer token authorizing dynamic client registration.
     # Generate: openssl rand -hex 32
     initialAccessToken: ""
+    # Stable lookup key; generate with openssl rand -hex 32. Do not rotate
+    # independently of an identifier reindex (duplicate detection depends on it).
+    signupIdentifierKey: ""
+    signupSmtpUsername: ""
+    signupSmtpPassword: ""
+
 
 # Production runtime crypto contract shared by hot and management. This is a
 # region=KMS-key-ID map, not KMS credentials; credentials come from workload

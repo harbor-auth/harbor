@@ -10,6 +10,7 @@
 package e2e
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -19,9 +20,11 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"github.com/google/uuid"
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -150,21 +153,9 @@ func rawRequest(t *testing.T, method, path, body string, cookies map[string]stri
 
 // httpEnroll is enroll's goroutine-safe counterpart.
 func httpEnroll(client *http.Client) (userID, region string, err error) {
-	body, err := json.Marshal(map[string]string{"region": enrollRegion()})
+	raw, err := httpVerifiedEnrollment(client)
 	if err != nil {
 		return "", "", err
-	}
-	resp, err := client.Post(mgmtBaseURL()+enrollPath, "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		return "", "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", "", err
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", "", fmt.Errorf("POST %s = %d: %s", enrollPath, resp.StatusCode, raw)
 	}
 	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
@@ -489,4 +480,98 @@ func userStatus(t *testing.T, conn *pgx.Conn, userID string) string {
 		t.Fatalf("select status for %s: %v", userID, err)
 	}
 	return status
+}
+
+// Every e2e account verifies a unique address through the local Mailpit inbox.
+// There is no API or environment flag that bypasses ownership verification.
+func httpVerifiedEnrollment(client *http.Client) ([]byte, error) {
+	email := "signup-" + uuid.NewString() + "@example.com"
+	body, err := json.Marshal(map[string]string{"region": enrollRegion(), "email": email})
+	if err != nil {
+		return nil, err
+	}
+	resp, err := postSignupWithRateLimit(client, enrollPath, body)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		return nil, fmt.Errorf("start signup: %d %s", resp.StatusCode, raw)
+	}
+	inbox := strings.TrimRight(envOr("HARBOR_E2E_MAILPIT_URL", "http://localhost:8025"), "/")
+	mailClient := &http.Client{Timeout: 3 * time.Second}
+	var code string
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		response, err := mailClient.Get(inbox + "/api/v1/search?query=" + url.QueryEscape("to:"+email))
+		if err != nil {
+			return nil, err
+		}
+		var found struct{ Messages []struct{ ID string } }
+		err = json.NewDecoder(response.Body).Decode(&found)
+		response.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		if len(found.Messages) > 0 {
+			response, err = mailClient.Get(inbox + "/api/v1/message/" + url.PathEscape(found.Messages[0].ID))
+			if err != nil {
+				return nil, err
+			}
+			var message struct{ Text string }
+			err = json.NewDecoder(response.Body).Decode(&message)
+			response.Body.Close()
+			if err != nil {
+				return nil, err
+			}
+			match := regexp.MustCompile(`signup code is: ([0-9]{8})`).FindStringSubmatch(message.Text)
+			if len(match) != 2 {
+				return nil, fmt.Errorf("mailbox message has no signup code")
+			}
+			code = match[1]
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if code == "" {
+		return nil, fmt.Errorf("verification email did not arrive")
+	}
+	payload, err := json.Marshal(map[string]string{"code": code})
+	if err != nil {
+		return nil, err
+	}
+	resp, err = postSignupWithRateLimit(client, "/enroll/verify", payload)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return nil, fmt.Errorf("verify signup: %d %s", resp.StatusCode, raw)
+	}
+	return raw, nil
+}
+
+// Signup start and verify share the production source budget. Pace only 429s;
+// never retry a successful/ambiguous verification and accidentally replay it.
+func postSignupWithRateLimit(client *http.Client, path string, body []byte) (*http.Response, error) {
+	deadline := time.Now().Add(2 * time.Minute)
+	delay := time.Second
+	for {
+		response, err := client.Post(mgmtBaseURL()+path, "application/json", bytes.NewReader(body))
+		if err != nil || response.StatusCode != http.StatusTooManyRequests || time.Now().After(deadline) {
+			return response, err
+		}
+		response.Body.Close()
+		time.Sleep(delay)
+		if delay < 8*time.Second {
+			delay *= 2
+		}
+	}
 }

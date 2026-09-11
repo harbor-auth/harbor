@@ -16,6 +16,17 @@ users (
   created_at    timestamptz
 )
 
+account_identifiers (
+  user_id       uuid fk,          -- stable account identity, not an email-derived ID
+  region        text,
+  kind          text,             -- email initially; other verified IDs later
+  lookup_hash   bytea,            -- purpose/region/kind-separated HMAC
+  encrypted_value bytea 🔒,       -- account DEK; AAD binds user_id and kind
+  verified_at   timestamptz,
+  primary key (user_id, kind),
+  unique (region, kind, lookup_hash)
+)
+
 credentials (                      -- passkeys (primary) + optional password
   id            uuid pk,
   user_id       uuid fk,
@@ -89,3 +100,5 @@ audit_events (                     -- user-visible auth trail
 **PPID derivation** (§3.2): `pairwise_sub = B64URL(HMAC-SHA256(pairwise_secret, sector_id || user_id))`.
 
 **Revocation outbox** (§3.5): when a rotated refresh token or a consumed authorization code is replayed, the theft signal is enqueued to `revocation_outbox` *before* the best-effort inline revoke. A background worker (`RevocationWorker`) polls pending rows every 5s and retries delivery with exponential backoff, so a transient DB failure during the inline revoke never silently drops the family-revoke signal. Delivery is idempotent (`RevokeSessionsByUserClient` is a no-op on an already-revoked family). See [docs/plans/revocation-outbox.md](../../plans/revocation-outbox.md) and invariant `INV-DURABLE-REVOCATION`.
+
+Verified account identifiers are separate from authentication credentials. Email verification authorizes new enrollment only. Account erasure removes identifier lookup rows as well as destroying the DEK. See [email-first signup](../../features/email-first-signup.md).
