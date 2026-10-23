@@ -288,8 +288,11 @@ with the submission provider. Mail attempts are bounded to eight seconds and
 fail closed; no plaintext fallback or verification bypass exists. Addresses,
 codes and provider errors containing recipients are not logged by signup.
 
-In Helm, set `mgmt.signup.smtpHost`, `smtpPort`, `smtpFrom`, and the exact provider
-CIDRs in `smtpEgressCIDRs`. Empty CIDRs deny SMTP egress. Supply
+In Helm, set `mgmt.signup.smtpHost`, `smtpPort`, `smtpFrom`, and the provider's
+published SMTP relay CIDRs in `smtpEgressCIDRs`. The relay hostname can resolve
+to different addresses inside the production cluster and on public DNS, so
+allowlisting one observed address can silently block delivery. Empty CIDRs deny
+SMTP egress. Supply
 `mgmt.secrets.signupIdentifierKey` and optional `signupSmtpUsername` /
 `signupSmtpPassword`, or include their corresponding environment keys in
 `mgmt.secrets.existingSecret`. The chart exempts the SMTP port from Linkerd
@@ -302,9 +305,11 @@ Production uses Brevo Free for transactional signup mail, with
 `smtp-relay.brevo.com:587` and sender `verify@notify.harborauth.com`.
 The notification subdomain has separate Brevo verification/DKIM records and a
 DMARC quarantine policy; the root domain's Proton mail records stay unchanged.
+Port-587 egress allows Brevo's published relay ranges
+(`1.179.112.0/20` and `172.246.240.0/20`, Europe relay range).
 SMTP credentials belong only in `harbor-mgmt-secrets-v2`, alongside the stable
 identifier key. Never commit them. Reconcile `mgmt.signup.smtpEgressCIDRs` if
-Brevo's submission-host DNS changes. Check delivery and quota before promoting:
+Brevo's published relay ranges change. Check delivery and quota before promoting:
 the free plan's 300-message daily allowance includes retries, and queued messages
 can outlive a signup code's ten-minute validity. Sender authentication, working
 SMTP credentials and a real delivered-code signup are required rollout evidence.

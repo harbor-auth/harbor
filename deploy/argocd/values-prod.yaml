@@ -71,9 +71,12 @@ mgmt:
     smtpHost: smtp-relay.brevo.com
     smtpPort: 587
     smtpFrom: verify@notify.harborauth.com
-    # SMTP submission IPv4 resolved during setup. Reconcile if provider DNS changes.
+    # Brevo's documented SMTP relay ranges. The relay hostname resolves
+    # differently inside the production cluster than on public DNS.
+    # https://help.brevo.com/hc/en-us/articles/15127404548498
     smtpEgressCIDRs:
-      - 1.179.119.1/32
+      - 1.179.112.0/20
+      - 172.246.240.0/20
   # Both default to the scaffold auth.example.com in the chart. Unset, the
   # post-authentication hand-back and the RFC 7591 registration responses point
   # at a domain nobody owns.
