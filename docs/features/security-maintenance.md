@@ -25,7 +25,7 @@ release evidence must distinguish repository changes from deployed versions.
   connection isolation and ingress-NGINX provider fixes. Both core/cloud
   definitions are patched; host-owned copies live in harbor-cloud's
   `infra/host/k3s/`.
-- Argo CD 3.4.10: its publisher-signed image index is pinned in harbor-cloud's
+- Argo CD 3.4.12: its publisher-signed image index is pinned in harbor-cloud's
   core/cloud bootstrap charts. It fixes CVE-2026-113708/113709 repo-server RCE,
   CVE-2026-113672 file disclosure and other advisories. Installed chart 10.2.2
   is explicitly retained. Repository and Application access remain privileged.
@@ -63,3 +63,24 @@ pins differed from live values. OpenBao's chart rendered successfully.
 - [Argo CD advisories](https://github.com/argoproj/argo-cd/security/advisories)
 - [Traefik advisories](https://github.com/traefik/traefik/security/advisories)
 - [Go release history](https://go.dev/doc/devel/release)
+
+## Rebuilt OpenBao and seal plugin
+
+The official 2.6.4 image still contained Go 1.26.8 and x/net 0.58.0. The deployed
+OVH plugin separately used Go 1.26.4 and older gRPC. Harbor therefore rebuilds
+both exact upstream source commits with patched dependencies and retains the
+existing OVH key identifiers. The plugin moves from mutable PVC storage into the
+signed image, with a declared SHA-256 checksum. Private registry credentials are
+used only by kubelet and are not mounted into OpenBao.
+
+The combined image scanner's remaining six high alerts are version/package
+matching artifacts, not waived reachable vulnerabilities: five OpenBao records
+compare its `v0.0.0-...` Go module pseudo-version with historical fixed releases
+through 2.5.4, although the pinned server source is 2.6.4. The sixth,
+CVE-2025-59048, concerns the external `auth-aws` plugin; this binary contains only
+the OVH KMS plugin. Go/TLS/HTTP2/gRPC and OS findings were removed by the rebuild.
+
+Argo CD 3.4.12 also correctly checks hook permissions. Core's existing AppProject
+omitted batch/Job, so its migration hook initially failed closed. The host-owned
+project manifest now explicitly permits Jobs inside its existing destination and
+repository restrictions. No unrestricted project or hook bypass was introduced.
