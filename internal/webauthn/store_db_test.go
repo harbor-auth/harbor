@@ -164,6 +164,29 @@ func TestDBStore_GetUser_ProductionHandleFormat(t *testing.T) {
 	}
 }
 
+func TestDBStore_GetUser_ReadableAccountLabel(t *testing.T) {
+	// This raw handle contains invalid UTF-8 and NUL bytes. Interpreting it
+	// as a string previously saved replacement characters in passkey labels.
+	id := uuid.MustParse("00ff8011-2233-4455-8899-aabbccddeeff")
+	q := newFakeStoreQuerier()
+	uid := pgUUID(id)
+	q.users[uid] = db.User{ID: uid, Region: "EU", Status: "active"}
+	store := NewDBStore(q)
+	for _, handle := range [][]byte{id[:], []byte(id.String())} {
+		user, err := store.GetUser(context.Background(), handle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "Harbor " + id.String()
+		if user.WebAuthnName() != want || user.WebAuthnDisplayName() != want {
+			t.Fatalf("passkey labels = %q / %q, want %q", user.WebAuthnName(), user.WebAuthnDisplayName(), want)
+		}
+		if !bytes.Equal(user.WebAuthnID(), handle) {
+			t.Fatal("display label change altered the authenticator user handle")
+		}
+	}
+}
+
 func TestDBStore_GetUser_OK(t *testing.T) {
 	s, _, uid := newFakeDBStore(t)
 	u, err := s.GetUser(context.Background(), uidBytes(uid))

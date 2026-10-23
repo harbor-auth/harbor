@@ -79,10 +79,10 @@ func (s *DBStore) GetUser(ctx context.Context, userID []byte) (User, error) {
 	for _, c := range creds {
 		goCreds = append(goCreds, rowToGoCredential(c))
 	}
-	// name and displayName are display-only; Harbor stores no profile PII in the
-	// users table, so the opaque user ID string serves as both.
-	uidStr := string(userID)
-	return NewUser(userID, uidStr, uidStr, goCreds).WithRecoveryRequired(row.RecoveryRequired), nil
+	// The handle is opaque binary, not UTF-8 text. Keep the canonical UUID in
+	// the display-only label without changing the authenticator's user handle.
+	label := "Harbor " + uuid.UUID(uid.Bytes).String()
+	return NewUser(userID, label, label, goCreds).WithRecoveryRequired(row.RecoveryRequired), nil
 }
 
 // AddCredential implements Store: persists a newly-registered passkey.
