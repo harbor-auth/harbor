@@ -8,7 +8,7 @@
 | Audience | external teams building the Harbor Cloud marketing site and demo |
 | Code | `internal/bff/signup.go`, `internal/bff/signin.go`, `internal/bff/returnto.go`, `internal/bff/session.go`, `internal/mgmtapi/enroll.go`, `internal/mgmtapi/session.go`, `cmd/harbor-mgmt/caller.go`, `cmd/harbor-mgmt/main.go` |
 | Verified by | `internal/bff/signup_cta_contract_test.go` (`go test ./internal/bff/... -run TestSignupCTAContract`) |
-| Last reconciled | 2026-08-04 |
+| Last reconciled | 2026-09-10 |
 
 ## Purpose
 
@@ -39,10 +39,10 @@ harbor-mgmt-only hostname.
 
 - **Auth:** none (pre-session, public).
 - **Response:** `200 text/html`, `Content-Type: text/html; charset=utf-8`.
-- **Body:** the privacy-promise copy plus a region picker built from the
-  server's own accepted region list (currently EU / US / APAC). Selecting a
-  region and submitting the form on this page is what actually starts
-  enrollment — it `POST`s JSON to the existing `POST /enroll` endpoint.
+- **Body:** privacy copy, email input and the deployment's home region. Submitting
+  `POST /enroll` with `{email, region}` sends a code and displays the verification
+  form. Only a successful `POST /enroll/verify` creates the account and navigates
+  to `/signup/passkey`. Email verification never authenticates an existing account.
 - **Query parameters:** neither is required. `region` remains **inert**: the
   picker's in-page radio selection is authoritative, never a pre-selection
   from the query string (see [Region parameter semantics](#region-parameter-semantics)).
@@ -88,8 +88,8 @@ signup, not itself a CTA target) all validate `return_to` through the same
 function, `bff.ValidateReturnTo` (`internal/bff/returnto.go`). `GET /signup`
 validates once, at the point the value is first read from the client, and
 stashes the accepted value in a short-lived, `HttpOnly`/`Secure` cookie
-(`harbor_signup_return_to`) that `POST /enroll` folds into the enrollment
-session record — never re-parsed from a query string at any later hop
+(`harbor_signup_return_to`) that `POST /enroll` captures in the encrypted verification
+challenge; `POST /enroll/verify` then folds it into the enrollment session record — never re-parsed from a query string at any later hop
 (design.md Decision 5 / REQ-004):
 
 - A **same-origin relative path** starting with `/` (and not `//`, which
@@ -114,13 +114,11 @@ degrades gracefully to Harbor's own default landing path rather than erroring.
 
 ## Region parameter semantics
 
-`GET /signup`'s in-page region picker only ever offers the subset of
-`EU` / `US` / `APAC` that `internal/region.Parse` currently accepts
-(`internal/bff/signup.go`'s `allowedSignupRegions`) — a region retired from
-`region.Parse` disappears from the picker automatically rather than offering a
-choice the backend would reject. The region is submitted as a JSON field
-(`{"region": "EU"}`) in the `POST /enroll` request the page's own form issues;
-it is **not** read from this page's query string (see above).
+The production picker offers the current deployment's `REGION` only. To choose
+another home region, a caller must open that region's public signup origin before
+sending an email. The API rejects a region that differs from the deployment.
+`region` query parameters remain inert; the selected value is sent alongside
+`email` in the JSON body. See [email-first signup](../../features/email-first-signup.md).
 
 ## Known gaps (follow-on work, not part of this contract yet)
 

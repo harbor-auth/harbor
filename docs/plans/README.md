@@ -1,5 +1,7 @@
 # Harbor Plans — Dependency Graph & Build Order
 
+> **Current status (2026-10-22):** See [the project review](../PROJECT-STATUS.md) for current implementation evidence and release gaps. The older plan rows and dependency waves below are historical and have not been fully reconciled; several listed pending features are implemented.
+
 This file is the **navigation layer** for `docs/plans/`. It answers one
 question: **in what order do we build things, and what can we build in
 parallel?** Read the individual `*.md` files for the full rationale, schema

@@ -1,14 +1,18 @@
 package mgmtapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/harbor-auth/harbor/internal/identity"
 	"github.com/harbor-auth/harbor/internal/region"
+	"github.com/harbor-auth/harbor/internal/signup"
 	"github.com/harbor-auth/harbor/internal/telemetry"
 )
 
@@ -23,7 +27,7 @@ func parseUUIDToBytes(s string) ([]byte, error) {
 }
 
 // maxEnrollBody caps the enrollment request body. The body carries only a
-// region string, so a few KB is far beyond any legitimate request and stops a
+// email, region or verification code, so a few KB is far beyond any legitimate request and stops a
 // flooded /enroll from exhausting memory (docs/DESIGN.md §6.5).
 const maxEnrollBody = 4 * 1024
 
@@ -88,81 +92,131 @@ func signupReturnToFromCookie(r *http.Request) string {
 	return c.Value
 }
 
-// enrollRequest is the POST /enroll JSON body.
-type enrollRequest struct {
-	Region string `json:"region"`
+// EmailSignup is the only public enrollment authority. Finish must consume a
+// browser-bound verification code before atomically creating a new account.
+type EmailSignup interface {
+	Start(context.Context, string, string, string) (string, error)
+	Finish(context.Context, string, string) (identity.EnrollResult, string, error)
 }
 
-// enrollResponse is the POST /enroll success body: the new user's ID plus the
-// pending lifecycle status.
+const SignupVerificationCookieName = "harbor_signup_verification"
+
+type enrollRequest struct {
+	Region string `json:"region"`
+	Email  string `json:"email"`
+}
 type enrollResponse struct {
 	UserID string `json:"user_id"`
 	Region string `json:"region"`
 	Status string `json:"status"`
 }
 
-// PostEnroll is the enrollment front door (POST /enroll, docs/DESIGN.md §11.1).
-// It validates the requested region, creates a new sealed user via the
-// Enroller, and returns the new user ID with status=pending. The user stays
-// pending until passkey registration completes.
-//
-// Responses:
-//   - 201 Created             on success ({user_id, region, status:"pending"})
-//   - 400 Bad Request         malformed body or unknown region
-//   - 403 Forbidden           cross-site POST (see checkPreSessionOrigin)
-//   - 429 Too Many Requests   abuse-gate limit exceeded
-//   - 503 Service Unavailable enrollment not wired (no DB / KEK)
-//   - 500 Internal Server Error any other enrollment failure
-func (s *Server) PostEnroll(w http.ResponseWriter, r *http.Request) {
+func (s *Server) WithEmailSignup(flow EmailSignup) *Server {
+	s.emailSignup = flow
+	return s
+}
+
+func (s *Server) signupAllowed(w http.ResponseWriter, r *http.Request) bool {
+	w.Header().Set("Cache-Control", "no-store")
 	if err := checkPreSessionOrigin(r); err != nil {
 		s.writeError(w, http.StatusForbidden, "forbidden", "cross-site request rejected")
-		return
+		return false
 	}
 	if s.abuseGate != nil && !s.abuseGate.Check(r.Context(), "enroll", abuseSource(r)) {
 		s.writeError(w, http.StatusTooManyRequests, "rate_limited", "too many requests")
+		return false
+	}
+	if s.emailSignup == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "unavailable", "email signup is not configured")
+		return false
+	}
+	return true
+}
+func decodeSignup(w http.ResponseWriter, r *http.Request, into any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxEnrollBody)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(into); err != nil {
+		return err
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return errors.New("unexpected trailing JSON")
+	}
+	return nil
+}
+
+// PostEnroll sends a code. It never creates a user or a WebAuthn enrollment session.
+func (s *Server) PostEnroll(w http.ResponseWriter, r *http.Request) {
+	if !s.signupAllowed(w, r) {
+		return
+	}
+	var req enrollRequest
+	if err := decodeSignup(w, r, &req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "invalid_request", "provide an email and region")
+		return
+	}
+	reg, err := region.Parse(req.Region)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "invalid_region", "unknown or unsupported region")
+		return
+	}
+	// A regional deployment must never accept PII into another region's store.
+	if s.signupRegion != "" && string(reg) != s.signupRegion {
+		s.writeError(w, http.StatusBadRequest, "invalid_region", "use this deployment's region")
+		return
+	}
+	if _, err := signup.NormalizeEmail(req.Email); err != nil {
+		s.writeError(w, http.StatusBadRequest, "invalid_email", "enter a valid email address")
+		return
+	}
+	key, err := s.emailSignup.Start(r.Context(), req.Email, string(reg), signupReturnToFromCookie(r))
+	if err != nil {
+		if errors.Is(err, signup.ErrRateLimited) {
+			s.writeError(w, http.StatusTooManyRequests, "rate_limited", "too many verification requests")
+			return
+		}
+		s.writeError(w, http.StatusServiceUnavailable, "unavailable", "could not send verification email; try again")
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: SignupVerificationCookieName, Value: key, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: int(signup.TTL.Seconds())})
+	s.writeJSON(w, http.StatusAccepted, map[string]string{"status": "verification_required"})
+}
+
+// PostEnrollVerify consumes the email code, creates the identified account,
+// and only then issues the browser's first-passkey enrollment session.
+func (s *Server) PostEnrollVerify(w http.ResponseWriter, r *http.Request) {
+	if !s.signupAllowed(w, r) {
+		return
+	}
+	var req struct {
+		Code string `json:"code"`
+	}
+	if err := decodeSignup(w, r, &req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "invalid_request", "provide the verification code")
+		return
+	}
+	cookie, err := r.Cookie(SignupVerificationCookieName)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "invalid_code", "verification expired; start signup again")
 		return
 	}
 	start := time.Now()
 	outcome := telemetry.OutcomeError
 	defer func() { recordRequest(telemetry.EndpointEnroll, outcome, start) }()
-
-	if s.enroller == nil {
-		recordError(telemetry.EndpointEnroll, "unavailable")
-		s.writeError(w, http.StatusServiceUnavailable, "unavailable",
-			"enrollment is not configured on this instance")
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, maxEnrollBody)
-	var req enrollRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		recordError(telemetry.EndpointEnroll, "invalid_request")
-		s.writeError(w, http.StatusBadRequest, "invalid_request", "malformed JSON request body")
-		return
-	}
-
-	// Validate the region up front so a bad region is a clean 400 and cannot be
-	// confused with a server-side enrollment failure below. req.Region is a
-	// region *code* (e.g. "us", "eu"), not a host, so region.Parse is the correct
-	// validator here — region.Resolve maps hosts (e.g. "us.harbor.id") and would
-	// reject every valid enrollment. Parse is pure and deterministic, so this
-	// does not race with Enroll's own parse.
-	if _, err := region.Parse(req.Region); err != nil {
-		recordError(telemetry.EndpointEnroll, "invalid_region")
-		s.writeError(w, http.StatusBadRequest, "invalid_region", "unknown or unsupported region")
-		return
-	}
-
-	res, err := s.enroller.Enroll(r.Context(), req.Region)
+	res, returnTo, err := s.emailSignup.Finish(r.Context(), cookie.Value, req.Code)
 	if err != nil {
-		// Region is already validated, so a failure here is server-side (DEK
-		// generation, KEK wrap, encrypt, or DB persist). The error may carry
-		// internal detail, so log it and return a generic 500 (docs/DESIGN.md §6.5).
-		s.logger.ErrorContext(r.Context(), "enrollment failed", "error", err)
-		recordError(telemetry.EndpointEnroll, "server_error")
-		s.writeError(w, http.StatusInternalServerError, "server_error", "enrollment failed")
+		switch {
+		case errors.Is(err, signup.ErrInvalidCode):
+			s.writeError(w, http.StatusBadRequest, "invalid_code", "code is incorrect or expired")
+		case errors.Is(err, identity.ErrIdentifierExists):
+			http.SetCookie(w, &http.Cookie{Name: SignupVerificationCookieName, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
+			s.writeError(w, http.StatusConflict, "account_exists", "an account already uses this email; sign in with your passkey")
+		default:
+			s.writeError(w, http.StatusInternalServerError, "server_error", "could not complete signup; start again")
+		}
 		return
 	}
+	http.SetCookie(w, &http.Cookie{Name: SignupVerificationCookieName, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 
 	// When an enrollment session store is wired, save the new user's handle and
 	// set an HttpOnly cookie so the passkey registration ceremony can bind to
@@ -184,7 +238,7 @@ func (s *Server) PostEnroll(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusInternalServerError, "server_error", "enrollment failed")
 			return
 		}
-		if err := s.sessions.Save(r.Context(), key, userHandle, false, signupReturnToFromCookie(r)); err != nil {
+		if err := s.sessions.Save(r.Context(), key, userHandle, false, returnTo); err != nil {
 			s.logger.ErrorContext(r.Context(), "save enrollment session failed", "error", err)
 			recordError(telemetry.EndpointEnroll, "server_error")
 			s.writeError(w, http.StatusInternalServerError, "server_error", "enrollment failed")

@@ -15,7 +15,7 @@ const definition: AgentDefinition = {
   id: 'harbor-reviewer',
   displayName: 'Harbor Reviewer',
   // Model can be tuned as needed (e.g. a stronger model for security-sensitive diffs).
-  model: 'anthropic/claude-sonnet-4',
+  model: 'anthropic/claude-sonnet-5',
   spawnerPrompt:
     'Review Harbor changes against security, privacy, data-sovereignty, spec-first, and testing principles.',
   inputSchema: {

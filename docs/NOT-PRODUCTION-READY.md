@@ -1,5 +1,11 @@
 # NOT PRODUCTION READY
 
+> Historical deployment audit. Findings below were recorded in August 2026,
+> partially superseded by the October 22 production inspection: OpenBao now
+> uses OVH auto-unseal and Harbor Argo self-healing is enabled. Other findings
+> remain historical unless explicitly reverified. See
+> [current project status](PROJECT-STATUS.md) for the evidence boundary.
+
 **Status as of 2026-08-08.** The system is deployed and working end to end. It
 is **not** ready to carry real users, and this file says exactly why.
 

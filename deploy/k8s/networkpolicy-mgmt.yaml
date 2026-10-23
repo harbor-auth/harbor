@@ -40,6 +40,13 @@ spec:
         - port: 8081
           protocol: TCP
   egress:
+    # Replace this documentation-only address with the regional SMTP provider.
+    - to:
+        - ipBlock:
+            cidr: 192.0.2.1/32
+      ports:
+        - port: 587
+          protocol: TCP
     # DNS resolution (kube-dns / CoreDNS). Both UDP and TCP on 53.
     - to:
         - namespaceSelector: {}

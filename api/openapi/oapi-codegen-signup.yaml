@@ -1,0 +1,6 @@
+package: signupapi
+output: internal/gen/signupapi/signup.gen.go
+generate:
+  models: true
+  std-http-server: true
+  embedded-spec: true

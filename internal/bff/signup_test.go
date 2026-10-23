@@ -132,8 +132,8 @@ func TestGetSignup_RendersOnlyAcceptedRegions(t *testing.T) {
 }
 
 // TestGetSignup_NoUserIDParameter proves the signup page never echoes or
-// solicits a client-supplied user_id or email — the enrollment session cookie
-// set by POST /enroll is the only supported identity seam (docs/DESIGN.md §9).
+// solicits a client-supplied user_id — the enrollment session cookie
+// set by POST /enroll/verify is the only supported account-ownership seam (docs/DESIGN.md §9).
 func TestGetSignup_NoUserIDParameter(t *testing.T) {
 	h := newTestSignupHandler(t)
 

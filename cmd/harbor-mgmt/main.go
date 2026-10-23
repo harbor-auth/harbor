@@ -37,6 +37,7 @@ import (
 	"github.com/harbor-auth/harbor/internal/mgmtapi"
 	"github.com/harbor-auth/harbor/internal/region"
 	"github.com/harbor-auth/harbor/internal/relay"
+	"github.com/harbor-auth/harbor/internal/signup"
 	"github.com/harbor-auth/harbor/internal/telemetry"
 	"github.com/harbor-auth/harbor/internal/webauthn"
 	"github.com/harbor-auth/harbor/web"
@@ -176,7 +177,8 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	q := db.New(pool)
 	bffStore := bff.NewRedisBFFSessionStore(redisClient, bffSessionTTL)
 	enrollmentSessions := mgmtapi.NewRedisEnrollmentSessionStore(redisClient)
-	credentialStore := webauthn.NewDBStore(q).WithPool(pool)
+	identifierStore := clients.NewDBIdentifierStore(pool, kp, crypto.NewCipher())
+	credentialStore := webauthn.NewDBStore(q).WithPool(pool).WithAccountLabels(identifierStore)
 	ceremonySessions := webauthn.NewRedisSessionStore(redisClient, bffSessionTTL)
 	webauthnService, err := webauthn.NewService(webauthn.Config{
 		RPID: rpID, RPDisplayName: getenv("WEBAUTHN_RP_DISPLAY_NAME", "Harbor"), RPOrigins: rpOrigins,
@@ -187,6 +189,19 @@ func run(ctx context.Context, logger *slog.Logger) error {
 
 	persister := clients.NewDBUserPersister(q)
 	enroller := identity.NewEnroller(kp, crypto.NewCipher(), persister)
+	lookupKey, err := hex.DecodeString(os.Getenv("SIGNUP_IDENTIFIER_KEY"))
+	if err != nil || len(lookupKey) != 32 {
+		return errors.New("SIGNUP_IDENTIFIER_KEY must be a stable random 32-byte hex key")
+	}
+	mailer, err := signup.NewSMTPMailer(os.Getenv("SIGNUP_SMTP_ADDR"), os.Getenv("SIGNUP_SMTP_FROM"), os.Getenv("SIGNUP_SMTP_USERNAME"), os.Getenv("SIGNUP_SMTP_PASSWORD"))
+	if err != nil {
+		return err
+	}
+	emailSignup, err := signup.New(signup.NewRedisChallenges(redisClient), mailer, kp, lookupKey, enroller, identifierStore)
+	if err != nil {
+		return err
+	}
+
 	grantStore := clients.NewDBGrantStore(q)
 	sessionStore := clients.NewDBSessionStoreWithPool(q, pool)
 	registrationStore := clients.NewDBClientRegistrationStore(q)
@@ -209,7 +224,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 		Decryptor: crypto.NewCipher(),
 	}
 	complianceDeps := &mgmtapi.ComplianceDeps{
-		Bundler: identity.NewExportBundler(q, q, q, q, kp, crypto.NewCipher()),
+		Bundler: identity.NewExportBundler(q, q, q, q, kp, crypto.NewCipher()).WithIdentifiers(q),
 		Eraser:  identity.NewEraser(q, q, auditRecorder, logger),
 		Users:   userLoader,
 	}
@@ -253,6 +268,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 	// Shared by both PostRecoveryComplete (lost-device recovery) and the
 	// post-registration handoff below (first-time signup): the two entry
 	// points into the exact same enrollment-only BFF session type.
+	mgmtServer.WithEmailSignup(emailSignup).WithSignupRegion(string(reg))
 	enrollmentSessionIssuer := &recoverySessionIssuer{bffSessions: bffStore, enrollmentSessions: enrollmentSessions}
 	// Shared by both PostRecoveryAcknowledge and the post-registration handoff
 	// below (lost-device recovery's own register/finish): both refresh an
@@ -354,7 +370,7 @@ func run(ctx context.Context, logger *slog.Logger) error {
 			ssoLoginCodes, bffStore, dbActiveUserChecker{q: q}, auditRecorder, ssoLoginAbuseProtection.limiter, ssoDashboardPath, logger,
 		))
 	}
-	signupHandler.Routes(mux)
+	signupHandler.WithSignupRegion(string(reg)).Routes(mux)
 	loginHandler := bff.NewLoginHandler(bffStore, newBFFWebAuthnAdapter(webauthnService), bff.DiscoverableUserResolver{}, authorizeCompleteURL)
 	mux.HandleFunc("GET /login", loginHandler.BeginLogin)
 	mux.HandleFunc("POST /login/complete", loginHandler.FinishLogin)

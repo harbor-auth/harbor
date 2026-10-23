@@ -35,11 +35,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
 	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/jackc/pgx/v5"
@@ -100,11 +98,7 @@ func openDB(t *testing.T) *pgx.Conn {
 // exactly how a browser carries the handoff (docs/DESIGN.md §9, §11.1).
 func jarClient(t *testing.T) *http.Client {
 	t.Helper()
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		t.Fatalf("cookiejar: %v", err)
-	}
-	return &http.Client{Jar: jar}
+	return signupJarClient(t)
 }
 
 // enroll POSTs to /enroll and returns the created user's ID and region. It fails
@@ -112,36 +106,9 @@ func jarClient(t *testing.T) *http.Client {
 // tests to mean anything) but skips if harbor-mgmt is unreachable entirely.
 func enroll(t *testing.T, client *http.Client) (userID, region string) {
 	t.Helper()
-	body, err := json.Marshal(map[string]string{"region": enrollRegion()})
+	raw, err := httpVerifiedEnrollment(client)
 	if err != nil {
-		t.Fatalf("marshal enroll body: %v", err)
-	}
-	resp, err := client.Post(mgmtBaseURL()+enrollPath, "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		unavailable(t, "harbor-mgmt unreachable at %s: %v", mgmtBaseURL(), err)
-	}
-	// Journey setup shares one IP across the suite. Respect the production
-	// enrollment quota instead of treating an exhausted window as a login bug.
-	// Dedicated abuse tests send their own requests and still assert 429.
-	deadline := time.Now().Add(65 * time.Second)
-	for resp.StatusCode == http.StatusTooManyRequests && time.Now().Before(deadline) {
-		_ = resp.Body.Close()
-		time.Sleep(time.Second)
-		resp, err = client.Post(mgmtBaseURL()+enrollPath, "application/json", strings.NewReader(string(body)))
-		if err != nil {
-			t.Fatal("enrollment retry request failed")
-		}
-	}
-	defer func() { _ = resp.Body.Close() }()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read enroll response: %v", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		if resp.StatusCode == http.StatusServiceUnavailable {
-			unavailable(t, "POST /enroll = 503 (enrollment not wired: set DATABASE_URL + development test key provider)")
-		}
-		t.Fatalf("POST /enroll = %d, want 2xx\n%s", resp.StatusCode, raw)
+		t.Fatalf("verified enrollment: %v", err)
 	}
 	userID, region = parseEnrollResponse(t, raw)
 	if userID == "" {
@@ -252,24 +219,9 @@ func TestEnrollmentPerCallIsIndependent(t *testing.T) {
 // and returns no profile PII (docs/DESIGN.md §5, §6.5). This is the black-box
 // proxy for "no PII in logs": the response is the only caller-visible surface.
 func TestEnrollmentResponseHasNoPII(t *testing.T) {
-	body, err := json.Marshal(map[string]string{"region": enrollRegion()})
+	raw, err := httpVerifiedEnrollment(signupJarClient(t))
 	if err != nil {
-		t.Fatalf("marshal enroll body: %v", err)
-	}
-	resp, err := http.Post(mgmtBaseURL()+enrollPath, "application/json", strings.NewReader(string(body)))
-	if err != nil {
-		t.Skipf("harbor-mgmt unreachable at %s: %v — skipping", mgmtBaseURL(), err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read enroll response: %v", err)
-	}
-	if resp.StatusCode == http.StatusServiceUnavailable {
-		t.Skip("POST /enroll = 503 (enrollment not wired) — skipping")
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		t.Fatalf("POST /enroll = %d, want 2xx\n%s", resp.StatusCode, raw)
+		t.Fatal(err)
 	}
 
 	lower := strings.ToLower(string(raw))

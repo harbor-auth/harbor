@@ -11,6 +11,8 @@ data:
   USER_DEK_PROVIDER: "local"
   USER_DEK_LEGACY_READ_ENABLED: "false"
   USER_DEK_WRITE_EXTERNAL_ENABLED: "true"
+  SIGNUP_SMTP_ADDR: "smtp.example.com:587" # Replace with regional submission host.
+  SIGNUP_SMTP_FROM: "signup@example.com"
   PORT: "8081"
   REGION: "EU"
   KMS_KEY_MAP: "EU=REPLACE_WITH_REGIONAL_KMS_KEY_ID"

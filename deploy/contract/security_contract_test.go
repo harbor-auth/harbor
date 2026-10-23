@@ -141,14 +141,20 @@ func assertPublicLoginRoute(t *testing.T, objects []object) {
 	}
 	paths := pathSlice(t, pathMap(t, rule, "http"), "paths")
 	want := map[string]string{
-		"/login":     "harbor-mgmt",
-		"/signup":    "harbor-mgmt",
-		"/signin":    "harbor-mgmt",
-		"/enroll":    "harbor-mgmt",
-		"/webauthn":  "harbor-mgmt",
-		"/recovery":  "harbor-mgmt",
-		"/dashboard": "harbor-mgmt", // M2: SSO_DASHBOARD_PATH's default landing target (GET /login/sso, and the post-registration handoff) must resolve to harbor-mgmt, not fall through to harbor-hot's catch-all.
-		"/":          "harbor-hot",
+		"/login":           "harbor-mgmt",
+		"/signup":          "harbor-mgmt",
+		"/signin":          "harbor-mgmt",
+		"/enroll":          "harbor-mgmt",
+		"/webauthn":        "harbor-mgmt",
+		"/recovery":        "harbor-mgmt",
+		"/dashboard":       "harbor-mgmt", // M2: SSO_DASHBOARD_PATH's default landing target (GET /login/sso, and the post-registration handoff) must resolve to harbor-mgmt, not fall through to harbor-hot's catch-all.
+		"/":                "harbor-hot",
+		"/mfa":             "harbor-mgmt",
+		"/audit-events":    "harbor-mgmt",
+		"/consent-grants":  "harbor-mgmt",
+		"/relay-addresses": "harbor-mgmt",
+		"/compliance":      "harbor-mgmt",
+		"/byo-domains":     "harbor-mgmt",
 	}
 	for _, item := range paths {
 		path, ok := asObject(item)
@@ -433,7 +439,7 @@ func assertWorkloadContract(t *testing.T, variant string, objects []object) {
 				}
 			}
 			for port := range ports {
-				if port != 53 && port != 5432 && port != 6379 && port != 443 && port != 8080 && port != 8086 && port != 8090 && port != 8200 {
+				if (component != "harbor-mgmt" || port != 587) && port != 53 && port != 5432 && port != 6379 && port != 443 && port != 8080 && port != 8086 && port != 8090 && port != 8200 {
 					t.Errorf("unexpected egress port %d", port)
 				}
 			}
@@ -445,11 +451,11 @@ func assertRuntimeConfigurationContract(t *testing.T, objects []object, requireS
 	t.Helper()
 	requiredConfig := map[string][]string{
 		"harbor-hot":  {"ISSUER", "LOGIN_URL", "REGION"},
-		"harbor-mgmt": {"AUTHORIZE_COMPLETE_URL", "REGISTRATION_BASE_URL", "REGION", "WEBAUTHN_RP_DISPLAY_NAME", "WEBAUTHN_RP_ID", "WEBAUTHN_RP_ORIGINS"},
+		"harbor-mgmt": {"SIGNUP_SMTP_ADDR", "SIGNUP_SMTP_FROM", "AUTHORIZE_COMPLETE_URL", "REGISTRATION_BASE_URL", "REGION", "WEBAUTHN_RP_DISPLAY_NAME", "WEBAUTHN_RP_ID", "WEBAUTHN_RP_ORIGINS"},
 	}
 	requiredSecrets := map[string][]string{
 		"harbor-hot":  {"DATABASE_URL", "HARBOR_KMS_SECRET", "REDIS_URL"},
-		"harbor-mgmt": {"DATABASE_URL", "HARBOR_KMS_SECRET", "INITIAL_ACCESS_TOKEN", "REDIS_URL"},
+		"harbor-mgmt": {"SIGNUP_IDENTIFIER_KEY", "DATABASE_URL", "HARBOR_KMS_SECRET", "INITIAL_ACCESS_TOKEN", "REDIS_URL"},
 	}
 
 	for _, component := range []string{"harbor-hot", "harbor-mgmt"} {

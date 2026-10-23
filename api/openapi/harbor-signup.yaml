@@ -1,0 +1,153 @@
+openapi: 3.1.0
+info:
+  title: Harbor Email Signup API
+  version: 0.1.0
+  contact:
+    name: Harbor
+    url: https://github.com/harbor-auth/harbor
+  description: Browser-bound email verification for new public passkey accounts. Email verification never authenticates an existing account.
+tags:
+  - name: Signup
+    description: Verified-email enrollment for new accounts.
+servers:
+  - url: https://auth.eu.harbor.example
+paths:
+  /enroll:
+    post:
+      operationId: postEnroll
+      tags: [Signup]
+      summary: Send an email verification code
+      description: >-
+        Accepts a plain ASCII email address and this deployment's home region.
+        Returns the same response for new and existing emails. Sets an HttpOnly,
+        Secure, SameSite=Strict harbor_signup_verification cookie for ten minutes.
+        No account or passkey enrollment session is created. Source and destination
+        rate limits apply. The destination captured by GET /signup is carried in
+        server-side encrypted state. Cross-site requests are rejected.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [email, region]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  maxLength: 254
+                region:
+                  type: string
+                  enum: [EU, US, APAC]
+      responses:
+        '202':
+          description: Verification email sent; enter its eight-digit code in the same browser.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [verification_required]
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /enroll/verify:
+    post:
+      operationId: postEnrollVerify
+      tags: [Signup]
+      summary: Verify email and enroll a new account
+      description: >-
+        Requires the browser's harbor_signup_verification cookie and email code.
+        Atomically consumes the challenge, allowing at most five attempts in ten
+        minutes. Creates a new account and verified email identifier atomically,
+        then sets harbor_enrollment_session for first-passkey registration. Recovery
+        setup is still mandatory. No existing account is authenticated or linked.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [code]
+              properties:
+                code:
+                  type: string
+                  pattern: '^[0-9]{8}$'
+      responses:
+        '201':
+          description: Email verified and account pending first passkey registration.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [user_id, region, status]
+                properties:
+                  user_id:
+                    type: string
+                    format: uuid
+                  region:
+                    type: string
+                  status:
+                    type: string
+                    enum: [pending]
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Verified email belongs to an existing account. Sign in with its passkey; no enrollment cookie is issued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/Unavailable'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+components:
+  schemas:
+    Error:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+  responses:
+    InvalidRequest:
+      description: Invalid email, region, body, or incorrect/expired verification code.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Cross-site request rejected.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: Verification request budget exhausted.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unavailable:
+      description: Signup dependency unavailable. Restart signup if the challenge was consumed.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
