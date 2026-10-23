@@ -13,9 +13,9 @@ spec:
   failurePolicy: abort
   valuesContent: |
     image:
-      tag: v3.7.12
-      digest: sha256:7523e37d0694ff940ee9cefe2184c5869dd0c0db7d6c5ee78254f7d985deecc6
-    versionOverride: v3.7.12
+      tag: v3.7.16
+      digest: sha256:abb2b9c1b132b5b0be40d09c85bf8d3dab2a59fa0eb3aa955ab8be5efbb73de6
+    versionOverride: v3.7.16
     deployment:
       kind: DaemonSet
       dnsPolicy: ClusterFirstWithHostNet

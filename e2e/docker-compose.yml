@@ -133,7 +133,7 @@ services:
         condition: service_healthy
 
   harbor-hot:
-    image: golang:1.26
+    image: golang:1.26.10
     working_dir: /src
     command: ["go", "run", "./cmd/harbor-hot"]
     environment:
@@ -166,7 +166,7 @@ services:
       start_period: 120s
 
   harbor-mgmt:
-    image: golang:1.26
+    image: golang:1.26.10
     working_dir: /src
     command: ["go", "run", "./cmd/harbor-mgmt"]
     environment:
