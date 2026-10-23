@@ -2,9 +2,9 @@
 
 > [!WARNING]
 > **The live deployment is not production ready.** It works end to end, but it
-> is carrying deliberate shortcuts — including an over-scoped registry
-> credential, an OpenBao instance whose five unseal shares all sit on one
-> machine, and no offsite backups. See
+> is carrying deliberate shortcuts — including unresolved release and recovery checks. The October 22 inspection
+> found an older signup deployment and missing management API ingress routes.
+> OpenBao now uses OVH auto-unseal; older manual-unseal notes are historical. See
 > [docs/NOT-PRODUCTION-READY.md](docs/NOT-PRODUCTION-READY.md) before pointing
 > anything at it that you would be sorry to lose.
 
@@ -14,7 +14,7 @@ Harbor is an OpenID Provider (OP) that authenticates people to the apps they've 
 
 ## Principles
 
-- **Verifiable privacy.** We technically constrain *ourselves* from tracking users. Pairwise pseudonymous identifiers (PPID) mean relying parties can't correlate you across apps — and neither can we.
+- **Verifiable privacy.** We technically constrain *ourselves* from tracking users. Pairwise pseudonymous identifiers (PPID) prevent relying parties from correlating subjects across apps. PPIDs alone do not prove provider-side non-correlation; see [current evidence](docs/PROJECT-STATUS.md).
 - **Data sovereignty.** Each user lives in exactly one jurisdiction. Their data never leaves that region. Region is encoded in identifiers so requests route at the edge with no global lookup.
 - **Extreme performance, low cost.** The sign-in / token-verification hot path is stateless and edge-cacheable (asymmetric JWTs verified via JWKS, no DB hit), so we can serve millions of verifications per second cheaply.
 - **Standards-first, contract-first, codegen-everywhere.** We never invent what an open standard already solves, every interface (external *and* internal) is defined by a versioned machine-readable contract, and anything derivable from a spec is generated — not hand-maintained.
@@ -23,23 +23,32 @@ Harbor is an OpenID Provider (OP) that authenticates people to the apps they've 
 
 | Layer | Choice |
 |---|---|
-| Core backend | **Go** (modular monolith; `zitadel/oidc`, `go-webauthn`, `pgx` + `sqlc`) |
+| Core backend | **Go** (modular monolith; in-repo OIDC implementation, `go-webauthn`, `pgx` + `sqlc`) |
 | Auth factors | **Passkeys (WebAuthn)** primary; TOTP + recovery codes secondary |
 | Protocols | **OIDC / OAuth 2.1 + PKCE**; SAML deferred |
 | Data | **Postgres + Redis** per region; envelope encryption via regional KMS/HSM |
-| Frontend | **Next.js (React) + TypeScript** dashboard & auth UI (typed API client generated from OpenAPI) |
+| Frontend | **Go HTML templates** for dashboard & auth UI; React/TypeScript sign-in button SDK |
 | Contracts | **OpenAPI 3.1** (REST) · **Protobuf/gRPC** (internal) · **SQL + `sqlc`** (data) — spec-first, codegen-verified in CI |
 | Deploy | **Kubernetes**, multi-jurisdiction, anycast/GeoDNS edge |
 
 ## Status
 
-🚧 **Foundation / scaffolding.** The design is set and the codegen-first foundation is landing: spec-first API contracts (`api/openapi`, `api/proto`), the Go modular-monolith skeleton (`harbor-hot` / `harbor-mgmt` serving spec-generated OIDC discovery + health), the Postgres schema + migrations, PPID derivation (with a golden regression vector), and the `make generate` / `validate` / `test` toolchain wiring the `.agents/` skills. No production auth flows (`/authorize`, `/token`, passkeys) yet.
+**Implemented MVP; production readiness unverified.** The Go services implement
+OIDC Authorization Code + PKCE, signed tokens, refresh/revocation/logout,
+verified-email signup, durable passkeys, MFA/recovery, consent and account
+management, and cloud provisioning. `go test ./...` passed during the
+2026-10-21 repository review. This does not establish live deployment health,
+end-to-end completion, certification, or disaster recovery.
+
+See [the current project review](docs/PROJECT-STATUS.md) for implementation
+evidence, known gaps, and the proposed private-beta release gates. Older plan
+statuses and deployment audits are historical until reverified.
 
 ## Getting started
 
 ### Prerequisites
 
-Harbor pins its entire toolchain (Go 1.26, `sqlc`, `oapi-codegen`, `buf`,
+Harbor pins its toolchain (Go 1.25, `sqlc`, `oapi-codegen`, `buf`,
 `golangci-lint`, `go-migrate`, `k6`, Node/`pnpm`) with Nix so
 local and CI runs are byte-identical. Enter the hermetic dev shell:
 
@@ -47,7 +56,7 @@ local and CI runs are byte-identical. Enter the hermetic dev shell:
 nix develop            # drops you into the pinned toolchain shell
 ```
 
-Without Nix you need Go 1.26+ and Docker (for the e2e / conformance gates); the
+Without Nix you need Go 1.25+ and Docker (for the e2e / conformance gates); the
 `make` targets **fail closed** with an install hint when a required tool is
 missing. Run `make help` to list every target.
 
@@ -137,8 +146,9 @@ Foundation OP certification suite and the WebAuthn gate (requires Docker):
 make conformance       # e2e smoke -> OIDF OP plan -> assert -> WebAuthn gate
 ```
 
-The OIDF OP suite is intentionally **honest red** until harbor-hot reaches real
-OIDC compliance (asymmetric-signed tokens, pairwise subjects) — details in
+The certification harness is implemented, but a passing current run has not
+been established. The available local July artifact records a runner failure
+and no completed modules; it is not evidence of certification. See
 [conformance/README.md](conformance/README.md).
 
 ## KMS Credentials — Bootstrap, Rotation, and Rollback

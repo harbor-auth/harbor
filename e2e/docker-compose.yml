@@ -15,7 +15,34 @@ x-harbor-dependencies: &harbor-dependencies
   # Both binaries must derive the same KEK when wrapping/unwrapping user DEKs.
   HARBOR_KMS_SECRET: e2e-shared-user-dek-kek-change-me
 
+volumes:
+  signup-mail-tls:
+
 services:
+  mail-cert:
+    image: golang:1.26
+    entrypoint: ["sh", "-ec"]
+    command:
+      - >-
+        openssl req -x509 -newkey rsa:2048 -nodes -days 7
+        -keyout /certs/key.pem -out /certs/cert.pem -subj /CN=mailpit
+        -addext 'subjectAltName=DNS:mailpit,DNS:localhost,IP:127.0.0.1'
+        -addext 'basicConstraints=critical,CA:TRUE'
+    volumes:
+      - signup-mail-tls:/certs
+
+  mailpit:
+    image: axllent/mailpit:v1.26.0
+    environment:
+      MP_SMTP_TLS_CERT: /certs/cert.pem
+      MP_SMTP_TLS_KEY: /certs/key.pem
+      MP_SMTP_REQUIRE_STARTTLS: "true"
+    ports: ["127.0.0.1:8025:8025"]
+    volumes:
+      - signup-mail-tls:/certs:ro
+    depends_on:
+      mail-cert:
+        condition: service_completed_successfully
   postgres:
     image: postgres:16-alpine
     environment:
@@ -145,6 +172,10 @@ services:
     environment:
       <<: *harbor-dependencies
       PORT: "8081"
+      SIGNUP_IDENTIFIER_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+      SIGNUP_SMTP_ADDR: mailpit:1025
+      SIGNUP_SMTP_FROM: signup@harbor.example
+      SSL_CERT_FILE: /mail-tls/cert.pem
       REGION: EU
       AUTHORIZE_COMPLETE_URL: http://localhost:8080/authorize/complete
       REGISTRATION_BASE_URL: http://localhost:8081
@@ -157,7 +188,10 @@ services:
     ports: ["8081:8081"]
     volumes:
       - ..:/src:ro
+      - signup-mail-tls:/mail-tls:ro
     depends_on:
+      mailpit:
+        condition: service_started
       harbor-hot:
         condition: service_healthy
       seed-rp:

@@ -24,6 +24,9 @@ func setValidManagementEnvironment(t *testing.T) {
 	t.Setenv("RELAY_DOMAIN", "relay.integration.harbor.test")
 	t.Setenv("REGION", "EU")
 	t.Setenv("PORT", "0")
+	t.Setenv("SIGNUP_IDENTIFIER_KEY", strings.Repeat("ab", 32))
+	t.Setenv("SIGNUP_SMTP_ADDR", "localhost:587")
+	t.Setenv("SIGNUP_SMTP_FROM", "signup@integration.harbor.test")
 }
 
 // TestRunRejectsMissingDatabaseBeforeGraphObservation proves a missing required

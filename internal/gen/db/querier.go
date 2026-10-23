@@ -20,6 +20,7 @@ type Querier interface {
 	// Counts remaining unused recovery codes for a user. Used to warn users
 	// when they're running low on codes and should generate new ones.
 	CountUnusedCodes(ctx context.Context, userID pgtype.UUID) (int64, error)
+	CreateAccountIdentifier(ctx context.Context, arg CreateAccountIdentifierParams) error
 	// Queries for the audit_events table (the user-visible auth trail; DESIGN §10,
 	// §11.6). This log is APPEND-ONLY — no update/delete — so users get a truthful,
 	// tamper-evident history. The query IS the contract (DESIGN §1.3): `sqlc
@@ -167,6 +168,7 @@ type Querier interface {
 	// Clean up delivered revocation signals older than the retention period.
 	// Background cleanup, off the hot path.
 	DeleteDeliveredRevocations(ctx context.Context, createdAt pgtype.Timestamptz) error
+	DeleteExpiredPendingSignup(ctx context.Context, id pgtype.UUID) (int64, error)
 	// DeleteExpiredSessions reaps rows whose refresh token has expired — background
 	// cleanup, off the hot path.
 	DeleteExpiredSessions(ctx context.Context) error
@@ -204,6 +206,7 @@ type Querier interface {
 	// same signal while this worker is delivering it. A crashed worker's lease
 	// expires after 30 seconds and the durable row becomes eligible again.
 	FetchPendingRevocations(ctx context.Context, limit int32) ([]RevocationOutbox, error)
+	FindAccountIdentifier(ctx context.Context, arg FindAccountIdentifierParams) (User, error)
 	// FindGrantByPPID looks up an active grant by its pairwise_sub (PPID) and
 	// client_id. Used during RP-Initiated Logout to reverse-lookup the userID from
 	// the id_token_hint's sub claim without exposing internal user IDs to RPs.
@@ -363,6 +366,7 @@ type Querier interface {
 	// JTI), update reason/expires_at to latest values. This is idempotent so
 	// retries and duplicate pub/sub messages are safe.
 	InsertRevokedJTI(ctx context.Context, arg InsertRevokedJTIParams) (RevokedJti, error)
+	ListAccountIdentifiers(ctx context.Context, userID pgtype.UUID) ([]AccountIdentifier, error)
 	// ListActiveRevokedJTIs returns all JTIs that are still within their JWT's
 	// original expiry window. Used to rehydrate the bloom filter on startup.
 	ListActiveRevokedJTIs(ctx context.Context) ([]RevokedJti, error)

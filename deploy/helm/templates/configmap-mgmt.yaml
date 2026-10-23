@@ -13,6 +13,8 @@ data:
   {{- if eq .Values.userDEK.provider "openbao" }}
   USER_DEK_KEY_MAP: {{ required "userDEK.keyMap is required for OpenBao user data" .Values.userDEK.keyMap | quote }}
   {{- end }}
+  SIGNUP_SMTP_ADDR: {{ printf "%s:%v" .Values.mgmt.signup.smtpHost .Values.mgmt.signup.smtpPort | quote }}
+  SIGNUP_SMTP_FROM: {{ .Values.mgmt.signup.smtpFrom | quote }}
   PORT: {{ .Values.mgmt.port | quote }}
   # REGION binds this instance's RP origin host to a region so the fail-closed
   # region middleware resolves it (harbor-mgmt refuses to boot otherwise).

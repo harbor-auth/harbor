@@ -29,9 +29,10 @@ type SignupAuditRecorder interface {
 // these routes run BEFORE any BFF session cookie exists, so they carry no
 // caller identity and no session-scope gate — the pages themselves only ever
 // render static copy plus the region list; all state-changing work happens
-// client-side against the existing POST /enroll and POST /webauthn/register/*
+// client-side against POST /enroll, POST /enroll/verify and POST /webauthn/register/*
 // endpoints (docs/DESIGN.md §9, §11.1).
 type SignupHandler struct {
+	signupRegion      string
 	tmpl              *template.Template
 	sessions          BFFSessionStore
 	audit             SignupAuditRecorder
@@ -67,7 +68,7 @@ func NewSignupHandler(tmpl *template.Template, sessions BFFSessionStore, audit S
 // is a same-origin, allowlist-bounded return_to cookie a forced cross-site
 // GET cannot turn into anything unsafe — see GetSignup), so — unlike the
 // dashboard's mutating routes — neither needs RequireFullScope or CSRF
-// middleware; the state-changing requests they drive (POST /enroll, POST
+// middleware; the state-changing requests they drive (POST /enroll, POST /enroll/verify, POST
 // /webauthn/register/begin|finish) already carry their own PreSessionCSRF +
 // rate-limit + body-size defenses at the routing layer.
 //
@@ -132,15 +133,15 @@ type signupData struct {
 // (mgmtapi.enrollmentSessionTTL) so neither carrier expires first.
 const signupReturnToCookieTTL = 10 * time.Minute
 
-// GetSignup renders the privacy promise and region picker. The form on this
-// page starts enrollment by POSTing JSON to the existing POST /enroll (task
-// 1's PreSessionCSRF-protected front door), then navigates to
-// GET /signup/passkey once an enrollment session cookie has been set.
+// GetSignup renders the email entry and region picker. POST /enroll sends a
+// code; POST /enroll/verify creates the account and enrollment session before
+// the page navigates to /signup/passkey.
 //
 // return_to is validated exactly once, here — returnto.go's "validate at the
 // point read from the client" contract — and the validated value (never the
 // raw one) is stashed in a short-lived cookie. PostEnroll reads that cookie
-// and folds it into the new enrollment session as real server-side state, so
+// and captures it in the encrypted challenge; verification copies it into
+// the new enrollment session as real server-side state, so
 // it survives the rest of the journey (/signup/passkey -> the WebAuthn
 // ceremony -> the post-registration handoff -> /signup/recovery ->
 // /signup/success) without ever being echoed back through a query string
@@ -159,13 +160,22 @@ func (h *SignupHandler) GetSignup(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteStrictMode,
 		MaxAge:   int(signupReturnToCookieTTL.Seconds()),
 	})
-	h.renderTemplate(w, r, "signup.html", signupData{Regions: allowedSignupRegions()})
+	regions := allowedSignupRegions()
+	if h.signupRegion != "" {
+		regions = nil
+		for _, option := range allowedSignupRegions() {
+			if option.Code == h.signupRegion {
+				regions = append(regions, option)
+			}
+		}
+	}
+	h.renderTemplate(w, r, "signup.html", signupData{Regions: regions})
 }
 
 // GetSignupPasskey renders the first-passkey ceremony page. Its script drives
 // navigator.credentials.create() against POST /webauthn/register/begin and
 // POST /webauthn/register/finish, relying entirely on the HttpOnly
-// harbor_enrollment_session cookie set by POST /enroll to identify the
+// harbor_enrollment_session cookie set by POST /enroll/verify to identify the
 // in-progress enrollment — there is deliberately no user_id or email
 // parameter anywhere on this page or in the requests it issues (docs/DESIGN.md
 // §9: a client-supplied user_id would be an IDOR).
@@ -266,3 +276,5 @@ func (h *SignupHandler) renderTemplate(w http.ResponseWriter, r *http.Request, n
 			"template", name, "error", err)
 	}
 }
+
+func (h *SignupHandler) WithSignupRegion(reg string) *SignupHandler { h.signupRegion = reg; return h }

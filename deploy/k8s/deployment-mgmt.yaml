@@ -26,6 +26,8 @@ spec:
       maxSurge: 1
   template:
     metadata:
+      annotations:
+        config.linkerd.io/skip-outbound-ports: "5432,6379,587"
       labels:
         app.kubernetes.io/name: harbor-mgmt
         app.kubernetes.io/part-of: harbor

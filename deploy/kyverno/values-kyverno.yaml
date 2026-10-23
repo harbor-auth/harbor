@@ -1,4 +1,4 @@
-# Kyverno Helm values — single-node RKE2 cluster (ns31170412 / 51.89.98.90)
+# Kyverno Helm values — the single-node Harbor cluster.
 #
 # Key decisions:
 #   replicaCount=1    — single-node; HA requires multiple nodes AND multiple replicas.

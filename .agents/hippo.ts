@@ -20,7 +20,7 @@ import type { AgentDefinition } from './types/agent-definition'
 const definition: AgentDefinition = {
   id: 'hippo',
   displayName: 'Hippo Memory',
-  model: 'anthropic/claude-sonnet-4',
+  model: 'anthropic/claude-sonnet-5',
   spawnerPrompt:
     'Manage cross-session agent memory — recall prior context at session start, track work on `hippo todo`, and capture friction as todos so nothing is lost when context truncates.',
   inputSchema: {

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/harbor-auth/harbor/internal/gen/signupapi"
 	"github.com/harbor-auth/harbor/internal/identity"
 	"github.com/harbor-auth/harbor/internal/region"
 	"github.com/harbor-auth/harbor/internal/relay"
@@ -24,12 +25,14 @@ type Enroller interface {
 // (docs/DESIGN.md §4.2, §11.1). Today that is the enrollment front door;
 // consent/audit/admin routes are layered on here in later work.
 type Server struct {
+	emailSignup  EmailSignup
+	signupRegion string
 	// enroller performs user enrollment. It may be nil in the dev-scaffold mode
 	// (no DATABASE_URL / HARBOR_KEK_SECRET); PostEnroll then returns 503 rather
 	// than panicking, so the binary still serves liveness.
 	enroller Enroller
 	// sessions, when non-nil, stores the enrollment→passkey handoff: after a
-	// successful POST /enroll the new user's handle is saved under a fresh key
+	// successful POST /enroll/verify the new user's handle is saved under a fresh key
 	// and returned as an HttpOnly cookie for the registration ceremony to read
 	// (docs/DESIGN.md §9, §11.1). Nil leaves the cookie unset (dev-scaffold mode).
 	sessions EnrollmentSessionStore
@@ -393,7 +396,7 @@ func (s *Server) WithCompliance(deps *ComplianceDeps) *Server {
 // Routes registers harbor-mgmt's cold-path routes on mux. It is additive: the
 // caller owns the mux (typically httpserver.NewHealthMux) and its /healthz route.
 func (s *Server) Routes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /enroll", s.PostEnroll)
+	signupapi.HandlerFromMux(s, mux)
 	mux.HandleFunc("POST /register", s.PostRegister)
 	mux.HandleFunc("GET /register/{client_id}", s.GetRegister)
 	mux.HandleFunc("PUT /register/{client_id}", s.PutRegister)
@@ -461,3 +464,6 @@ func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {
 		s.logger.Warn("mgmtapi: failed to encode response", "error", err)
 	}
 }
+
+// WithSignupRegion pins new account PII to this deployment.
+func (s *Server) WithSignupRegion(reg string) *Server { s.signupRegion = reg; return s }

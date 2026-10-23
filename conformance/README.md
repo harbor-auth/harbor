@@ -66,10 +66,12 @@ same host. `host.docker.internal` is wired to the host gateway via `extra_hosts`
 ## Conformance status
 
 harbor-hot now issues **real ES256-signed tokens** (pairwise `sub`), so the
-OIDC **Basic OP** certification plan is expected to **PASS**. The
+OIDC **Basic OP** certification plan has implementation support. A current
+passing run is unverified; the local July 23 artifact records runner exit 1
+and zero completed modules. The
 `oidf-conformance` feature delivered the claims and endpoints the suite checks.
 
-### Now passing (asserted by `assert-pass.sh` via `REQUIRED_MODULES`)
+### Required coverage (enforced by `assert-pass.sh` via `REQUIRED_MODULES`)
 
 | Area | What the suite verifies | Delivered by |
 |---|---|---|
