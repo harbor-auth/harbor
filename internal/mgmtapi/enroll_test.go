@@ -214,7 +214,10 @@ func TestEmailSignupOriginAndRateGates(t *testing.T) {
 // two-phase contract: starting signup must never create credential authority.
 func assertSignupStart(t *testing.T, body, origin, site string, flow *fakeEmailSignup, want int) {
 	t.Helper()
-	server := newTestServer(nil).WithEmailSignup(flow)
+	server := newTestServer(nil)
+	if flow != nil {
+		server.WithEmailSignup(flow)
+	}
 	request := httptest.NewRequest(http.MethodPost, "https://harbor.example.com/enroll", strings.NewReader(body))
 	if origin != "" {
 		request.Header.Set("Origin", origin)
