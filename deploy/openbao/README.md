@@ -20,12 +20,10 @@ identity. Production currently uses the US Vint Hill endpoint and an
 unexportable AES-256 key. The access certificate must be valid and permitted
 by OVH IAM. Keep key administration separate from this runtime identity.
 
-Before startup, provision the checksum-verified plugin release on the data PVC:
-`/openbao/data/plugins/openbao-plugin-kms-ovhcloud`, owned by the OpenBao user,
-mode 0750. The required binary is v0.0.1, SHA-256
-`653ed969ae963caa3622c4505be401756a91c8cd2145ac83b83249648b60f76c`.
-The server verifies the configured checksum. A replacement PVC needs this
-binary restored separately; the chart does not download executables at boot.
+The pinned security image includes the checksum-verified OVH plugin under
+`/usr/local/libexec/openbao`. The server verifies its configured checksum.
+Provision the namespace's `ghcr-pull` image-pull Secret before installation;
+no executable needs to be restored onto a replacement data PVC.
 
 Apply `application.yaml` only to Harbor core. Supply the OVH mTLS Secret
 through a protected operator session, never through Git, command arguments,
@@ -71,3 +69,24 @@ plugin binary and TLS/PKI material. Backups and an offline recovery shim were
 explicitly deferred by the owner; this configuration does not close those gates.
 OpenBao upgrades use OnDelete: review the release, sync the pinned configuration,
 then restart deliberately. A downgrade needs a compatible recovery procedure.
+
+## October 2026 security rebuild
+
+The production server uses the exact OpenBao 2.6.4 source with Go 1.26.10 and
+patched HTTP/2 dependencies. Its OVH seal plugin is rebuilt from the previously
+deployed source commit with Go 1.26.10, x/net 0.60.0 and gRPC 1.83.2. The signed
+private image is published by harbor-cloud's main-only
+`openbao-security-image.yml` workflow. `ghcr-pull` must exist in namespace
+`openbao` for kubelet image pulls; it is not mounted into the server.
+
+Plugins now execute from the immutable image under `/usr/local/libexec/openbao`,
+with their binary checksum declared in configuration. The old PVC plugin binary
+is retained but is not used. The OVH endpoint, client identity, KMS/key IDs,
+Raft/audit PVCs and seal mechanism are unchanged. Do not change those identifiers
+to perform a patch upgrade.
+
+Before promotion, verify the publisher signature and source commit, inspect the
+binary build information, and test an isolated Raft server with temporary storage
+against the same OVH seal. Initialization, Transit encryption/decryption and
+restart auto-unseal must pass without putting the test pod behind production's
+Service. Preserve an encrypted production snapshot before the controlled restart.
