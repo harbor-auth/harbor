@@ -123,7 +123,8 @@ generate: ## Regenerate all code from the api/ contracts (spec-first, zero drift
 		echo '  oapi-codegen -config $(OAPI_CONFIG) $(OPENAPI_SPEC)'; \
 		oapi-codegen -config $(OAPI_CONFIG) $(OPENAPI_SPEC); \
 		echo '  oapi-codegen -config $(OAPI_CLOUD_CONFIG) $(OPENAPI_CLOUD_SPEC)'; \
-		oapi-codegen -config $(OAPI_CLOUD_CONFIG) $(OPENAPI_CLOUD_SPEC); fi
+		oapi-codegen -config $(OAPI_CLOUD_CONFIG) $(OPENAPI_CLOUD_SPEC); \
+		oapi-codegen -config api/openapi/oapi-codegen-signup.yaml api/openapi/harbor-signup.yaml; fi
 	@$(REQUIRE); if _require buf 'go install github.com/bufbuild/buf/cmd/buf@latest (or: nix develop)'; then \
 		echo '  buf generate'; buf generate; fi
 	@if [ -f package.json ] || [ -f web/package.json ]; then \

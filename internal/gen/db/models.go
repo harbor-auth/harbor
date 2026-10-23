@@ -8,6 +8,15 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AccountIdentifier struct {
+	UserID         pgtype.UUID        `json:"user_id"`
+	Region         string             `json:"region"`
+	Kind           string             `json:"kind"`
+	LookupHash     []byte             `json:"lookup_hash"`
+	EncryptedValue []byte             `json:"encrypted_value"`
+	VerifiedAt     pgtype.Timestamptz `json:"verified_at"`
+}
+
 type AuditEvent struct {
 	ID         pgtype.UUID        `json:"id"`
 	Region     string             `json:"region"`

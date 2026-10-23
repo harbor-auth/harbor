@@ -39,7 +39,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"strings"
 	"testing"
@@ -62,12 +61,12 @@ type bffFlowResult struct {
 }
 
 // TestBFFPasskeyLoginToTokenFlow drives the authenticated BFF flow to completion
-// for two independent users and asserts the PPID invariants. It skips when the
-// full BFF stack is not exercisable on the target environment.
+// for two independent users and asserts the PPID invariants. An incomplete
+// ceremony fails this required journey instead of reporting a skipped pass.
 func TestBFFPasskeyLoginToTokenFlow(t *testing.T) {
 	res1, ok := runBFFPasskeyFlow(t)
 	if !ok {
-		unavailable(t, "BFF passkey login flow not exercisable on this stack")
+		t.Fatal("BFF passkey login flow did not complete")
 	}
 
 	// The sub claim must be a PPID: present, opaque, distinct from the raw
@@ -138,7 +137,7 @@ type bffNonceFlowState struct {
 func TestBFFNonceClearedAfterAuthorizeComplete(t *testing.T) {
 	_, state, ok := runBFFPasskeyFlowDetailed(t)
 	if !ok {
-		unavailable(t, "BFF passkey login flow not exercisable on this stack")
+		t.Fatal("BFF passkey login flow did not complete")
 	}
 	if state.nonceValue == "" {
 		unavailable(t, "__Host-harbor-bff-nonce not set by /authorize — BFF nonce mode unavailable")
@@ -157,7 +156,7 @@ func TestBFFNonceClearedAfterAuthorizeComplete(t *testing.T) {
 func TestBFFNonceNotInResponseBodies(t *testing.T) {
 	_, state, ok := runBFFPasskeyFlowDetailed(t)
 	if !ok {
-		unavailable(t, "BFF passkey login flow not exercisable on this stack")
+		t.Fatal("BFF passkey login flow did not complete")
 	}
 	if state.nonceValue == "" {
 		unavailable(t, "__Host-harbor-bff-nonce not set by /authorize — cannot assert nonce absence")
@@ -244,7 +243,7 @@ func runBFFPasskeyFlowDetailedAt(t *testing.T, scope, tokenEndpoint string) (bff
 	// which production answers 405 — and because a non-200 returns false and
 	// the caller turns that into t.Skip, the most valuable test in this suite
 	// reported PASS while never running the ceremony at all.
-	beginResp, err := hc.Get(baseURL() + bffLoginBeginPath + "?request_id=" + url.QueryEscape(requestID))
+	beginResp, err := hc.Get(mgmtBaseURL() + bffLoginBeginPath + "?request_id=" + url.QueryEscape(requestID))
 	if err != nil {
 		t.Logf("GET /login (begin): %v", err)
 		return bffFlowResult{}, bffNonceFlowState{}, false
@@ -284,7 +283,7 @@ func runBFFPasskeyFlowDetailedAt(t *testing.T, scope, tokenEndpoint string) (bff
 		t.Logf("build assertion: %v", err)
 		return bffFlowResult{}, bffNonceFlowState{}, false
 	}
-	finishResp, err := hc.Post(baseURL()+bffLoginFinishPath, "application/json", strings.NewReader(assertion))
+	finishResp, err := hc.Post(mgmtBaseURL()+bffLoginFinishPath, "application/json", strings.NewReader(assertion))
 	if err != nil {
 		t.Logf("POST /login/complete: %v", err)
 		return bffFlowResult{}, bffNonceFlowState{}, false
@@ -424,12 +423,9 @@ func runBFFPasskeyFlowDetailedAt(t *testing.T, scope, tokenEndpoint string) (bff
 // persist across steps while we still inspect each redirect Location.
 func jarNoRedirectClient(t *testing.T) *http.Client {
 	t.Helper()
-	jar, err := cookiejar.New(nil)
-	if err != nil {
-		t.Fatalf("cookiejar: %v", err)
-	}
+	// Local compose uses HTTP; preserve Secure cookies exactly as signup tests do.
 	return &http.Client{
-		Jar: jar,
+		Jar: newLaxSecureCookieJar(),
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

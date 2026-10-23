@@ -1,5 +1,7 @@
 # Harbor Docs — The Feature & Plan Index
 
+> **Current status and reconciliation (2026-10-22):** See [the project review](PROJECT-STATUS.md) for current implementation evidence and release gaps. The older plan rows and dependency waves below are historical and have not been fully reconciled; several listed pending features are implemented.
+
 The single entry point (TOC) for everything Harbor **does** and **plans to do**. This index exists so agents (and humans) can find the right doc fast, then reconcile it against the code. If you're building a feature, **start here**.
 
 > **New to Harbor?** Read [`ARCHITECTURE.md`](ARCHITECTURE.md) first — a one-page, high-level map (hot/cold path, regions, KMS, the PII-free global plane) that's a gentler on-ramp than [`DESIGN.md`](DESIGN.md). [`DESIGN.md`](DESIGN.md) is now a **navigable index** into a tree of focused files under [`design/`](design/) (each ≤ ~2,000 words, per the small-files principle §1.10). Then see [`OIDC-LOGIN-FLOW.md`](OIDC-LOGIN-FLOW.md) for a step-by-step ASCII sequence diagram of the most complex sequence in the system (the Authorization Code + PKCE login flow, §11.2), backed by [`oidc-flow/`](oidc-flow/) sub-files.
@@ -24,6 +26,7 @@ docs/plans/         → future WHAT — intent not yet built
 
 | Doc | Status | DESIGN § | Code | Last reconciled |
 |---|---|---|---|---|
+| [email-first-signup](features/email-first-signup.md) | implemented | §11.1, §10, §7.5, §9 | `internal/signup/`, `internal/mgmtapi/enroll.go`, `web/templates/signup.html` | 2026-09-10 |
 | [security-maintenance](features/security-maintenance.md) | patches implemented; rollout tracked separately | §7.3, §4.4, §1.8 | `deploy/`, `go.mod`, `.github/workflows/security.yml` | 2026-10-22 |
 | [ppid-identity](features/ppid-identity.md) | implemented | §3.2 | `internal/identity/` | 2026-07-08 |
 | [webauthn-passkeys](features/webauthn-passkeys.md) | implemented | §3.1 | `internal/webauthn/`, `cmd/harbor-mgmt/` | 2026-07-08 |
@@ -42,7 +45,7 @@ docs/plans/         → future WHAT — intent not yet built
 | [webauthn-session-store](features/webauthn-session-store.md) | implemented | §4.1, §4.4, §9 | `internal/webauthn/`, `cmd/harbor-mgmt/` | 2026-07-20 |
 | [bff-session-middleware](features/bff-session-middleware.md) | implemented | §9, §11.1, §11.2 | `internal/bff/`, `internal/oidcapi/`, `internal/oidc/`, `cmd/harbor-mgmt/` | 2026-07-20 |
 | [userinfo-endpoint](features/userinfo-endpoint.md) | implemented | §3.3, §11.4, §3.1 | `internal/oidcapi/`, `api/openapi/harbor.yaml` | 2026-07-20 |
-| [oidf-conformance](features/oidf-conformance.md) | implemented | §1.8, §11.7, §3.1 | `internal/oidc/`, `internal/oidcapi/`, `conformance/` | 2026-07-20 |
+| [oidf-conformance](features/oidf-conformance.md) | harness implemented; certification unverified | §1.8, §11.7, §3.1 | `internal/oidc/`, `internal/oidcapi/`, `conformance/` | 2026-07-20 |
 | [auth-code-persistence](features/auth-code-persistence.md) | implemented | §4.1, §10 | `internal/oidc/`, `internal/clients/`, `cmd/harbor-hot/` | 2026-07-21 |
 | [token-introspection](features/token-introspection.md) | implemented | §3.3, §3.5 | `internal/oidcapi/`, `api/openapi/harbor.yaml` | 2026-07-21 |
 | [kms-provider-integration](features/kms-provider-integration.md) | implemented | §4.4, §7.3, §A.4 | `internal/crypto/` | 2026-07-21 |

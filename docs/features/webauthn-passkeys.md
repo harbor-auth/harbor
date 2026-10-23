@@ -7,7 +7,7 @@ spec:  []
 tests: [internal/webauthn/]
 depends_on: []
 plan: null
-last_reconciled: 2026-07-08
+last_reconciled: 2026-09-10
 ---
 
 # WebAuthn Passkey Registration & Login
@@ -21,6 +21,14 @@ the management/cold-path binary `cmd/harbor-mgmt`. It follows §1.7's pure-core 
 thin-I/O split: the ceremony engine delegates to the library while all
 persistence sits behind the `Store` / `SessionStore` interfaces, so the sqlc-backed
 credential/session stores plug in later without touching ceremony code.
+
+## Email verification prerequisite
+
+New public enrollment starts with [verified email signup](email-first-signup.md).
+Only `POST /enroll/verify` issues the first-passkey enrollment cookie, after
+successful browser-bound verification and atomic account/identifier creation.
+The verified email supplies WebAuthn name/displayName; account UUID bytes remain
+the user handle. Email proof cannot add credentials to an existing account.
 
 ## Behavior (as-built)
 
@@ -46,12 +54,8 @@ stored counter is *not* updated. The in-memory store adds a second, defensive
 monotonicity guard: an update that doesn't strictly advance the counter (after
 the first assertion) is refused with `ErrSignCountRegression`.
 
-**IDOR guard (§9)** — the ceremony user handle is read from a client-supplied
-base64url `user_id` query param **only** when `allowInsecureUserID` is true (a
-dev-only path). When false (the production default) every endpoint refuses with
-`501 not_implemented` and never reads the param. In production the identity must
-come from the authenticated dashboard session; this gate is a scaffold until the
-BFF session middleware lands.
+**IDOR guard (§9)** — registration resolves the user handle from the server-side
+enrollment session, never from a client-supplied account ID or email.
 
 **Enumeration-safe errors (§6.5)** — `ErrUserNotFound` deliberately has **no**
 distinct response: it collapses into the generic `invalid_request` (400), so an

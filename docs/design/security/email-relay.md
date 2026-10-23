@@ -58,3 +58,12 @@ Advanced users can point **their own domain** (or a subdomain) at Harbor, so rel
 | **Active** | Forwarded to the user's real inbox (after SPF/DKIM/DMARC checks, ARC-sealed) | Default on first consent; one address per (user, RP). |
 | **Deactivated** | **Hard bounce** (address refused) | Instant per-app kill switch; independent of the RP login grant. |
 | **BYO-domain** | Forwarded via the user's own verified domain (`x@mail.alice.example`) | Region-pinned; requires DNS/MX/SPF/DKIM verification. |
+
+## Signup email
+
+Public signup verifies an email before account creation and stores it as an
+encrypted account identifier, available as the relay destination. Its account
+label is independent of passkeys and the account UUID. Signup does not itself
+provision relay addresses or disclose real email in OIDC claims; see
+[email-first signup](../../features/email-first-signup.md). Future phone-first
+accounts will need a verified email before enabling email relay.

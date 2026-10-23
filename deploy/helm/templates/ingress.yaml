@@ -2,8 +2,8 @@
 # Ingress: the shared public origin routes the BFF login paths and the
 # public signup/sign-in surface (/signup*, /signin, /enroll, /webauthn/*,
 # /recovery/*, /dashboard*) to harbor-mgmt; every other path goes to
-# harbor-hot. Other management APIs stay unreachable because no public path
-# selects them.
+# harbor-hot. Authenticated user-management routes share this origin;
+# privileged /admin and RP registration APIs remain outside these routes.
 #
 # The host here MUST match hot.issuer, or the OIDC discovery document will
 # advertise endpoints under a different origin than clients reach.
@@ -88,6 +88,49 @@ spec:
           # already authenticated, then gets a bare 404 instead of their
           # dashboard.
           - path: /dashboard
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "harbor.fullname" . }}-mgmt
+                port:
+                  number: 80
+          # Authenticated user-management APIs share the BFF origin.
+          - path: /mfa
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "harbor.fullname" . }}-mgmt
+                port:
+                  number: 80
+          - path: /audit-events
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "harbor.fullname" . }}-mgmt
+                port:
+                  number: 80
+          - path: /consent-grants
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "harbor.fullname" . }}-mgmt
+                port:
+                  number: 80
+          - path: /relay-addresses
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "harbor.fullname" . }}-mgmt
+                port:
+                  number: 80
+          - path: /compliance
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "harbor.fullname" . }}-mgmt
+                port:
+                  number: 80
+          - path: /byo-domains
             pathType: Prefix
             backend:
               service:

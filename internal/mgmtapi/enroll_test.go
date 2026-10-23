@@ -1,17 +1,15 @@
 package mgmtapi
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
+	"github.com/harbor-auth/harbor/internal/identity"
+	"github.com/harbor-auth/harbor/internal/signup"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/harbor-auth/harbor/internal/identity"
 )
 
 // fakeEnroller is an in-memory Enroller for handler tests.
@@ -27,158 +25,6 @@ func (f *fakeEnroller) Enroll(_ context.Context, rawRegion string) (identity.Enr
 	f.gotRegion = rawRegion
 	return f.result, f.err
 }
-
-func doEnroll(t *testing.T, s *Server, body string) *httptest.ResponseRecorder {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodPost, "/enroll", strings.NewReader(body))
-	rec := httptest.NewRecorder()
-	s.PostEnroll(rec, req)
-	return rec
-}
-
-func TestPostEnrollSuccess(t *testing.T) {
-	const userID = "550e8400-e29b-41d4-a716-446655440000"
-	fe := &fakeEnroller{result: identity.EnrollResult{UserID: userID, Region: "EU"}}
-	s := newTestServer(fe)
-
-	rec := doEnroll(t, s, `{"region":"EU"}`)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
-	}
-	var resp enrollResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
-	if resp.UserID != userID {
-		t.Errorf("user_id = %q, want %s", resp.UserID, userID)
-	}
-	if resp.Status != statusPending {
-		t.Errorf("status = %q, want %q", resp.Status, statusPending)
-	}
-	if !fe.called {
-		t.Error("expected Enroll to be called")
-	}
-	if fe.gotRegion != "EU" {
-		t.Errorf("Enroll got region %q, want EU", fe.gotRegion)
-	}
-}
-
-// TestPostEnroll_FoldsReturnToCookieIntoEnrollmentSession proves POST /enroll
-// reads the return_to GET /signup already validated and stashed in
-// SignupReturnToCookieName, and folds it into the new enrollment session —
-// the carrier design.md Decision 5 / REQ-004 requires so the value survives
-// the rest of the signup journey as server-side state.
-func TestPostEnroll_FoldsReturnToCookieIntoEnrollmentSession(t *testing.T) {
-	const userID = "550e8400-e29b-41d4-a716-446655440000"
-	fe := &fakeEnroller{result: identity.EnrollResult{UserID: userID, Region: "EU"}}
-	s := newTestServer(fe)
-
-	req := httptest.NewRequest(http.MethodPost, "/enroll", strings.NewReader(`{"region":"EU"}`))
-	req.AddCookie(&http.Cookie{Name: SignupReturnToCookieName, Value: "/dashboard/after-signup"})
-	rec := httptest.NewRecorder()
-	s.PostEnroll(rec, req)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
-	}
-	var enrollmentKey string
-	for _, c := range rec.Result().Cookies() {
-		if c.Name == EnrollmentSessionCookieName {
-			enrollmentKey = c.Value
-		}
-	}
-	if enrollmentKey == "" {
-		t.Fatalf("PostEnroll set no %s cookie", EnrollmentSessionCookieName)
-	}
-	_, _, returnTo, err := s.sessions.UserHandle(context.Background(), enrollmentKey)
-	if err != nil {
-		t.Fatalf("UserHandle: %v", err)
-	}
-	if returnTo != "/dashboard/after-signup" {
-		t.Fatalf("enrollment session returnTo = %q, want %q", returnTo, "/dashboard/after-signup")
-	}
-}
-
-// TestPostEnroll_NoReturnToCookieYieldsEmptyReturnTo proves calling POST
-// /enroll without ever visiting GET /signup (no return_to cookie) still
-// succeeds, with no return_to captured — matching behavior before this
-// carrier existed.
-func TestPostEnroll_NoReturnToCookieYieldsEmptyReturnTo(t *testing.T) {
-	const userID = "550e8400-e29b-41d4-a716-446655440001"
-	fe := &fakeEnroller{result: identity.EnrollResult{UserID: userID, Region: "EU"}}
-	s := newTestServer(fe)
-
-	rec := doEnroll(t, s, `{"region":"EU"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
-	}
-	var enrollmentKey string
-	for _, c := range rec.Result().Cookies() {
-		if c.Name == EnrollmentSessionCookieName {
-			enrollmentKey = c.Value
-		}
-	}
-	if enrollmentKey == "" {
-		t.Fatalf("PostEnroll set no %s cookie", EnrollmentSessionCookieName)
-	}
-	_, _, returnTo, err := s.sessions.UserHandle(context.Background(), enrollmentKey)
-	if err != nil {
-		t.Fatalf("UserHandle: %v", err)
-	}
-	if returnTo != "" {
-		t.Fatalf("enrollment session returnTo = %q, want empty with no GET /signup cookie", returnTo)
-	}
-}
-
-func TestPostEnrollInvalidRegion(t *testing.T) {
-	fe := &fakeEnroller{result: identity.EnrollResult{UserID: "x"}}
-	s := newTestServer(fe)
-
-	rec := doEnroll(t, s, `{"region":"ATLANTIS"}`)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-	if fe.called {
-		t.Error("Enroll must not be called for an invalid region")
-	}
-}
-
-func TestPostEnrollMalformedBody(t *testing.T) {
-	fe := &fakeEnroller{}
-	s := newTestServer(fe)
-
-	rec := doEnroll(t, s, `{not json`)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
-	}
-	if fe.called {
-		t.Error("Enroll must not be called for a malformed body")
-	}
-}
-
-// TestPostEnrollUnavailable retains the historical missing-enroller regression.
-// The server now fails closed at construction instead of exposing a 503 route.
-func TestPostEnrollUnavailable(t *testing.T) {
-	if _, err := New(nil, NewInMemoryEnrollmentSessionStore(), &fakeClientReg{}, testRegBaseURL, nil); err == nil {
-		t.Fatal("New accepted a nil enroller")
-	}
-}
-
-func TestPostEnrollServerError(t *testing.T) {
-	fe := &fakeEnroller{err: errors.New("db down")}
-	s := newTestServer(fe)
-
-	rec := doEnroll(t, s, `{"region":"EU"}`)
-
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500", rec.Code)
-	}
-}
-
-// --- checkPreSessionOrigin / cross-site CSRF tests ---
 
 func TestCheckPreSessionOrigin(t *testing.T) {
 	cases := []struct {
@@ -216,73 +62,6 @@ func TestCheckPreSessionOrigin(t *testing.T) {
 	}
 }
 
-// TestPostEnrollCrossSitePostRejected verifies a cross-site POST /enroll is
-// refused with no state change: the enroller is never invoked, so no user row
-// or enrollment-session cookie is created for the forged request.
-func TestPostEnrollCrossSitePostRejected(t *testing.T) {
-	fe := &fakeEnroller{result: identity.EnrollResult{UserID: "x", Region: "EU"}}
-	s := newTestServer(fe)
-
-	req := httptest.NewRequest(http.MethodPost, "/enroll", strings.NewReader(`{"region":"EU"}`))
-	req.Header.Set("Sec-Fetch-Site", "cross-site")
-	rec := httptest.NewRecorder()
-	s.PostEnroll(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
-	}
-	if fe.called {
-		t.Error("Enroll must not be called for a cross-site request (no state change)")
-	}
-	if len(rec.Result().Cookies()) != 0 {
-		t.Error("no cookie should be set for a rejected cross-site request")
-	}
-}
-
-// TestPostEnrollCrossOriginHeaderRejected exercises the Origin-header fallback
-// path (no Sec-Fetch-Site) with the same no-state-change expectation.
-func TestPostEnrollCrossOriginHeaderRejected(t *testing.T) {
-	fe := &fakeEnroller{result: identity.EnrollResult{UserID: "x", Region: "EU"}}
-	s := newTestServer(fe)
-
-	req := httptest.NewRequest(http.MethodPost, "/enroll", strings.NewReader(`{"region":"EU"}`))
-	req.Header.Set("Origin", "https://evil.example.com")
-	req.Host = "harbor.example.com"
-	rec := httptest.NewRecorder()
-	s.PostEnroll(rec, req)
-
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
-	}
-	if fe.called {
-		t.Error("Enroll must not be called for a cross-origin request")
-	}
-}
-
-// TestPostEnrollSameOriginStillWorks pins down that the new CSRF check does not
-// regress a legitimate same-origin (or header-less) enrollment.
-func TestPostEnrollSameOriginStillWorks(t *testing.T) {
-	fe := &fakeEnroller{result: identity.EnrollResult{UserID: "550e8400-e29b-41d4-a716-446655440002", Region: "EU"}}
-	s := newTestServer(fe)
-
-	req := httptest.NewRequest(http.MethodPost, "/enroll", strings.NewReader(`{"region":"EU"}`))
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-	rec := httptest.NewRecorder()
-	s.PostEnroll(rec, req)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want 201; body=%s", rec.Code, rec.Body.String())
-	}
-	if !fe.called {
-		t.Error("expected Enroll to be called for a same-origin request")
-	}
-}
-
-// --- abuse-gate rate-limit integration on PostEnroll ---
-
-// fakeRateLimiter denies every call once calls reach limit, without any Redis
-// dependency — enough to exercise the s.abuseGate.Check(...) wiring already in
-// PostEnroll alongside the new pre-session CSRF check.
 type fakeRateLimiter struct {
 	limit int
 	calls int
@@ -296,41 +75,255 @@ func (f *fakeRateLimiter) Allow(_ context.Context, _ string) (bool, time.Duratio
 	return true, 0, nil
 }
 
-// TestPostEnrollRateLimitedAfterOrigin verifies that a same-origin (CSRF-
-// passing) request that exhausts the abuse-gate limit gets 429, and that the
-// CSRF check runs independently of — and before — rate-limit accounting.
-func TestPostEnrollRateLimitedAfterOrigin(t *testing.T) {
-	fe := &fakeEnroller{result: identity.EnrollResult{UserID: "550e8400-e29b-41d4-a716-446655440003", Region: "EU"}}
-	s := newTestServer(fe)
-	limiter := &fakeRateLimiter{limit: 1}
-	s.WithProductionAbuseProtection("enroll", limiter)
+type fakeEmailSignup struct {
+	started, finished bool
+	returnTo          string
+	err               error
+}
 
-	// First same-origin request consumes the single allowed slot.
-	rec := doEnroll(t, s, `{"region":"EU"}`)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("first request status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+func (f *fakeEmailSignup) Start(_ context.Context, email, reg, returnTo string) (string, error) {
+	f.started = true
+	f.returnTo = returnTo
+	return strings.Repeat("a", 64), f.err
+}
+func (f *fakeEmailSignup) Finish(_ context.Context, key, code string) (identity.EnrollResult, string, error) {
+	f.finished = true
+	return identity.EnrollResult{UserID: "550e8400-e29b-41d4-a716-446655440000", Region: "EU"}, f.returnTo, f.err
+}
+func signupRequest(s *Server, path, body string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("POST", path, strings.NewReader(body))
+	for _, c := range cookies {
+		req.AddCookie(c)
 	}
-
-	// Second same-origin request is over budget.
-	rec = doEnroll(t, s, `{"region":"EU"}`)
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("second request status = %d, want 429; body=%s", rec.Code, rec.Body.String())
+	rec := httptest.NewRecorder()
+	mux := http.NewServeMux()
+	s.Routes(mux)
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+func TestPostEnrollSuccess(t *testing.T) {
+	legacy := &fakeEnroller{}
+	flow := &fakeEmailSignup{}
+	s := newTestServer(legacy).WithEmailSignup(flow)
+	rec := signupRequest(s, "/enroll", `{"email":"me@example.com","region":"EU"}`, &http.Cookie{Name: SignupReturnToCookieName, Value: "/dashboard/next"})
+	if rec.Code != 202 || !flow.started || legacy.called {
+		t.Fatalf("unexpected start: %d %s", rec.Code, rec.Body)
+	}
+	if strings.Contains(rec.Body.String(), "user_id") {
+		t.Fatal("start exposed an account")
+	}
+	cookies := rec.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != SignupVerificationCookieName || !cookies[0].Secure || !cookies[0].HttpOnly {
+		t.Fatalf("cookies: %+v", cookies)
+	}
+	if flow.returnTo != "/dashboard/next" {
+		t.Fatal("lost return destination")
+	}
+	// Finish must use the captured destination, not a subsequently changed cookie.
+	done := signupRequest(s, "/enroll/verify", `{"code":"12345678"}`, cookies[0], &http.Cookie{Name: SignupReturnToCookieName, Value: "/changed"})
+	if done.Code != 201 || !flow.finished {
+		t.Fatalf("verify: %d %s", done.Code, done.Body)
+	}
+	var handoff *http.Cookie
+	for _, c := range done.Result().Cookies() {
+		if c.Name == EnrollmentSessionCookieName {
+			handoff = c
+		}
+	}
+	if handoff == nil {
+		t.Fatal("missing enrollment session")
+	}
+	_, recovery, returnTo, err := s.sessions.UserHandle(context.Background(), handoff.Value)
+	if err != nil || recovery || returnTo != "/dashboard/next" {
+		t.Fatalf("bad handoff: %v %q %v", recovery, returnTo, err)
+	}
+}
+func TestEmailSignupRejectsUnverifiedAndInvalidRequests(t *testing.T) {
+	for _, body := range []string{`{"region":"EU"}`, `{"email":"bad","region":"EU"}`, `{"email":"me@example.com","region":"bad"}`, `{"email":"me@example.com","region":"EU","user_id":"forged"}`, `{} {}`, `{broken`} {
+		flow := &fakeEmailSignup{}
+		s := newTestServer(nil).WithEmailSignup(flow)
+		rec := signupRequest(s, "/enroll", body)
+		if rec.Code != 400 || flow.started || flow.finished {
+			t.Fatalf("accepted %s: %d", body, rec.Code)
+		}
+	}
+	flow := &fakeEmailSignup{}
+	s := newTestServer(nil).WithEmailSignup(flow)
+	rec := signupRequest(s, "/enroll/verify", `{"code":"12345678"}`)
+	if rec.Code != 400 || flow.finished {
+		t.Fatal("verification accepted without browser cookie")
+	}
+	rec = signupRequest(newTestServer(nil), "/enroll", `{"email":"me@example.com","region":"EU"}`)
+	if rec.Code != 503 {
+		t.Fatal("unconfigured signup did not fail closed")
+	}
+	rec = signupRequest(s.WithSignupRegion("US"), "/enroll", `{"email":"me@example.com","region":"EU"}`)
+	if rec.Code != 400 || flow.started {
+		t.Fatal("accepted another deployment's region")
+	}
+}
+func TestEmailSignupErrorPaths(t *testing.T) {
+	for _, tc := range []struct {
+		err    error
+		status int
+	}{{signup.ErrInvalidCode, 400}, {identity.ErrIdentifierExists, 409}, {errors.New("db failure"), 500}} {
+		flow := &fakeEmailSignup{err: tc.err}
+		s := newTestServer(nil).WithEmailSignup(flow)
+		rec := signupRequest(s, "/enroll/verify", `{"code":"12345678"}`, &http.Cookie{Name: SignupVerificationCookieName, Value: strings.Repeat("a", 64)})
+		if rec.Code != tc.status {
+			t.Fatalf("got %d want %d", rec.Code, tc.status)
+		}
+		for _, c := range rec.Result().Cookies() {
+			if c.Name == EnrollmentSessionCookieName {
+				t.Fatal("failed verification minted credential authority")
+			}
+		}
+	}
+	for _, tc := range []struct {
+		err    error
+		status int
+	}{{signup.ErrRateLimited, 429}, {errors.New("smtp recipient me@example.com failed"), 503}} {
+		rec := signupRequest(newTestServer(nil).WithEmailSignup(&fakeEmailSignup{err: tc.err}), "/enroll", `{"email":"me@example.com","region":"EU"}`)
+		if rec.Code != tc.status || strings.Contains(rec.Body.String(), "me@example.com") {
+			t.Fatalf("unexpected failure %d %s", rec.Code, rec.Body)
+		}
+	}
+}
+func TestEmailSignupOriginAndRateGates(t *testing.T) {
+	for _, path := range []string{"/enroll", "/enroll/verify"} {
+		flow := &fakeEmailSignup{}
+		s := newTestServer(nil).WithEmailSignup(flow)
+		mux := http.NewServeMux()
+		s.Routes(mux)
+		req := httptest.NewRequest("POST", path, strings.NewReader(`{}`))
+		req.Header.Set("Sec-Fetch-Site", "cross-site")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != 403 || flow.started || flow.finished {
+			t.Fatal("cross-site signup accepted")
+		}
+		s.WithProductionAbuseProtection("enroll", &fakeRateLimiter{limit: 0})
+		rec = signupRequest(s, path, `{}`)
+		if rec.Code != 429 || flow.started || flow.finished {
+			t.Fatal("rate limit bypass")
+		}
 	}
 }
 
-// TestRoutesRegistersEnroll verifies POST /enroll is wired through the mux.
-func TestRoutesRegistersEnroll(t *testing.T) {
-	fe := &fakeEnroller{result: identity.EnrollResult{UserID: "550e8400-e29b-41d4-a716-446655440001", Region: "EU"}}
-	s := newTestServer(fe)
-
-	mux := http.NewServeMux()
-	s.Routes(mux)
-
-	req := httptest.NewRequest(http.MethodPost, "/enroll", bytes.NewReader([]byte(`{"region":"EU"}`)))
-	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("routed status = %d, want 201; body=%s", rec.Code, rec.Body.String())
+// Retain the original enrollment regression names while checking the new
+// two-phase contract: starting signup must never create credential authority.
+func assertSignupStart(t *testing.T, body, origin, site string, flow *fakeEmailSignup, want int) {
+	t.Helper()
+	server := newTestServer(nil)
+	if flow != nil {
+		server.WithEmailSignup(flow)
 	}
+	request := httptest.NewRequest(http.MethodPost, "https://harbor.example.com/enroll", strings.NewReader(body))
+	if origin != "" {
+		request.Header.Set("Origin", origin)
+	}
+	if site != "" {
+		request.Header.Set("Sec-Fetch-Site", site)
+	}
+	recorder := httptest.NewRecorder()
+	mux := http.NewServeMux()
+	server.Routes(mux)
+	mux.ServeHTTP(recorder, request)
+	if recorder.Code != want {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, want, recorder.Body)
+	}
+	if want != http.StatusAccepted && flow != nil && flow.started {
+		t.Fatal("rejected request reached signup")
+	}
+}
+func TestPostEnrollUnavailable(t *testing.T) {
+	assertSignupStart(t, `{"email":"me@example.com","region":"EU"}`, "", "", nil, http.StatusServiceUnavailable)
+}
+func TestPostEnrollMalformedBody(t *testing.T) {
+	assertSignupStart(t, `{broken`, "", "", &fakeEmailSignup{}, http.StatusBadRequest)
+}
+func TestPostEnrollInvalidRegion(t *testing.T) {
+	assertSignupStart(t, `{"email":"me@example.com","region":"unknown"}`, "", "", &fakeEmailSignup{}, http.StatusBadRequest)
+}
+func TestPostEnrollCrossSitePostRejected(t *testing.T) {
+	assertSignupStart(t, `{"email":"me@example.com","region":"EU"}`, "", "cross-site", &fakeEmailSignup{}, http.StatusForbidden)
+}
+func TestPostEnrollCrossOriginHeaderRejected(t *testing.T) {
+	assertSignupStart(t, `{"email":"me@example.com","region":"EU"}`, "https://attacker.example", "", &fakeEmailSignup{}, http.StatusForbidden)
+}
+func TestPostEnrollSameOriginStillWorks(t *testing.T) {
+	flow := &fakeEmailSignup{}
+	assertSignupStart(t, `{"email":"me@example.com","region":"EU"}`, "https://harbor.example.com", "", flow, http.StatusAccepted)
+	if !flow.started {
+		t.Fatal("same-origin request did not start verification")
+	}
+}
+func TestRoutesRegistersEnroll(t *testing.T) {
+	flow := &fakeEmailSignup{}
+	assertSignupStart(t, `{"email":"me@example.com","region":"EU"}`, "", "", flow, http.StatusAccepted)
+	if !flow.started {
+		t.Fatal("enrollment route did not reach signup")
+	}
+}
+func TestPostEnrollServerError(t *testing.T) {
+	flow := &fakeEmailSignup{err: errors.New("internal failure")}
+	server := newTestServer(nil).WithEmailSignup(flow)
+	done := signupRequest(server, "/enroll/verify", `{"code":"12345678"}`, &http.Cookie{Name: SignupVerificationCookieName, Value: strings.Repeat("a", 64)})
+	if done.Code != http.StatusInternalServerError {
+		t.Fatalf("verify failure = %d", done.Code)
+	}
+	for _, cookie := range done.Result().Cookies() {
+		if cookie.Name == EnrollmentSessionCookieName {
+			t.Fatal("failed enrollment issued authority")
+		}
+	}
+}
+func TestPostEnrollRateLimitedAfterOrigin(t *testing.T) {
+	flow := &fakeEmailSignup{}
+	limiter := &fakeRateLimiter{limit: 0}
+	server := newTestServer(nil).WithEmailSignup(flow).WithProductionAbuseProtection("enroll", limiter)
+	request := httptest.NewRequest(http.MethodPost, "/enroll", strings.NewReader(`{}`))
+	request.Header.Set("Sec-Fetch-Site", "cross-site")
+	recorder := httptest.NewRecorder()
+	server.PostEnroll(recorder, request)
+	if recorder.Code != http.StatusForbidden || limiter.calls != 0 {
+		t.Fatal("origin rejection consumed abuse quota")
+	}
+	recorder = signupRequest(server, "/enroll", `{"email":"me@example.com","region":"EU"}`)
+	if recorder.Code != http.StatusTooManyRequests || limiter.calls != 1 || flow.started {
+		t.Fatal("same-origin rate limit failed")
+	}
+}
+func checkEnrollmentDestination(t *testing.T, destination string) {
+	t.Helper()
+	flow := &fakeEmailSignup{}
+	server := newTestServer(nil).WithEmailSignup(flow)
+	var cookies []*http.Cookie
+	if destination != "" {
+		cookies = append(cookies, &http.Cookie{Name: SignupReturnToCookieName, Value: destination})
+	}
+	start := signupRequest(server, "/enroll", `{"email":"me@example.com","region":"EU"}`, cookies...)
+	if start.Code != http.StatusAccepted {
+		t.Fatalf("start = %d", start.Code)
+	}
+	done := signupRequest(server, "/enroll/verify", `{"code":"12345678"}`, start.Result().Cookies()...)
+	if done.Code != http.StatusCreated {
+		t.Fatalf("verify = %d", done.Code)
+	}
+	for _, c := range done.Result().Cookies() {
+		if c.Name == EnrollmentSessionCookieName {
+			_, _, got, err := server.sessions.UserHandle(context.Background(), c.Value)
+			if err != nil || got != destination {
+				t.Fatalf("destination = %q, err=%v", got, err)
+			}
+			return
+		}
+	}
+	t.Fatal("missing enrollment handoff")
+}
+func TestPostEnroll_FoldsReturnToCookieIntoEnrollmentSession(t *testing.T) {
+	checkEnrollmentDestination(t, "/dashboard/next")
+}
+func TestPostEnroll_NoReturnToCookieYieldsEmptyReturnTo(t *testing.T) {
+	checkEnrollmentDestination(t, "")
 }

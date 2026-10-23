@@ -45,6 +45,9 @@ noscript p{background:#fff3cd;color:#664d03;border:1px solid #ffe69c;border-radi
   <section class="card">
     <form id="signup-form" novalidate>
       <p id="signup-error" class="error" role="alert" hidden></p>
+      <label for="signup-email">Your email address</label>
+      <input id="signup-email" name="email" type="email" autocomplete="email" required maxlength="254" style="display:block;width:100%;padding:.75rem;margin:.5rem 0">
+      <p class="hint">We’ll verify your email to identify your account. It will also be available as your email relay destination. Apps won’t receive your real email unless you choose to share it.</p>
       <fieldset>
         <legend>Choose your region</legend>
         <p class="hint">Your account data is stored in the region you choose and stays there.</p>
@@ -55,7 +58,16 @@ noscript p{background:#fff3cd;color:#664d03;border:1px solid #ffe69c;border-radi
         </label>
         {{end}}
       </fieldset>
-      <button type="submit" id="signup-submit">Continue to create your passkey</button>
+      <button type="submit" id="signup-submit">Send verification code</button>
+    </form>
+    <form id="verify-form" hidden>
+      <h2>Check your email</h2>
+      <p>Enter the 8-digit code we sent you. It expires in 10 minutes. Keep this page open while you check your inbox.</p>
+      <label for="signup-code">Verification code</label>
+      <input id="signup-code" name="code" type="text" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{8}" minlength="8" maxlength="8" required style="display:block;width:100%;padding:.75rem;margin:.5rem 0">
+      <p id="verify-error" class="error" role="alert" hidden></p>
+      <button type="submit" id="verify-submit">Verify email and create passkey</button>
+      <button type="button" id="restart-signup" style="margin-top:1rem">Use another email or resend code</button>
     </form>
     <a class="signin-link" href="/signin">Already have a Harbor account? Sign in</a>
   </section>
@@ -65,6 +77,11 @@ noscript p{background:#fff3cd;color:#664d03;border:1px solid #ffe69c;border-radi
   "use strict";
   var form = document.getElementById("signup-form");
   var submitButton = document.getElementById("signup-submit");
+  var verifyForm = document.getElementById("verify-form");
+  var verifyError = document.getElementById("verify-error");
+  var verifyButton = document.getElementById("verify-submit");
+  var emailInput = document.getElementById("signup-email");
+  var codeInput = document.getElementById("signup-code");
   var errorBox = document.getElementById("signup-error");
 
   function showError(message) {
@@ -81,6 +98,7 @@ noscript p{background:#fff3cd;color:#664d03;border:1px solid #ffe69c;border-radi
     event.preventDefault();
     hideError();
 
+    if (!emailInput.reportValidity()) { return; }
     var selected = form.querySelector('input[name="region"]:checked');
     if (!selected) {
       showError("Please choose a region to continue.");
@@ -92,16 +110,49 @@ noscript p{background:#fff3cd;color:#664d03;border:1px solid #ffe69c;border-radi
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ region: selected.value })
+      body: JSON.stringify({ region: selected.value, email: emailInput.value })
     }).then(function (response) {
       if (!response.ok) {
         throw new Error("enroll failed");
       }
-      window.location.assign("/signup/passkey");
+      form.hidden = true;
+      verifyForm.hidden = false;
+      codeInput.focus();
     }).catch(function () {
-      showError("We couldn't start your signup. Please try again.");
+      showError("We couldn't send a code. Check your email address, or wait a few minutes before trying again.");
       submitButton.disabled = false;
     });
+  });
+  verifyForm.addEventListener("submit", async function (event) {
+    event.preventDefault();
+    verifyError.hidden = true;
+    verifyButton.disabled = true;
+    try {
+      var response = await fetch("/enroll/verify", {
+        method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: codeInput.value.trim() })
+      });
+      if (response.status === 409) {
+        verifyError.textContent = "This email already has a Harbor account. Use the Sign in link below to continue with your existing passkey.";
+        verifyError.hidden = false;
+        return;
+      }
+      if (!response.ok) { throw new Error("verification failed"); }
+      window.location.assign("/signup/passkey");
+    } catch (err) {
+      verifyError.textContent = "We couldn't verify that code. Check it and try again, or request a new code if it has expired.";
+      verifyError.hidden = false;
+    } finally {
+      verifyButton.disabled = false;
+    }
+  });
+  document.getElementById("restart-signup").addEventListener("click", function () {
+    verifyForm.hidden = true;
+    form.hidden = false;
+    submitButton.disabled = false;
+    codeInput.value = "";
+    emailInput.focus();
   });
 })();
 </script>

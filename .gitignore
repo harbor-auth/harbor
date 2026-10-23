@@ -37,5 +37,17 @@ debug/
 .weft/
 .hippo/
 
-# Local deployment notes (machine-specific, never commit)
+# Local deployment/operations notes — host and VM topology, SSH details,
+# cluster access, anything that fingerprints live infrastructure.
+#
+# These patterns are deliberately broader than the one file they started as:
+# deploy/LOCAL.md was listed here and STILL ended up committed, because adding
+# a path to .gitignore does not untrack a file already in the index. If you add
+# a local ops note, name it to match one of these AND run
+# `git check-ignore -v <file>` to confirm before you touch git add.
 deploy/LOCAL.md
+**/LOCAL.md
+**/*.local.md
+**/*.local.yaml
+.local/
+keys/

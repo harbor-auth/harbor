@@ -1,5 +1,5 @@
 ---
-title: OIDF OP Conformance (green certification suite)
+title: OIDF OP Conformance Harness
 status: implemented
 design_refs: [§1.8, §11.7, §3.1]
 code:  [internal/oidc/, internal/oidcapi/, api/openapi/harbor.yaml, conformance/]
@@ -10,13 +10,14 @@ plan: oidf-conformance
 last_reconciled: 2026-07-20
 ---
 
-# OIDF OP Conformance (green certification suite)
+# OIDF OP Conformance Harness
 
 ## Summary
 
-`harbor-hot` passes the OpenID Foundation **OIDC Basic OP certification** plan,
-and the conformance run is wired into CI as a release-blocking gate (§1.8
-Stage 7). Getting there required completing the `id_token` claim set
+The OpenID Foundation **OIDC Basic OP certification** harness is wired into
+CI as a release-blocking gate (§1.8 Stage 7). A current passing run has not
+been established: the available local July 23 result records runner exit 1
+and no completed modules. Harness implementation is not certification. Getting there required completing the `id_token` claim set
 (`auth_time`, `nonce`, `jti`, `azp`, `acr`, `amr`), threading `auth_time`
 through the flow, shipping `/userinfo`, and filling in the discovery metadata
 (`subject_types_supported`, `claims_supported`, `userinfo_endpoint`, …). The

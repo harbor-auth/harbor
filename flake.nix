@@ -101,6 +101,7 @@
       in
       {
         default = pkgs.mkShell {
+          # The security-patched channel provides a current Darwin SDK.
           buildInputs = toolchain ++ optionalTools;
 
           # spectral (@stoplight/spectral-cli) was REMOVED from nixpkgs (it is no

@@ -45,7 +45,18 @@ const exportAuditPageSize = int32(500)
 // Every field is decrypted under the caller's own DEK; no operator plaintext
 // path exists and no cross-user read can occur. The bundle is assembled in
 // memory and never persisted — it is PII and must be treated accordingly.
+type IdentifierEntry struct {
+	Kind       string    `json:"kind"`
+	Value      string    `json:"value"`
+	VerifiedAt time.Time `json:"verified_at"`
+}
+
+type ExportIdentifierLoader interface {
+	ListAccountIdentifiers(context.Context, pgtype.UUID) ([]db.AccountIdentifier, error)
+}
+
 type Bundle struct {
+	Identifiers   []IdentifierEntry   `json:"identifiers"`
 	UserID        string              `json:"user_id"`
 	Region        string              `json:"region"`
 	Status        string              `json:"status"`
@@ -88,12 +99,13 @@ type RelayMappingEntry struct {
 // All decryption happens under the caller's own DEK; the operator never sees
 // plaintext data.
 type ExportBundler struct {
-	users   ExportUserLoader
-	consent ExportConsentLoader
-	audit   ExportAuditLoader
-	relay   ExportRelayLoader
-	keys    crypto.KeyProvider
-	cipher  crypto.Decryptor
+	identifiers ExportIdentifierLoader
+	users       ExportUserLoader
+	consent     ExportConsentLoader
+	audit       ExportAuditLoader
+	relay       ExportRelayLoader
+	keys        crypto.KeyProvider
+	cipher      crypto.Decryptor
 }
 
 // NewExportBundler constructs an ExportBundler. All arguments must be non-nil.
@@ -164,6 +176,20 @@ func (b *ExportBundler) Assemble(ctx context.Context, userID string) (*Bundle, e
 	}
 	if user.CreatedAt.Valid {
 		bundle.CreatedAt = user.CreatedAt.Time
+	}
+	if b.identifiers != nil {
+		rows, err := b.identifiers.ListAccountIdentifiers(ctx, userUUID)
+		if err != nil {
+			return nil, fmt.Errorf("identity: export identifiers: %w", err)
+		}
+		bundle.Identifiers = make([]IdentifierEntry, 0, len(rows))
+		for _, row := range rows {
+			value, err := b.cipher.Decrypt(dek, row.EncryptedValue, IdentifierAAD(userID, row.Kind))
+			if err != nil {
+				return nil, fmt.Errorf("identity: decrypt identifier: %w", err)
+			}
+			bundle.Identifiers = append(bundle.Identifiers, IdentifierEntry{row.Kind, string(value), row.VerifiedAt.Time})
+		}
 	}
 	return bundle, nil
 }
@@ -258,4 +284,9 @@ func (b *ExportBundler) assembleRelay(ctx context.Context, userUUID pgtype.UUID,
 		out = append(out, entry)
 	}
 	return out, nil
+}
+
+func (b *ExportBundler) WithIdentifiers(loader ExportIdentifierLoader) *ExportBundler {
+	b.identifiers = loader
+	return b
 }

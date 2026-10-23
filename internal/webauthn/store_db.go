@@ -42,9 +42,14 @@ type activationQuerier interface {
 
 // DBStore implements Store backed by the sqlc queries over Postgres. It is
 // safe for concurrent use (all state is in the database).
+type AccountLabelLoader interface {
+	AccountLabel(context.Context, string) (string, error)
+}
+
 type DBStore struct {
-	q  dbStoreQuerier
-	tx txBeginner // nil → non-atomic best-effort fallback (dev/test without a pool)
+	labels AccountLabelLoader
+	q      dbStoreQuerier
+	tx     txBeginner // nil → non-atomic best-effort fallback (dev/test without a pool)
 }
 
 // NewDBStore returns a DBStore backed by the given querier.
@@ -84,12 +89,21 @@ func (s *DBStore) GetUser(ctx context.Context, userID []byte) (User, error) {
 			legacy[string(c.WebauthnCredID)] = true
 		}
 	}
-	// The handle is opaque binary, not UTF-8 text. Keep the canonical UUID in
-	// the display-only label without changing the authenticator's user handle.
+	// Labels are display-only; never interpret the opaque binary handle as text.
 	label := "Harbor " + uuid.UUID(uid.Bytes).String()
+	if s.labels != nil {
+		email, err := s.labels.AccountLabel(ctx, uuid.UUID(uid.Bytes).String())
+		if err != nil {
+			return User{}, fmt.Errorf("webauthn: load account label: %w", err)
+		}
+		if email != "" {
+			label = email
+		}
+	}
 	user := NewUser(userID, label, label, goCreds).WithRecoveryRequired(row.RecoveryRequired)
 	user.legacyCredentialFlags = legacy
 	return user, nil
+
 }
 
 // AddCredential implements Store: persists a newly-registered passkey.
@@ -279,3 +293,8 @@ func parseWebAuthnUserID(userID []byte) (pgtype.UUID, error) {
 
 // Compile-time assertion: DBStore implements Store.
 var _ Store = (*DBStore)(nil)
+
+func (s *DBStore) WithAccountLabels(labels AccountLabelLoader) *DBStore {
+	s.labels = labels
+	return s
+}
