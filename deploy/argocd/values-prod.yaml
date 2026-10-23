@@ -23,7 +23,7 @@ global:
   image:
     registry: ghcr.io/harbor-auth/harbor
     pullPolicy: IfNotPresent
-    sourceRevision: 381f666ff0830a735f22e8d2f0a0365babe6c2a3
+    sourceRevision: c239a37ee3f02583439cb3c06027e3fee3f4d916
   postgresTLS:
     enabled: true
     secretName: harbor-postgresql-tls
@@ -33,7 +33,7 @@ global:
 region: EU
 hot:
   image:
-    digest: sha256:876337884a1c526266ebaf720060858b122cd7cea892c3c476b94395e361835c
+    digest: sha256:cf4ebeef41af7f103cf9f4f2507a6c8841b54e88d4ef98cfb1647e3028fd92f5
   # Single node — one replica. HPA/PDB are meaningless here and are disabled.
   replicaCount: 1
   issuer: https://auth.harborauth.com
@@ -73,7 +73,7 @@ mgmt:
   authorizeCompleteURL: https://auth.harborauth.com/authorize/complete
   registrationBaseURL: https://auth.harborauth.com
   image:
-    digest: sha256:1dae9cbc325c0d72e45f715ea6ad12adc0573b9ce1dbb7636eec2ac1d0feb9b4
+    digest: sha256:8fe73bdb5a6f349840d965e4a3012e7b66840ef381d78a0af6ca8d1ba248e841
   replicaCount: 1
   webauthn:
     rpId: auth.harborauth.com
@@ -129,7 +129,7 @@ migrate:
   secrets:
     existingSecret: harbor-migrate-secrets
   image:
-    digest: sha256:9c51368c68eb38690fb92362b02877768a2ed66058cbc4859e9c19e90a425617
+    digest: sha256:70daf1e32aa552cc7f1d3a1f7b20d5801c0a19231d22a46377525593565cc06f
 # The harbor namespace already exists (created by the initial install); ArgoCD
 # manages resources inside it but must not try to re-create it.
 namespace:
