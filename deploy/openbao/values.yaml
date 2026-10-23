@@ -1,6 +1,8 @@
 global:
   enabled: true
   tlsDisable: false
+  imagePullSecrets:
+    - name: ghcr-pull
 
 injector:
   enabled: false
@@ -13,10 +15,10 @@ ui:
 
 server:
   image:
-    registry: quay.io
-    repository: openbao/openbao
-    # OpenBao 2.6.4, pinned to the linux/amd64 manifest.
-    tag: "2.6.4@sha256:bd3e8b6b67b5c4c3fc1064cd0f86eb8063d9ed92a7af608b6408d6748e6eef64"
+    registry: ghcr.io
+    repository: harbor-auth/harbor-cloud/platform-openbao
+    # Pinned 2.6.4 source rebuilt with Go 1.26.10 and a patched OVH plugin.
+    tag: "security-0f2e18929dd12ca69d33edcd53100cac4902b60d@sha256:43b29d94a9c5b05d9f5963bc13e6a535fb470b68b52179bc209a413fdfb0bc83"
     pullPolicy: IfNotPresent
 
   logLevel: info
@@ -85,12 +87,12 @@ server:
 
         service_registration "kubernetes" {}
 
-        plugin_directory = "/openbao/data/plugins"
+        plugin_directory = "/usr/local/libexec/openbao"
         plugin_auto_register = true
         plugin "kms" "ovhcloud" {
           command = "openbao-plugin-kms-ovhcloud"
-          version = "v0.0.1"
-          sha256sum = "653ed969ae963caa3622c4505be401756a91c8cd2145ac83b83249648b60f76c"
+          version = "v0.0.1+harbor.20261022"
+          sha256sum = "e27bc586277ba088630020d524083e25e451f1ecd90e3aea6e19f48b13042860"
         }
         seal "ovhcloud" {
           endpoint = "https://us-east-vin.okms.ovh.us"
