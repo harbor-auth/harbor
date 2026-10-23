@@ -57,6 +57,7 @@ func (f *fakeStoreQuerier) CreateCredential(_ context.Context, arg db.CreateCred
 		WebauthnPubkey: arg.WebauthnPubkey,
 		WebauthnAaguid: arg.WebauthnAaguid,
 		SignCount:      arg.SignCount,
+		WebauthnFlags:  arg.WebauthnFlags,
 	}
 	f.credentials = append(f.credentials, c)
 	return c, nil
@@ -82,8 +83,11 @@ func (f *fakeStoreQuerier) UpdateCredentialSignCount(_ context.Context, arg db.U
 		if c.ID == arg.ID {
 			// Mirror the guarded SQL update: a stale writer affects zero rows and
 			// the :execrows sqlc method exposes that result to the store.
-			if c.SignCount < arg.SignCount {
+			if (c.SignCount < arg.SignCount || (c.SignCount == 0 && arg.SignCount == 0)) &&
+				(c.WebauthnFlags == nil || (*c.WebauthnFlags&8) == (arg.WebauthnFlags&8)) {
 				f.credentials[i].SignCount = arg.SignCount
+				flags := arg.WebauthnFlags
+				f.credentials[i].WebauthnFlags = &flags
 				return 1, nil
 			}
 			return 0, nil
@@ -422,9 +426,8 @@ func TestDBStore_UpdateCredential_ConcurrentNoOpIsRegression(t *testing.T) {
 }
 
 // WebAuthn authenticators that do not implement a signature counter always
-// return zero. Zero-to-zero is valid and should not execute a guarded SQL
-// update whose zero-row result is otherwise treated as a clone signal.
-func TestDBStore_UpdateCredential_ZeroCounterSkipsUpdate(t *testing.T) {
+// return zero. Zero-to-zero still persists the signed authenticator flags.
+func TestDBStore_UpdateCredential_ZeroCounterPersistsFlags(t *testing.T) {
 	s, q, uid := newFakeDBStore(t)
 	cred := gowebauthn.Credential{ID: []byte("cred-zero-counter"), PublicKey: []byte("pk")}
 	if err := s.AddCredential(context.Background(), uidBytes(uid), cred); err != nil {
@@ -434,7 +437,7 @@ func TestDBStore_UpdateCredential_ZeroCounterSkipsUpdate(t *testing.T) {
 	if err := s.UpdateCredential(context.Background(), uidBytes(uid), cred); err != nil {
 		t.Fatalf("zero-counter authenticator: %v", err)
 	}
-	if q.counterUpdateCalls != 0 {
-		t.Fatalf("guarded update calls = %d, want 0 for unsupported counter", q.counterUpdateCalls)
+	if q.counterUpdateCalls != 1 {
+		t.Fatalf("guarded update calls = %d, want 1 to persist flags", q.counterUpdateCalls)
 	}
 }

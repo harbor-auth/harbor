@@ -491,11 +491,9 @@ type Querier interface {
 	// SSO login).
 	TouchFederatedIdentity(ctx context.Context, arg TouchFederatedIdentityParams) error
 	UpdateBYODomainState(ctx context.Context, arg UpdateBYODomainStateParams) (ByoDomain, error)
-	// UpdateCredentialSignCount advances a passkey's signature counter after an
-	// assertion — a monotonically increasing counter is how WebAuthn detects a
-	// cloned authenticator (DESIGN §3.1). The `sign_count < $2` guard makes the
-	// update strictly increasing: an equal or regressed counter is a clone signal
-	// and is a no-op here (the caller treats zero rows affected as a failure).
+	// Persist signed assertion flags and monotonically increasing counters together.
+	// Counterless authenticators may stay at zero. Backup eligibility is immutable
+	// once initialized, including if two replicas race to initialize a legacy row.
 	UpdateCredentialSignCount(ctx context.Context, arg UpdateCredentialSignCountParams) (int64, error)
 	// UpdateGrantScopes records an approved scope set on the canonical grant. It
 	// deliberately cannot create a grant because region and pairwise_sub must come

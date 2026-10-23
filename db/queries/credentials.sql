@@ -23,22 +23,22 @@ ORDER BY created_at DESC;
 -- public key; webauthn_aaguid identifies the authenticator model.
 -- name: CreateCredential :one
 INSERT INTO credentials (
-    id, region, user_id, type, webauthn_cred_id, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash
+    id, region, user_id, type, webauthn_cred_id, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash, webauthn_flags
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
 )
 RETURNING *;
 
--- UpdateCredentialSignCount advances a passkey's signature counter after an
--- assertion — a monotonically increasing counter is how WebAuthn detects a
--- cloned authenticator (DESIGN §3.1). The `sign_count < $2` guard makes the
--- update strictly increasing: an equal or regressed counter is a clone signal
--- and is a no-op here (the caller treats zero rows affected as a failure).
+-- Persist signed assertion flags and monotonically increasing counters together.
+-- Counterless authenticators may stay at zero. Backup eligibility is immutable
+-- once initialized, including if two replicas race to initialize a legacy row.
 -- name: UpdateCredentialSignCount :execrows
 UPDATE credentials
-SET sign_count = $2
+SET sign_count = $2, webauthn_flags = sqlc.arg(webauthn_flags)::smallint
 WHERE id = $1
-  AND sign_count < $2;
+  AND (sign_count < $2 OR (sign_count = 0 AND $2 = 0))
+  AND (webauthn_flags IS NULL
+       OR (webauthn_flags & 8) = (sqlc.arg(webauthn_flags)::smallint & 8));
 
 -- name: DeleteCredential :exec
 DELETE FROM credentials

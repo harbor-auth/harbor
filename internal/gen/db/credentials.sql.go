@@ -13,11 +13,11 @@ import (
 
 const createCredential = `-- name: CreateCredential :one
 INSERT INTO credentials (
-    id, region, user_id, type, webauthn_cred_id, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash
+    id, region, user_id, type, webauthn_cred_id, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash, webauthn_flags
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
 )
-RETURNING id, region, user_id, type, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash, created_at, webauthn_cred_id
+RETURNING id, region, user_id, type, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash, created_at, webauthn_cred_id, webauthn_flags
 `
 
 type CreateCredentialParams struct {
@@ -30,6 +30,7 @@ type CreateCredentialParams struct {
 	WebauthnAaguid []byte      `json:"webauthn_aaguid"`
 	SignCount      int64       `json:"sign_count"`
 	PasswordHash   []byte      `json:"password_hash"`
+	WebauthnFlags  *int16      `json:"webauthn_flags"`
 }
 
 // CreateCredential persists a newly-registered passkey. webauthn_cred_id is the
@@ -46,6 +47,7 @@ func (q *Queries) CreateCredential(ctx context.Context, arg CreateCredentialPara
 		arg.WebauthnAaguid,
 		arg.SignCount,
 		arg.PasswordHash,
+		arg.WebauthnFlags,
 	)
 	var i Credential
 	err := row.Scan(
@@ -59,6 +61,7 @@ func (q *Queries) CreateCredential(ctx context.Context, arg CreateCredentialPara
 		&i.PasswordHash,
 		&i.CreatedAt,
 		&i.WebauthnCredID,
+		&i.WebauthnFlags,
 	)
 	return i, err
 }
@@ -75,7 +78,7 @@ func (q *Queries) DeleteCredential(ctx context.Context, id pgtype.UUID) error {
 
 const getCredential = `-- name: GetCredential :one
 
-SELECT id, region, user_id, type, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash, created_at, webauthn_cred_id FROM credentials
+SELECT id, region, user_id, type, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash, created_at, webauthn_cred_id, webauthn_flags FROM credentials
 WHERE id = $1
 `
 
@@ -96,12 +99,13 @@ func (q *Queries) GetCredential(ctx context.Context, id pgtype.UUID) (Credential
 		&i.PasswordHash,
 		&i.CreatedAt,
 		&i.WebauthnCredID,
+		&i.WebauthnFlags,
 	)
 	return i, err
 }
 
 const getCredentialByWebAuthnCredID = `-- name: GetCredentialByWebAuthnCredID :one
-SELECT id, region, user_id, type, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash, created_at, webauthn_cred_id FROM credentials
+SELECT id, region, user_id, type, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash, created_at, webauthn_cred_id, webauthn_flags FROM credentials
 WHERE webauthn_cred_id = $1
 `
 
@@ -122,12 +126,13 @@ func (q *Queries) GetCredentialByWebAuthnCredID(ctx context.Context, webauthnCre
 		&i.PasswordHash,
 		&i.CreatedAt,
 		&i.WebauthnCredID,
+		&i.WebauthnFlags,
 	)
 	return i, err
 }
 
 const listCredentialsByUser = `-- name: ListCredentialsByUser :many
-SELECT id, region, user_id, type, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash, created_at, webauthn_cred_id FROM credentials
+SELECT id, region, user_id, type, webauthn_pubkey, webauthn_aaguid, sign_count, password_hash, created_at, webauthn_cred_id, webauthn_flags FROM credentials
 WHERE user_id = $1
 ORDER BY created_at DESC
 `
@@ -152,6 +157,7 @@ func (q *Queries) ListCredentialsByUser(ctx context.Context, userID pgtype.UUID)
 			&i.PasswordHash,
 			&i.CreatedAt,
 			&i.WebauthnCredID,
+			&i.WebauthnFlags,
 		); err != nil {
 			return nil, err
 		}
@@ -165,23 +171,24 @@ func (q *Queries) ListCredentialsByUser(ctx context.Context, userID pgtype.UUID)
 
 const updateCredentialSignCount = `-- name: UpdateCredentialSignCount :execrows
 UPDATE credentials
-SET sign_count = $2
+SET sign_count = $2, webauthn_flags = $3::smallint
 WHERE id = $1
-  AND sign_count < $2
+  AND (sign_count < $2 OR (sign_count = 0 AND $2 = 0))
+  AND (webauthn_flags IS NULL
+       OR (webauthn_flags & 8) = ($3::smallint & 8))
 `
 
 type UpdateCredentialSignCountParams struct {
-	ID        pgtype.UUID `json:"id"`
-	SignCount int64       `json:"sign_count"`
+	ID            pgtype.UUID `json:"id"`
+	SignCount     int64       `json:"sign_count"`
+	WebauthnFlags int16       `json:"webauthn_flags"`
 }
 
-// UpdateCredentialSignCount advances a passkey's signature counter after an
-// assertion — a monotonically increasing counter is how WebAuthn detects a
-// cloned authenticator (DESIGN §3.1). The `sign_count < $2` guard makes the
-// update strictly increasing: an equal or regressed counter is a clone signal
-// and is a no-op here (the caller treats zero rows affected as a failure).
+// Persist signed assertion flags and monotonically increasing counters together.
+// Counterless authenticators may stay at zero. Backup eligibility is immutable
+// once initialized, including if two replicas race to initialize a legacy row.
 func (q *Queries) UpdateCredentialSignCount(ctx context.Context, arg UpdateCredentialSignCountParams) (int64, error) {
-	result, err := q.db.Exec(ctx, updateCredentialSignCount, arg.ID, arg.SignCount)
+	result, err := q.db.Exec(ctx, updateCredentialSignCount, arg.ID, arg.SignCount, arg.WebauthnFlags)
 	if err != nil {
 		return 0, err
 	}

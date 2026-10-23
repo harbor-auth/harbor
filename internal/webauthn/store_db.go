@@ -3,6 +3,7 @@ package webauthn
 import (
 	"context"
 	"fmt"
+	"github.com/go-webauthn/webauthn/protocol"
 
 	gowebauthn "github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
@@ -76,13 +77,19 @@ func (s *DBStore) GetUser(ctx context.Context, userID []byte) (User, error) {
 		return User{}, fmt.Errorf("webauthn/store_db: list credentials: %w", err)
 	}
 	goCreds := make([]gowebauthn.Credential, 0, len(creds))
+	legacy := make(map[string]bool)
 	for _, c := range creds {
 		goCreds = append(goCreds, rowToGoCredential(c))
+		if c.WebauthnFlags == nil {
+			legacy[string(c.WebauthnCredID)] = true
+		}
 	}
 	// The handle is opaque binary, not UTF-8 text. Keep the canonical UUID in
 	// the display-only label without changing the authenticator's user handle.
 	label := "Harbor " + uuid.UUID(uid.Bytes).String()
-	return NewUser(userID, label, label, goCreds).WithRecoveryRequired(row.RecoveryRequired), nil
+	user := NewUser(userID, label, label, goCreds).WithRecoveryRequired(row.RecoveryRequired)
+	user.legacyCredentialFlags = legacy
+	return user, nil
 }
 
 // AddCredential implements Store: persists a newly-registered passkey.
@@ -156,6 +163,7 @@ func createCredentialAndActivate(ctx context.Context, q activationQuerier, uid p
 // credentialParams builds the sqlc params for inserting a passkey. The
 // credential's own primary key is a fresh UUID; region is the user's own region.
 func credentialParams(uid pgtype.UUID, region string, cred gowebauthn.Credential) db.CreateCredentialParams {
+	flags := int16(cred.Flags.ProtocolValue())
 	return db.CreateCredentialParams{
 		ID:             pgtype.UUID{Bytes: uuid.New(), Valid: true},
 		Region:         region,
@@ -165,6 +173,7 @@ func credentialParams(uid pgtype.UUID, region string, cred gowebauthn.Credential
 		WebauthnPubkey: cred.PublicKey,
 		WebauthnAaguid: cred.Authenticator.AAGUID,
 		SignCount:      int64(cred.Authenticator.SignCount),
+		WebauthnFlags:  &flags,
 	}
 }
 
@@ -186,18 +195,14 @@ func (s *DBStore) UpdateCredential(ctx context.Context, userID []byte, cred gowe
 	}
 	old := uint32(row.SignCount)
 	newCount := cred.Authenticator.SignCount
-	// Authenticators without counter support report zero for every assertion.
-	// That zero-to-zero case is valid and must not be confused with a guarded
-	// update losing a race to another replica.
-	if old == 0 && newCount == 0 {
-		return nil
-	}
+	// Counterless authenticators still need their signed backup state saved.
 	if old != 0 && newCount <= old {
 		return ErrSignCountRegression
 	}
 	rowsAffected, err := s.q.UpdateCredentialSignCount(ctx, db.UpdateCredentialSignCountParams{
-		ID:        row.ID,
-		SignCount: int64(newCount),
+		ID:            row.ID,
+		SignCount:     int64(newCount),
+		WebauthnFlags: int16(cred.Flags.ProtocolValue()),
 	})
 	if err != nil {
 		return err
@@ -231,6 +236,9 @@ func rowToGoCredential(row db.Credential) gowebauthn.Credential {
 	}
 	c.Authenticator.AAGUID = row.WebauthnAaguid
 	c.Authenticator.SignCount = uint32(row.SignCount)
+	if row.WebauthnFlags != nil {
+		c.Flags = gowebauthn.NewCredentialFlags(protocol.AuthenticatorFlags(*row.WebauthnFlags))
+	}
 	return c
 }
 

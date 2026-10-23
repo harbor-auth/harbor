@@ -13,6 +13,9 @@
 package webauthn
 
 import (
+	"bytes"
+
+	"github.com/go-webauthn/webauthn/protocol"
 	gowebauthn "github.com/go-webauthn/webauthn/webauthn"
 )
 
@@ -24,11 +27,28 @@ import (
 // decoupled from the library's interface so the storage layer never depends on
 // go-webauthn internals.
 type User struct {
-	id               []byte
-	name             string
-	displayName      string
-	credentials      []gowebauthn.Credential
-	recoveryRequired bool
+	id                    []byte
+	name                  string
+	displayName           string
+	credentials           []gowebauthn.Credential
+	recoveryRequired      bool
+	legacyCredentialFlags map[string]bool
+}
+
+// bindLegacyFlags supplies missing historical metadata for validation only.
+// The assertion signature must still verify before any flags are persisted.
+// Registered metadata is never replaced from an unverified assertion.
+func (u User) bindLegacyFlags(id []byte, flags protocol.AuthenticatorFlags) User {
+	if !u.legacyCredentialFlags[string(id)] {
+		return u
+	}
+	u.credentials = append([]gowebauthn.Credential(nil), u.credentials...)
+	for i := range u.credentials {
+		if bytes.Equal(u.credentials[i].ID, id) {
+			u.credentials[i].Flags = gowebauthn.NewCredentialFlags(flags)
+		}
+	}
+	return u
 }
 
 // NewUser builds a User. The id is the opaque WebAuthn user handle (docs/DESIGN.md

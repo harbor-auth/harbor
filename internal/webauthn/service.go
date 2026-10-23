@@ -208,6 +208,7 @@ func (s *Service) FinishDiscoverableLogin(ctx context.Context, sessionKey string
 		if err != nil {
 			return nil, err
 		}
+		u = u.bindLegacyFlags(rawID, parsed.Response.AuthenticatorData.Flags)
 		resolved = u
 		return u, nil
 	}
@@ -258,6 +259,7 @@ func (s *Service) FinishLogin(ctx context.Context, userID []byte, sessionKey str
 	if err != nil {
 		return nil, false, err
 	}
+	user = user.bindLegacyFlags(parsed.RawID, parsed.Response.AuthenticatorData.Flags)
 	assertedCred, err := s.wa.ValidateLogin(user, session, parsed)
 	if err != nil {
 		return nil, false, err
