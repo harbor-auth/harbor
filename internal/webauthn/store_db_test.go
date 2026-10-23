@@ -426,8 +426,9 @@ func TestDBStore_UpdateCredential_ConcurrentNoOpIsRegression(t *testing.T) {
 }
 
 // WebAuthn authenticators that do not implement a signature counter always
-// return zero. Zero-to-zero still persists the signed authenticator flags.
-func TestDBStore_UpdateCredential_ZeroCounterPersistsFlags(t *testing.T) {
+// return zero. Keep the historical zero-counter regression: the counter must
+// not advance, even though signed flags now require a metadata write.
+func TestDBStore_UpdateCredential_ZeroCounterSkipsUpdate(t *testing.T) {
 	s, q, uid := newFakeDBStore(t)
 	cred := gowebauthn.Credential{ID: []byte("cred-zero-counter"), PublicKey: []byte("pk")}
 	if err := s.AddCredential(context.Background(), uidBytes(uid), cred); err != nil {
@@ -437,7 +438,10 @@ func TestDBStore_UpdateCredential_ZeroCounterPersistsFlags(t *testing.T) {
 	if err := s.UpdateCredential(context.Background(), uidBytes(uid), cred); err != nil {
 		t.Fatalf("zero-counter authenticator: %v", err)
 	}
-	if q.counterUpdateCalls != 1 {
-		t.Fatalf("guarded update calls = %d, want 1 to persist flags", q.counterUpdateCalls)
+	if q.credentials[0].SignCount != 0 {
+		t.Fatal("counterless authenticator counter advanced")
+	}
+	if q.counterUpdateCalls != 1 || q.credentials[0].WebauthnFlags == nil {
+		t.Fatal("counterless authenticator lost its signed metadata")
 	}
 }
