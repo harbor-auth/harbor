@@ -19,7 +19,7 @@
 
   inputs = {
     # Pinned to a stable channel; `nix flake update` refreshes flake.lock.
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     # flake-utils intentionally NOT used — inlining eachDefaultSystem eliminates
     # 2 extra GitHub tarball fetches (flake-utils + systems) that were causing
     # intermittent 503 CI failures on api.github.com.
@@ -39,36 +39,13 @@
         let
           pkgs = import nixpkgs { inherit system; };
 
-        # go.mod declares `go 1.25.0` (required by grpc v1.82+, webauthn v0.17+,
-        # pgx v5.10+, golang.org/x/* v0.52+). The nix shell provides go_1_24 as
-        # a bootstrap; GOTOOLCHAIN=auto (Go default since 1.21) auto-downloads
-        # go1.25.0 when the build or test commands need it. Prefer go_1_25 once
-        # nixpkgs 25.05 ships that attribute; until then the fallback is go_1_24.
-        goToolchain = pkgs.go_1_25 or pkgs.go_1_24 or pkgs.go;
-
-        # nixpkgs' `golangci-lint` package.nix (pkgs/by-name/go/golangci-lint)
-        # is built via `buildGo124Module` — a builder HARDCODED to go1.24 as a
-        # named function argument, NOT derived from the top-level `pkgs.go`.
-        # (Confirmed by reading the package.nix source: `{ buildGo124Module,
-        # fetchFromGitHub, lib, installShellFiles }: buildGo124Module rec { ... }`.)
-        # golangci-lint v2 refuses to analyze a module whose go directive
-        # exceeds its own compile-time Go version ("the Go language version
-        # go1.24 used to build golangci-lint is lower than the targeted Go
-        # version 1.25.0"), and there is no .golangci.yml workaround: forcing
-        # a lower `run.go` just moves the failure into a go/types crash
-        # instead (file versions still propagate from go.mod). A `pkgs.extend`
-        # overlay that replaces the global `go` attribute does NOT fix this —
-        # golangci-lint's build never references `pkgs.go`. Fix: override the
-        # specific `buildGo124Module` argument it takes with a go1.25-based
-        # module builder. `vendorHash` only hashes vendored Go source, so it
-        # is unaffected by the compiler swap. Drop this override once nixpkgs
-        # packages `golangci-lint` against go1.25+ itself.
-        golangciLint = pkgs.golangci-lint.override {
-          buildGo124Module = pkgs.buildGoModule.override { go = goToolchain; };
-        };
+        # Patched kin-openapi requires Go 1.26. Use the supported channel's
+        # compiler and linter; the old Go 1.25 linter cannot analyze this module.
+        goToolchain = pkgs.go_1_26;
+        golangciLint = pkgs.golangci-lint;
 
         # sqlc is pinned to v1.30.0 explicitly rather than taken from the
-        # nixos-25.05 channel (which ships v1.29.0). This prevents codegen drift
+        # channel. This prevents codegen drift
         # when developers upgrade their local sqlc: CI and local always regenerate
         # identical output. Hashes sourced from nixpkgs commit 0820e12e1ccb
         # ("sqlc: 1.29.0 -> 1.30.0"). Bump this when upgrading local sqlc.

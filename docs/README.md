@@ -24,6 +24,7 @@ docs/plans/         → future WHAT — intent not yet built
 
 | Doc | Status | DESIGN § | Code | Last reconciled |
 |---|---|---|---|---|
+| [security-maintenance](features/security-maintenance.md) | patches implemented; rollout tracked separately | §7.3, §4.4, §1.8 | `deploy/`, `go.mod`, `.github/workflows/security.yml` | 2026-10-22 |
 | [ppid-identity](features/ppid-identity.md) | implemented | §3.2 | `internal/identity/` | 2026-07-08 |
 | [webauthn-passkeys](features/webauthn-passkeys.md) | implemented | §3.1 | `internal/webauthn/`, `cmd/harbor-mgmt/` | 2026-07-08 |
 | [oidc-authorization-code](features/oidc-authorization-code.md) | implemented | §3.1, §11.2, §11.7 | `internal/oidc/`, `internal/oidcapi/` | 2026-07-08 |

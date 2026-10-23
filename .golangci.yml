@@ -3,11 +3,8 @@
 # modules-download-mode: mod avoids "go.mod: updates needed" errors when the
 # build cache is cold (golangci-lint runs `go list` internally).
 #
-# run.go is intentionally NOT set here. golangci-lint reads the go directive
-# from go.mod (currently go 1.25.0, required by grpc v1.82+, webauthn v0.17+,
-# pgx v5.10+) and configures the type-checker accordingly. nixpkgs 25.05 ships
-# golangci-lint v2.1.6 compiled with go1.25 (the channel default since the
-# 2026-01-02 revision), so go1.25 modules are handled natively.
+# The linter reads Go 1.26 from go.mod. The pinned Nix channel provides a
+# linter compiled with a compatible Go version; do not lower run.go.
 version: "2"
 
 run:

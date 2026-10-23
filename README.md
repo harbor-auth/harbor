@@ -39,7 +39,7 @@ Harbor is an OpenID Provider (OP) that authenticates people to the apps they've 
 
 ### Prerequisites
 
-Harbor pins its entire toolchain (Go 1.26, `sqlc`, `oapi-codegen`, `buf`,
+Harbor pins its entire toolchain (Go 1.26.10, `sqlc`, `oapi-codegen`, `buf`,
 `golangci-lint`, `go-migrate`, `k6`, Node/`pnpm`) with Nix so
 local and CI runs are byte-identical. Enter the hermetic dev shell:
 
@@ -47,7 +47,7 @@ local and CI runs are byte-identical. Enter the hermetic dev shell:
 nix develop            # drops you into the pinned toolchain shell
 ```
 
-Without Nix you need Go 1.26+ and Docker (for the e2e / conformance gates); the
+Without Nix you need Go 1.26.10+ and Docker (for the e2e / conformance gates); the
 `make` targets **fail closed** with an install hint when a required tool is
 missing. Run `make help` to list every target.
 

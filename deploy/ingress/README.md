@@ -1,6 +1,6 @@
 # Production ingress
 
-Both K3s clusters use Traefik 3.7.12, chart 41.5.0, with a pinned amd64 image.
+Both K3s clusters use Traefik 3.7.16, chart 41.5.0, with a pinned amd64 image.
 The Helm release, namespace and IngressClass retain the name `ingress-nginx`
 so existing application routes and cert-manager HTTP-01 solvers keep working.
 The controller implementation is Traefik's Kubernetes Ingress NGINX provider.

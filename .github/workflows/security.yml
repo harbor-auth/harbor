@@ -1,0 +1,48 @@
+name: dependency-security
+
+on:
+  pull_request:
+    paths:
+      - 'go.mod'
+      - 'go.sum'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'sdk/sign-in-button/react/package*.json'
+      - '.github/workflows/security.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'go.mod'
+      - 'go.sum'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'sdk/sign-in-button/react/package*.json'
+      - '.github/workflows/security.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  go-vulnerabilities:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.10'
+      - name: Check reachable production command vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./cmd/harbor-hot ./cmd/harbor-mgmt ./cmd/harbor-relay
+  sdk-vulnerabilities:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/sign-in-button/react
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --ignore-scripts
+      - run: npm audit --audit-level=low
+      - run: npm run typecheck
+      - run: npm test
