@@ -57,6 +57,7 @@ func (f *fakeStoreQuerier) CreateCredential(_ context.Context, arg db.CreateCred
 		WebauthnPubkey: arg.WebauthnPubkey,
 		WebauthnAaguid: arg.WebauthnAaguid,
 		SignCount:      arg.SignCount,
+		WebauthnFlags:  arg.WebauthnFlags,
 	}
 	f.credentials = append(f.credentials, c)
 	return c, nil
@@ -82,8 +83,11 @@ func (f *fakeStoreQuerier) UpdateCredentialSignCount(_ context.Context, arg db.U
 		if c.ID == arg.ID {
 			// Mirror the guarded SQL update: a stale writer affects zero rows and
 			// the :execrows sqlc method exposes that result to the store.
-			if c.SignCount < arg.SignCount {
+			if (c.SignCount < arg.SignCount || (c.SignCount == 0 && arg.SignCount == 0)) &&
+				(c.WebauthnFlags == nil || (*c.WebauthnFlags&8) == (arg.WebauthnFlags&8)) {
 				f.credentials[i].SignCount = arg.SignCount
+				flags := arg.WebauthnFlags
+				f.credentials[i].WebauthnFlags = &flags
 				return 1, nil
 			}
 			return 0, nil
@@ -161,6 +165,29 @@ func TestDBStore_GetUser_ProductionHandleFormat(t *testing.T) {
 	rawHandle := uid.Bytes[:] // exactly what parseUUIDToBytes/recoveryUserHandle produce in production.
 	if _, err := s.GetUser(context.Background(), rawHandle); err != nil {
 		t.Fatalf("GetUser(raw 16-byte handle) = %v, want success — this is the handle format enrollment/recovery actually produce", err)
+	}
+}
+
+func TestDBStore_GetUser_ReadableAccountLabel(t *testing.T) {
+	// This raw handle contains invalid UTF-8 and NUL bytes. Interpreting it
+	// as a string previously saved replacement characters in passkey labels.
+	id := uuid.MustParse("00ff8011-2233-4455-8899-aabbccddeeff")
+	q := newFakeStoreQuerier()
+	uid := pgUUID(id)
+	q.users[uid] = db.User{ID: uid, Region: "EU", Status: "active"}
+	store := NewDBStore(q)
+	for _, handle := range [][]byte{id[:], []byte(id.String())} {
+		user, err := store.GetUser(context.Background(), handle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "Harbor " + id.String()
+		if user.WebAuthnName() != want || user.WebAuthnDisplayName() != want {
+			t.Fatalf("passkey labels = %q / %q, want %q", user.WebAuthnName(), user.WebAuthnDisplayName(), want)
+		}
+		if !bytes.Equal(user.WebAuthnID(), handle) {
+			t.Fatal("display label change altered the authenticator user handle")
+		}
 	}
 }
 
@@ -399,8 +426,8 @@ func TestDBStore_UpdateCredential_ConcurrentNoOpIsRegression(t *testing.T) {
 }
 
 // WebAuthn authenticators that do not implement a signature counter always
-// return zero. Zero-to-zero is valid and should not execute a guarded SQL
-// update whose zero-row result is otherwise treated as a clone signal.
+// return zero. Keep the historical zero-counter regression: the counter must
+// not advance, even though signed flags now require a metadata write.
 func TestDBStore_UpdateCredential_ZeroCounterSkipsUpdate(t *testing.T) {
 	s, q, uid := newFakeDBStore(t)
 	cred := gowebauthn.Credential{ID: []byte("cred-zero-counter"), PublicKey: []byte("pk")}
@@ -411,7 +438,10 @@ func TestDBStore_UpdateCredential_ZeroCounterSkipsUpdate(t *testing.T) {
 	if err := s.UpdateCredential(context.Background(), uidBytes(uid), cred); err != nil {
 		t.Fatalf("zero-counter authenticator: %v", err)
 	}
-	if q.counterUpdateCalls != 0 {
-		t.Fatalf("guarded update calls = %d, want 0 for unsupported counter", q.counterUpdateCalls)
+	if q.credentials[0].SignCount != 0 {
+		t.Fatal("counterless authenticator counter advanced")
+	}
+	if q.counterUpdateCalls != 1 || q.credentials[0].WebauthnFlags == nil {
+		t.Fatal("counterless authenticator lost its signed metadata")
 	}
 }

@@ -86,6 +86,7 @@ type Credential struct {
 	PasswordHash   []byte             `json:"password_hash"`
 	CreatedAt      pgtype.Timestamptz `json:"created_at"`
 	WebauthnCredID []byte             `json:"webauthn_cred_id"`
+	WebauthnFlags  *int16             `json:"webauthn_flags"`
 }
 
 type FederatedIdentity struct {
