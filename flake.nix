@@ -101,10 +101,8 @@
       in
       {
         default = pkgs.mkShell {
-          # Go's macOS certificate verifier links SecTrustCopyCertificateChain,
-          # introduced in macOS 12. The default SDK 11 cannot provide it.
-          buildInputs = toolchain ++ optionalTools
-            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [ pkgs.apple-sdk_12 ];
+          # The security-patched channel provides a current Darwin SDK.
+          buildInputs = toolchain ++ optionalTools;
 
           # spectral (@stoplight/spectral-cli) was REMOVED from nixpkgs (it is no
           # longer available as a Nix package on any channel, incl. unstable), so
