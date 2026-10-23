@@ -67,6 +67,13 @@ hot:
       tokenAudience: openbao
       tokenExpirationSeconds: 600
 mgmt:
+  signup:
+    smtpHost: smtp-relay.brevo.com
+    smtpPort: 587
+    smtpFrom: verify@notify.harborauth.com
+    # SMTP submission IPv4 resolved during setup. Reconcile if provider DNS changes.
+    smtpEgressCIDRs:
+      - 1.179.119.1/32
   # Both default to the scaffold auth.example.com in the chart. Unset, the
   # post-authentication hand-back and the RFC 7591 registration responses point
   # at a domain nobody owns.

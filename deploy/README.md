@@ -298,6 +298,17 @@ Raw Kubernetes manifests carry documentation placeholders: replace the SMTP
 host, sender, secret values, and `192.0.2.1/32` NetworkPolicy destination; keep
 its SMTP port and `skip-outbound-ports` annotation aligned.
 
+Production uses Brevo Free for transactional signup mail, with
+`smtp-relay.brevo.com:587` and sender `verify@notify.harborauth.com`.
+The notification subdomain has separate Brevo verification/DKIM records and a
+DMARC quarantine policy; the root domain's Proton mail records stay unchanged.
+SMTP credentials belong only in `harbor-mgmt-secrets-v2`, alongside the stable
+identifier key. Never commit them. Reconcile `mgmt.signup.smtpEgressCIDRs` if
+Brevo's submission-host DNS changes. Check delivery and quota before promoting:
+the free plan's 300-message daily allowance includes retries, and queued messages
+can outlive a signup code's ten-minute validity. Sender authentication, working
+SMTP credentials and a real delivered-code signup are required rollout evidence.
+
 Keep the identifier key stable across replicas and restarts. Blindly rotating
 it breaks duplicate detection; a future key rotation must reindex encrypted
 identifiers. Uniqueness is regional, with no global user/email directory.
