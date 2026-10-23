@@ -15,8 +15,8 @@ server:
   image:
     registry: quay.io
     repository: openbao/openbao
-    # OpenBao 2.6.2, pinned to the linux/amd64 manifest.
-    tag: "2.6.2@sha256:11fd73a2102cda9c55d5d881a8c3210303146a7ec1e8ac76f526e175c6d24641"
+    # OpenBao 2.6.4, pinned to the linux/amd64 manifest.
+    tag: "2.6.4@sha256:bd3e8b6b67b5c4c3fc1064cd0f86eb8063d9ed92a7af608b6408d6748e6eef64"
     pullPolicy: IfNotPresent
 
   logLevel: info

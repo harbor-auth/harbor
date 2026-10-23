@@ -79,7 +79,7 @@ func TestJWKToPublicKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ToPublicKey: %v", err)
 	}
-	if pub.X.Cmp(priv.X) != 0 || pub.Y.Cmp(priv.Y) != 0 {
+	if !pub.Equal(&priv.PublicKey) {
 		t.Fatal("reconstructed public key does not match")
 	}
 }

@@ -2,7 +2,6 @@ package oidc
 
 import (
 	"context"
-	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -575,19 +574,12 @@ func fixedGoldenKey(t *testing.T, dHex string) *ecdsa.PrivateKey {
 	if !ok {
 		t.Fatalf("invalid fixed key hex")
 	}
-	// Derive the public point via ecdh (avoids deprecated elliptic.ScalarBaseMult since Go 1.21).
 	dBytes := make([]byte, 32)
 	d.FillBytes(dBytes)
-	ecdhPriv, err := ecdh.P256().NewPrivateKey(dBytes)
+	priv, err := ecdsa.ParseRawPrivateKey(elliptic.P256(), dBytes)
 	if err != nil {
-		t.Fatalf("ecdh NewPrivateKey: %v", err)
+		t.Fatalf("ParseRawPrivateKey: %v", err)
 	}
-	pubBytes := ecdhPriv.PublicKey().Bytes() // uncompressed SEC1: 0x04 || x || y
-	priv := new(ecdsa.PrivateKey)
-	priv.Curve = elliptic.P256()
-	priv.D = d
-	priv.X = new(big.Int).SetBytes(pubBytes[1:33])
-	priv.Y = new(big.Int).SetBytes(pubBytes[33:65])
 	return priv
 }
 
