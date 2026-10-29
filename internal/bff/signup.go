@@ -6,6 +6,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/harbor-auth/harbor/internal/identity"
@@ -122,7 +123,8 @@ func allowedSignupRegions() []signupRegionOption {
 
 // signupData is the template data for GET /signup.
 type signupData struct {
-	Regions []signupRegionOption
+	Regions   []signupRegionOption
+	SigninURL string
 }
 
 // signupReturnToCookieTTL bounds how long the cookie carrying a validated
@@ -169,7 +171,11 @@ func (h *SignupHandler) GetSignup(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	h.renderTemplate(w, r, "signup.html", signupData{Regions: regions})
+	signinURL := "/signin"
+	if returnTo != defaultReturnTo {
+		signinURL += "?" + url.Values{"return_to": {returnTo}}.Encode()
+	}
+	h.renderTemplate(w, r, "signup.html", signupData{Regions: regions, SigninURL: signinURL})
 }
 
 // GetSignupPasskey renders the first-passkey ceremony page. Its script drives

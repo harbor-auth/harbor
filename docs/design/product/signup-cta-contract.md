@@ -47,14 +47,16 @@ harbor-mgmt-only hostname.
   picker's in-page radio selection is authoritative, never a pre-selection
   from the query string (see [Region parameter semantics](#region-parameter-semantics)).
   `return_to` is validated once here, through the same `bff.ValidateReturnTo`
-  allowlist [signin](#3-get-signinreturn_tourl) uses, and — while it has no
-  visible effect on this page's own rendered body — is now carried as opaque
+  allowlist [signin](#3-get-signinreturn_tourl) uses, and is carried as opaque
   server-side session state through the rest of the journey (`/signup` ->
   `/signup/passkey` -> the passkey ceremony -> the post-registration handoff
   -> `/signup/recovery`) and honored at `GET /signup/success`'s completion
   link, without ever being round-tripped through a later hop's URL. An
   unrecognized or missing value falls back to the fixed same-origin default,
   same as everywhere else `ValidateReturnTo` is used.
+  The existing-account Sign in link also carries the validated destination to
+  `/signin`, so switching from business enrollment to sign-in resumes the same
+  business authorization transaction. Rejected destinations are never echoed.
 
 ### 2. `GET /signup?return_to=<url>&region=<code>`
 
