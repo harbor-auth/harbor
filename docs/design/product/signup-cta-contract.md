@@ -84,6 +84,13 @@ remains inert, same as (1).
 
 ## `return_to` allowlist semantics
 
+When `/authorize` opens `/signin?request_id=...`, sign-in resumes that existing
+OIDC transaction after checking its live session and matching browser nonce.
+It retains the RP callback and PKCE state and continues at `/authorize/complete`.
+An invalid, expired or foreign-browser request is rejected, and a supplied
+`return_to` cannot override this authorization continuation. This mode creates
+no personal session and does not replace the nonce cookie.
+
 `GET /signin`, `GET /signup` (this page's own CTA-facing entry point), and the
 post-completion `GET /signup/success` page (reached only after finishing
 signup, not itself a CTA target) all validate `return_to` through the same

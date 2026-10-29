@@ -5,6 +5,7 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -13,11 +14,10 @@ import (
 //
 // The actual authentication ceremony is driven entirely by the existing,
 // unmodified GET /login and POST /login/complete endpoints (wired with
-// DiscoverableUserResolver — see cmd/harbor-mgmt/main.go). This handler's only
-// job is to establish the one-time BFF session and browser-nonce binding those
-// endpoints require, exactly as internal/oidcapi's authorizeWithBFFSession
-// does for the OIDC flow, minus any OIDC-specific fields (ClientID,
-// RedirectURI, Scope, ...) that a plain sign-in has no use for.
+// DiscoverableUserResolver — see cmd/harbor-mgmt/main.go). Plain sign-in creates
+// a personal session and browser nonce. When /authorize supplies request_id,
+// it instead resumes that browser-bound RP transaction and completes it through
+// /authorize/complete after the passkey ceremony.
 type SigninHandler struct {
 	sessions          BFFSessionStore
 	tmpl              *template.Template
@@ -73,6 +73,10 @@ type signinPageData struct {
 //     embedded for its script to use against the unmodified GET /login and
 //     POST /login/complete endpoints.
 func (h *SigninHandler) ServeSignin(w http.ResponseWriter, r *http.Request) {
+	if requestID := r.URL.Query().Get("request_id"); requestID != "" {
+		h.serveAuthorizationSignin(w, r, requestID)
+		return
+	}
 	returnTo, _ := ValidateReturnTo(r.URL.Query().Get("return_to"), h.returnToAllowlist)
 
 	requestID, err := NewRequestID()
@@ -103,5 +107,28 @@ func (h *SigninHandler) ServeSignin(w http.ResponseWriter, r *http.Request) {
 	data := signinPageData{RequestID: requestID, ReturnTo: returnTo}
 	if err := h.tmpl.ExecuteTemplate(w, "signin.html", data); err != nil {
 		h.logger.ErrorContext(r.Context(), "bff: signin: template render failed", "error", err)
+	}
+}
+
+// /authorize has already created the RP transaction and bound it to a browser
+// nonce. Replacing it with a personal session discards the RP callback/PKCE
+// state. Resume only after proving this browser owns that live transaction.
+func (h *SigninHandler) serveAuthorizationSignin(w http.ResponseWriter, r *http.Request, requestID string) {
+	session, err := h.sessions.Get(r.Context(), requestID)
+	nonce, nonceErr := ReadBFFNonceCookie(r)
+	if err != nil || nonceErr != nil || session.ClientID == "" || session.RedirectURI == "" ||
+		!session.ExpiresAt.After(time.Now()) || len(session.BrowserNonceHash) == 0 ||
+		!NonceMatches(nonce, session.BrowserNonceHash) {
+		http.Error(w, "invalid or expired sign-in request; restart sign-in from the app", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	data := signinPageData{
+		RequestID: requestID,
+		ReturnTo:  "/authorize/complete?" + url.Values{"request_id": {requestID}}.Encode(),
+	}
+	if err := h.tmpl.ExecuteTemplate(w, "signin.html", data); err != nil {
+		h.logger.ErrorContext(r.Context(), "bff: render authorization signin template", "error", err)
 	}
 }
