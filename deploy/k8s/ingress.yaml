@@ -27,6 +27,10 @@ metadata:
     # on top of application-level auth. The /admin/* paths must never be
     # reachable from the internet regardless of auth state.
     nginx.ingress.kubernetes.io/server-snippet: |
+      # Signup's default Continue destination is the shared origin's root.
+      location = / {
+        return 302 /dashboard;
+      }
       location ~* ^/admin {
         deny all;
         return 403;

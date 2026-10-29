@@ -131,6 +131,10 @@ func assertServiceAccountsExist(t *testing.T, objects []object) {
 func assertPublicLoginRoute(t *testing.T, objects []object) {
 	t.Helper()
 	ingress := find(t, objects, "Ingress", "harbor-hot")
+	snippet := pathString(t, ingress, "metadata", "annotations", "nginx.ingress.kubernetes.io/server-snippet")
+	if !regexp.MustCompile(`location = /\s*\{\s*return 302 /dashboard;\s*\}`).MatchString(snippet) {
+		t.Error("public origin root must redirect to the dashboard after signup")
+	}
 	rules := pathSlice(t, pathMap(t, ingress, "spec"), "rules")
 	if len(rules) != 1 {
 		t.Fatalf("public ingress rules = %d, want 1", len(rules))
