@@ -81,16 +81,9 @@ func TestSignupCTAContract_PublishedURLsReturn200HTML(t *testing.T) {
 	}
 }
 
-// TestSignupCTAContract_SignupQueryParamsAreInert locks in the contract doc's
-// claim that GET /signup's rendered BODY never varies based on its return_to
-// or region query parameters: region selection stays in-page (radio buttons),
-// and return_to — while now captured into a cookie for the rest of the
-// journey (see TestGetSignup_SetsValidatedReturnToCookie) — is not a template
-// field on this page and so is never echoed into the body. This is the
-// regression guard for the "Known gaps" section of the contract doc — if this
-// test ever needs to change, the doc's inert-parameter language must be
-// updated in the same commit.
-func TestSignupCTAContract_SignupQueryParamsAreInert(t *testing.T) {
+// Rejected destinations and the inert region parameter cannot alter the page.
+// Accepted destinations are covered by the signup-to-signin handoff tests.
+func TestSignupCTAContract_RejectedQueryParamsAreInert(t *testing.T) {
 	h := newTestSignupHandler(t)
 
 	plain := httptest.NewRequest(http.MethodGet, "/signup", nil)
@@ -102,9 +95,9 @@ func TestSignupCTAContract_SignupQueryParamsAreInert(t *testing.T) {
 	h.GetSignup(withParamsRec, withParams)
 
 	if plainRec.Body.String() != withParamsRec.Body.String() {
-		t.Error("GET /signup response body differs based on return_to/region query parameters — contract doc's inert-parameter claim is now false")
+		t.Error("rejected return_to or region changed the signup page")
 	}
 	if strings.Contains(withParamsRec.Body.String(), "marketing.example.com") {
-		t.Error("GET /signup echoed a return_to value — it has no return_to template field today")
+		t.Error("signup echoed a rejected return_to")
 	}
 }
