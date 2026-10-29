@@ -83,7 +83,7 @@ func TestSignupCTAContract_PublishedURLsReturn200HTML(t *testing.T) {
 
 // Rejected destinations and the inert region parameter cannot alter the page.
 // Accepted destinations are covered by the signup-to-signin handoff tests.
-func TestSignupCTAContract_RejectedQueryParamsAreInert(t *testing.T) {
+func TestSignupCTAContract_SignupQueryParamsAreInert(t *testing.T) {
 	h := newTestSignupHandler(t)
 
 	plain := httptest.NewRequest(http.MethodGet, "/signup", nil)
