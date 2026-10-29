@@ -34,6 +34,11 @@ https://auth.example.com/recovery/* → harbor-mgmt  (recovery codes/ack)
 https://auth.example.com/*          → harbor-hot   (OIDC hot path)
 ```
 
+The exact root path `/` redirects to `/dashboard`, which is served by
+`harbor-mgmt`. Signup's default Continue link targets `/`; without this exact
+redirect a completed signup would land on the hot service's 404 response.
+Other paths retain the OIDC catch-all routing above.
+
 Both services live behind the same TLS terminator and hostname. The
 `__Host-harbor-bff` cookie set during `/login` (or `/signin`, or the
 post-registration handoff from `/signup/passkey`) is readable by the
