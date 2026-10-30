@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Approve access — Harbor</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#f5f5f5;color:#111}.nav{background:#1a1a2e;color:#fff;padding:1rem 2rem;font-weight:600}.container{max-width:480px;margin:3rem auto;padding:0 1rem}.card{background:#fff;border-radius:12px;padding:2rem;box-shadow:0 1px 6px #0001}h1{font-size:1.6rem;margin:0 0 1rem}p,li{line-height:1.6;color:#444}ul{padding-left:1.25rem;margin:1.25rem 0 2rem}strong{overflow-wrap:anywhere}.actions{display:flex;gap:.75rem;flex-wrap:wrap}button{flex:1;padding:.85rem 1rem;border:1px solid #d5d7dd;border-radius:7px;background:#fff;color:#222;font:inherit;font-weight:600;cursor:pointer}.approve{background:#1a1a2e;border-color:#1a1a2e;color:#fff}button:focus-visible{outline:3px solid #4d7cff;outline-offset:3px}.note{font-size:.9rem;margin-top:1.5rem}
+</style>
+</head>
+<body>
+<header class="nav">⚓ Harbor</header>
+<main class="container"><section class="card" aria-labelledby="consent-title">
+<h1 id="consent-title">Approve access</h1>
+<p><strong>{{.AppHost}}</strong> wants to use Harbor to sign you in.</p>
+<p>If you approve, this app can receive:</p>
+<ul>{{range .Permissions}}<li>{{.}}</li>{{end}}</ul>
+<form method="post" action="/consent/complete">
+<input type="hidden" name="request_id" value="{{.RequestID}}">
+<div class="actions"><button type="submit" name="decision" value="deny">Cancel</button><button class="approve" type="submit" name="decision" value="approve">Approve and continue</button></div>
+</form>
+<p class="note">You can review and revoke app access from your Harbor account.</p>
+</section></main>
+</body></html>
