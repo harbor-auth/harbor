@@ -1,7 +1,6 @@
 package oidcapi
 
 import (
-	"html"
 	"net/http"
 	"net/url"
 	"time"
@@ -296,17 +295,14 @@ func (s *Server) GetAuthorizeComplete(w http.ResponseWriter, r *http.Request) {
 	s.issueAuthorization(w, r, session)
 }
 
-// GetConsent renders the explicit consent choice. Client and scope values are
-// intentionally not interpolated into HTML; the decision is bound to the
-// server-side session identified by request_id.
+// GetConsent renders the browser-bound consent choice from server-side state.
 func (s *Server) GetConsent(w http.ResponseWriter, r *http.Request) {
 	requestID := r.URL.Query().Get("request_id")
 	if requestID == "" {
 		writeAuthorizeErrorPage(w)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(`<!doctype html><html><body><h1>Approve access?</h1><form method="post" action="/consent/complete"><input type="hidden" name="request_id" value="` + html.EscapeString(requestID) + `"><button name="decision" value="approve">Approve</button><button name="decision" value="deny">Deny</button></form></body></html>`))
+	s.renderConsentPage(w, r, requestID)
 }
 
 // PostConsentComplete atomically consumes one explicit consent decision.
