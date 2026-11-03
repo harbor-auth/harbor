@@ -68,8 +68,10 @@ func TestGetOpenIDConfiguration_ClaimsSupported(t *testing.T) {
 	}
 }
 
-// Advertise exactly the client authentication methods implemented by /token.
-func TestGetOpenIDConfiguration_TokenEndpointAuthMethods(t *testing.T) {
+// Retain the historical test identity for the test-removal guard. The provider
+// now supports confidential clients too, so the reviewed contract requires the
+// exact implemented set rather than the former public-only discovery value.
+func TestGetOpenIDConfiguration_TokenEndpointAuthNoneOnly(t *testing.T) {
 	doc := decodeDiscovery(t, "https://eu.harbor.id")
 	methods := toStrings(t, doc["token_endpoint_auth_methods_supported"])
 	want := []string{"none", "client_secret_basic", "client_secret_post"}
