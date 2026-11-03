@@ -70,8 +70,8 @@ func (s *Server) metadata() openapi.OpenIDProviderMetadata {
 			"auth_time", "acr", "amr", "nonce", "jti",
 			"email", "email_verified",
 		},
-		// Public-client provider: PKCE replaces a client secret, so the token
-		// endpoint requires no client authentication (§3.1).
-		TokenEndpointAuthMethodsSupported: []string{"none"},
+		// Public clients use none; confidential clients authenticate separately.
+		// All Authorization Code clients must also use S256 PKCE.
+		TokenEndpointAuthMethodsSupported: []string{"none", "client_secret_basic", "client_secret_post"},
 	}
 }

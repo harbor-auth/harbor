@@ -102,7 +102,7 @@ func TestValidateTokenExchange(t *testing.T) {
 // AND fires the revocation signal (docs/DESIGN.md §11.7, §3.5).
 func TestService_Token_ReuseRevokesCodeFamily(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	codes := NewInMemoryAuthCodeStore()
+	codes := newRedisAuthCodeStore(t)
 	if err := codes.Save(t.Context(), validAuthCode(now)); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestService_Token_ReuseRevokesCodeFamily(t *testing.T) {
 	registry := NewInMemoryClientRegistry()
 	registry.Put(testClient())
 
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:      "https://eu.harbor.id",
 		Clients:     registry,
 		Codes:       codes,
@@ -149,12 +149,12 @@ func TestService_Token_FailedExchangeDoesNotBurnCode(t *testing.T) {
 
 	// A fresh sink + code store per subcase keeps them fully isolated.
 	newSvc := func() (*Service, *RecordingRevocationSink) {
-		codes := NewInMemoryAuthCodeStore()
+		codes := newRedisAuthCodeStore(t)
 		if err := codes.Save(t.Context(), validAuthCode(now)); err != nil {
 			t.Fatalf("Save: %v", err)
 		}
 		revocations := NewRecordingRevocationSink()
-		return mustNewService(ServiceConfig{
+		return mustNewService(t, ServiceConfig{
 			Issuer:      "https://eu.harbor.id",
 			Clients:     clients,
 			Codes:       codes,
@@ -199,10 +199,10 @@ func TestService_Token_FailedExchangeDoesNotBurnCode(t *testing.T) {
 
 func TestService_Token_UnknownCode(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  NewInMemoryClientRegistry(),
-		Codes:    NewInMemoryAuthCodeStore(),
+		Codes:    newRedisAuthCodeStore(t),
 		Tokens:   NewPlaceholderIssuer(),
 		Sessions: NewStubSessionResolver("demo-subject-ppid"),
 		Now:      func() time.Time { return now },

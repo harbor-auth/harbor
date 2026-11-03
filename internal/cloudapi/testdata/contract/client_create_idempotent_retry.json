@@ -24,7 +24,8 @@
         "redirect_uris": [
           "https://contract-client.example.com/cb"
         ],
-        "token_endpoint_auth_method": "none"
+        "token_endpoint_auth_method": "none",
+        "generation": 1
       },
       "want_status": 201,
       "want_body_contains": {
@@ -43,7 +44,8 @@
         "redirect_uris": [
           "https://contract-client.example.com/cb"
         ],
-        "token_endpoint_auth_method": "none"
+        "token_endpoint_auth_method": "none",
+        "generation": 1
       },
       "want_status": 201,
       "want_same_body_as_step": 2

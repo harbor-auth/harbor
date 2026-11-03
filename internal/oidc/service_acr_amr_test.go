@@ -10,7 +10,7 @@ import (
 )
 
 // acrAMRFlowServer builds a minimal Service wired for BFF-path ACR/AMR tests.
-func acrAMRFlowServer(t *testing.T) (*Service, *InMemoryAuthCodeStore) {
+func acrAMRFlowServer(t *testing.T) (*Service, *RedisAuthCodeStore) {
 	t.Helper()
 	clients := NewInMemoryClientRegistry()
 	clients.Put(Client{
@@ -19,12 +19,12 @@ func acrAMRFlowServer(t *testing.T) (*Service, *InMemoryAuthCodeStore) {
 		RedirectURIs:  []string{"https://example.com/callback"},
 		ScopesAllowed: []string{"openid"},
 	})
-	codes := NewInMemoryAuthCodeStore()
+	codes := newRedisAuthCodeStore(t)
 	signer, err := crypto.NewLocalSigner()
 	if err != nil {
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    codes,

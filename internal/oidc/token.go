@@ -70,7 +70,7 @@ func ValidateRefreshParams(req TokenRequest, session RefreshSession, now time.Ti
 	return nil
 }
 
-// ValidateTokenExchange verifies a consumed authorization code against the
+// ValidateTokenExchange verifies a fresh authorization code against the
 // presented request: client/redirect binding, expiry, and PKCE. Pure — the code
 // is passed in, so there is no I/O to mock (docs/DESIGN.md §1.7, §11.7).
 //
@@ -78,17 +78,31 @@ func ValidateRefreshParams(req TokenRequest, session RefreshSession, now time.Ti
 // distinguish "expired" from "mismatched PKCE" from "wrong client" in the error
 // code, to avoid leaking which check failed.
 func ValidateTokenExchange(req TokenRequest, code AuthCode, now time.Time) *TokenError {
+	if terr := validateTokenBinding(req, code); terr != nil {
+		return terr
+	}
+	return validateCodeExpiry(code, now)
+}
+
+// validateTokenBinding is required before either fresh issuance or replay
+// revocation. Expiry is separate: a spent code can still prove authenticated
+// theft after it stops being eligible for a new token exchange.
+func validateTokenBinding(req TokenRequest, code AuthCode) *TokenError {
 	if code.ClientID != req.ClientID {
 		return invalidGrant("authorization code was not issued to this client")
 	}
 	if code.RedirectURI != req.RedirectURI {
 		return invalidGrant("redirect_uri does not match the authorization request")
 	}
-	if now.After(code.ExpiresAt) {
-		return invalidGrant("authorization code has expired")
-	}
 	if err := VerifyChallenge(req.CodeVerifier, code.CodeChallenge); err != nil {
 		return invalidGrant("PKCE verification failed")
+	}
+	return nil
+}
+
+func validateCodeExpiry(code AuthCode, now time.Time) *TokenError {
+	if now.After(code.ExpiresAt) {
+		return invalidGrant("authorization code has expired")
 	}
 	return nil
 }

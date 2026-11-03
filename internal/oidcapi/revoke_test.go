@@ -48,7 +48,7 @@ func newRevokeServer(t *testing.T) (*httptest.Server, *oidctest.InMemorySessionS
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
-		Codes:        oidctest.NewInMemoryAuthCodeStore(),
+		Codes:        oidctest.NewRedisAuthCodeStore(t),
 		Tokens:       oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Sessions:     oidctest.NewStubSessionResolver("demo-subject-ppid"),
 		SessionStore: sessionStore,
@@ -97,7 +97,7 @@ func TestPostRevoke_PublicClientCannotAuthenticate(t *testing.T) {
 	clients.Put(oidc.Client{ID: testClientID, TokenEndpointAuthMethod: "none"})
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer: "https://eu.harbor.id", Clients: clients,
-		Codes: oidctest.NewInMemoryAuthCodeStore(), Tokens: oidctest.NewPlaceholderIssuer(),
+		Codes: oidctest.NewRedisAuthCodeStore(t), Tokens: oidctest.NewPlaceholderIssuer(),
 		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
 	srv := New(Config{Issuer: "https://eu.harbor.id", Service: svc})
@@ -392,7 +392,7 @@ func TestPostRevoke_AccessToken_AddsToFilter(t *testing.T) {
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
-		Codes:    oidctest.NewInMemoryAuthCodeStore(),
+		Codes:    oidctest.NewRedisAuthCodeStore(t),
 		Tokens:   oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
@@ -477,7 +477,7 @@ func TestPostRevoke_WrongHintAccessToken_StillRevokesRefreshToken(t *testing.T) 
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
-		Codes:        oidctest.NewInMemoryAuthCodeStore(),
+		Codes:        oidctest.NewRedisAuthCodeStore(t),
 		Tokens:       oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Sessions:     oidctest.NewStubSessionResolver("demo-subject-ppid"),
 		SessionStore: sessionStore,
@@ -533,7 +533,7 @@ func TestPostRevoke_WrongHintRefreshToken_StillRevokesAccessToken(t *testing.T) 
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
-		Codes:    oidctest.NewInMemoryAuthCodeStore(),
+		Codes:    oidctest.NewRedisAuthCodeStore(t),
 		Tokens:   oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
@@ -623,7 +623,7 @@ func TestPostRevoke_CrossClient_Returns200WithoutRevoking(t *testing.T) {
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
-		Codes:        oidctest.NewInMemoryAuthCodeStore(),
+		Codes:        oidctest.NewRedisAuthCodeStore(t),
 		Tokens:       oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Sessions:     oidctest.NewStubSessionResolver("demo-subject-ppid"),
 		SessionStore: sessionStore,

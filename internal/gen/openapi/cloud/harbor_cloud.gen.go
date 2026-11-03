@@ -27,13 +27,13 @@ const (
 
 // Defines values for ClientCreateRequestGrantTypes.
 const (
-	AuthorizationCode ClientCreateRequestGrantTypes = "authorization_code"
-	RefreshToken      ClientCreateRequestGrantTypes = "refresh_token"
+	ClientCreateRequestGrantTypesAuthorizationCode ClientCreateRequestGrantTypes = "authorization_code"
+	ClientCreateRequestGrantTypesRefreshToken      ClientCreateRequestGrantTypes = "refresh_token"
 )
 
 // Defines values for ClientCreateRequestResponseTypes.
 const (
-	Code ClientCreateRequestResponseTypes = "code"
+	ClientCreateRequestResponseTypesCode ClientCreateRequestResponseTypes = "code"
 )
 
 // Defines values for ClientCreateRequestTokenEndpointAuthMethod.
@@ -41,6 +41,17 @@ const (
 	ClientCreateRequestTokenEndpointAuthMethodClientSecretBasic ClientCreateRequestTokenEndpointAuthMethod = "client_secret_basic"
 	ClientCreateRequestTokenEndpointAuthMethodClientSecretPost  ClientCreateRequestTokenEndpointAuthMethod = "client_secret_post"
 	ClientCreateRequestTokenEndpointAuthMethodNone              ClientCreateRequestTokenEndpointAuthMethod = "none"
+)
+
+// Defines values for ClientUpdateRequestGrantTypes.
+const (
+	ClientUpdateRequestGrantTypesAuthorizationCode ClientUpdateRequestGrantTypes = "authorization_code"
+	ClientUpdateRequestGrantTypesRefreshToken      ClientUpdateRequestGrantTypes = "refresh_token"
+)
+
+// Defines values for ClientUpdateRequestResponseTypes.
+const (
+	ClientUpdateRequestResponseTypesCode ClientUpdateRequestResponseTypes = "code"
 )
 
 // Defines values for ClientUpdateRequestTokenEndpointAuthMethod.
@@ -55,6 +66,7 @@ const (
 	ErrorCodeClientAlreadyExists    ErrorCode = "client_already_exists"
 	ErrorCodeClientNotFound         ErrorCode = "client_not_found"
 	ErrorCodeCrossTenantForbidden   ErrorCode = "cross_tenant_forbidden"
+	ErrorCodeGenerationConflict     ErrorCode = "generation_conflict"
 	ErrorCodeIdempotencyKeyReused   ErrorCode = "idempotency_key_reused"
 	ErrorCodeInsufficientScope      ErrorCode = "insufficient_scope"
 	ErrorCodeInvalidRequest         ErrorCode = "invalid_request"
@@ -62,8 +74,10 @@ const (
 	ErrorCodeInvalidToken           ErrorCode = "invalid_token"
 	ErrorCodeNamespaceAlreadyExists ErrorCode = "namespace_already_exists"
 	ErrorCodeNamespaceNotFound      ErrorCode = "namespace_not_found"
+	ErrorCodeOperationInProgress    ErrorCode = "operation_in_progress"
 	ErrorCodeRateLimited            ErrorCode = "rate_limited"
 	ErrorCodeSessionExpired         ErrorCode = "session_expired"
+	ErrorCodeStaleGeneration        ErrorCode = "stale_generation"
 	ErrorCodeSubjectUnavailable     ErrorCode = "subject_unavailable"
 	ErrorCodeTokenReplayed          ErrorCode = "token_replayed"
 )
@@ -84,8 +98,11 @@ type ClientCreateRequest struct {
 	ClientName *string `json:"client_name,omitempty"`
 
 	// ClientSecretHash Lowercase hex-encoded SHA-256 digest of the client secret. Harbor stores this value VERBATIM and applies no further transform (no additional hashing, no KDF) — the caller must submit the digest of a high-entropy secret, never a low-entropy password's hash.
-	ClientSecretHash *string                          `json:"client_secret_hash,omitempty"`
-	GrantTypes       *[]ClientCreateRequestGrantTypes `json:"grant_types,omitempty"`
+	ClientSecretHash *string `json:"client_secret_hash,omitempty"`
+
+	// Generation Monotonically increasing desired-state generation. Equal-generation retries require identical configuration.
+	Generation int64                            `json:"generation"`
+	GrantTypes *[]ClientCreateRequestGrantTypes `json:"grant_types,omitempty"`
 
 	// RedirectUris OAuth 2.0 redirect URIs, exact-matched at `/authorize`.
 	RedirectUris  []string                            `json:"redirect_uris"`
@@ -114,9 +131,12 @@ type ClientListResponse struct {
 
 // ClientResponse A namespace-owned client's current state. NEVER carries a secret or secret hash, in either direction — this response shape is used for create, get, update, and list, and none of those operations echo `client_secret_hash` back.
 type ClientResponse struct {
-	ClientId                string    `json:"client_id"`
-	ClientName              *string   `json:"client_name,omitempty"`
-	CreatedAt               time.Time `json:"created_at"`
+	ClientId   string    `json:"client_id"`
+	ClientName *string   `json:"client_name,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+
+	// Generation Accepted desired-state generation; zero identifies an unmanaged registration.
+	Generation              int64     `json:"generation"`
 	GrantTypes              *[]string `json:"grant_types,omitempty"`
 	NamespaceId             string    `json:"namespace_id"`
 	RedirectUris            []string  `json:"redirect_uris"`
@@ -127,12 +147,23 @@ type ClientResponse struct {
 
 // ClientUpdateRequest Request to update a namespace-owned client's mutable metadata. The same `client_secret_hash` / `token_endpoint_auth_method` consistency rule as create applies. Omitting `client_secret_hash` leaves the stored hash unchanged (it does NOT clear it) — there is no way to move a client from confidential to public via this route without also changing `token_endpoint_auth_method`.
 type ClientUpdateRequest struct {
-	ClientName              *string                                     `json:"client_name,omitempty"`
-	ClientSecretHash        *string                                     `json:"client_secret_hash,omitempty"`
+	ClientName       *string `json:"client_name,omitempty"`
+	ClientSecretHash *string `json:"client_secret_hash,omitempty"`
+
+	// Generation Monotonically increasing desired-state generation. Equal-generation retries require identical configuration.
+	Generation              int64                                       `json:"generation"`
+	GrantTypes              *[]ClientUpdateRequestGrantTypes            `json:"grant_types,omitempty"`
 	RedirectUris            []string                                    `json:"redirect_uris"`
+	ResponseTypes           *[]ClientUpdateRequestResponseTypes         `json:"response_types,omitempty"`
 	Scope                   *string                                     `json:"scope,omitempty"`
 	TokenEndpointAuthMethod *ClientUpdateRequestTokenEndpointAuthMethod `json:"token_endpoint_auth_method,omitempty"`
 }
+
+// ClientUpdateRequestGrantTypes defines model for ClientUpdateRequest.GrantTypes.
+type ClientUpdateRequestGrantTypes string
+
+// ClientUpdateRequestResponseTypes defines model for ClientUpdateRequest.ResponseTypes.
+type ClientUpdateRequestResponseTypes string
 
 // ClientUpdateRequestTokenEndpointAuthMethod defines model for ClientUpdateRequest.TokenEndpointAuthMethod.
 type ClientUpdateRequestTokenEndpointAuthMethod string
@@ -279,12 +310,28 @@ type PostAdminV1NamespacesClientsParams struct {
 
 // DeleteAdminV1NamespacesClientParams defines parameters for DeleteAdminV1NamespacesClient.
 type DeleteAdminV1NamespacesClientParams struct {
+	Generation int64 `form:"generation" json:"generation"`
+
 	// IdempotencyKey Caller-generated opaque key that de-duplicates retries of this exact request over an unreliable private tunnel. The server hashes the normalized request body and keys a response ledger on `(idempotency_key, operation)`: replaying the same key with the same body returns the original response verbatim; replaying the same key with a different body is rejected with `idempotency_key_reused`.
 	IdempotencyKey IdempotencyKey `json:"Idempotency-Key"`
 }
 
 // PutAdminV1NamespacesClientParams defines parameters for PutAdminV1NamespacesClient.
 type PutAdminV1NamespacesClientParams struct {
+	// IdempotencyKey Caller-generated opaque key that de-duplicates retries of this exact request over an unreliable private tunnel. The server hashes the normalized request body and keys a response ledger on `(idempotency_key, operation)`: replaying the same key with the same body returns the original response verbatim; replaying the same key with a different body is rejected with `idempotency_key_reused`.
+	IdempotencyKey IdempotencyKey `json:"Idempotency-Key"`
+}
+
+// DeleteAdminV1NamespacesClientConfigurationParams defines parameters for DeleteAdminV1NamespacesClientConfiguration.
+type DeleteAdminV1NamespacesClientConfigurationParams struct {
+	Generation int64 `form:"generation" json:"generation"`
+
+	// IdempotencyKey Caller-generated opaque key that de-duplicates retries of this exact request over an unreliable private tunnel. The server hashes the normalized request body and keys a response ledger on `(idempotency_key, operation)`: replaying the same key with the same body returns the original response verbatim; replaying the same key with a different body is rejected with `idempotency_key_reused`.
+	IdempotencyKey IdempotencyKey `json:"Idempotency-Key"`
+}
+
+// PutAdminV1NamespacesClientConfigurationParams defines parameters for PutAdminV1NamespacesClientConfiguration.
+type PutAdminV1NamespacesClientConfigurationParams struct {
 	// IdempotencyKey Caller-generated opaque key that de-duplicates retries of this exact request over an unreliable private tunnel. The server hashes the normalized request body and keys a response ledger on `(idempotency_key, operation)`: replaying the same key with the same body returns the original response verbatim; replaying the same key with a different body is rejected with `idempotency_key_reused`.
 	IdempotencyKey IdempotencyKey `json:"Idempotency-Key"`
 }
@@ -306,6 +353,9 @@ type PostAdminV1NamespacesClientsJSONRequestBody = ClientCreateRequest
 
 // PutAdminV1NamespacesClientJSONRequestBody defines body for PutAdminV1NamespacesClient for application/json ContentType.
 type PutAdminV1NamespacesClientJSONRequestBody = ClientUpdateRequest
+
+// PutAdminV1NamespacesClientConfigurationJSONRequestBody defines body for PutAdminV1NamespacesClientConfiguration for application/json ContentType.
+type PutAdminV1NamespacesClientConfigurationJSONRequestBody = ClientUpdateRequest
 
 // PostAdminV1SessionsJSONRequestBody defines body for PostAdminV1Sessions for application/json ContentType.
 type PostAdminV1SessionsJSONRequestBody = SessionMintRequest
@@ -342,6 +392,12 @@ type ServerInterface interface {
 	// Update an OIDC client
 	// (PUT /admin/v1/namespaces/{namespace}/clients/{client_id})
 	PutAdminV1NamespacesClient(w http.ResponseWriter, r *http.Request, namespace string, clientId string, params PutAdminV1NamespacesClientParams)
+	// Apply a terminal generation-fenced client deletion
+	// (DELETE /admin/v1/namespaces/{namespace}/clients/{client_id}/configuration)
+	DeleteAdminV1NamespacesClientConfiguration(w http.ResponseWriter, r *http.Request, namespace string, clientId string, params DeleteAdminV1NamespacesClientConfigurationParams)
+	// Apply a complete generation-fenced client configuration
+	// (PUT /admin/v1/namespaces/{namespace}/clients/{client_id}/configuration)
+	PutAdminV1NamespacesClientConfiguration(w http.ResponseWriter, r *http.Request, namespace string, clientId string, params PutAdminV1NamespacesClientConfigurationParams)
 	// Mint a namespace-scoped management session
 	// (POST /admin/v1/sessions)
 	PostAdminV1Sessions(w http.ResponseWriter, r *http.Request, params PostAdminV1SessionsParams)
@@ -641,6 +697,21 @@ func (siw *ServerInterfaceWrapper) DeleteAdminV1NamespacesClient(w http.Response
 	// Parameter object where we will unmarshal all parameters from the context
 	var params DeleteAdminV1NamespacesClientParams
 
+	// ------------- Required query parameter "generation" -------------
+
+	if paramValue := r.URL.Query().Get("generation"); paramValue != "" {
+
+	} else {
+		siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "generation"})
+		return
+	}
+
+	err = runtime.BindQueryParameter("form", true, true, "generation", r.URL.Query(), &params.Generation)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "generation", Err: err})
+		return
+	}
+
 	headers := r.Header
 
 	// ------------- Required header parameter "Idempotency-Key" -------------
@@ -776,6 +847,157 @@ func (siw *ServerInterfaceWrapper) PutAdminV1NamespacesClient(w http.ResponseWri
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.PutAdminV1NamespacesClient(w, r, namespace, clientId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteAdminV1NamespacesClientConfiguration operation middleware
+func (siw *ServerInterfaceWrapper) DeleteAdminV1NamespacesClientConfiguration(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "namespace" -------------
+	var namespace string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "namespace", r.PathValue("namespace"), &namespace, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "namespace", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "client_id" -------------
+	var clientId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "client_id", r.PathValue("client_id"), &clientId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "client_id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, CloudServiceAuthScopes, []string{"clients:write"})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params DeleteAdminV1NamespacesClientConfigurationParams
+
+	// ------------- Required query parameter "generation" -------------
+
+	if paramValue := r.URL.Query().Get("generation"); paramValue != "" {
+
+	} else {
+		siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "generation"})
+		return
+	}
+
+	err = runtime.BindQueryParameter("form", true, true, "generation", r.URL.Query(), &params.Generation)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "generation", Err: err})
+		return
+	}
+
+	headers := r.Header
+
+	// ------------- Required header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = IdempotencyKey
+
+	} else {
+		err := fmt.Errorf("Header parameter Idempotency-Key is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "Idempotency-Key", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteAdminV1NamespacesClientConfiguration(w, r, namespace, clientId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// PutAdminV1NamespacesClientConfiguration operation middleware
+func (siw *ServerInterfaceWrapper) PutAdminV1NamespacesClientConfiguration(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// ------------- Path parameter "namespace" -------------
+	var namespace string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "namespace", r.PathValue("namespace"), &namespace, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "namespace", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "client_id" -------------
+	var clientId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "client_id", r.PathValue("client_id"), &clientId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "client_id", Err: err})
+		return
+	}
+
+	ctx := r.Context()
+
+	ctx = context.WithValue(ctx, CloudServiceAuthScopes, []string{"clients:write"})
+
+	r = r.WithContext(ctx)
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params PutAdminV1NamespacesClientConfigurationParams
+
+	headers := r.Header
+
+	// ------------- Required header parameter "Idempotency-Key" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Idempotency-Key")]; found {
+		var IdempotencyKey IdempotencyKey
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Idempotency-Key", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Idempotency-Key", valueList[0], &IdempotencyKey, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: true})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Idempotency-Key", Err: err})
+			return
+		}
+
+		params.IdempotencyKey = IdempotencyKey
+
+	} else {
+		err := fmt.Errorf("Header parameter Idempotency-Key is required, but not found")
+		siw.ErrorHandlerFunc(w, r, &RequiredHeaderError{ParamName: "Idempotency-Key", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.PutAdminV1NamespacesClientConfiguration(w, r, namespace, clientId, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -984,6 +1206,8 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc("DELETE "+options.BaseURL+"/admin/v1/namespaces/{namespace}/clients/{client_id}", wrapper.DeleteAdminV1NamespacesClient)
 	m.HandleFunc("GET "+options.BaseURL+"/admin/v1/namespaces/{namespace}/clients/{client_id}", wrapper.GetAdminV1NamespacesClient)
 	m.HandleFunc("PUT "+options.BaseURL+"/admin/v1/namespaces/{namespace}/clients/{client_id}", wrapper.PutAdminV1NamespacesClient)
+	m.HandleFunc("DELETE "+options.BaseURL+"/admin/v1/namespaces/{namespace}/clients/{client_id}/configuration", wrapper.DeleteAdminV1NamespacesClientConfiguration)
+	m.HandleFunc("PUT "+options.BaseURL+"/admin/v1/namespaces/{namespace}/clients/{client_id}/configuration", wrapper.PutAdminV1NamespacesClientConfiguration)
 	m.HandleFunc("POST "+options.BaseURL+"/admin/v1/sessions", wrapper.PostAdminV1Sessions)
 	m.HandleFunc("POST "+options.BaseURL+"/admin/v1/user-sessions", wrapper.PostAdminV1UserSessions)
 
@@ -993,133 +1217,147 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 // Base64 encoded, gzipped, json marshaled Swagger object
 var swaggerSpec = []string{
 
-	"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",
-	"AAAA///eVMgRZ3oAAA==",
+	"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",
+	"CwAA//+d7byJPIwAAA==",
 }
 
 // GetSwagger returns the content of the embedded swagger specification file

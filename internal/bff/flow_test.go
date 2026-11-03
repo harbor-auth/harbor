@@ -127,7 +127,7 @@ func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bffte
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
-		Codes:    oidctest.NewInMemoryAuthCodeStore(),
+		Codes:    oidctest.NewRedisAuthCodeStore(t),
 		Tokens:   oidctest.NewPlaceholderIssuer(),
 		Sessions: resolver,
 		Grants:   grants,

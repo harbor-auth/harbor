@@ -75,6 +75,10 @@ func (unusedCloudQuerier) DeleteFederatedIdentitiesByNamespace(context.Context, 
 // into the actual client-provisioning handler logic.
 type unusedCloudClientStore struct{}
 
+func (unusedCloudClientStore) ApplyVersioned(context.Context, clients.VersionedClientMutation) (clients.NamespacedClient, error) {
+	panic("unexpected versioned client mutation: auth/rate guard should reject request")
+}
+
 func (unusedCloudClientStore) Create(context.Context, clients.NewNamespacedClient) (clients.NamespacedClient, error) {
 	panic("unusedCloudClientStore: Create should not be reached in wiring tests")
 }
@@ -255,6 +259,8 @@ var cloudAuthedRoutes = []struct {
 	{"clients get", http.MethodGet, "/admin/v1/namespaces/ns-1/clients/client-1", scopeClientsRead},
 	{"clients update", http.MethodPut, "/admin/v1/namespaces/ns-1/clients/client-1", scopeClientsWrite},
 	{"clients delete", http.MethodDelete, "/admin/v1/namespaces/ns-1/clients/client-1", scopeClientsWrite},
+	{"clients configuration apply", http.MethodPut, "/admin/v1/namespaces/ns-1/clients/client-1/configuration", scopeClientsWrite},
+	{"clients configuration delete", http.MethodDelete, "/admin/v1/namespaces/ns-1/clients/client-1/configuration", scopeClientsWrite},
 }
 
 func TestRegisterCloudAPIRoutesRejectsMissingBearer(t *testing.T) {

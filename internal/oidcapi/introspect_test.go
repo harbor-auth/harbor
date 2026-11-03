@@ -51,7 +51,7 @@ func newIntrospectServer(t *testing.T) *httptest.Server {
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
-		Codes:    oidctest.NewInMemoryAuthCodeStore(),
+		Codes:    oidctest.NewRedisAuthCodeStore(t),
 		Tokens:   oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
@@ -232,7 +232,7 @@ func TestPostIntrospect_PublicClientCannotAuthenticate(t *testing.T) {
 	}
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer: "https://eu.harbor.id", Clients: clients,
-		Codes: oidctest.NewInMemoryAuthCodeStore(), Tokens: oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
+		Codes: oidctest.NewRedisAuthCodeStore(t), Tokens: oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
 	srv := New(Config{Issuer: "https://eu.harbor.id", Service: svc, Signers: []crypto.Signer{signer}})

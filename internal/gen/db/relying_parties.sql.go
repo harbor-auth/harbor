@@ -11,6 +11,73 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const applyCloudClientMutation = `-- name: ApplyCloudClientMutation :one
+SELECT apply_cloud_client_mutation(
+ $1::text, $2::text, $3::text,
+ $4::bigint, $5::bytea, $6::jsonb
+) AS result
+`
+
+type ApplyCloudClientMutationParams struct {
+	Action      string `json:"action"`
+	NamespaceID string `json:"namespace_id"`
+	ClientID    string `json:"client_id"`
+	Generation  int64  `json:"generation"`
+	RequestHash []byte `json:"request_hash"`
+	Config      []byte `json:"config"`
+}
+
+func (q *Queries) ApplyCloudClientMutation(ctx context.Context, arg ApplyCloudClientMutationParams) ([]byte, error) {
+	row := q.db.QueryRow(ctx, applyCloudClientMutation,
+		arg.Action,
+		arg.NamespaceID,
+		arg.ClientID,
+		arg.Generation,
+		arg.RequestHash,
+		arg.Config,
+	)
+	var result []byte
+	err := row.Scan(&result)
+	return result, err
+}
+
+const applyCloudClientOperation = `-- name: ApplyCloudClientOperation :one
+SELECT apply_cloud_client_operation(
+ $1::text, $2::text, $3::text,
+ $4::bigint, $5::bytea, $6::jsonb,
+ $7::text, $8::text, $9::bytea
+) AS result
+`
+
+type ApplyCloudClientOperationParams struct {
+	Action         string `json:"action"`
+	NamespaceID    string `json:"namespace_id"`
+	ClientID       string `json:"client_id"`
+	Generation     int64  `json:"generation"`
+	RequestHash    []byte `json:"request_hash"`
+	Config         []byte `json:"config"`
+	IdempotencyKey string `json:"idempotency_key"`
+	Operation      string `json:"operation"`
+	OperationHash  []byte `json:"operation_hash"`
+}
+
+func (q *Queries) ApplyCloudClientOperation(ctx context.Context, arg ApplyCloudClientOperationParams) ([]byte, error) {
+	row := q.db.QueryRow(ctx, applyCloudClientOperation,
+		arg.Action,
+		arg.NamespaceID,
+		arg.ClientID,
+		arg.Generation,
+		arg.RequestHash,
+		arg.Config,
+		arg.IdempotencyKey,
+		arg.Operation,
+		arg.OperationHash,
+	)
+	var result []byte
+	err := row.Scan(&result)
+	return result, err
+}
+
 const createNamespacedClient = `-- name: CreateNamespacedClient :one
 
 INSERT INTO relying_parties (
@@ -22,7 +89,7 @@ SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 WHERE EXISTS (
     SELECT 1 FROM cloud_namespaces WHERE id = $12 AND deleted_at IS NULL FOR SHARE
 )
-RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at
+RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at, cloud_generation, cloud_request_hash
 `
 
 type CreateNamespacedClientParams struct {
@@ -113,6 +180,8 @@ func (q *Queries) CreateNamespacedClient(ctx context.Context, arg CreateNamespac
 		&i.LogoutUris,
 		&i.NamespaceID,
 		&i.DeletedAt,
+		&i.CloudGeneration,
+		&i.CloudRequestHash,
 	)
 	return i, err
 }
@@ -125,7 +194,7 @@ INSERT INTO relying_parties (
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 )
-RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at
+RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at, cloud_generation, cloud_request_hash
 `
 
 type CreateRegisteredClientParams struct {
@@ -177,6 +246,8 @@ func (q *Queries) CreateRegisteredClient(ctx context.Context, arg CreateRegister
 		&i.LogoutUris,
 		&i.NamespaceID,
 		&i.DeletedAt,
+		&i.CloudGeneration,
+		&i.CloudRequestHash,
 	)
 	return i, err
 }
@@ -194,7 +265,7 @@ func (q *Queries) DeleteRelyingParty(ctx context.Context, clientID string) error
 }
 
 const getNamespacedClient = `-- name: GetNamespacedClient :one
-SELECT client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at FROM relying_parties
+SELECT client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at, cloud_generation, cloud_request_hash FROM relying_parties
 WHERE client_id = $1
   AND namespace_id = $2
   AND deleted_at IS NULL
@@ -229,12 +300,14 @@ func (q *Queries) GetNamespacedClient(ctx context.Context, arg GetNamespacedClie
 		&i.LogoutUris,
 		&i.NamespaceID,
 		&i.DeletedAt,
+		&i.CloudGeneration,
+		&i.CloudRequestHash,
 	)
 	return i, err
 }
 
 const getRegisteredClient = `-- name: GetRegisteredClient :one
-SELECT client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at FROM relying_parties
+SELECT client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at, cloud_generation, cloud_request_hash FROM relying_parties
 WHERE registration_access_token_hash = $1
 `
 
@@ -259,13 +332,15 @@ func (q *Queries) GetRegisteredClient(ctx context.Context, registrationAccessTok
 		&i.LogoutUris,
 		&i.NamespaceID,
 		&i.DeletedAt,
+		&i.CloudGeneration,
+		&i.CloudRequestHash,
 	)
 	return i, err
 }
 
 const getRelyingParty = `-- name: GetRelyingParty :one
 
-SELECT relying_parties.client_id, relying_parties.name, relying_parties.sector_id, relying_parties.redirect_uris, relying_parties.token_format, relying_parties.scopes_allowed, relying_parties.client_secret_hash, relying_parties.registration_access_token_hash, relying_parties.grant_types, relying_parties.response_types, relying_parties.token_endpoint_auth_method, relying_parties.created_at, relying_parties.logout_uris, relying_parties.namespace_id, relying_parties.deleted_at FROM relying_parties
+SELECT relying_parties.client_id, relying_parties.name, relying_parties.sector_id, relying_parties.redirect_uris, relying_parties.token_format, relying_parties.scopes_allowed, relying_parties.client_secret_hash, relying_parties.registration_access_token_hash, relying_parties.grant_types, relying_parties.response_types, relying_parties.token_endpoint_auth_method, relying_parties.created_at, relying_parties.logout_uris, relying_parties.namespace_id, relying_parties.deleted_at, relying_parties.cloud_generation, relying_parties.cloud_request_hash FROM relying_parties
 LEFT JOIN cloud_namespaces ON cloud_namespaces.id = relying_parties.namespace_id
 WHERE relying_parties.client_id = $1
   AND relying_parties.deleted_at IS NULL
@@ -325,12 +400,14 @@ func (q *Queries) GetRelyingParty(ctx context.Context, clientID string) (Relying
 		&i.LogoutUris,
 		&i.NamespaceID,
 		&i.DeletedAt,
+		&i.CloudGeneration,
+		&i.CloudRequestHash,
 	)
 	return i, err
 }
 
 const listNamespacedClients = `-- name: ListNamespacedClients :many
-SELECT client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at FROM relying_parties
+SELECT client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at, cloud_generation, cloud_request_hash FROM relying_parties
 WHERE namespace_id = $1
   AND deleted_at IS NULL
 ORDER BY client_id
@@ -362,6 +439,8 @@ func (q *Queries) ListNamespacedClients(ctx context.Context, namespaceID *string
 			&i.LogoutUris,
 			&i.NamespaceID,
 			&i.DeletedAt,
+			&i.CloudGeneration,
+			&i.CloudRequestHash,
 		); err != nil {
 			return nil, err
 		}
@@ -437,7 +516,7 @@ SET name                       = $3,
 WHERE client_id = $1
   AND namespace_id = $2
   AND deleted_at IS NULL
-RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at
+RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at, cloud_generation, cloud_request_hash
 `
 
 type UpdateNamespacedClientParams struct {
@@ -484,6 +563,8 @@ func (q *Queries) UpdateNamespacedClient(ctx context.Context, arg UpdateNamespac
 		&i.LogoutUris,
 		&i.NamespaceID,
 		&i.DeletedAt,
+		&i.CloudGeneration,
+		&i.CloudRequestHash,
 	)
 	return i, err
 }
@@ -500,7 +581,7 @@ SET name                           = $2,
     response_types                 = $9,
     token_endpoint_auth_method     = $10
 WHERE client_id = $1
-RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at
+RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at, cloud_generation, cloud_request_hash
 `
 
 type UpdateRegisteredClientParams struct {
@@ -549,6 +630,8 @@ func (q *Queries) UpdateRegisteredClient(ctx context.Context, arg UpdateRegister
 		&i.LogoutUris,
 		&i.NamespaceID,
 		&i.DeletedAt,
+		&i.CloudGeneration,
+		&i.CloudRequestHash,
 	)
 	return i, err
 }
@@ -565,7 +648,7 @@ ON CONFLICT (client_id) DO UPDATE
         redirect_uris  = EXCLUDED.redirect_uris,
         token_format   = EXCLUDED.token_format,
         scopes_allowed = EXCLUDED.scopes_allowed
-RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at
+RETURNING client_id, name, sector_id, redirect_uris, token_format, scopes_allowed, client_secret_hash, registration_access_token_hash, grant_types, response_types, token_endpoint_auth_method, created_at, logout_uris, namespace_id, deleted_at, cloud_generation, cloud_request_hash
 `
 
 type UpsertRelyingPartyParams struct {
@@ -603,6 +686,8 @@ func (q *Queries) UpsertRelyingParty(ctx context.Context, arg UpsertRelyingParty
 		&i.LogoutUris,
 		&i.NamespaceID,
 		&i.DeletedAt,
+		&i.CloudGeneration,
+		&i.CloudRequestHash,
 	)
 	return i, err
 }

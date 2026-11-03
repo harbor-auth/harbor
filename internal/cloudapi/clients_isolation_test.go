@@ -18,7 +18,7 @@ import (
 // of the create-time secret-hash pairing rule, which is exercised
 // separately in clients_test.go.
 func clientBodyNoAuth(clientID string, redirectURI string) string {
-	return `{"client_id":"` + clientID + `","redirect_uris":["` + redirectURI + `"],"token_endpoint_auth_method":"none"}`
+	return `{"generation":1,"client_id":"` + clientID + `","redirect_uris":["` + redirectURI + `"],"token_endpoint_auth_method":"none"}`
 }
 
 // TestClientIsolationCrossTenantAccessIsStructurallyImpossible seeds two
@@ -61,7 +61,7 @@ func TestClientIsolationCrossTenantAccessIsStructurallyImpossible(t *testing.T) 
 
 	// --- PUT via tenant-b: 404, AND tenant-a's row unchanged afterward ---
 	putRec := doPutClient(t, srv, "tenant-b", "isolation-client-a", "iso-put-key",
-		`{"redirect_uris":["https://attacker.example.com/cb"],"client_name":"pwned"}`)
+		`{"generation":2,"redirect_uris":["https://attacker.example.com/cb"],"client_name":"pwned"}`)
 	if putRec.Code != 404 {
 		t.Fatalf("PUT via wrong tenant status = %d, want 404; body = %s", putRec.Code, putRec.Body.String())
 	}
@@ -75,7 +75,7 @@ func TestClientIsolationCrossTenantAccessIsStructurallyImpossible(t *testing.T) 
 	assertClientRowUnchanged(t, "after cross-tenant PUT", before, afterPut)
 
 	// --- DELETE via tenant-b: 204 (never leaks existence), AND tenant-a's row still live ---
-	delRec := doDeleteClient(t, srv, "tenant-b", "isolation-client-a", "iso-delete-key")
+	delRec := doDeleteClient(t, srv, "tenant-b", "isolation-client-a", "iso-delete-key", 3)
 	if delRec.Code != 204 {
 		t.Fatalf("DELETE via wrong tenant status = %d, want 204 (idempotent no-op, never 404); body = %s", delRec.Code, delRec.Body.String())
 	}
@@ -240,7 +240,7 @@ func TestClientIsolationOperatorClientInvisibleToNamespacedRoutes(t *testing.T) 
 		}
 	}
 
-	if rec := doDeleteClient(t, srv, "tenant-a", "operator-client", "operator-delete-key"); rec.Code != 204 {
+	if rec := doDeleteClient(t, srv, "tenant-a", "operator-client", "operator-delete-key", 3); rec.Code != 204 {
 		t.Fatalf("DELETE operator client via tenant-a status = %d, want 204 (idempotent no-op)", rec.Code)
 	}
 	after, ok := cs.row("operator-client")

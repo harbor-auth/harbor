@@ -88,7 +88,7 @@ func newClientAuthFlowServer(t *testing.T, method, secret string) *httptest.Serv
 	}
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer: "https://eu.harbor.id", Clients: clients,
-		Codes: oidctest.NewInMemoryAuthCodeStore(), Tokens: oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
+		Codes: oidctest.NewRedisAuthCodeStore(t), Tokens: oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
 	srv := New(Config{Issuer: "https://eu.harbor.id", Service: svc, Signers: []crypto.Signer{signer}})
@@ -283,5 +283,42 @@ func TestToken_BasicAndPostCredentialsConflict(t *testing.T) {
 	}
 	if got := decodeOAuthErrorCode(t, res); got != "invalid_request" {
 		t.Fatalf("error = %q, want invalid_request", got)
+	}
+}
+
+func TestBothClientTypesRequirePKCE(t *testing.T) {
+	for _, method := range []string{"none", "client_secret_basic"} {
+		t.Run(method, func(t *testing.T) {
+			const secret = "backend-test-credential"
+			ts := newClientAuthFlowServer(t, method, secret)
+			code := mintCode(t, ts)
+			form := validTokenForm(code)
+			form.Del("code_verifier")
+			var res *http.Response
+			if method == "none" {
+				res = postToken(t, ts, form)
+			} else {
+				res = postTokenWithBasic(t, ts, form, testClientID, secret)
+			}
+			defer res.Body.Close()
+			if res.StatusCode == http.StatusOK {
+				t.Fatal("client exchanged a code without PKCE")
+			}
+		})
+	}
+}
+
+func TestTokenBasicChallengeOnlyForBasicAuthenticationFailure(t *testing.T) {
+	ts := newClientAuthFlowServer(t, "client_secret_basic", "correct-secret")
+	code := mintCode(t, ts)
+	res := postTokenWithBasic(t, ts, validTokenForm(code), testClientID, "wrong-secret")
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusUnauthorized || res.Header.Get("WWW-Authenticate") != `Basic realm="Harbor"` {
+		t.Fatal("missing Basic authentication challenge")
+	}
+	res2 := postToken(t, ts, validTokenForm(code))
+	defer res2.Body.Close()
+	if res2.StatusCode != http.StatusUnauthorized || res2.Header.Get("WWW-Authenticate") != "" {
+		t.Fatal("unexpected Basic challenge without Basic credentials")
 	}
 }

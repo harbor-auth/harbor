@@ -63,7 +63,7 @@ func newRefreshFlowReplica(t *testing.T, sessions oidc.SessionStore, grants *oid
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
-		Codes:        oidctest.NewInMemoryAuthCodeStore(),
+		Codes:        oidctest.NewRedisAuthCodeStore(t),
 		Tokens:       oidctest.NewPlaceholderIssuer(),
 		Sessions:     resolver,
 		SessionStore: sessions,

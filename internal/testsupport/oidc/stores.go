@@ -11,6 +11,7 @@ import (
 	"time"
 
 	harboroidc "github.com/harbor-auth/harbor/internal/oidc"
+	"github.com/harbor-auth/harbor/internal/testsupport/realredis"
 )
 
 type recordingRevocationSink struct{}
@@ -44,7 +45,7 @@ func NewService(t testing.TB, cfg harboroidc.ServiceConfig) *harboroidc.Service 
 		cfg.Clients = NewInMemoryClientRegistry()
 	}
 	if cfg.Codes == nil {
-		cfg.Codes = NewInMemoryAuthCodeStore()
+		cfg.Codes = NewRedisAuthCodeStore(t)
 	}
 	if cfg.Tokens == nil {
 		cfg.Tokens = NewPlaceholderIssuer()
@@ -106,61 +107,6 @@ func (r *InMemoryClientRegistry) Lookup(_ context.Context, clientID string) (har
 	defer r.mu.RUnlock()
 	c, ok := r.clients[clientID]
 	return c, ok
-}
-
-type authCodeEntry struct {
-	code     harboroidc.AuthCode
-	consumed bool
-}
-
-// InMemoryAuthCodeStore is a dev/test harboroidc.AuthCodeStore. NOT for production — a real
-// store is region-local and shared across replicas (e.g. Redis; docs/DESIGN.md
-// §4.4) with its own TTL eviction.
-type InMemoryAuthCodeStore struct {
-	mu    sync.Mutex
-	codes map[string]*authCodeEntry
-}
-
-// NewInMemoryAuthCodeStore returns an empty code store.
-func NewInMemoryAuthCodeStore() *InMemoryAuthCodeStore {
-	return &InMemoryAuthCodeStore{codes: make(map[string]*authCodeEntry)}
-}
-
-// Save implements harboroidc.AuthCodeStore.
-func (s *InMemoryAuthCodeStore) Save(_ context.Context, code harboroidc.AuthCode) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.codes[code.Code] = &authCodeEntry{code: code}
-	return nil
-}
-
-// Peek implements harboroidc.AuthCodeStore: reads the stored code and its consumed state
-// without mutating it.
-func (s *InMemoryAuthCodeStore) Peek(_ context.Context, code string) (harboroidc.AuthCode, bool, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	entry, ok := s.codes[code]
-	if !ok {
-		return harboroidc.AuthCode{}, false, false, nil
-	}
-	return entry.code, true, entry.consumed, nil
-}
-
-// Consume implements harboroidc.AuthCodeStore with reuse detection: the first call returns
-// harboroidc.ConsumeFirstUse and tombstones the entry; any later call returns
-// harboroidc.ConsumeReused.
-func (s *InMemoryAuthCodeStore) Consume(_ context.Context, code string) (harboroidc.ConsumeResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	entry, ok := s.codes[code]
-	if !ok {
-		return harboroidc.ConsumeResult{Status: harboroidc.ConsumeNotFound}, nil
-	}
-	if entry.consumed {
-		return harboroidc.ConsumeResult{Status: harboroidc.ConsumeReused, Code: entry.code}, nil
-	}
-	entry.consumed = true
-	return harboroidc.ConsumeResult{Status: harboroidc.ConsumeFirstUse, Code: entry.code}, nil
 }
 
 // sessionEntry is a stored session plus its revoked flag (in-memory store).
@@ -527,4 +473,10 @@ func NewStubSessionResolver(subject string) harboroidc.SessionResolver {
 // tests (see newRefreshFlowServerWithStore in refresh_rotation_test.go).
 func (r stubSessionResolver) Resolve(_ context.Context, _ harboroidc.Client, _ string) (string, string, bool, error) {
 	return r.subject, "", true, nil
+}
+
+// NewRedisAuthCodeStore uses the production adapter and an isolated Redis server.
+func NewRedisAuthCodeStore(t testing.TB) *harboroidc.RedisAuthCodeStore {
+	t.Helper()
+	return harboroidc.NewRedisAuthCodeStore(realredis.NewClient(t), time.Minute)
 }

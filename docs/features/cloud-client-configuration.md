@@ -1,0 +1,13 @@
+# Cloud client configuration
+
+Cloud applies complete desired configurations through `PUT /admin/v1/namespaces/{namespace}/clients/{client_id}/configuration`; deletion uses the same resource with `DELETE ?generation=N`. Both require `clients:write`, a positive generation and an `Idempotency-Key`. This dedicated resource makes older receivers fail before mutation.
+
+Migration `0025_cloud_client_generation` provides durable per-namespace/client generation fences and terminal deletion tombstones. Migration `0026_cloud_client_atomic_operations` binds each successful client mutation to its operation key in the same PostgreSQL transaction. Apply both migrations before deploying the updated Core binary, then deploy Cloud. A ledger insertion failure rolls back the client row and generation fence; it cannot produce a successful acknowledgment.
+
+The operation identity includes namespace, client ID, generation and normalized desired configuration. Different accepted requests using the same key and operation return `409 idempotency_key_reused`. During a concurrent request with that operation key, the server returns `409 operation_in_progress` with `Retry-After: 1`; callers retry the same request and generation. PostgreSQL uses a nonblocking transaction advisory lock, so duplicate-key contention does not leave connections waiting for another operation transaction.
+
+Identical retries always recheck the generation fence. A previously accepted generation cannot receive a cached success after a newer configuration or tombstone exists. Successful responses include `X-Harbor-Generation`; PUT also returns the client/namespace/generation identity in JSON. The ledger stores a small acceptance receipt without credentials, rather than a reusable generation acknowledgment. Legacy client POST/PUT/DELETE handlers use the same atomic operation path.
+
+The generation store's internal `ApplyVersioned` method also supports trusted operations without an HTTP idempotency key. Every Cloud HTTP mutation supplies the key, operation and request hash, and fails closed when the atomic SQL function is unavailable. Namespace and session operations retain their separate existing ledger behavior.
+
+Real PostgreSQL tests in `internal/clients/client_operation_integration_test.go` hold the winning mutation behind a database lock while another client attempts the same operation key. They verify that exactly one client and receipt persist, conflicting retries fail, identical retries remain stable, and a forced receipt insertion failure rolls back both the client and fence. The generation integration suite also verifies that a stale ledger retry fails without a generation acknowledgment.

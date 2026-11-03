@@ -54,7 +54,7 @@ func newBFFFlowServerWithStore(t *testing.T, store bff.BFFSessionStore) *httptes
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:  "https://eu.harbor.id",
 		Clients: clients,
-		Codes:   oidctest.NewInMemoryAuthCodeStore(),
+		Codes:   oidctest.NewRedisAuthCodeStore(t),
 		Tokens:  oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Grants:  grants,
 		// The stub resolver would issue a code in the legacy path; with the BFF

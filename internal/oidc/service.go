@@ -463,11 +463,10 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (*Authori
 // could lock the legitimate user out. So we:
 //
 //  1. validate params (grant_type + presence);
-//  2. PEEK the code (no mutation) — unknown → invalid_grant; already consumed →
-//     theft signal (revoke the code family) + invalid_grant;
-//  3. validate binding + expiry + PKCE against the peeked code — on failure
-//     return WITHOUT consuming (the code stays valid for its real owner);
-//  4. only on success CONSUME (single-use). A racing second exchange that wins
+//  2. PEEK the code (no mutation) — unknown → invalid_grant;
+//  3. validate binding + PKCE and authenticate the client — on failure return
+//     WITHOUT mutation; authenticated reuse revokes the code family;
+//  4. require freshness for unspent codes, then CONSUME (single-use). A racing second exchange that wins
 //     the tombstone here still surfaces as reuse (revoke + invalid_grant).
 func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *TokenError) {
 	if terr := ValidateTokenParams(req); terr != nil {
@@ -480,6 +479,18 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 	if !found {
 		return nil, invalidGrant("authorization code is invalid")
 	}
+
+	// Validate against the STORED code before burning it. A failure here leaves
+	// the code intact for the legitimate owner.
+	if terr := validateTokenBinding(req, stored); terr != nil {
+		return nil, terr
+	}
+	if _, ok := s.AuthenticateClient(ctx, req.ClientID, req.ClientAuthMethod, req.ClientSecret); !ok {
+		return nil, &TokenError{Code: ErrCodeInvalidClient, Description: "client authentication failed", Status: 401}
+	}
+
+	// Reuse is a revocation action: require code binding, PKCE, and client
+	// authentication before an untrusted replay can affect the token family.
 	if consumed {
 		// Assume theft: revoke everything minted from this code.
 		// Raw ctx: signalCodeReuse self-enforces context.WithoutCancel + 10 s timeout internally.
@@ -487,13 +498,10 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 		return nil, invalidGrant("authorization code has already been used")
 	}
 
-	// Validate against the STORED code before burning it. A failure here leaves
-	// the code intact for the legitimate owner.
-	if terr := ValidateTokenExchange(req, stored, s.now()); terr != nil {
+	// Only fresh codes are eligible for issuance. Authenticated spent-code
+	// replay still revokes the family after the original code's expiry.
+	if terr := validateCodeExpiry(stored, s.now()); terr != nil {
 		return nil, terr
-	}
-	if _, ok := s.AuthenticateClient(ctx, req.ClientID, req.ClientAuthMethod, req.ClientSecret); !ok {
-		return nil, &TokenError{Code: ErrCodeInvalidClient, Description: "client authentication failed", Status: 401}
 	}
 
 	// Only now consume (single-use). Handle a lost race on the tombstone.
@@ -645,6 +653,14 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	session, err := s.sessionStore.GetSessionByTokenHash(ctx, hash)
 	if err != nil {
 		if errors.Is(err, ErrRefreshTokenRevoked) {
+			// A spent token alone is insufficient to revoke a confidential
+			// client's live sessions. Bind and authenticate before side effects.
+			if session.ClientID != req.ClientID {
+				return nil, invalidGrant("refresh token is invalid")
+			}
+			if _, ok := s.AuthenticateClient(ctx, req.ClientID, req.ClientAuthMethod, req.ClientSecret); !ok {
+				return nil, &TokenError{Code: ErrCodeInvalidClient, Description: "client authentication failed", Status: 401}
+			}
 			// A rotated (revoked) token was replayed: assume theft, revoke family.
 			// Raw ctx: signalRefreshReuse self-enforces context.WithoutCancel + 10 s timeout internally.
 			s.signalRefreshReuse(ctx, session)

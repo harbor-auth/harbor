@@ -672,12 +672,12 @@ components:
         token_endpoint_auth_methods_supported:
           type: array
           description: >-
-            Harbor is a public-client provider — PKCE replaces a client secret,
-            so the token endpoint requires no client authentication (`none`)
-            (DESIGN §3.1).
+            Public clients use none; confidential clients authenticate using
+            client_secret_basic or client_secret_post. Both require S256 PKCE
+            for Authorization Code grants.
           items:
             type: string
-          example: ["none"]
+          example: ["none", "client_secret_basic", "client_secret_post"]
     TokenResponse:
       type: object
       description: Successful token response (RFC 6749 §5.1 + OIDC id_token).

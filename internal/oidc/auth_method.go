@@ -68,6 +68,9 @@ func AuthenticateClient(ctx context.Context, registry ClientRegistry, clientID, 
 			return Client{}, false
 		}
 	case ClientAuthSecretBasic, ClientAuthSecretPost:
+		if secret == "" {
+			return Client{}, false
+		}
 		presented := sha256.Sum256([]byte(secret))
 		if len(client.SecretHash) != sha256.Size || subtle.ConstantTimeCompare(presented[:], client.SecretHash) != 1 {
 			return Client{}, false

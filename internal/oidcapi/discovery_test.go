@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 )
 
@@ -67,13 +68,15 @@ func TestGetOpenIDConfiguration_ClaimsSupported(t *testing.T) {
 	}
 }
 
-// Public-client provider (DESIGN §3.1): token endpoint auth is `none` only —
-// PKCE replaces a client secret. `client_secret_*` must never be advertised.
+// Retain the historical test identity for the test-removal guard. The provider
+// now supports confidential clients too, so the reviewed contract requires the
+// exact implemented set rather than the former public-only discovery value.
 func TestGetOpenIDConfiguration_TokenEndpointAuthNoneOnly(t *testing.T) {
 	doc := decodeDiscovery(t, "https://eu.harbor.id")
 	methods := toStrings(t, doc["token_endpoint_auth_methods_supported"])
-	if len(methods) != 1 || methods[0] != "none" {
-		t.Fatalf("token_endpoint_auth_methods_supported = %v, want [none]", methods)
+	want := []string{"none", "client_secret_basic", "client_secret_post"}
+	if !reflect.DeepEqual(methods, want) {
+		t.Fatalf("methods = %v, want %v", methods, want)
 	}
 }
 

@@ -512,7 +512,8 @@ paths:
         Soft-deletes a client owned by `namespace`. Requires the
         `clients:write` scope. For any SYNTACTICALLY VALID `namespace` and
         `client_id` (matching the patterns on this path's parameters above),
-        this operation is naturally idempotent: it ALWAYS returns `204`,
+        this operation is naturally idempotent after its positive generation
+        passes the atomic fence: it returns `204`,
         including when `client_id` is absent, already deleted, or owned by a
         DIFFERENT namespace — a cross-tenant delete attempt is a silent no-op
         against the actual owner's row, never a `404` (which would confirm
@@ -524,6 +525,10 @@ paths:
         pattern is rejected with `400 invalid_request` before anything is
         looked up — malformed input is never treated as "absent" for the
         purposes of the `204`-always contract above.
+
+        Stale generations return `409 stale_generation`; different state at
+        an equal generation returns `409 generation_conflict`. Successful
+        responses acknowledge generation in `X-Harbor-Generation`.
 
         A deleted `client_id` is burned PERMANENTLY: it can never be reused,
         by this namespace or any other. `client_id` remains the underlying
@@ -537,6 +542,13 @@ paths:
       security:
         - cloudServiceAuth: [clients:write]
       parameters:
+        - name: generation
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
         - $ref: "#/components/parameters/IdempotencyKey"
       responses:
         "204":
@@ -599,6 +611,112 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Error"
+  /admin/v1/namespaces/{namespace}/clients/{client_id}/configuration:
+    parameters:
+      - name: namespace
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+      - name: client_id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: "^[A-Za-z0-9._~-]{8,128}$"
+    put:
+      operationId: putAdminV1NamespacesClientConfiguration
+      summary: Apply a complete generation-fenced client configuration
+      description: >-
+        Atomically creates or replaces desired configuration. Requires clients:write.
+        Generation must be positive and newer than accepted state; an identical
+        equal-generation retry is acknowledged without mutation. Lower versions
+        return stale_generation; equal-generation differences or terminal
+        tombstones return generation_conflict. Deleted clients cannot be revived.
+        Use this dedicated route so older receivers fail with 404 before writing.
+        The body omits client_id, which is taken from the path.
+        The Idempotency-Key identity and successful mutation commit atomically.
+        Concurrent uses of the same operation key return 409 operation_in_progress
+        with Retry-After: 1; retry the same request. Conflicting accepted identities
+        return 409 idempotency_key_reused. Identical retries recheck the generation
+        fence rather than returning an outdated cached acknowledgment.
+      tags: [clients]
+      security:
+        - cloudServiceAuth: [clients:write]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClientUpdateRequest"
+      responses:
+        "200":
+          description: Configuration accepted, including an identical generation retry.
+          headers:
+            X-Harbor-Generation:
+              schema:
+                type: integer
+                format: int64
+                minimum: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClientResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Namespace does not exist or is terminally deleted.
+        "409":
+          description: Stale generation, different equal-generation state, or terminal client.
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    delete:
+      operationId: deleteAdminV1NamespacesClientConfiguration
+      summary: Apply a terminal generation-fenced client deletion
+      description: >-
+        Persists a namespace/client tombstone even if the client does not exist.
+        Stale generation is rejected. Equal-generation identical deletion retries
+        are acknowledged without mutation. Foreign clients are not changed or
+        disclosed. A tombstone prevents subsequent create/update at any generation.
+      tags: [clients]
+      security:
+        - cloudServiceAuth: [clients:write]
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: generation
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        "204":
+          description: Terminal deletion accepted or identically retried.
+          headers:
+            X-Harbor-Generation:
+              schema:
+                type: integer
+                format: int64
+                minimum: 1
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: Stale generation or different equal-generation mutation.
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
 components:
   securitySchemes:
     cloudServiceAuth:
@@ -730,9 +848,15 @@ components:
         omitting the field, which defaults away from `none` per below)
         forbids it. An inconsistent pairing is rejected as `invalid_request`.
       required:
+        - generation
         - client_id
         - redirect_uris
       properties:
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Monotonically increasing desired-state generation. Equal-generation retries require identical configuration.
         client_id:
           type: string
           description: Caller-chosen client identifier, immutable once created.
@@ -796,8 +920,14 @@ components:
         move a client from confidential to public via this route without
         also changing `token_endpoint_auth_method`.
       required:
+        - generation
         - redirect_uris
       properties:
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Monotonically increasing desired-state generation. Equal-generation retries require identical configuration.
         client_name:
           type: string
         redirect_uris:
@@ -817,6 +947,17 @@ components:
             - none
         scope:
           type: string
+        grant_types:
+          type: array
+          items:
+            type: string
+            enum: [authorization_code, refresh_token]
+        response_types:
+          type: array
+          items:
+            type: string
+            enum: [code]
+
     ClientResponse:
       type: object
       description: >-
@@ -825,12 +966,18 @@ components:
         create, get, update, and list, and none of those operations echo
         `client_secret_hash` back.
       required:
+        - generation
         - client_id
         - namespace_id
         - redirect_uris
         - token_endpoint_auth_method
         - created_at
       properties:
+        generation:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Accepted desired-state generation; zero identifies an unmanaged registration.
         client_id:
           type: string
         namespace_id:
@@ -1020,7 +1167,10 @@ components:
             - namespace_not_found
             - client_already_exists
             - client_not_found
+            - stale_generation
+            - generation_conflict
             - idempotency_key_reused
+            - operation_in_progress
             - rate_limited
             - subject_unavailable
             - invalid_subject
