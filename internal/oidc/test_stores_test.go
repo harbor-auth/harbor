@@ -43,11 +43,6 @@ func (r *InMemoryClientRegistry) Lookup(_ context.Context, clientID string) (Cli
 	return c, ok
 }
 
-type authCodeEntry struct {
-	code     AuthCode
-	consumed bool
-}
-
 // noopSessionStore is a deliberately inert test double used by corruption and
 // revocation-path tests that override only the method under examination.
 type noopSessionStore struct{}
@@ -62,56 +57,6 @@ func (noopSessionStore) RevokeSessionsByUserClient(context.Context, string, stri
 	return nil
 }
 func (noopSessionStore) RevokeSessionsByGrant(context.Context, string) error { return nil }
-
-// InMemoryAuthCodeStore is a dev/test AuthCodeStore. NOT for production — a real
-// store is region-local and shared across replicas (e.g. Redis; docs/DESIGN.md
-// §4.4) with its own TTL eviction.
-type InMemoryAuthCodeStore struct {
-	mu    sync.Mutex
-	codes map[string]*authCodeEntry
-}
-
-// NewInMemoryAuthCodeStore returns an empty code store.
-func NewInMemoryAuthCodeStore() *InMemoryAuthCodeStore {
-	return &InMemoryAuthCodeStore{codes: make(map[string]*authCodeEntry)}
-}
-
-// Save implements AuthCodeStore.
-func (s *InMemoryAuthCodeStore) Save(_ context.Context, code AuthCode) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.codes[code.Code] = &authCodeEntry{code: code}
-	return nil
-}
-
-// Peek implements AuthCodeStore: reads the stored code and its consumed state
-// without mutating it.
-func (s *InMemoryAuthCodeStore) Peek(_ context.Context, code string) (AuthCode, bool, bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	entry, ok := s.codes[code]
-	if !ok {
-		return AuthCode{}, false, false, nil
-	}
-	return entry.code, true, entry.consumed, nil
-}
-
-// Consume implements AuthCodeStore with reuse detection: the first call returns
-// ConsumeFirstUse and tombstones the entry; any later call returns
-// ConsumeReused.
-func (s *InMemoryAuthCodeStore) Consume(_ context.Context, code string) (ConsumeResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	entry, ok := s.codes[code]
-	if !ok {
-		return ConsumeResult{Status: ConsumeNotFound}, nil
-	}
-	if entry.consumed {
-		return ConsumeResult{Status: ConsumeReused, Code: entry.code}, nil
-	}
-	entry.consumed = true
-	return ConsumeResult{Status: ConsumeFirstUse, Code: entry.code}, nil
-}
 
 // sessionEntry is a stored session plus its revoked flag (in-memory store).
 type sessionEntry struct {

@@ -17,10 +17,10 @@ func newTestRevokeService(t *testing.T, sessionStore SessionStore) *Service {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 
-	return mustNewService(ServiceConfig{
+	return mustNewService(t, ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
-		Codes:        NewInMemoryAuthCodeStore(),
+		Codes:        newRedisAuthCodeStore(t),
 		Tokens:       NewPlaceholderIssuer(),
 		Sessions:     NewStubSessionResolver("demo-subject-ppid"),
 		SessionStore: sessionStore,
@@ -270,10 +270,10 @@ func TestService_RevokeRefreshToken_LogsDBError(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
-		Codes:        NewInMemoryAuthCodeStore(),
+		Codes:        newRedisAuthCodeStore(t),
 		Tokens:       NewPlaceholderIssuer(),
 		Sessions:     NewStubSessionResolver("demo-subject-ppid"),
 		SessionStore: store,
@@ -329,10 +329,10 @@ func TestService_RevokeRefreshToken_EmptyUserID_SkipsRevoke(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
-		Codes:        NewInMemoryAuthCodeStore(),
+		Codes:        newRedisAuthCodeStore(t),
 		Tokens:       NewPlaceholderIssuer(),
 		Sessions:     NewStubSessionResolver("demo-subject-ppid"),
 		SessionStore: store,
@@ -378,10 +378,10 @@ func TestService_RevokeRefreshToken_ZeroUUID_SkipsRevoke(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
-		Codes:        NewInMemoryAuthCodeStore(),
+		Codes:        newRedisAuthCodeStore(t),
 		Tokens:       NewPlaceholderIssuer(),
 		Sessions:     NewStubSessionResolver("demo-subject-ppid"),
 		SessionStore: store,

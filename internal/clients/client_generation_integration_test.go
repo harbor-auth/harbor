@@ -20,6 +20,7 @@ import (
 	"github.com/harbor-auth/harbor/internal/cloudapi"
 	db "github.com/harbor-auth/harbor/internal/gen/db"
 	cloudopenapi "github.com/harbor-auth/harbor/internal/gen/openapi/cloud"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -50,7 +51,9 @@ func generationPool(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(func() {
 		pool.Close()
-		admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE")
+		if _, err := admin.Exec(context.Background(), "DROP SCHEMA "+schema+" CASCADE"); err != nil {
+			t.Errorf("drop test schema: %v", err)
+		}
 		admin.Close()
 	})
 	for _, name := range []string{"0001_init.up.sql", "0012_client_registration.up.sql", "0017_logout_uris.up.sql", "0019_cloud_namespaces.up.sql", "0020_relying_parties_namespace.up.sql", "0025_cloud_client_generation.up.sql"} {
@@ -100,7 +103,9 @@ func TestGenerationOrderingAndTerminalDeletion(t *testing.T) {
 		t.Fatal("same-generation method-independent retry failed", err)
 	}
 	var after string
-	pool.QueryRow(ctx, "SELECT xmin::text FROM relying_parties WHERE client_id=$1", old.ClientID).Scan(&after)
+	if err := pool.QueryRow(ctx, "SELECT xmin::text FROM relying_parties WHERE client_id=$1", old.ClientID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
 	if before != after {
 		t.Fatal("equal generation retry rewrote state")
 	}
@@ -247,7 +252,11 @@ func TestConcurrentLateGenerationCannotOverwriteCommittedNewerConfiguration(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback(context.Background())
+	defer func() {
+		if err := tx.Rollback(context.Background()); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			t.Errorf("rollback test transaction: %v", err)
+		}
+	}()
 	newest := initial
 	newest.Generation = 3
 	newest.Configuration.RedirectURIs = []string{"https://latest.example/cb"}

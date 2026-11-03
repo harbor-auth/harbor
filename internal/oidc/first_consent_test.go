@@ -27,7 +27,7 @@ func TestFirstConsentCreatesCanonicalGrantBeforeUpdatingView(t *testing.T) {
 	client.SectorID = "rp.example.com"
 	clients.Put(client)
 	consents := updateOnlyConsentStore{NewInMemoryConsentStore(), grants}
-	svc := mustNewService(ServiceConfig{Issuer: "https://eu.harbor.id", Clients: clients, Codes: NewInMemoryAuthCodeStore(), Tokens: NewPlaceholderIssuer(), Sessions: resolver, Grants: grants, Consents: consents})
+	svc := mustNewService(t, ServiceConfig{Issuer: "https://eu.harbor.id", Clients: clients, Codes: newRedisAuthCodeStore(t), Tokens: NewPlaceholderIssuer(), Sessions: resolver, Grants: grants, Consents: consents})
 	ctx := context.Background()
 	if err := svc.ApproveConsent(ctx, userID, client.ID, "openid profile"); err != nil {
 		t.Fatalf("first consent failed: %v", err)

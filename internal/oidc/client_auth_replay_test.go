@@ -97,11 +97,22 @@ func TestExpiredConsumedCodeStillRevokesOnlyForAuthenticatedBoundReplay(t *testi
 	client := testClient()
 	client.TokenEndpointAuthMethod, client.SecretHash = ClientAuthSecretBasic, clientSecretHash(secret)
 	svc := clientAuthService(t, client)
+	// Use actual Redis expiry, rather than advancing only the service clock.
+	store := newRedisAuthCodeStore(t)
+	store.codeTTL = 2 * time.Second
+	code := validAuthCode(time.Now())
+	code.ExpiresAt = time.Now().Add(store.codeTTL)
+	svc.now = time.Now
+	if err := store.Save(t.Context(), code); err != nil {
+		t.Fatal(err)
+	}
+	svc.codes = store
 	req := validTokenReq()
 	if _, err := svc.codes.Consume(t.Context(), req.Code); err != nil {
 		t.Fatal(err)
 	}
-	svc.now = func() time.Time { return time.Unix(1_700_000_000, 0).Add(2 * time.Minute) }
+	time.Sleep(store.codeTTL + 100*time.Millisecond)
+
 	sink := NewRecordingRevocationSink()
 	svc.revocations = sink
 	req.ClientAuthMethod, req.ClientSecret = ClientAuthSecretBasic, secret

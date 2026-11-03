@@ -6,19 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/harbor-auth/harbor/internal/oidc"
-	"github.com/redis/go-redis/v9"
+	"github.com/harbor-auth/harbor/internal/testsupport/realredis"
 )
-
-// testRedisClient creates a miniredis-backed Redis client for testing.
-func testRedisClient(t *testing.T) (*redis.Client, *miniredis.Miniredis) {
-	t.Helper()
-	mr := miniredis.RunT(t)
-	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = client.Close() }) //nolint:errcheck // test cleanup
-	return client, mr
-}
 
 // testAuthCode creates a test auth code with the given code string.
 func testAuthCode(code string, ttl time.Duration) oidc.AuthCode {
@@ -39,7 +29,7 @@ func testAuthCode(code string, ttl time.Duration) oidc.AuthCode {
 // TestRedisAuthCodeStore_SavePeekConsume exercises the complete round-trip:
 // Save → Peek (found, not consumed) → Consume (first use) → Peek (found, consumed).
 func TestRedisAuthCodeStore_SavePeekConsume(t *testing.T) {
-	client, _ := testRedisClient(t)
+	client := realredis.NewClient(t)
 	store := NewRedisAuthCodeStore(client, 60*time.Second)
 	ctx := context.Background()
 
@@ -96,7 +86,7 @@ func TestRedisAuthCodeStore_SavePeekConsume(t *testing.T) {
 // TestRedisAuthCodeStore_DoubleConsume verifies reuse detection: the second
 // Consume returns ConsumeReused (not ConsumeFirstUse or ConsumeNotFound).
 func TestRedisAuthCodeStore_DoubleConsume(t *testing.T) {
-	client, _ := testRedisClient(t)
+	client := realredis.NewClient(t)
 	store := NewRedisAuthCodeStore(client, 60*time.Second)
 	ctx := context.Background()
 
@@ -131,7 +121,7 @@ func TestRedisAuthCodeStore_DoubleConsume(t *testing.T) {
 
 // TestRedisAuthCodeStore_Expiry verifies that expired codes return NotFound.
 func TestRedisAuthCodeStore_Expiry(t *testing.T) {
-	client, mr := testRedisClient(t)
+	client := realredis.NewClient(t)
 	store := NewRedisAuthCodeStore(client, 1*time.Second)
 	ctx := context.Background()
 
@@ -150,8 +140,8 @@ func TestRedisAuthCodeStore_Expiry(t *testing.T) {
 		t.Fatal("Peek before expiry: expected found=true")
 	}
 
-	// Fast-forward time past TTL
-	mr.FastForward(2 * time.Second)
+	// Wait past TTL
+	time.Sleep(2 * time.Second)
 
 	// Code should be gone
 	_, found, _, err = store.Peek(ctx, code.Code)
@@ -173,10 +163,10 @@ func TestRedisAuthCodeStore_Expiry(t *testing.T) {
 }
 
 // TestRedisAuthCodeStore_ConsumedMarkerOutlivesCode verifies that the consumed
-// marker TTL (2x code TTL) allows reuse detection even after the code data
+// binding TTL (2x code TTL) allows reuse detection after the original code TTL
 // expires. This is critical for detecting theft attempts that arrive late.
 func TestRedisAuthCodeStore_ConsumedMarkerOutlivesCode(t *testing.T) {
-	client, mr := testRedisClient(t)
+	client := realredis.NewClient(t)
 	codeTTL := 2 * time.Second
 	store := NewRedisAuthCodeStore(client, codeTTL)
 	ctx := context.Background()
@@ -196,39 +186,33 @@ func TestRedisAuthCodeStore_ConsumedMarkerOutlivesCode(t *testing.T) {
 		t.Fatalf("Consume: expected ConsumeFirstUse, got %v", result.Status)
 	}
 
-	// Fast-forward past code TTL but before consumed marker TTL (2x)
-	mr.FastForward(codeTTL + 500*time.Millisecond)
+	// Wait past code TTL but before consumed marker TTL (2x)
+	time.Sleep(codeTTL + 500*time.Millisecond)
 
-	// Code data should be expired
-	_, found, _, err := store.Peek(ctx, code.Code)
-	if err != nil {
-		t.Fatalf("Peek after code expiry: %v", err)
+	// Consumed metadata remains available beyond the original code TTL.
+	stored, found, consumed, err := store.Peek(ctx, code.Code)
+	if err != nil || !found || !consumed || stored.ClientID != code.ClientID {
+		t.Fatalf("lost consumed binding after fresh expiry: %+v %v %v %v", stored, found, consumed, err)
 	}
-	if found {
-		t.Fatal("Peek after code expiry: code data should be gone")
-	}
-
-	// But the consumed marker should still exist (checked via EXISTS in Peek)
-	// We verify this by checking that if we had the code, it would show consumed
-	// Since Peek returns found=false, we check the marker directly
-	exists, err := client.Exists(ctx, consumedKey(code.Code)).Result()
-	if err != nil {
-		t.Fatalf("EXISTS consumed marker: %v", err)
-	}
-	if exists != 1 {
-		t.Fatal("consumed marker should still exist after code expiry")
+	replay, err := store.Consume(ctx, code.Code)
+	if err != nil || replay.Status != oidc.ConsumeReused || replay.Code.Subject != code.Subject {
+		t.Fatalf("late replay lost binding: %+v %v", replay, err)
 	}
 
-	// Fast-forward past consumed marker TTL
-	mr.FastForward(codeTTL + 1*time.Second)
+	// Wait past consumed marker TTL
+	time.Sleep(codeTTL + 1*time.Second)
 
 	// Now the consumed marker should also be gone
-	exists, err = client.Exists(ctx, consumedKey(code.Code)).Result()
+	exists, err := client.Exists(ctx, "authcode:consumed:"+code.Code).Result()
 	if err != nil {
 		t.Fatalf("EXISTS consumed marker after full expiry: %v", err)
 	}
 	if exists != 0 {
 		t.Fatal("consumed marker should be gone after 2x code TTL")
+	}
+	_, found, consumed, err = store.Peek(ctx, code.Code)
+	if err != nil || found || consumed {
+		t.Fatalf("replay binding survived its TTL: %v %v %v", found, consumed, err)
 	}
 }
 
@@ -236,7 +220,7 @@ func TestRedisAuthCodeStore_ConsumedMarkerOutlivesCode(t *testing.T) {
 // exactly one of N concurrent Consume calls returns ConsumeFirstUse; all others
 // return ConsumeReused.
 func TestRedisAuthCodeStore_ConcurrentConsume(t *testing.T) {
-	client, _ := testRedisClient(t)
+	client := realredis.NewClient(t)
 	store := NewRedisAuthCodeStore(client, 60*time.Second)
 	ctx := context.Background()
 
@@ -289,7 +273,7 @@ func TestRedisAuthCodeStore_ConcurrentConsume(t *testing.T) {
 // TestRedisAuthCodeStore_SaveDuplicate verifies that saving a code that already
 // exists returns an error (SET NX semantics).
 func TestRedisAuthCodeStore_SaveDuplicate(t *testing.T) {
-	client, _ := testRedisClient(t)
+	client := realredis.NewClient(t)
 	store := NewRedisAuthCodeStore(client, 60*time.Second)
 	ctx := context.Background()
 
@@ -310,7 +294,7 @@ func TestRedisAuthCodeStore_SaveDuplicate(t *testing.T) {
 // TestRedisAuthCodeStore_ConsumeNotFound verifies that consuming a non-existent
 // code returns ConsumeNotFound.
 func TestRedisAuthCodeStore_ConsumeNotFound(t *testing.T) {
-	client, _ := testRedisClient(t)
+	client := realredis.NewClient(t)
 	store := NewRedisAuthCodeStore(client, 60*time.Second)
 	ctx := context.Background()
 
@@ -326,7 +310,7 @@ func TestRedisAuthCodeStore_ConsumeNotFound(t *testing.T) {
 // TestRedisAuthCodeStore_PeekNotFound verifies that peeking a non-existent
 // code returns found=false without error.
 func TestRedisAuthCodeStore_PeekNotFound(t *testing.T) {
-	client, _ := testRedisClient(t)
+	client := realredis.NewClient(t)
 	store := NewRedisAuthCodeStore(client, 60*time.Second)
 	ctx := context.Background()
 

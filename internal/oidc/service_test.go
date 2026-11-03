@@ -14,7 +14,7 @@ func TestNewService_RejectsMissingRequiredCollaborators(t *testing.T) {
 	valid := ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      NewInMemoryClientRegistry(),
-		Codes:        NewInMemoryAuthCodeStore(),
+		Codes:        newRedisAuthCodeStore(t),
 		Tokens:       NewPlaceholderIssuer(),
 		Sessions:     NewStubSessionResolver("test-subject"),
 		SessionStore: NewInMemorySessionStore(),
@@ -57,7 +57,7 @@ func TestNewService_PanicsWhenSessionStoreWithoutGrantStore(t *testing.T) {
 	cfg := ServiceConfig{
 		Issuer:       "https://test",
 		Clients:      NewInMemoryClientRegistry(),
-		Codes:        NewInMemoryAuthCodeStore(),
+		Codes:        newRedisAuthCodeStore(t),
 		Tokens:       NewPlaceholderIssuer(),
 		Sessions:     NewStubSessionResolver("sub"),
 		SessionStore: NewInMemorySessionStore(),
@@ -77,10 +77,10 @@ func newTestAuthorizeService(t *testing.T) (*Service, *InMemoryClientRegistry) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
-		Codes:    NewInMemoryAuthCodeStore(),
+		Codes:    newRedisAuthCodeStore(t),
 		Tokens:   NewPlaceholderIssuer(),
 		Sessions: NewStubSessionResolver("demo-subject-ppid"),
 		NewCode:  func() (string, error) { return "test-code-12345", nil },
@@ -183,10 +183,10 @@ func TestService_Authorize_SessionResolutionError(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
-		Codes:    NewInMemoryAuthCodeStore(),
+		Codes:    newRedisAuthCodeStore(t),
 		Tokens:   NewPlaceholderIssuer(),
 		Sessions: errSessionResolver{err: errors.New("session resolution failed")},
 		Now:      func() time.Time { return time.Unix(1_700_000_000, 0) },
@@ -215,10 +215,10 @@ func TestService_Authorize_ConsentDenied(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
-		Codes:    NewInMemoryAuthCodeStore(),
+		Codes:    newRedisAuthCodeStore(t),
 		Tokens:   NewPlaceholderIssuer(),
 		Sessions: denyingSessionResolver{},
 		Now:      func() time.Time { return time.Unix(1_700_000_000, 0) },
@@ -240,10 +240,10 @@ func TestService_Authorize_CodeGenerationError(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
-		Codes:    NewInMemoryAuthCodeStore(),
+		Codes:    newRedisAuthCodeStore(t),
 		Tokens:   NewPlaceholderIssuer(),
 		Sessions: NewStubSessionResolver("demo-subject-ppid"),
 		NewCode:  func() (string, error) { return "", errors.New("code generation failed") },
@@ -283,7 +283,7 @@ func TestService_Authorize_CodeStorageError(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
 
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    errAuthCodeStore{saveErr: errors.New("storage failed")},
@@ -325,7 +325,7 @@ func (s peekErrAuthCodeStore) Consume(_ context.Context, _ string) (ConsumeResul
 }
 
 func TestService_Token_PeekError(t *testing.T) {
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  NewInMemoryClientRegistry(),
 		Codes:    peekErrAuthCodeStore{peekErr: errors.New("database connection failed")},
@@ -368,7 +368,7 @@ func TestService_Token_ConsumeError(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	registry := NewInMemoryClientRegistry()
 	registry.Put(testClient())
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:  "https://eu.harbor.id",
 		Clients: registry,
 		Codes: consumeErrAuthCodeStore{
@@ -394,14 +394,14 @@ func TestService_Token_ConsumeError(t *testing.T) {
 
 func TestService_Token_IssueError(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
-	codes := NewInMemoryAuthCodeStore()
+	codes := newRedisAuthCodeStore(t)
 	if err := codes.Save(context.Background(), validAuthCode(now)); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
 	registry := NewInMemoryClientRegistry()
 	registry.Put(testClient())
 
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  registry,
 		Codes:    codes,
@@ -423,10 +423,10 @@ func TestService_Token_IssueError(t *testing.T) {
 }
 
 func TestService_Token_InvalidGrantType(t *testing.T) {
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  NewInMemoryClientRegistry(),
-		Codes:    NewInMemoryAuthCodeStore(),
+		Codes:    newRedisAuthCodeStore(t),
 		Tokens:   NewPlaceholderIssuer(),
 		Sessions: NewStubSessionResolver("demo-subject-ppid"),
 		Now:      func() time.Time { return time.Unix(1_700_000_000, 0) },
@@ -444,10 +444,10 @@ func TestService_Token_InvalidGrantType(t *testing.T) {
 }
 
 func TestService_Token_MissingParams(t *testing.T) {
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  NewInMemoryClientRegistry(),
-		Codes:    NewInMemoryAuthCodeStore(),
+		Codes:    newRedisAuthCodeStore(t),
 		Tokens:   NewPlaceholderIssuer(),
 		Sessions: NewStubSessionResolver("demo-subject-ppid"),
 		Now:      func() time.Time { return time.Unix(1_700_000_000, 0) },
@@ -515,7 +515,7 @@ func TestService_signalCodeReuse_LogsRevocationError(t *testing.T) {
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:      "https://eu.harbor.id",
 		Clients:     NewInMemoryClientRegistry(),
 		Codes:       consumedCodeStore{code: code},
@@ -558,7 +558,7 @@ func TestService_signalCodeReuse_NoLogOnSuccess(t *testing.T) {
 	// Use RecordingRevocationSink which succeeds (returns nil).
 	revocations := NewRecordingRevocationSink()
 
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:      "https://eu.harbor.id",
 		Clients:     NewInMemoryClientRegistry(),
 		Codes:       consumedCodeStore{code: code},
@@ -606,10 +606,10 @@ func TestService_Authorize_UpsertsConsentOnApproval(t *testing.T) {
 	clients.Put(testClient())
 	consents := NewInMemoryConsentStore()
 
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
-		Codes:    NewInMemoryAuthCodeStore(),
+		Codes:    newRedisAuthCodeStore(t),
 		Tokens:   NewPlaceholderIssuer(),
 		Sessions: &userIDSessionResolverSvc{subject: "ppid-123", userID: "user-456"},
 		Consents: consents,
@@ -667,10 +667,10 @@ func TestService_Authorize_ScopeEscalation_PersistsMergedScopes(t *testing.T) {
 		t.Fatalf("Upsert failed: %v", err)
 	}
 
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
-		Codes:    NewInMemoryAuthCodeStore(),
+		Codes:    newRedisAuthCodeStore(t),
 		Tokens:   NewPlaceholderIssuer(),
 		Sessions: &userIDSessionResolverSvc{subject: "ppid-123", userID: "user-456"},
 		Consents: consents,
@@ -724,10 +724,10 @@ func TestService_Authorize_ConsentUpsertError(t *testing.T) {
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
-		Codes:    NewInMemoryAuthCodeStore(),
+		Codes:    newRedisAuthCodeStore(t),
 		Tokens:   NewPlaceholderIssuer(),
 		Sessions: &userIDSessionResolverSvc{subject: "ppid-123", userID: "user-456"},
 		Consents: consents,
@@ -800,7 +800,7 @@ func TestService_signalCodeReuse_LogDoesNotContainPII(t *testing.T) {
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:      "https://eu.harbor.id",
 		Clients:     NewInMemoryClientRegistry(),
 		Codes:       consumedCodeStore{code: code},

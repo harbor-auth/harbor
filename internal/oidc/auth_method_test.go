@@ -76,11 +76,11 @@ func clientAuthService(t *testing.T, client Client) *Service {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(client)
 	now := time.Unix(1_700_000_000, 0)
-	codes := NewInMemoryAuthCodeStore()
+	codes := newRedisAuthCodeStore(t)
 	if err := codes.Save(t.Context(), validAuthCode(now)); err != nil {
 		t.Fatalf("Save auth code: %v", err)
 	}
-	return mustNewService(ServiceConfig{
+	return mustNewService(t, ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    codes,

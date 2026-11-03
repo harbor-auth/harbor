@@ -119,7 +119,7 @@ func (s *chaosFindGrantStore) FindGrant(ctx context.Context, userID, clientID st
 
 // newChaosService returns a minimal Service with in-memory stores suitable for
 // chaos tests. Callers replace individual store fields after construction.
-func newChaosService(sessionStore SessionStore, grantStore GrantStore) *Service {
+func newChaosService(t *testing.T, sessionStore SessionStore, grantStore GrantStore) *Service {
 	clientReg := NewInMemoryClientRegistry()
 	clientReg.Put(Client{
 		ID:            testRefreshClientID,
@@ -127,10 +127,10 @@ func newChaosService(sessionStore SessionStore, grantStore GrantStore) *Service 
 		RedirectURIs:  []string{"http://localhost/cb"},
 		ScopesAllowed: []string{"openid", "offline_access"},
 	})
-	return mustNewService(ServiceConfig{
+	return mustNewService(t, ServiceConfig{
 		Issuer:       "https://chaos.harbor.example",
 		Clients:      clientReg,
-		Codes:        NewInMemoryAuthCodeStore(),
+		Codes:        newRedisAuthCodeStore(t),
 		Tokens:       NewPlaceholderIssuer(),
 		Sessions:     NewStubSessionResolver("ppid-chaos"),
 		SessionStore: sessionStore,
@@ -155,7 +155,7 @@ func TestChaos_Refresh_SessionLookupDBError(t *testing.T) {
 		InMemorySessionStore: NewInMemorySessionStore(),
 		getErr:               dbErr,
 	}
-	svc := newChaosService(chaosStore, NewInMemoryGrantStore())
+	svc := newChaosService(t, chaosStore, NewInMemoryGrantStore())
 
 	// The plaintext token doesn't need to be real — the injected DB error fires
 	// before any content-based validation of the token.
@@ -197,7 +197,7 @@ func TestChaos_Refresh_GrantLookupFails_PreRotation(t *testing.T) {
 		InMemoryGrantStore: realGrantStore,
 		findErr:            errors.New("grants table: connection timeout"),
 	}
-	svc := newChaosService(sessionStore, chaosGrants)
+	svc := newChaosService(t, sessionStore, chaosGrants)
 
 	req := refreshReq(oldToken)
 
@@ -235,7 +235,7 @@ func TestChaos_Refresh_TokenSigningFails_PreRotation(t *testing.T) {
 	oldToken := seedSession(t, sessionStore, grantStore, "ppid-chaos-sign")
 
 	// Inject fault: token signing always fails.
-	svc := newChaosService(sessionStore, grantStore)
+	svc := newChaosService(t, sessionStore, grantStore)
 	svc.tokens = errTokenIssuer{issueErr: errors.New("signing key temporarily unavailable")}
 
 	req := refreshReq(oldToken)
@@ -275,7 +275,7 @@ func TestChaos_Refresh_RotationFails(t *testing.T) {
 		InMemorySessionStore: innerStore,
 		rotateErr:            errors.New("deadlock detected on sessions table"),
 	}
-	svc := newChaosService(chaosStore, grantStore)
+	svc := newChaosService(t, chaosStore, grantStore)
 
 	req := refreshReq(oldToken)
 
@@ -317,7 +317,7 @@ func TestChaos_Refresh_FamilyRevokeFails_StillInvalidGrant(t *testing.T) {
 	grantStore := NewInMemoryGrantStore()
 	origToken := seedSession(t, innerStore, grantStore, "ppid-chaos-theft")
 
-	setupSvc := newChaosService(innerStore, grantStore)
+	setupSvc := newChaosService(t, innerStore, grantStore)
 	if _, terr := setupSvc.Refresh(context.Background(), refreshReq(origToken)); terr != nil {
 		t.Fatalf("initial rotation: %v", terr)
 	}
@@ -331,10 +331,10 @@ func TestChaos_Refresh_FamilyRevokeFails_StillInvalidGrant(t *testing.T) {
 		InMemorySessionStore: innerStore,
 		revokeErr:            errors.New("sessions table: timeout during family revoke"),
 	}
-	chaosSvc := mustNewService(ServiceConfig{
+	chaosSvc := mustNewService(t, ServiceConfig{
 		Issuer:       "https://chaos.harbor.example",
 		Clients:      NewInMemoryClientRegistry(),
-		Codes:        NewInMemoryAuthCodeStore(),
+		Codes:        newRedisAuthCodeStore(t),
 		Tokens:       NewPlaceholderIssuer(),
 		Sessions:     NewStubSessionResolver("ppid-chaos-theft"),
 		SessionStore: chaosStore,
@@ -386,7 +386,7 @@ func TestChaos_Refresh_NewSessionIDFails_PreRotation(t *testing.T) {
 	grantStore := NewInMemoryGrantStore()
 	oldToken := seedSession(t, sessionStore, grantStore, "ppid-chaos-newid")
 
-	svc := newChaosService(sessionStore, grantStore)
+	svc := newChaosService(t, sessionStore, grantStore)
 
 	// Inject fault: fail the newSessionID call in Refresh — Step C generates
 	// the new session ID via newSessionID(). 'called' ensures the fault fires
@@ -443,7 +443,7 @@ func TestChaos_Refresh_CancelledContextBeforeLookup(t *testing.T) {
 	grantStore := NewInMemoryGrantStore()
 	oldToken := seedSession(t, sessionStore, grantStore, "ppid-cancelled-ctx")
 
-	svc := newChaosService(sessionStore, grantStore)
+	svc := newChaosService(t, sessionStore, grantStore)
 
 	// Cancel the context before calling Refresh to simulate a client disconnect
 	// that arrives after the session lookup but before the client registry check.
@@ -486,7 +486,7 @@ func TestChaos_Refresh_CancelledContextBeforeLookup(t *testing.T) {
 //
 //harbor:invariant INV-VALIDATE-TOKEN-PARAMS-GATE
 func TestChaos_Refresh_ValidateTokenParams_GatesStoreAccess(t *testing.T) {
-	svc := newChaosService(NewInMemorySessionStore(), NewInMemoryGrantStore())
+	svc := newChaosService(t, NewInMemorySessionStore(), NewInMemoryGrantStore())
 
 	// Case 1: empty refresh_token → invalid_request (not invalid_grant).
 	_, terr := svc.Refresh(context.Background(), TokenRequest{
@@ -542,7 +542,7 @@ func TestChaos_Token_ValidateTokenParams_GatesStoreAccess(t *testing.T) {
 	// Use a store that panics on any access — if ValidateTokenParams does NOT
 	// gate the store, the panic fires and makes the gap unmissable.
 	panicCodes := &panicOnAccessAuthCodeStore{}
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:   "https://chaos.harbor.example",
 		Clients:  NewInMemoryClientRegistry(),
 		Codes:    panicCodes,
@@ -648,7 +648,7 @@ func TestChaos_Refresh_OutboxEnqueuesWhenDownstreamFails(t *testing.T) {
 	grantStore := NewInMemoryGrantStore()
 	origToken := seedSession(t, innerStore, grantStore, "ppid-outbox-refresh")
 
-	setupSvc := newChaosService(innerStore, grantStore)
+	setupSvc := newChaosService(t, innerStore, grantStore)
 	if _, terr := setupSvc.Refresh(context.Background(), refreshReq(origToken)); terr != nil {
 		t.Fatalf("initial rotation: %v", terr)
 	}
@@ -662,10 +662,10 @@ func TestChaos_Refresh_OutboxEnqueuesWhenDownstreamFails(t *testing.T) {
 	outbox := &recordingOutbox{}
 
 	var logBuf bytes.Buffer
-	chaosSvc := mustNewService(ServiceConfig{
+	chaosSvc := mustNewService(t, ServiceConfig{
 		Issuer:       "https://chaos.harbor.example",
 		Clients:      NewInMemoryClientRegistry(),
-		Codes:        NewInMemoryAuthCodeStore(),
+		Codes:        newRedisAuthCodeStore(t),
 		Tokens:       NewPlaceholderIssuer(),
 		Sessions:     NewStubSessionResolver("ppid-outbox-refresh"),
 		SessionStore: chaosStore,
@@ -717,7 +717,7 @@ func TestChaos_Token_OutboxEnqueuesWhenDownstreamFails(t *testing.T) {
 
 	// Seed a consumed code that carries a real UserID + ClientID so the
 	// signalCodeReuse enqueue guard (code.UserID != "") passes.
-	codeStore := NewInMemoryAuthCodeStore()
+	codeStore := newRedisAuthCodeStore(t)
 	if err := codeStore.Save(context.Background(), AuthCode{
 		Code:                codeVal,
 		ClientID:            testRefreshClientID,
@@ -735,7 +735,7 @@ func TestChaos_Token_OutboxEnqueuesWhenDownstreamFails(t *testing.T) {
 
 	outbox := &recordingOutbox{}
 	var logBuf bytes.Buffer
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:      "https://chaos.harbor.example",
 		Clients:     NewInMemoryClientRegistry(),
 		Codes:       codeStore,
@@ -825,10 +825,10 @@ func TestChaos_Refresh_SignalRefreshReuse_ZeroUUID(t *testing.T) {
 			var logBuf bytes.Buffer
 			logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 
-			svc := mustNewService(ServiceConfig{
+			svc := mustNewService(t, ServiceConfig{
 				Issuer:       "https://chaos.harbor.example",
 				Clients:      NewInMemoryClientRegistry(),
-				Codes:        NewInMemoryAuthCodeStore(),
+				Codes:        newRedisAuthCodeStore(t),
 				Tokens:       NewPlaceholderIssuer(),
 				Sessions:     NewStubSessionResolver("ppid-chaos"),
 				SessionStore: chaosStore,
@@ -901,7 +901,7 @@ func TestChaos_Token_SignalCodeReuse_EmptyClientID(t *testing.T) {
 
 	// Seed a consumed code with ClientID "" — simulates a store bug where
 	// rowToAuthCode emits an empty client_id instead of the stored value.
-	codeStore := NewInMemoryAuthCodeStore()
+	codeStore := newRedisAuthCodeStore(t)
 	if err := codeStore.Save(context.Background(), AuthCode{Code: codeVal, ClientID: ""}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -913,7 +913,7 @@ func TestChaos_Token_SignalCodeReuse_EmptyClientID(t *testing.T) {
 
 	sink := NewRecordingRevocationSink()
 	var logBuf bytes.Buffer
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:      "https://chaos.harbor.example",
 		Clients:     NewInMemoryClientRegistry(),
 		Codes:       codeStore,
@@ -1000,7 +1000,7 @@ func TestChaos_Token_SignalCodeReuse_ConsumePathEmptyClientID(t *testing.T) {
 	var logBuf bytes.Buffer
 	registry := NewInMemoryClientRegistry()
 	registry.Put(Client{ID: clientID})
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:      "https://chaos.harbor.example",
 		Clients:     registry,
 		Codes:       &chaosConsumePathCodeStore{peekCode: peekCode, reuseCode: reuseCode},

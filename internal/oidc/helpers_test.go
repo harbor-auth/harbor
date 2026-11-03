@@ -4,16 +4,19 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/harbor-auth/harbor/internal/testsupport/realredis"
 )
 
 // mustNewService supplies isolated test collaborators for fields a test does
 // not exercise and fails the test if construction is rejected.
-func mustNewService(cfg ServiceConfig) *Service {
+func mustNewService(t *testing.T, cfg ServiceConfig) *Service {
+	t.Helper()
 	if cfg.Clients == nil {
 		cfg.Clients = NewInMemoryClientRegistry()
 	}
 	if cfg.Codes == nil {
-		cfg.Codes = NewInMemoryAuthCodeStore()
+		cfg.Codes = newRedisAuthCodeStore(t)
 	}
 	if cfg.Tokens == nil {
 		cfg.Tokens = NewPlaceholderIssuer()
@@ -96,4 +99,9 @@ type errTokenIssuer struct {
 
 func (i errTokenIssuer) Issue(_ context.Context, _ IssueParams) (IssuedTokens, error) {
 	return IssuedTokens{}, i.issueErr
+}
+
+func newRedisAuthCodeStore(t testing.TB) *RedisAuthCodeStore {
+	t.Helper()
+	return NewRedisAuthCodeStore(realredis.NewClient(t), time.Minute)
 }

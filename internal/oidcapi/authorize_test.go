@@ -46,7 +46,7 @@ func newFlowServer(t *testing.T) *httptest.Server {
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
-		Codes:    oidctest.NewInMemoryAuthCodeStore(),
+		Codes:    oidctest.NewRedisAuthCodeStore(t),
 		Tokens:   oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})

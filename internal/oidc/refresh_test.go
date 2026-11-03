@@ -25,10 +25,10 @@ func newTestServiceWithSessions(t *testing.T) (*Service, *InMemorySessionStore, 
 		RedirectURIs:  []string{"http://localhost/cb"},
 		ScopesAllowed: []string{"openid", "offline_access", "profile"},
 	})
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:       "https://test.harbor.example",
 		Clients:      clientReg,
-		Codes:        NewInMemoryAuthCodeStore(),
+		Codes:        newRedisAuthCodeStore(t),
 		Tokens:       NewPlaceholderIssuer(),
 		Sessions:     NewStubSessionResolver("stub-ppid"),
 		Grants:       grantStore,
@@ -264,10 +264,10 @@ func TestRefreshTokenRegionPropagated(t *testing.T) {
 		ScopesAllowed: []string{"openid", "offline_access"},
 	})
 
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:       "https://test.harbor.example",
 		Clients:      clientReg,
-		Codes:        NewInMemoryAuthCodeStore(),
+		Codes:        newRedisAuthCodeStore(t),
 		Tokens:       NewPlaceholderIssuer(),
 		Sessions:     resolver,
 		SessionStore: sessionStore,
@@ -691,10 +691,10 @@ func TestRefreshTokenGrantIDPropagated(t *testing.T) {
 		ScopesAllowed: []string{"openid", "offline_access"},
 	})
 
-	svc := mustNewService(ServiceConfig{
+	svc := mustNewService(t, ServiceConfig{
 		Issuer:       "https://test.harbor.example",
 		Clients:      clientReg,
-		Codes:        NewInMemoryAuthCodeStore(),
+		Codes:        newRedisAuthCodeStore(t),
 		Tokens:       NewPlaceholderIssuer(),
 		Sessions:     resolver,
 		SessionStore: sessionStore,

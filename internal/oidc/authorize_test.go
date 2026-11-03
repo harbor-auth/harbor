@@ -109,13 +109,13 @@ func TestValidateAuthorize_RedirectChannelErrors(t *testing.T) {
 }
 
 // testServiceWithConsent creates a Service with consent store for testing.
-func testServiceWithConsent(consents ConsentStore) *Service {
+func testServiceWithConsent(t *testing.T, consents ConsentStore) *Service {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(testClient())
-	return mustNewService(ServiceConfig{
+	return mustNewService(t, ServiceConfig{
 		Issuer:   "https://test.example",
 		Clients:  clients,
-		Codes:    NewInMemoryAuthCodeStore(),
+		Codes:    newRedisAuthCodeStore(t),
 		Tokens:   &stubTokenIssuer{},
 		Sessions: &userIDSessionResolver{subject: "ppid-123", userID: "user-456"},
 		Consents: consents,
@@ -125,7 +125,7 @@ func testServiceWithConsent(consents ConsentStore) *Service {
 func TestConsentRequiredReadsCanonicalGrant(t *testing.T) {
 	const userID = "00000000-0000-0000-0000-000000000456"
 	legacy := NewInMemoryConsentStore()
-	svc := testServiceWithConsent(legacy)
+	svc := testServiceWithConsent(t, legacy)
 	canonical := NewInMemoryGrantStore()
 	if _, err := canonical.CreateGrant(context.Background(), NewGrant{
 		Region: "eu", UserID: userID, ClientID: "demo-client", PairwiseSub: "ppid", Scopes: []string{"openid"},
@@ -164,7 +164,7 @@ func TestAuthorize_ConsentSkip_CoveringGrant(t *testing.T) {
 		t.Fatalf("Upsert failed: %v", err)
 	}
 
-	svc := testServiceWithConsent(consents)
+	svc := testServiceWithConsent(t, consents)
 	req := validAuthorizeReq()
 
 	result, err := svc.Authorize(context.Background(), req)
@@ -179,7 +179,7 @@ func TestAuthorize_ConsentSkip_CoveringGrant(t *testing.T) {
 func TestAuthorize_ConsentPromptNone_NoGrant_InteractionRequired(t *testing.T) {
 	// No existing consent grant, prompt=none should fail
 	consents := NewInMemoryConsentStore()
-	svc := testServiceWithConsent(consents)
+	svc := testServiceWithConsent(t, consents)
 
 	req := validAuthorizeReq()
 	req.Prompt = "none"
@@ -200,7 +200,7 @@ func TestAuthorize_ConsentPromptNone_CoveringGrant_Success(t *testing.T) {
 		t.Fatalf("Upsert failed: %v", err)
 	}
 
-	svc := testServiceWithConsent(consents)
+	svc := testServiceWithConsent(t, consents)
 	req := validAuthorizeReq()
 	req.Prompt = "none"
 
@@ -220,7 +220,7 @@ func TestAuthorize_ConsentPromptNone_ScopeEscalation_InteractionRequired(t *test
 		t.Fatalf("Upsert failed: %v", err)
 	}
 
-	svc := testServiceWithConsent(consents)
+	svc := testServiceWithConsent(t, consents)
 	req := validAuthorizeReq()
 	req.Prompt = "none"
 	req.Scope = "openid profile" // requesting more than granted
@@ -240,7 +240,7 @@ func TestAuthorize_ConsentPromptNone_ScopeEscalation_InteractionRequired(t *test
 // explicit approval decision is consumed.
 func TestAuthorize_FirstConsentRequiresExplicitApproval(t *testing.T) {
 	consents := NewInMemoryConsentStore()
-	svc := testServiceWithConsent(consents)
+	svc := testServiceWithConsent(t, consents)
 
 	result, err := svc.Authorize(context.Background(), validAuthorizeReq())
 	if err == nil {
@@ -263,7 +263,7 @@ func TestAuthorize_ScopeEscalationRequiresExplicitApproval(t *testing.T) {
 	if _, err := consents.Upsert(context.Background(), "user-456", "demo-client", []string{"openid"}); err != nil {
 		t.Fatalf("seed consent: %v", err)
 	}
-	svc := testServiceWithConsent(consents)
+	svc := testServiceWithConsent(t, consents)
 
 	result, err := svc.Authorize(context.Background(), validAuthorizeReq())
 	if err == nil {
@@ -286,7 +286,7 @@ func TestAuthorize_PromptConsentAlwaysRequiresExplicitApproval(t *testing.T) {
 	if _, err := consents.Upsert(context.Background(), "user-456", "demo-client", []string{"openid", "profile"}); err != nil {
 		t.Fatalf("seed consent: %v", err)
 	}
-	svc := testServiceWithConsent(consents)
+	svc := testServiceWithConsent(t, consents)
 	req := validAuthorizeReq()
 	req.Prompt = "consent"
 
