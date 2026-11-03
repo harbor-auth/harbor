@@ -636,6 +636,11 @@ paths:
         tombstones return generation_conflict. Deleted clients cannot be revived.
         Use this dedicated route so older receivers fail with 404 before writing.
         The body omits client_id, which is taken from the path.
+        The Idempotency-Key identity and successful mutation commit atomically.
+        Concurrent uses of the same operation key return 409 operation_in_progress
+        with Retry-After: 1; retry the same request. Conflicting accepted identities
+        return 409 idempotency_key_reused. Identical retries recheck the generation
+        fence rather than returning an outdated cached acknowledgment.
       tags: [clients]
       security:
         - cloudServiceAuth: [clients:write]
@@ -1165,6 +1170,7 @@ components:
             - stale_generation
             - generation_conflict
             - idempotency_key_reused
+            - operation_in_progress
             - rate_limited
             - subject_unavailable
             - invalid_subject

@@ -41,6 +41,43 @@ func (q *Queries) ApplyCloudClientMutation(ctx context.Context, arg ApplyCloudCl
 	return result, err
 }
 
+const applyCloudClientOperation = `-- name: ApplyCloudClientOperation :one
+SELECT apply_cloud_client_operation(
+ $1::text, $2::text, $3::text,
+ $4::bigint, $5::bytea, $6::jsonb,
+ $7::text, $8::text, $9::bytea
+) AS result
+`
+
+type ApplyCloudClientOperationParams struct {
+	Action         string `json:"action"`
+	NamespaceID    string `json:"namespace_id"`
+	ClientID       string `json:"client_id"`
+	Generation     int64  `json:"generation"`
+	RequestHash    []byte `json:"request_hash"`
+	Config         []byte `json:"config"`
+	IdempotencyKey string `json:"idempotency_key"`
+	Operation      string `json:"operation"`
+	OperationHash  []byte `json:"operation_hash"`
+}
+
+func (q *Queries) ApplyCloudClientOperation(ctx context.Context, arg ApplyCloudClientOperationParams) ([]byte, error) {
+	row := q.db.QueryRow(ctx, applyCloudClientOperation,
+		arg.Action,
+		arg.NamespaceID,
+		arg.ClientID,
+		arg.Generation,
+		arg.RequestHash,
+		arg.Config,
+		arg.IdempotencyKey,
+		arg.Operation,
+		arg.OperationHash,
+	)
+	var result []byte
+	err := row.Scan(&result)
+	return result, err
+}
+
 const createNamespacedClient = `-- name: CreateNamespacedClient :one
 
 INSERT INTO relying_parties (

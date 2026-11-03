@@ -11,8 +11,10 @@ import (
 )
 
 var (
-	ErrStaleClientGeneration    = errors.New("clients: stale generation")
-	ErrClientGenerationConflict = errors.New("clients: generation conflict")
+	ErrStaleClientGeneration     = errors.New("clients: stale generation")
+	ErrClientGenerationConflict  = errors.New("clients: generation conflict")
+	ErrClientIdempotencyConflict = errors.New("clients: idempotency key reused")
+	ErrClientOperationInProgress = errors.New("clients: operation in progress")
 )
 
 // ClientConfiguration is a full desired snapshot. The same representation is
@@ -28,7 +30,17 @@ type ClientConfiguration struct {
 	AuthMethod    string   `json:"token_endpoint_auth_method"`
 }
 
+// ClientMutationIdempotency binds a successful remote write to its durable key.
+// The request hash includes generation; unlike the generation hash it identifies
+// the exact operation rather than only the desired configuration.
+type ClientMutationIdempotency struct {
+	Key         string
+	Operation   string
+	RequestHash [32]byte
+}
+
 type VersionedClientMutation struct {
+	Idempotency   *ClientMutationIdempotency
 	Action        string
 	NamespaceID   string
 	ClientID      string
@@ -39,6 +51,10 @@ type VersionedClientMutation struct {
 
 type versionedClientQuerier interface {
 	ApplyCloudClientMutation(context.Context, db.ApplyCloudClientMutationParams) ([]byte, error)
+}
+
+type versionedClientOperationQuerier interface {
+	ApplyCloudClientOperation(context.Context, db.ApplyCloudClientOperationParams) ([]byte, error)
 }
 
 // ApplyVersioned performs all generation decisions and writes atomically in
@@ -73,9 +89,21 @@ func (s *DBNamespacedClientStore) ApplyVersioned(ctx context.Context, m Versione
 		return NamespacedClient{}, err
 	}
 	hash := sha256.Sum256(canonical)
-	raw, err := q.ApplyCloudClientMutation(ctx, db.ApplyCloudClientMutationParams{
-		Action: m.Action, NamespaceID: m.NamespaceID, ClientID: m.ClientID, Generation: m.Generation, RequestHash: hash[:], Config: config,
-	})
+	var raw []byte
+	if m.Idempotency != nil {
+		operationQuerier, ok := s.q.(versionedClientOperationQuerier)
+		if !ok {
+			return NamespacedClient{}, errors.New("clients: atomic operation querier unavailable")
+		}
+		raw, err = operationQuerier.ApplyCloudClientOperation(ctx, db.ApplyCloudClientOperationParams{
+			Action: m.Action, NamespaceID: m.NamespaceID, ClientID: m.ClientID, Generation: m.Generation, RequestHash: hash[:], Config: config,
+			IdempotencyKey: m.Idempotency.Key, Operation: m.Idempotency.Operation, OperationHash: m.Idempotency.RequestHash[:],
+		})
+	} else {
+		raw, err = q.ApplyCloudClientMutation(ctx, db.ApplyCloudClientMutationParams{
+			Action: m.Action, NamespaceID: m.NamespaceID, ClientID: m.ClientID, Generation: m.Generation, RequestHash: hash[:], Config: config,
+		})
+	}
 	if err != nil {
 		return NamespacedClient{}, fmt.Errorf("clients: apply fenced mutation: %w", err)
 	}
@@ -95,6 +123,10 @@ func (s *DBNamespacedClientStore) ApplyVersioned(ctx context.Context, m Versione
 			return NamespacedClient{}, errors.New("clients: fenced mutation missing client result")
 		}
 		return rowToNamespacedClient(*result.Client), nil
+	case "idempotency_conflict":
+		return NamespacedClient{}, ErrClientIdempotencyConflict
+	case "operation_in_progress":
+		return NamespacedClient{}, ErrClientOperationInProgress
 	case "stale":
 		return NamespacedClient{}, ErrStaleClientGeneration
 	case "conflict":

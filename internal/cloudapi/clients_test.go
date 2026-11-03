@@ -1,12 +1,12 @@
 package cloudapi
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,9 +21,10 @@ import (
 // fake shared by every *_test.go file in this package that needs a Server —
 // mirrors memQuerier's role for *Store (sessions_test.go).
 type fakeClientStore struct {
-	fences  map[string]clients.VersionedClientMutation
-	mu      sync.Mutex
-	clients map[string]clients.NamespacedClient // keyed by client_id
+	operations map[string][32]byte
+	fences     map[string]clients.VersionedClientMutation
+	mu         sync.Mutex
+	clients    map[string]clients.NamespacedClient // keyed by client_id
 	// createErrOverride, if non-nil, is returned (and cleared) by the next
 	// Create call instead of the normal in-memory logic. Used to deterministically
 	// exercise cloudapi's mapping of clients.ErrNamespaceInactive to 404
@@ -776,9 +777,25 @@ func TestClientResponseEmptyGrantAndResponseTypesMarshalAsEmptyArrays(t *testing
 
 // ApplyVersioned is the unit-test seam. PostgreSQL conditional mutation,
 // trigger and concurrency behavior are exercised by real database tests.
-func (f *fakeClientStore) ApplyVersioned(ctx context.Context, m clients.VersionedClientMutation) (clients.NamespacedClient, error) {
+func (f *fakeClientStore) ApplyVersioned(ctx context.Context, m clients.VersionedClientMutation) (result clients.NamespacedClient, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if m.Idempotency != nil {
+		if f.operations == nil {
+			f.operations = map[string][32]byte{}
+		}
+		key := m.Idempotency.Operation + "/" + m.Idempotency.Key
+		if prior, ok := f.operations[key]; ok && prior != m.Idempotency.RequestHash {
+			return clients.NamespacedClient{}, clients.ErrClientIdempotencyConflict
+		}
+		// This fake runs under one mutex; rollback/concurrency and durable
+		// success recording are tested against PostgreSQL, not simulated here.
+		defer func() {
+			if err == nil {
+				f.operations[key] = m.Idempotency.RequestHash
+			}
+		}()
+	}
 	if f.createErrOverride != nil {
 		err := f.createErrOverride
 		f.createErrOverride = nil
@@ -800,9 +817,7 @@ func (f *fakeClientStore) ApplyVersioned(ctx context.Context, m clients.Versione
 			return clients.NamespacedClient{}, clients.ErrStaleClientGeneration
 		}
 		if m.Generation == old.Generation {
-			a, _ := json.Marshal(old.Configuration)
-			b, _ := json.Marshal(m.Configuration)
-			if (old.Action == "delete") != (m.Action == "delete") || (m.Action != "delete" && !bytes.Equal(a, b)) {
+			if (old.Action == "delete") != (m.Action == "delete") || (m.Action != "delete" && !reflect.DeepEqual(old.Configuration, m.Configuration)) {
 				return clients.NamespacedClient{}, clients.ErrClientGenerationConflict
 			}
 			return row, nil
@@ -831,7 +846,10 @@ func (f *fakeClientStore) ApplyVersioned(ctx context.Context, m clients.Versione
 		return clients.NamespacedClient{Generation: m.Generation}, nil
 	}
 	cfg := m.Configuration
-	hash, _ := hex.DecodeString(cfg.SecretHash)
+	hash, err := hex.DecodeString(cfg.SecretHash)
+	if err != nil {
+		return clients.NamespacedClient{}, err
+	}
 	row = clients.NamespacedClient{ClientID: m.ClientID, NamespaceID: m.NamespaceID, Name: cfg.Name, SectorID: m.ClientID,
 		RedirectURIs: cfg.RedirectURIs, TokenFormat: "jwt", ScopesAllowed: cfg.ScopesAllowed, ClientSecretHash: hash,
 		GrantTypes: cfg.GrantTypes, ResponseTypes: cfg.ResponseTypes, TokenEndpointAuthMethod: cfg.AuthMethod, CreatedAt: time.Now().UTC(), Generation: m.Generation}

@@ -169,35 +169,38 @@ func (s *Server) serveClientMutation(w http.ResponseWriter, r *http.Request, nam
 			return
 		}
 	}
-	// Idempotency conflicts are checked before mutation, but a cached response
-	// never bypasses the generation fence: even identical ledger retries call SQL.
-	identity, _ := json.Marshal(struct {
+	// SQL reserves the operation key, checks its identity, applies the generation
+	// fence and records success in one transaction. Identical retries still run
+	// the fence; the ledger never supplies a cached generation acknowledgment.
+	identity, err := json.Marshal(struct {
 		Namespace, Client string
 		Generation        int64
 		Desired           clients.ClientConfiguration
 		Deleted           bool
 	}{namespace, clientID, generation, desired, action == "delete"})
+	if err != nil {
+		writeInternalError(w, "cloudapi: encode client operation identity", err)
+		return
+	}
 	reqHash := sha256.Sum256(identity)
 	operation := opClientUpdate
-	if action == "create" {
+	switch action {
+	case "create":
 		operation = opClientCreate
-	} else if action == "delete" {
+	case "delete":
 		operation = opClientDelete
 	}
-	_, outcome, ledgerErr := s.checkIdempotency(r.Context(), idempotencyKey, operation, reqHash)
-	if ledgerErr != nil {
-		writeInternalError(w, "cloudapi: read client mutation ledger", ledgerErr)
-		return
-	}
-	if outcome == idempotencyConflict {
-		writeCloudError(w, 409, "idempotency_key_reused", "Idempotency-Key was previously used with a different request")
-		return
-	}
 	applied, err := s.clientStore.ApplyVersioned(r.Context(), clients.VersionedClientMutation{
-		Action: action, NamespaceID: namespace, ClientID: clientID, Generation: generation, Configuration: desired, ExpectedBase: expectedBase,
+		Idempotency: &clients.ClientMutationIdempotency{Key: idempotencyKey, Operation: operation, RequestHash: reqHash},
+		Action:      action, NamespaceID: namespace, ClientID: clientID, Generation: generation, Configuration: desired, ExpectedBase: expectedBase,
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, clients.ErrClientIdempotencyConflict):
+			writeCloudError(w, 409, "idempotency_key_reused", "Idempotency-Key was previously used with a different request")
+		case errors.Is(err, clients.ErrClientOperationInProgress):
+			w.Header().Set("Retry-After", "1")
+			writeCloudError(w, 409, "operation_in_progress", "another request with this Idempotency-Key is in progress; retry")
 		case errors.Is(err, clients.ErrStaleClientGeneration):
 			writeCloudError(w, 409, "stale_generation", "a newer generation is already accepted")
 		case errors.Is(err, clients.ErrClientGenerationConflict):
@@ -215,7 +218,6 @@ func (s *Server) serveClientMutation(w http.ResponseWriter, r *http.Request, nam
 	}
 	if action == "delete" {
 		w.Header().Set("X-Harbor-Generation", strconv.FormatInt(generation, 10))
-		s.recordOperation(r.Context(), idempotencyKey, operation, reqHash, http.StatusNoContent, nil)
 		writeCloudBody(w, http.StatusNoContent, nil)
 		return
 	}
@@ -229,6 +231,5 @@ func (s *Server) serveClientMutation(w http.ResponseWriter, r *http.Request, nam
 		return
 	}
 	w.Header().Set("X-Harbor-Generation", strconv.FormatInt(generation, 10))
-	s.recordOperation(r.Context(), idempotencyKey, operation, reqHash, status, body)
 	writeCloudBody(w, status, body)
 }

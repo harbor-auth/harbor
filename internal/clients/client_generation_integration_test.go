@@ -56,7 +56,7 @@ func generationPool(t *testing.T) *pgxpool.Pool {
 		}
 		admin.Close()
 	})
-	for _, name := range []string{"0001_init.up.sql", "0012_client_registration.up.sql", "0017_logout_uris.up.sql", "0019_cloud_namespaces.up.sql", "0020_relying_parties_namespace.up.sql", "0025_cloud_client_generation.up.sql"} {
+	for _, name := range []string{"0001_init.up.sql", "0012_client_registration.up.sql", "0017_logout_uris.up.sql", "0019_cloud_namespaces.up.sql", "0020_relying_parties_namespace.up.sql", "0025_cloud_client_generation.up.sql", "0026_cloud_client_atomic_operations.up.sql"} {
 		raw, e := os.ReadFile(filepath.Join("../../db/migrations", name))
 		if e != nil {
 			t.Fatal(e)

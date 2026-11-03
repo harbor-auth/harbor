@@ -228,3 +228,10 @@ SELECT apply_cloud_client_mutation(
  sqlc.arg(action)::text, sqlc.arg(namespace_id)::text, sqlc.arg(client_id)::text,
  sqlc.arg(generation)::bigint, sqlc.arg(request_hash)::bytea, sqlc.arg(config)::jsonb
 ) AS result;
+
+-- name: ApplyCloudClientOperation :one
+SELECT apply_cloud_client_operation(
+ sqlc.arg(action)::text, sqlc.arg(namespace_id)::text, sqlc.arg(client_id)::text,
+ sqlc.arg(generation)::bigint, sqlc.arg(request_hash)::bytea, sqlc.arg(config)::jsonb,
+ sqlc.arg(idempotency_key)::text, sqlc.arg(operation)::text, sqlc.arg(operation_hash)::bytea
+) AS result;

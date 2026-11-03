@@ -16,7 +16,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"regexp"
@@ -71,10 +70,6 @@ var (
 const (
 	defaultClientAuthMethod = "client_secret_basic"
 	defaultClientScope      = "openid"
-	// defaultClientTokenFormat mirrors mgmtapi's defaultTokenFormat — Harbor
-	// issues JWT access tokens (docs/DESIGN.md §3.3) for every client,
-	// namespaced or dynamically registered.
-	defaultClientTokenFormat = "jwt"
 )
 
 // PostAdminV1NamespacesClients is the legacy create route. A positive
@@ -292,111 +287,6 @@ func stringOrEmpty(s *string) string {
 		return ""
 	}
 	return *s
-}
-
-// grantTypesToStrings converts the generated enum-typed slice to plain
-// strings for clients.ValidateGrantTypes and persistence.
-func grantTypesToStrings(in []cloudopenapi.ClientCreateRequestGrantTypes) []string {
-	out := make([]string, len(in))
-	for i, v := range in {
-		out[i] = string(v)
-	}
-	return out
-}
-
-// responseTypesToStrings converts the generated enum-typed slice to plain
-// strings for clients.ValidateResponseTypes and persistence.
-func responseTypesToStrings(in []cloudopenapi.ClientCreateRequestResponseTypes) []string {
-	out := make([]string, len(in))
-	for i, v := range in {
-		out[i] = string(v)
-	}
-	return out
-}
-
-// canonicalClientCreateRequest fixes field order and folds in the namespace
-// path segment — which is not part of the JSON body but MUST be part of the
-// idempotency hash — so two requests carrying the same logical content hash
-// identically regardless of client JSON formatting, and so the SAME
-// Idempotency-Key reused by two DIFFERENT namespaces never collides:
-// cloud_operations' primary key is (idempotency_key, operation), not
-// namespace-scoped (db/migrations/0019_cloud_namespaces.up.sql).
-type canonicalClientCreateRequest struct {
-	Namespace               string    `json:"namespace"`
-	ClientID                string    `json:"client_id"`
-	ClientName              *string   `json:"client_name,omitempty"`
-	RedirectURIs            []string  `json:"redirect_uris"`
-	ClientSecretHash        *string   `json:"client_secret_hash,omitempty"`
-	TokenEndpointAuthMethod *string   `json:"token_endpoint_auth_method,omitempty"`
-	GrantTypes              *[]string `json:"grant_types,omitempty"`
-	ResponseTypes           *[]string `json:"response_types,omitempty"`
-	Scope                   *string   `json:"scope,omitempty"`
-}
-
-// hashClientCreateRequest computes the idempotency ledger's request_hash for
-// a client create request, scoped to namespace (see
-// canonicalClientCreateRequest's doc comment).
-func hashClientCreateRequest(namespace string, req cloudopenapi.ClientCreateRequest) ([32]byte, error) {
-	canon := canonicalClientCreateRequest{
-		Namespace:        namespace,
-		ClientID:         req.ClientId,
-		ClientName:       req.ClientName,
-		RedirectURIs:     req.RedirectUris,
-		ClientSecretHash: req.ClientSecretHash,
-		Scope:            req.Scope,
-	}
-	if req.TokenEndpointAuthMethod != nil {
-		v := string(*req.TokenEndpointAuthMethod)
-		canon.TokenEndpointAuthMethod = &v
-	}
-	if req.GrantTypes != nil {
-		v := grantTypesToStrings(*req.GrantTypes)
-		canon.GrantTypes = &v
-	}
-	if req.ResponseTypes != nil {
-		v := responseTypesToStrings(*req.ResponseTypes)
-		canon.ResponseTypes = &v
-	}
-	data, err := json.Marshal(canon)
-	if err != nil {
-		return [32]byte{}, err
-	}
-	return sha256.Sum256(data), nil
-}
-
-// canonicalClientUpdateRequest is hashClientCreateRequest's counterpart for
-// PUT — see canonicalClientCreateRequest's doc comment for why namespace and
-// client_id (here the path parameter, not a body field) are folded in.
-type canonicalClientUpdateRequest struct {
-	Namespace               string   `json:"namespace"`
-	ClientID                string   `json:"client_id"`
-	ClientName              *string  `json:"client_name,omitempty"`
-	RedirectURIs            []string `json:"redirect_uris"`
-	ClientSecretHash        *string  `json:"client_secret_hash,omitempty"`
-	TokenEndpointAuthMethod *string  `json:"token_endpoint_auth_method,omitempty"`
-	Scope                   *string  `json:"scope,omitempty"`
-}
-
-// hashClientUpdateRequest computes the idempotency ledger's request_hash for
-// a client update request.
-func hashClientUpdateRequest(namespace, clientID string, req cloudopenapi.ClientUpdateRequest) ([32]byte, error) {
-	canon := canonicalClientUpdateRequest{
-		Namespace:        namespace,
-		ClientID:         clientID,
-		ClientName:       req.ClientName,
-		RedirectURIs:     req.RedirectUris,
-		ClientSecretHash: req.ClientSecretHash,
-		Scope:            req.Scope,
-	}
-	if req.TokenEndpointAuthMethod != nil {
-		v := string(*req.TokenEndpointAuthMethod)
-		canon.TokenEndpointAuthMethod = &v
-	}
-	data, err := json.Marshal(canon)
-	if err != nil {
-		return [32]byte{}, err
-	}
-	return sha256.Sum256(data), nil
 }
 
 // hashClientDeleteRequest computes the idempotency ledger's request_hash for

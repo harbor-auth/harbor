@@ -54,7 +54,7 @@ func TestRunBuildsDurableLiveGraph(t *testing.T) {
 	}
 	want := map[string]string{
 		"clients":       "*clients.DBClientRegistry",
-		"codes":         "*clients.RedisAuthCodeStore",
+		"codes":         "*oidc.RedisAuthCodeStore",
 		"grants":        "*clients.DBGrantStore",
 		"consents":      "*clients.DBConsentStore",
 		"sessions":      "*clients.DBSessionStore",
