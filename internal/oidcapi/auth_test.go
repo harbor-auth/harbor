@@ -268,3 +268,16 @@ func TestValidateClientCredentialsReturnsFullClient(t *testing.T) {
 		t.Errorf("len(client.ScopesAllowed) = %d, want 3", len(client.ScopesAllowed))
 	}
 }
+
+func TestParseOAuthBasicFormEncodedCredentials(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/token", nil)
+	req.SetBasicAuth("client%3Awith%2Bsymbols", "secret%2Bwith%3Aspace+here")
+	got, ok := parseBasicAuth(req)
+	if !ok || got.ClientID != "client:with+symbols" || got.ClientSecret != "secret+with:space here" {
+		t.Fatal("OAuth Basic credentials were not form decoded")
+	}
+	req.SetBasicAuth("client", "%invalid")
+	if _, ok := parseBasicAuth(req); ok {
+		t.Fatal("malformed form encoding accepted")
+	}
+}

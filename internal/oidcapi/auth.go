@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/harbor-auth/harbor/internal/oidc"
@@ -54,8 +55,16 @@ func parseBasicAuth(r *http.Request) (ClientCredentials, bool) {
 		return ClientCredentials{}, false
 	}
 
-	clientID := creds[:idx]
-	clientSecret := creds[idx+1:]
+	// OAuth client credentials use form encoding before HTTP Basic encoding
+	// (RFC 6749 section 2.3.1), including escaped colons and plus signs.
+	clientID, err := url.QueryUnescape(creds[:idx])
+	if err != nil {
+		return ClientCredentials{}, false
+	}
+	clientSecret, err := url.QueryUnescape(creds[idx+1:])
+	if err != nil {
+		return ClientCredentials{}, false
+	}
 
 	// Empty client_id is invalid
 	if clientID == "" {

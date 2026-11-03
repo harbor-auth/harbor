@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/harbor-auth/harbor/internal/gen/openapi"
@@ -40,6 +41,9 @@ func (s *Server) PostToken(w http.ResponseWriter, r *http.Request) {
 	authMethod := oidc.ClientAuthNone
 	creds, basic := parseBasicAuth(r)
 	if r.Header.Get("Authorization") != "" && !basic {
+		if strings.HasPrefix(strings.ToLower(r.Header.Get("Authorization")), "basic ") {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Harbor"`)
+		}
 		writeOAuthError(w, &oidc.TokenError{Code: oidc.ErrCodeInvalidClient, Description: "client authentication failed", Status: http.StatusUnauthorized})
 		return
 	}
@@ -80,6 +84,9 @@ func (s *Server) PostToken(w http.ResponseWriter, r *http.Request) {
 		tokens, terr = s.svc.Token(r.Context(), req)
 	}
 	if terr != nil {
+		if basic && terr.Status == http.StatusUnauthorized {
+			w.Header().Set("WWW-Authenticate", `Basic realm="Harbor"`)
+		}
 		recordError(telemetry.EndpointToken, terr.Code)
 		if gk, ok := mapGrantType(req.GrantType); ok {
 			oidcTokensIssuedTotal.Inc(telemetry.GrantType(gk), telemetry.Outcome(telemetry.OutcomeError))
@@ -142,16 +149,8 @@ func writeOAuthError(w http.ResponseWriter, e *oidc.TokenError) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
-	// WWW-Authenticate: Basic is required by RFC 6749 §5.2 only when the client
-	// authenticated via HTTP Basic (Authorization: Basic ...) and that
-	// authentication failed. Harbor is a PKCE public-client service — clients
-	// never send Authorization: Basic, so emitting WWW-Authenticate: Basic on
-	// invalid_client would be protocol-incorrect and would mislead client SDKs
-	// (e.g. AppAuth) into prompting for Basic credentials instead of restarting
-	// the authorization-code flow. The ErrCodeInvalidClient path is now live
-	// (H20-2: deregistered-client refresh gate) so this placeholder must stay
-	// inert. When client_secret_basic is added, re-add the header only on the
-	// specific path where HTTP Basic auth was attempted.
+	// PostToken sets a Basic challenge only when Basic authentication was
+	// actually attempted and rejected. Public-client errors have no challenge.
 	w.WriteHeader(e.Status)
 	if err := json.NewEncoder(w).Encode(openapi.OAuthError{
 		Error:            e.Code,
