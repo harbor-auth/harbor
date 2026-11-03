@@ -25,11 +25,9 @@ import (
 // (not clients.DBNamespacedClientStore directly) keeps this package testable
 // with a fake and mirrors mgmtapi.ClientRegistrationStore's seam.
 type ClientProvisioningStore interface {
-	Create(ctx context.Context, c clients.NewNamespacedClient) (clients.NamespacedClient, error)
+	ApplyVersioned(ctx context.Context, m clients.VersionedClientMutation) (clients.NamespacedClient, error)
 	Get(ctx context.Context, clientID, namespaceID string) (clients.NamespacedClient, error)
 	List(ctx context.Context, namespaceID string) ([]clients.NamespacedClient, error)
-	Update(ctx context.Context, c clients.UpdateNamespacedClient) (clients.NamespacedClient, error)
-	SoftDelete(ctx context.Context, clientID, namespaceID string) error
 	// SoftDeleteAllForNamespace cascades a namespace's soft-delete to every
 	// live client it owns (H2 fix) — DeleteAdminV1Namespace calls this so a
 	// deleted tenant's clients stop authenticating at /token.
@@ -276,30 +274,15 @@ func (s *Server) GetAdminV1Namespace(w http.ResponseWriter, r *http.Request, id 
 // soft-deletes below are sequential statements, NOT one database
 // transaction: cloudapi.Store and clients.DBNamespacedClientStore are
 // separate packages, each behind its own narrow querier interface, with no
-// shared transaction handle threaded through Server — making this atomic
-// would require restructuring both stores (and every test that constructs a
-// Server) to share a transaction-capable handle, which is out of scope here.
-// Given that constraint, clients are cascaded FIRST: if the process dies
-// between the two statements, the namespace is left live with zero working
-// clients rather than the reverse ordering's failure mode — a namespace
-// reported deleted whose clients are still silently live, which is the exact
-// bug this fix closes.
+// shared transaction handle threaded through Server. The namespace is marked
+// terminal FIRST: the hot registry joins namespace liveness, so authentication
+// stops immediately even if client cleanup fails. SQL client mutation also
+// locks/rechecks the namespace, preventing new clients between these statements.
+// The generation trigger permits only the deletion bit during this terminal
+// cascade, never an unversioned credential or redirect change.
 //
-// Idempotency-Key recovery, precisely (do not oversimplify this during an
-// incident): recordOperation below only runs after BOTH statements succeed,
-// so a crash strictly BETWEEN them leaves no ledger entry yet — retrying
-// with the SAME key is genuinely safe in that narrow window (checkIdempotency
-// reports idempotencyProceed and simply re-runs both steps, each already a
-// no-op-safe idempotent UPDATE on its own). That is NOT the same as "the
-// same key always re-triggers the cascade": once this handler has fully
-// succeeded and recorded its ledger entry, replaying that SAME key only ever
-// returns the stored 204 (idempotencyReplay) — it does NOT touch the
-// database again, so it will NOT re-run SoftDeleteAllForNamespace. If a live
-// client is later found under a namespace whose delete already succeeded and
-// was recorded (for example, one created by a race this code did not
-// anticipate), recovering it requires calling DELETE again with a NEW
-// Idempotency-Key: checkIdempotency then treats it as a fresh operation and
-// genuinely re-executes the cascade. Retrying the OLD key will not help.
+// The ledger is recorded only after all cleanup succeeds. Retrying after a
+// partial failure therefore re-runs the idempotent terminal update and cascade.
 func (s *Server) DeleteAdminV1Namespace(w http.ResponseWriter, r *http.Request, id string, params cloudopenapi.DeleteAdminV1NamespaceParams) {
 	if !namespacePermitted(r.Context(), w, id) {
 		return
@@ -330,12 +313,12 @@ func (s *Server) DeleteAdminV1Namespace(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	if err := s.clientStore.SoftDeleteAllForNamespace(ctx, id); err != nil {
-		writeInternalError(w, "cloudapi: cascade soft delete namespace clients", err)
-		return
-	}
 	if err := s.store.SoftDeleteNamespace(ctx, id); err != nil {
 		writeInternalError(w, "cloudapi: soft delete namespace", err)
+		return
+	}
+	if err := s.clientStore.SoftDeleteAllForNamespace(ctx, id); err != nil {
+		writeInternalError(w, "cloudapi: cascade soft delete namespace clients", err)
 		return
 	}
 

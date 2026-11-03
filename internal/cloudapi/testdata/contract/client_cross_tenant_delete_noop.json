@@ -35,13 +35,14 @@
         "redirect_uris": [
           "https://cross-tenant.example.com/cb"
         ],
-        "token_endpoint_auth_method": "none"
+        "token_endpoint_auth_method": "none",
+        "generation": 1
       },
       "want_status": 201
     },
     {
       "method": "DELETE",
-      "path": "/admin/v1/namespaces/contract-tenant-b2/clients/cross-tenant-client-2",
+      "path": "/admin/v1/namespaces/contract-tenant-b2/clients/cross-tenant-client-2?generation=3",
       "auth": "valid",
       "scope": "clients:write",
       "idempotency_key": "cross-del-attempt-key",

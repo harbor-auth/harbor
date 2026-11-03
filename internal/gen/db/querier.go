@@ -11,6 +11,7 @@ import (
 )
 
 type Querier interface {
+	ApplyCloudClientMutation(ctx context.Context, arg ApplyCloudClientMutationParams) ([]byte, error)
 	// Atomically marks a recovery code as used (only if unused). Returns the
 	// updated row if successful, or no rows if the code was already used.
 	// This is the core fail-closed operation: a code can only be consumed once.

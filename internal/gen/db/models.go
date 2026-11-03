@@ -40,6 +40,14 @@ type ByoDomain struct {
 	ExpiresAt      pgtype.Timestamptz `json:"expires_at"`
 }
 
+type CloudClientVersion struct {
+	NamespaceID string `json:"namespace_id"`
+	ClientID    string `json:"client_id"`
+	Generation  int64  `json:"generation"`
+	RequestHash []byte `json:"request_hash"`
+	Deleted     bool   `json:"deleted"`
+}
+
 type CloudNamespace struct {
 	ID        string             `json:"id"`
 	Status    string             `json:"status"`
@@ -161,9 +169,11 @@ type RelyingParty struct {
 	TokenEndpointAuthMethod     *string            `json:"token_endpoint_auth_method"`
 	CreatedAt                   pgtype.Timestamptz `json:"created_at"`
 	// Registered post-logout redirect URIs for RP-Initiated Logout (exact match only).
-	LogoutUris  []string           `json:"logout_uris"`
-	NamespaceID *string            `json:"namespace_id"`
-	DeletedAt   pgtype.Timestamptz `json:"deleted_at"`
+	LogoutUris       []string           `json:"logout_uris"`
+	NamespaceID      *string            `json:"namespace_id"`
+	DeletedAt        pgtype.Timestamptz `json:"deleted_at"`
+	CloudGeneration  int64              `json:"cloud_generation"`
+	CloudRequestHash []byte             `json:"cloud_request_hash"`
 }
 
 type RevocationOutbox struct {

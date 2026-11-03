@@ -35,7 +35,8 @@
         "redirect_uris": [
           "https://cross-tenant.example.com/cb"
         ],
-        "token_endpoint_auth_method": "none"
+        "token_endpoint_auth_method": "none",
+        "generation": 1
       },
       "want_status": 201
     },

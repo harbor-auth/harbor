@@ -1,10 +1,13 @@
 package cloudapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +21,7 @@ import (
 // fake shared by every *_test.go file in this package that needs a Server —
 // mirrors memQuerier's role for *Store (sessions_test.go).
 type fakeClientStore struct {
+	fences  map[string]clients.VersionedClientMutation
 	mu      sync.Mutex
 	clients map[string]clients.NamespacedClient // keyed by client_id
 	// createErrOverride, if non-nil, is returned (and cleared) by the next
@@ -188,9 +192,9 @@ func doPutClient(t *testing.T, srv *Server, namespace, clientID, idempotencyKey,
 	return rec
 }
 
-func doDeleteClient(t *testing.T, srv *Server, namespace, clientID, idempotencyKey string) *httptest.ResponseRecorder {
+func doDeleteClient(t *testing.T, srv *Server, namespace, clientID, idempotencyKey string, generation int64) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodDelete, "/admin/v1/namespaces/"+namespace+"/clients/"+clientID, nil)
+	req := httptest.NewRequest(http.MethodDelete, "/admin/v1/namespaces/"+namespace+"/clients/"+clientID+"?generation="+strconv.FormatInt(generation, 10), nil)
 	rec := httptest.NewRecorder()
 	srv.DeleteAdminV1NamespacesClient(rec, req, namespace, clientID, cloudopenapi.DeleteAdminV1NamespacesClientParams{IdempotencyKey: idempotencyKey})
 	return rec
@@ -208,7 +212,7 @@ func TestPostAdminV1NamespacesClientsCreatesClient(t *testing.T) {
 	q.putNamespace("tenant-a", "active")
 
 	rec := doPostClient(t, srv, "tenant-a", "create-key-1",
-		`{"client_id":"client-aaaaaaaa","redirect_uris":["https://a.example.com/cb"],"client_secret_hash":"`+validSecretHash64Hex+`"}`)
+		`{"generation":1,"client_id":"client-aaaaaaaa","redirect_uris":["https://a.example.com/cb"],"client_secret_hash":"`+validSecretHash64Hex+`"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
 	}
@@ -244,7 +248,7 @@ func TestPostAdminV1NamespacesClientsNamespaceDeletedBetweenCheckAndInsertReturn
 	cs.createErrOverride = clients.ErrNamespaceInactive
 
 	rec := doPostClient(t, srv, "tenant-a", "toctou-key",
-		`{"client_id":"client-toctou1","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
+		`{"generation":1,"client_id":"client-toctou1","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
 	}
@@ -265,7 +269,7 @@ func TestPostAdminV1NamespacesClientsSectorIDEqualsClientID(t *testing.T) {
 	q.putNamespace("tenant-a", "active")
 
 	doPostClient(t, srv, "tenant-a", "create-key-2",
-		`{"client_id":"client-bbbbbbbb","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
+		`{"generation":1,"client_id":"client-bbbbbbbb","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
 
 	stored, ok := cs.row("client-bbbbbbbb")
 	if !ok {
@@ -285,7 +289,7 @@ func TestPostAdminV1NamespacesClientsResponseHasNoSecretFields(t *testing.T) {
 	q.putNamespace("tenant-a", "active")
 
 	rec := doPostClient(t, srv, "tenant-a", "create-key-3",
-		`{"client_id":"client-cccccccc","redirect_uris":["https://a.example.com/cb"],"client_secret_hash":"`+validSecretHash64Hex+`"}`)
+		`{"generation":1,"client_id":"client-cccccccc","redirect_uris":["https://a.example.com/cb"],"client_secret_hash":"`+validSecretHash64Hex+`"}`)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
 	}
@@ -303,7 +307,7 @@ func TestPostAdminV1NamespacesClientsResponseHasNoSecretFields(t *testing.T) {
 func TestPostAdminV1NamespacesClientsNamespaceNotFound(t *testing.T) {
 	srv, _, _ := newTestServerWithClients()
 	rec := doPostClient(t, srv, "missing-ns", "create-key-4",
-		`{"client_id":"client-dddddddd","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
+		`{"generation":1,"client_id":"client-dddddddd","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
 	}
@@ -319,7 +323,7 @@ func TestPostAdminV1NamespacesClientsSoftDeletedNamespaceNotFound(t *testing.T) 
 		t.Fatalf("SoftDeleteNamespace: %v", err)
 	}
 	rec := doPostClient(t, srv, "tenant-a", "create-key-5",
-		`{"client_id":"client-eeeeeeee","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
+		`{"generation":1,"client_id":"client-eeeeeeee","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
 	}
@@ -331,10 +335,10 @@ func TestPostAdminV1NamespacesClientsDuplicateIDRejected(t *testing.T) {
 	q.putNamespace("tenant-b", "active")
 
 	doPostClient(t, srv, "tenant-a", "dup-key-1",
-		`{"client_id":"client-ffffffff","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
+		`{"generation":1,"client_id":"client-ffffffff","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
 	// Even a different namespace claiming the same client_id collides.
 	rec := doPostClient(t, srv, "tenant-b", "dup-key-2-fresh",
-		`{"client_id":"client-ffffffff","redirect_uris":["https://b.example.com/cb"],"token_endpoint_auth_method":"none"}`)
+		`{"generation":1,"client_id":"client-ffffffff","redirect_uris":["https://b.example.com/cb"],"token_endpoint_auth_method":"none"}`)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body = %s", rec.Code, rec.Body.String())
 	}
@@ -350,7 +354,7 @@ func TestPostAdminV1NamespacesClientsDuplicateIDRejected(t *testing.T) {
 func TestPostAdminV1NamespacesClientsIdempotentReplayIsByteIdentical(t *testing.T) {
 	srv, q, _ := newTestServerWithClients()
 	q.putNamespace("tenant-a", "active")
-	body := `{"client_id":"client-gggggggg","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`
+	body := `{"generation":1,"client_id":"client-gggggggg","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`
 
 	first := doPostClient(t, srv, "tenant-a", "replay-key-1", body)
 	if first.Code != http.StatusCreated {
@@ -370,9 +374,9 @@ func TestPostAdminV1NamespacesClientsIdempotencyKeyReusedWithDifferentBody(t *te
 	q.putNamespace("tenant-a", "active")
 
 	doPostClient(t, srv, "tenant-a", "reuse-key-1",
-		`{"client_id":"client-hhhhhhhh","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
+		`{"generation":1,"client_id":"client-hhhhhhhh","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
 	rec := doPostClient(t, srv, "tenant-a", "reuse-key-1",
-		`{"client_id":"client-iiiiiiii","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
+		`{"generation":1,"client_id":"client-iiiiiiii","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409; body = %s", rec.Code, rec.Body.String())
 	}
@@ -390,19 +394,19 @@ func TestPostAdminV1NamespacesClientsValidation(t *testing.T) {
 	}{
 		{
 			name: "client_secret_hash bad length",
-			body: `{"client_id":"client-val00001","redirect_uris":["https://a.example.com/cb"],"client_secret_hash":"abc123"}`,
+			body: `{"generation":1,"client_id":"client-val00001","redirect_uris":["https://a.example.com/cb"],"client_secret_hash":"abc123"}`,
 		},
 		{
 			name: "client_secret_hash uppercase hex rejected",
-			body: `{"client_id":"client-val00002","redirect_uris":["https://a.example.com/cb"],"client_secret_hash":"` + strings.ToUpper(validSecretHash64Hex) + `"}`,
+			body: `{"generation":1,"client_id":"client-val00002","redirect_uris":["https://a.example.com/cb"],"client_secret_hash":"` + strings.ToUpper(validSecretHash64Hex) + `"}`,
 		},
 		{
 			name: `token_endpoint_auth_method "none" with a hash is rejected`,
-			body: `{"client_id":"client-val00003","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none","client_secret_hash":"` + validSecretHash64Hex + `"}`,
+			body: `{"generation":1,"client_id":"client-val00003","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none","client_secret_hash":"` + validSecretHash64Hex + `"}`,
 		},
 		{
 			name: "client_secret_basic without a hash is rejected",
-			body: `{"client_id":"client-val00004","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"client_secret_basic"}`,
+			body: `{"generation":1,"client_id":"client-val00004","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"client_secret_basic"}`,
 		},
 		{
 			// H1: an explicit "" must never be treated as "field omitted,
@@ -418,7 +422,7 @@ func TestPostAdminV1NamespacesClientsValidation(t *testing.T) {
 			// maps to ClientAuthNone: a client admitted at /token with NO
 			// credential check.
 			name: `empty-string token_endpoint_auth_method is rejected, not defaulted`,
-			body: `{"client_id":"client-val00011","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":""}`,
+			body: `{"generation":1,"client_id":"client-val00011","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":""}`,
 		},
 		{
 			// Same H1 hole, but with a hash also supplied — the review's
@@ -426,35 +430,35 @@ func TestPostAdminV1NamespacesClientsValidation(t *testing.T) {
 			// client authenticated with none anyway (NULL auth method wins),
 			// silently making the hash dead weight.
 			name: `empty-string token_endpoint_auth_method with a hash is still rejected`,
-			body: `{"client_id":"client-val00012","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"","client_secret_hash":"` + validSecretHash64Hex + `"}`,
+			body: `{"generation":1,"client_id":"client-val00012","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"","client_secret_hash":"` + validSecretHash64Hex + `"}`,
 		},
 		{
 			name: "non-loopback http redirect_uri rejected",
-			body: `{"client_id":"client-val00005","redirect_uris":["http://not-loopback.example.com/cb"],"token_endpoint_auth_method":"none"}`,
+			body: `{"generation":1,"client_id":"client-val00005","redirect_uris":["http://not-loopback.example.com/cb"],"token_endpoint_auth_method":"none"}`,
 		},
 		{
 			name: "redirect_uri with a fragment rejected",
-			body: `{"client_id":"client-val00006","redirect_uris":["https://a.example.com/cb#frag"],"token_endpoint_auth_method":"none"}`,
+			body: `{"generation":1,"client_id":"client-val00006","redirect_uris":["https://a.example.com/cb#frag"],"token_endpoint_auth_method":"none"}`,
 		},
 		{
 			name: "9 redirect_uris exceeds maxItems 8",
-			body: `{"client_id":"client-val00007","redirect_uris":["https://a.example.com/1","https://a.example.com/2","https://a.example.com/3","https://a.example.com/4","https://a.example.com/5","https://a.example.com/6","https://a.example.com/7","https://a.example.com/8","https://a.example.com/9"],"token_endpoint_auth_method":"none"}`,
+			body: `{"generation":1,"client_id":"client-val00007","redirect_uris":["https://a.example.com/1","https://a.example.com/2","https://a.example.com/3","https://a.example.com/4","https://a.example.com/5","https://a.example.com/6","https://a.example.com/7","https://a.example.com/8","https://a.example.com/9"],"token_endpoint_auth_method":"none"}`,
 		},
 		{
 			name: "bad grant_type rejected",
-			body: `{"client_id":"client-val00008","redirect_uris":["https://a.example.com/cb"],"grant_types":["implicit"]}`,
+			body: `{"generation":1,"client_id":"client-val00008","redirect_uris":["https://a.example.com/cb"],"grant_types":["implicit"]}`,
 		},
 		{
 			name: "bad response_type rejected",
-			body: `{"client_id":"client-val00009","redirect_uris":["https://a.example.com/cb"],"response_types":["token"]}`,
+			body: `{"generation":1,"client_id":"client-val00009","redirect_uris":["https://a.example.com/cb"],"response_types":["token"]}`,
 		},
 		{
 			name: "client_id too short (< 8 chars) rejected",
-			body: `{"client_id":"short","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`,
+			body: `{"generation":1,"client_id":"short","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`,
 		},
 		{
 			name: "no redirect_uris rejected",
-			body: `{"client_id":"client-val00010","redirect_uris":[],"token_endpoint_auth_method":"none"}`,
+			body: `{"generation":1,"client_id":"client-val00010","redirect_uris":[],"token_endpoint_auth_method":"none"}`,
 		},
 	}
 	for _, tt := range tests {
@@ -479,7 +483,7 @@ func TestPostAdminV1NamespacesClientsValidation(t *testing.T) {
 func TestGetAdminV1NamespacesClientFound(t *testing.T) {
 	srv, q, _ := newTestServerWithClients()
 	q.putNamespace("tenant-a", "active")
-	doPostClient(t, srv, "tenant-a", "get-key-1", `{"client_id":"client-jjjjjjjj","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
+	doPostClient(t, srv, "tenant-a", "get-key-1", `{"generation":1,"client_id":"client-jjjjjjjj","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
 
 	rec := doGetClient(t, srv, "tenant-a", "client-jjjjjjjj")
 	if rec.Code != http.StatusOK {
@@ -504,9 +508,9 @@ func TestGetAdminV1NamespacesClientsListsOnlyThatNamespace(t *testing.T) {
 	q.putNamespace("tenant-a", "active")
 	q.putNamespace("tenant-b", "active")
 
-	doPostClient(t, srv, "tenant-a", "list-key-1", `{"client_id":"client-kkkkkkkk","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
-	doPostClient(t, srv, "tenant-a", "list-key-2", `{"client_id":"client-llllllll","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
-	doPostClient(t, srv, "tenant-b", "list-key-3", `{"client_id":"client-mmmmmmmm","redirect_uris":["https://b.example.com/cb"],"token_endpoint_auth_method":"none"}`)
+	doPostClient(t, srv, "tenant-a", "list-key-1", `{"generation":1,"client_id":"client-kkkkkkkk","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
+	doPostClient(t, srv, "tenant-a", "list-key-2", `{"generation":1,"client_id":"client-llllllll","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
+	doPostClient(t, srv, "tenant-b", "list-key-3", `{"generation":1,"client_id":"client-mmmmmmmm","redirect_uris":["https://b.example.com/cb"],"token_endpoint_auth_method":"none"}`)
 
 	rec := doListClients(t, srv, "tenant-a")
 	if rec.Code != http.StatusOK {
@@ -527,10 +531,10 @@ func TestPutAdminV1NamespacesClientUpdatesAndPreservesOmittedFields(t *testing.T
 	srv, q, _ := newTestServerWithClients()
 	q.putNamespace("tenant-a", "active")
 	doPostClient(t, srv, "tenant-a", "put-key-1",
-		`{"client_id":"client-nnnnnnnn","client_name":"Original Name","redirect_uris":["https://a.example.com/cb"],"client_secret_hash":"`+validSecretHash64Hex+`","token_endpoint_auth_method":"client_secret_basic"}`)
+		`{"generation":1,"client_id":"client-nnnnnnnn","client_name":"Original Name","redirect_uris":["https://a.example.com/cb"],"client_secret_hash":"`+validSecretHash64Hex+`","token_endpoint_auth_method":"client_secret_basic"}`)
 
 	rec := doPutClient(t, srv, "tenant-a", "client-nnnnnnnn", "put-key-2",
-		`{"redirect_uris":["https://a.example.com/cb2"]}`)
+		`{"generation":2,"redirect_uris":["https://a.example.com/cb2"]}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
@@ -552,7 +556,7 @@ func TestPutAdminV1NamespacesClientUpdatesAndPreservesOmittedFields(t *testing.T
 func TestPutAdminV1NamespacesClientNotFound(t *testing.T) {
 	srv, q, _ := newTestServerWithClients()
 	q.putNamespace("tenant-a", "active")
-	rec := doPutClient(t, srv, "tenant-a", "never-existed-client", "put-key-3", `{"redirect_uris":["https://a.example.com/cb"]}`)
+	rec := doPutClient(t, srv, "tenant-a", "never-existed-client", "put-key-3", `{"generation":2,"redirect_uris":["https://a.example.com/cb"]}`)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
 	}
@@ -572,10 +576,10 @@ func TestPutAdminV1NamespacesClientEmptyAuthMethodDoesNotDowngradeClient(t *test
 	srv, q, cs := newTestServerWithClients()
 	q.putNamespace("tenant-a", "active")
 	doPostClient(t, srv, "tenant-a", "put-empty-am-create",
-		`{"client_id":"client-ppppppppp","redirect_uris":["https://a.example.com/cb"],"client_secret_hash":"`+validSecretHash64Hex+`","token_endpoint_auth_method":"client_secret_basic"}`)
+		`{"generation":1,"client_id":"client-ppppppppp","redirect_uris":["https://a.example.com/cb"],"client_secret_hash":"`+validSecretHash64Hex+`","token_endpoint_auth_method":"client_secret_basic"}`)
 
 	rec := doPutClient(t, srv, "tenant-a", "client-ppppppppp", "put-empty-am-attempt",
-		`{"redirect_uris":["https://a.example.com/cb2"],"token_endpoint_auth_method":""}`)
+		`{"generation":2,"redirect_uris":["https://a.example.com/cb2"],"token_endpoint_auth_method":""}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
 	}
@@ -608,10 +612,10 @@ func TestPutAdminV1NamespacesClientEmptySecretHashIsRejected(t *testing.T) {
 	srv, q, cs := newTestServerWithClients()
 	q.putNamespace("tenant-a", "active")
 	doPostClient(t, srv, "tenant-a", "put-empty-hash-create",
-		`{"client_id":"client-qqqqqqqqq","redirect_uris":["https://a.example.com/cb"],"client_secret_hash":"`+validSecretHash64Hex+`","token_endpoint_auth_method":"client_secret_basic"}`)
+		`{"generation":1,"client_id":"client-qqqqqqqqq","redirect_uris":["https://a.example.com/cb"],"client_secret_hash":"`+validSecretHash64Hex+`","token_endpoint_auth_method":"client_secret_basic"}`)
 
 	rec := doPutClient(t, srv, "tenant-a", "client-qqqqqqqqq", "put-empty-hash-attempt",
-		`{"redirect_uris":["https://a.example.com/cb2"],"token_endpoint_auth_method":"none","client_secret_hash":""}`)
+		`{"generation":2,"redirect_uris":["https://a.example.com/cb2"],"token_endpoint_auth_method":"none","client_secret_hash":""}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
 	}
@@ -643,9 +647,9 @@ func TestPutAdminV1NamespacesClientEmptySecretHashIsRejected(t *testing.T) {
 func TestDeleteAdminV1NamespacesClientSoftDeletesThenGetIsNotFound(t *testing.T) {
 	srv, q, _ := newTestServerWithClients()
 	q.putNamespace("tenant-a", "active")
-	doPostClient(t, srv, "tenant-a", "del-key-1", `{"client_id":"client-oooooooo","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
+	doPostClient(t, srv, "tenant-a", "del-key-1", `{"generation":1,"client_id":"client-oooooooo","redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`)
 
-	rec := doDeleteClient(t, srv, "tenant-a", "client-oooooooo", "del-key-2")
+	rec := doDeleteClient(t, srv, "tenant-a", "client-oooooooo", "del-key-2", 3)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204; body = %s", rec.Code, rec.Body.String())
 	}
@@ -659,7 +663,7 @@ func TestDeleteAdminV1NamespacesClientSoftDeletesThenGetIsNotFound(t *testing.T)
 func TestDeleteAdminV1NamespacesClientIdempotentOnAbsent(t *testing.T) {
 	srv, q, _ := newTestServerWithClients()
 	q.putNamespace("tenant-a", "active")
-	rec := doDeleteClient(t, srv, "tenant-a", "never-existed", "del-key-3")
+	rec := doDeleteClient(t, srv, "tenant-a", "never-existed", "del-key-3", 3)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want 204; body = %s", rec.Code, rec.Body.String())
 	}
@@ -686,7 +690,7 @@ func TestDeleteAdminV1NamespacesClientRejectsMalformedPathParameters(t *testing.
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			rec := doDeleteClient(t, srv, tt.namespace, tt.clientID, "del-malformed-"+tt.name)
+			rec := doDeleteClient(t, srv, tt.namespace, tt.clientID, "del-malformed-"+tt.name, 3)
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400; body = %s", rec.Code, rec.Body.String())
 			}
@@ -768,4 +772,69 @@ func TestClientResponseEmptyGrantAndResponseTypesMarshalAsEmptyArrays(t *testing
 			t.Errorf("response body = %s, want it to contain %s", body, field)
 		}
 	}
+}
+
+// ApplyVersioned is the unit-test seam. PostgreSQL conditional mutation,
+// trigger and concurrency behavior are exercised by real database tests.
+func (f *fakeClientStore) ApplyVersioned(ctx context.Context, m clients.VersionedClientMutation) (clients.NamespacedClient, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.createErrOverride != nil {
+		err := f.createErrOverride
+		f.createErrOverride = nil
+		return clients.NamespacedClient{}, err
+	}
+	if f.fences == nil {
+		f.fences = map[string]clients.VersionedClientMutation{}
+	}
+	key := m.NamespaceID + "/" + m.ClientID
+	row, exists := f.clients[m.ClientID]
+	if exists && row.NamespaceID != m.NamespaceID && m.Action != "delete" {
+		if m.Action == "create" {
+			return clients.NamespacedClient{}, clients.ErrNamespacedClientExists
+		}
+		return clients.NamespacedClient{}, clients.ErrClientNotFound
+	}
+	if old, ok := f.fences[key]; ok {
+		if m.Generation < old.Generation {
+			return clients.NamespacedClient{}, clients.ErrStaleClientGeneration
+		}
+		if m.Generation == old.Generation {
+			a, _ := json.Marshal(old.Configuration)
+			b, _ := json.Marshal(m.Configuration)
+			if (old.Action == "delete") != (m.Action == "delete") || (m.Action != "delete" && !bytes.Equal(a, b)) {
+				return clients.NamespacedClient{}, clients.ErrClientGenerationConflict
+			}
+			return row, nil
+		}
+		if old.Action == "delete" && m.Action != "delete" {
+			return clients.NamespacedClient{}, clients.ErrClientGenerationConflict
+		}
+	}
+	if m.Action == "create" && exists {
+		return clients.NamespacedClient{}, clients.ErrNamespacedClientExists
+	}
+	if m.Action == "update" && (!exists || row.DeletedAt != nil) {
+		return clients.NamespacedClient{}, clients.ErrClientNotFound
+	}
+	if m.Action == "update" && m.ExpectedBase != nil && row.Generation != *m.ExpectedBase {
+		return clients.NamespacedClient{}, clients.ErrStaleClientGeneration
+	}
+	f.fences[key] = m
+	if m.Action == "delete" {
+		if exists && row.NamespaceID == m.NamespaceID {
+			now := time.Now().UTC()
+			row.DeletedAt = &now
+			row.Generation = m.Generation
+			f.clients[m.ClientID] = row
+		}
+		return clients.NamespacedClient{Generation: m.Generation}, nil
+	}
+	cfg := m.Configuration
+	hash, _ := hex.DecodeString(cfg.SecretHash)
+	row = clients.NamespacedClient{ClientID: m.ClientID, NamespaceID: m.NamespaceID, Name: cfg.Name, SectorID: m.ClientID,
+		RedirectURIs: cfg.RedirectURIs, TokenFormat: "jwt", ScopesAllowed: cfg.ScopesAllowed, ClientSecretHash: hash,
+		GrantTypes: cfg.GrantTypes, ResponseTypes: cfg.ResponseTypes, TokenEndpointAuthMethod: cfg.AuthMethod, CreatedAt: time.Now().UTC(), Generation: m.Generation}
+	f.clients[m.ClientID] = row
+	return row, nil
 }

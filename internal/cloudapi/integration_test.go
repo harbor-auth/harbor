@@ -520,7 +520,7 @@ func TestIntegrationClientCrossNamespaceIsolation(t *testing.T) {
 	clientID := uniqueID("it-iso-client")
 	createRes := env.do(t, http.MethodPost, "/admin/v1/namespaces/"+nsA+"/clients",
 		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"),
-		fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`, clientID))
+		fmt.Sprintf(`{"generation":1,"client_id":%q,"redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"none"}`, clientID))
 	defer func() { _ = createRes.Body.Close() }()
 	if createRes.StatusCode != http.StatusCreated {
 		t.Fatalf("create client status = %d, want 201", createRes.StatusCode)
@@ -535,13 +535,13 @@ func TestIntegrationClientCrossNamespaceIsolation(t *testing.T) {
 
 	putForeign := env.do(t, http.MethodPut, "/admin/v1/namespaces/"+nsB+"/clients/"+clientID,
 		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"),
-		`{"redirect_uris":["https://attacker.example.com/cb"],"client_name":"pwned"}`)
+		`{"generation":2,"redirect_uris":["https://attacker.example.com/cb"],"client_name":"pwned"}`)
 	defer func() { _ = putForeign.Body.Close() }()
 	if putForeign.StatusCode != http.StatusNotFound {
 		t.Fatalf("PUT via wrong namespace status = %d, want 404", putForeign.StatusCode)
 	}
 
-	delForeign := env.do(t, http.MethodDelete, "/admin/v1/namespaces/"+nsB+"/clients/"+clientID,
+	delForeign := env.do(t, http.MethodDelete, "/admin/v1/namespaces/"+nsB+"/clients/"+clientID+"?generation=3",
 		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"), "")
 	defer func() { _ = delForeign.Body.Close() }()
 	if delForeign.StatusCode != http.StatusNoContent {
@@ -577,7 +577,7 @@ func TestIntegrationClientSoftDeleteStopsAuthentication(t *testing.T) {
 
 	createRes := env.do(t, http.MethodPost, "/admin/v1/namespaces/"+ns+"/clients",
 		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"),
-		fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"client_secret_basic","client_secret_hash":%q}`,
+		fmt.Sprintf(`{"generation":1,"client_id":%q,"redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"client_secret_basic","client_secret_hash":%q}`,
 			clientID, hashHex(secret)))
 	defer func() { _ = createRes.Body.Close() }()
 	if createRes.StatusCode != http.StatusCreated {
@@ -589,7 +589,7 @@ func TestIntegrationClientSoftDeleteStopsAuthentication(t *testing.T) {
 		t.Fatal("AuthenticateClient failed BEFORE delete — client should authenticate with its real secret")
 	}
 
-	delRes := env.do(t, http.MethodDelete, "/admin/v1/namespaces/"+ns+"/clients/"+clientID,
+	delRes := env.do(t, http.MethodDelete, "/admin/v1/namespaces/"+ns+"/clients/"+clientID+"?generation=3",
 		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"), "")
 	defer func() { _ = delRes.Body.Close() }()
 	if delRes.StatusCode != http.StatusNoContent {
@@ -616,7 +616,7 @@ func TestIntegrationNamespaceDeleteCascadesToClientSoftDeleteAndStopsAuthenticat
 
 	createRes := env.do(t, http.MethodPost, "/admin/v1/namespaces/"+ns+"/clients",
 		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"),
-		fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"client_secret_basic","client_secret_hash":%q}`,
+		fmt.Sprintf(`{"generation":1,"client_id":%q,"redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"client_secret_basic","client_secret_hash":%q}`,
 			clientID, hashHex(secret)))
 	defer func() { _ = createRes.Body.Close() }()
 	if createRes.StatusCode != http.StatusCreated {
@@ -675,7 +675,7 @@ func TestIntegrationClientCredentialPairingRejections(t *testing.T) {
 	postEmptyID := uniqueID("it-pairing-create-empty")
 	postEmptyRes := env.do(t, http.MethodPost, "/admin/v1/namespaces/"+ns+"/clients",
 		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"),
-		fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":""}`, postEmptyID))
+		fmt.Sprintf(`{"generation":1,"client_id":%q,"redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":""}`, postEmptyID))
 	defer func() { _ = postEmptyRes.Body.Close() }()
 	if postEmptyRes.StatusCode != http.StatusBadRequest {
 		t.Fatalf("POST with empty token_endpoint_auth_method status = %d, want 400", postEmptyRes.StatusCode)
@@ -689,7 +689,7 @@ func TestIntegrationClientCredentialPairingRejections(t *testing.T) {
 	secret := "integration-pairing-secret-" + clientID
 	createRes := env.do(t, http.MethodPost, "/admin/v1/namespaces/"+ns+"/clients",
 		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"),
-		fmt.Sprintf(`{"client_id":%q,"redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"client_secret_basic","client_secret_hash":%q}`,
+		fmt.Sprintf(`{"generation":1,"client_id":%q,"redirect_uris":["https://a.example.com/cb"],"token_endpoint_auth_method":"client_secret_basic","client_secret_hash":%q}`,
 			clientID, hashHex(secret)))
 	defer func() { _ = createRes.Body.Close() }()
 	if createRes.StatusCode != http.StatusCreated {
@@ -700,7 +700,7 @@ func TestIntegrationClientCredentialPairingRejections(t *testing.T) {
 	// public (an authentication bypass for anyone who knows client_id).
 	putDowngradeRes := env.do(t, http.MethodPut, "/admin/v1/namespaces/"+ns+"/clients/"+clientID,
 		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"),
-		`{"redirect_uris":["https://a.example.com/cb2"],"token_endpoint_auth_method":""}`)
+		`{"generation":2,"redirect_uris":["https://a.example.com/cb2"],"token_endpoint_auth_method":""}`)
 	defer func() { _ = putDowngradeRes.Body.Close() }()
 	if putDowngradeRes.StatusCode != http.StatusBadRequest {
 		t.Fatalf("PUT with empty token_endpoint_auth_method status = %d, want 400", putDowngradeRes.StatusCode)
@@ -723,7 +723,7 @@ func TestIntegrationClientCredentialPairingRejections(t *testing.T) {
 	// uses for the same reason.
 	putEmptyHashRes := env.do(t, http.MethodPut, "/admin/v1/namespaces/"+ns+"/clients/"+clientID,
 		env.mint(t, "clients:write", 90*time.Second), uniqueID("it-key"),
-		`{"redirect_uris":["https://a.example.com/cb2"],"token_endpoint_auth_method":"none","client_secret_hash":""}`)
+		`{"generation":2,"redirect_uris":["https://a.example.com/cb2"],"token_endpoint_auth_method":"none","client_secret_hash":""}`)
 	defer func() { _ = putEmptyHashRes.Body.Close() }()
 	if putEmptyHashRes.StatusCode != http.StatusBadRequest {
 		t.Fatalf("PUT with empty client_secret_hash status = %d, want 400", putEmptyHashRes.StatusCode)

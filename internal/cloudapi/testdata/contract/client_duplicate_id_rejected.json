@@ -24,7 +24,8 @@
         "redirect_uris": [
           "https://contract-client.example.com/cb"
         ],
-        "token_endpoint_auth_method": "none"
+        "token_endpoint_auth_method": "none",
+        "generation": 1
       },
       "want_status": 201
     },
@@ -39,7 +40,8 @@
         "redirect_uris": [
           "https://contract-client.example.com/cb"
         ],
-        "token_endpoint_auth_method": "none"
+        "token_endpoint_auth_method": "none",
+        "generation": 2
       },
       "want_status": 409,
       "want_error_code": "client_already_exists"

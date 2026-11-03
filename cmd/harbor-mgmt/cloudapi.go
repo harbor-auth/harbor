@@ -128,6 +128,15 @@ func registerCloudAPIRoutes(mux *http.ServeMux, verifier *cloudapi.ServiceAuthVe
 			server.GetAdminV1NamespacesClient(w, r, r.PathValue("namespace"), r.PathValue("client_id"))
 		})))
 
+	mux.HandleFunc("PUT /admin/v1/namespaces/{namespace}/clients/{client_id}/configuration", cloudRateLimited(limiters.clientsUpdate, "clients_update",
+		cloudAuthorized(verifier, "PUT /admin/v1/namespaces/{namespace}/clients/{client_id}/configuration", scopeClientsWrite, func(w http.ResponseWriter, r *http.Request) {
+			server.PutAdminV1NamespacesClientConfiguration(w, r, r.PathValue("namespace"), r.PathValue("client_id"), cloudopenapi.PutAdminV1NamespacesClientConfigurationParams{IdempotencyKey: r.Header.Get("Idempotency-Key")})
+		})))
+	mux.HandleFunc("DELETE /admin/v1/namespaces/{namespace}/clients/{client_id}/configuration", cloudRateLimited(limiters.clientsDelete, "clients_delete",
+		cloudAuthorized(verifier, "DELETE /admin/v1/namespaces/{namespace}/clients/{client_id}/configuration", scopeClientsWrite, func(w http.ResponseWriter, r *http.Request) {
+			server.DeleteAdminV1NamespacesClientConfiguration(w, r, r.PathValue("namespace"), r.PathValue("client_id"), cloudopenapi.DeleteAdminV1NamespacesClientConfigurationParams{IdempotencyKey: r.Header.Get("Idempotency-Key")})
+		})))
+
 	mux.HandleFunc("PUT /admin/v1/namespaces/{namespace}/clients/{client_id}", cloudRateLimited(limiters.clientsUpdate, "clients_update",
 		cloudAuthorized(verifier, "PUT /admin/v1/namespaces/{namespace}/clients/{client_id}", scopeClientsWrite, func(w http.ResponseWriter, r *http.Request) {
 			server.PutAdminV1NamespacesClient(w, r, r.PathValue("namespace"), r.PathValue("client_id"), cloudopenapi.PutAdminV1NamespacesClientParams{IdempotencyKey: r.Header.Get("Idempotency-Key")})

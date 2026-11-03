@@ -16,13 +16,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/harbor-auth/harbor/internal/clients"
 	cloudopenapi "github.com/harbor-auth/harbor/internal/gen/openapi/cloud"
@@ -79,165 +77,10 @@ const (
 	defaultClientTokenFormat = "jwt"
 )
 
-// PostAdminV1NamespacesClients handles POST
-// /admin/v1/namespaces/{namespace}/clients, requiring the `clients:write`
-// scope. It is idempotent on Idempotency-Key exactly like namespace create;
-// see this file's package doc for the shared ledger flow. Creating a
-// client_id that already exists — under this namespace, another namespace,
-// or no namespace at all — is rejected with 409 client_already_exists,
-// naming neither the id nor its owner.
+// PostAdminV1NamespacesClients is the legacy create route. A positive
+// generation is mandatory and the same SQL fence as /configuration applies.
 func (s *Server) PostAdminV1NamespacesClients(w http.ResponseWriter, r *http.Request, namespace string, params cloudopenapi.PostAdminV1NamespacesClientsParams) {
-	if !namespacePermitted(r.Context(), w, namespace) {
-		return
-	}
-	idempotencyKey := params.IdempotencyKey
-	if !validIdempotencyKey(idempotencyKey) {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", "missing or invalid Idempotency-Key header")
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, maxClientRequestBodyBytes)
-	var req cloudopenapi.ClientCreateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", "malformed JSON request body")
-		return
-	}
-
-	if !clientIDPattern.MatchString(req.ClientId) {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", "client_id must match ^[A-Za-z0-9._~-]{8,128}$")
-		return
-	}
-	if len(req.RedirectUris) > maxClientRedirectURIs {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", "redirect_uris must contain no more than 8 entries")
-		return
-	}
-	if err := clients.ValidateRedirectURIs(req.RedirectUris); err != nil {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-
-	grantTypes := defaultClientGrantTypes
-	if req.GrantTypes != nil {
-		grantTypes = grantTypesToStrings(*req.GrantTypes)
-	}
-	if err := clients.ValidateGrantTypes(grantTypes); err != nil {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	responseTypes := defaultClientResponseTypes
-	if req.ResponseTypes != nil {
-		responseTypes = responseTypesToStrings(*req.ResponseTypes)
-	}
-	if err := clients.ValidateResponseTypes(responseTypes); err != nil {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	authMethod := defaultClientAuthMethod
-	if req.TokenEndpointAuthMethod != nil {
-		var ok bool
-		authMethod, ok = resolveExplicitAuthMethod(w, string(*req.TokenEndpointAuthMethod))
-		if !ok {
-			return
-		}
-	}
-	secretHashHex := stringOrEmpty(req.ClientSecretHash)
-	if secretHashHex != "" && !clientSecretHashPattern.MatchString(secretHashHex) {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", "client_secret_hash must be 64 lowercase hex characters")
-		return
-	}
-	if msg, ok := validateAuthMethodSecretPairing(authMethod, secretHashHex != ""); !ok {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", msg)
-		return
-	}
-	scope := defaultClientScope
-	if req.Scope != nil {
-		scope = *req.Scope
-	}
-
-	ctx := r.Context()
-	reqHash, err := hashClientCreateRequest(namespace, req)
-	if err != nil {
-		writeInternalError(w, "cloudapi: hash client create request", err)
-		return
-	}
-
-	stored, outcome, err := s.checkIdempotency(ctx, idempotencyKey, opClientCreate, reqHash)
-	if err != nil {
-		writeInternalError(w, "cloudapi: check client create idempotency", err)
-		return
-	}
-	switch outcome {
-	case idempotencyReplay:
-		writeStoredResponse(w, stored)
-		return
-	case idempotencyConflict:
-		writeCloudError(w, http.StatusConflict, "idempotency_key_reused", "Idempotency-Key was previously used with a different request body")
-		return
-	}
-
-	if !s.namespaceActive(ctx, w, namespace) {
-		return
-	}
-
-	// Pattern-validated above (64 lowercase hex chars), so this cannot fail —
-	// hex.DecodeString is a format conversion, not a cryptographic transform:
-	// Harbor stores exactly these bytes (docs on ClientCreateRequest.client_secret_hash).
-	var secretHash []byte
-	if secretHashHex != "" {
-		secretHash, err = hex.DecodeString(secretHashHex)
-		if err != nil {
-			writeInternalError(w, "cloudapi: decode client_secret_hash", err)
-			return
-		}
-	}
-
-	created, err := s.clientStore.Create(ctx, clients.NewNamespacedClient{
-		ClientID:    req.ClientId,
-		NamespaceID: namespace,
-		Name:        stringOrEmpty(req.ClientName),
-		// Each namespaced client is its own PPID sector, mirroring
-		// mgmtapi/register.go's dynamic registration: a fresh client has no
-		// shared sector_identifier_uri, and sharing a sector across tenants
-		// would let two tenants correlate the same user's pairwise subject.
-		SectorID:                req.ClientId,
-		RedirectURIs:            req.RedirectUris,
-		TokenFormat:             defaultClientTokenFormat,
-		ScopesAllowed:           strings.Fields(scope),
-		ClientSecretHash:        secretHash,
-		GrantTypes:              grantTypes,
-		ResponseTypes:           responseTypes,
-		TokenEndpointAuthMethod: authMethod,
-		CreatedAt:               time.Now().UTC(),
-	})
-	if err != nil {
-		if errors.Is(err, clients.ErrNamespacedClientExists) {
-			writeCloudError(w, http.StatusConflict, "client_already_exists", "a client with this id already exists")
-			return
-		}
-		// H2 TOCTOU backstop: the namespaceActive check above and this Create
-		// call are two separate statements, so a concurrent
-		// DELETE /admin/v1/namespaces/{namespace} can soft-delete namespace in
-		// between. clientStore.Create's INSERT ... WHERE EXISTS
-		// (db/queries/relying_parties.sql) closes that window at the SQL
-		// level: a namespace that is no longer live at insert time yields
-		// ErrNamespaceInactive instead of a row, which this maps to the same
-		// 404 namespaceActive would have returned had the delete landed a
-		// moment earlier.
-		if errors.Is(err, clients.ErrNamespaceInactive) {
-			writeCloudError(w, http.StatusNotFound, "namespace_not_found", "namespace does not exist")
-			return
-		}
-		writeInternalError(w, "cloudapi: create namespaced client", err)
-		return
-	}
-
-	body, err := json.Marshal(clientResponse(created))
-	if err != nil {
-		writeInternalError(w, "cloudapi: marshal client response", err)
-		return
-	}
-	s.recordOperation(ctx, idempotencyKey, opClientCreate, reqHash, http.StatusCreated, body)
-	writeCloudBody(w, http.StatusCreated, body)
+	s.serveClientMutation(w, r, namespace, "", "create", params.IdempotencyKey)
 }
 
 // GetAdminV1NamespacesClients handles GET
@@ -292,229 +135,16 @@ func (s *Server) GetAdminV1NamespacesClient(w http.ResponseWriter, r *http.Reque
 	writeCloudJSON(w, http.StatusOK, clientResponse(c))
 }
 
-// PutAdminV1NamespacesClient handles PUT
-// /admin/v1/namespaces/{namespace}/clients/{client_id}, requiring the
-// `clients:write` scope. Fields the caller omits (other than
-// client_secret_hash, whose omission is preserved by
-// clients.DBNamespacedClientStore's COALESCE) fall back to the client's
-// CURRENT stored value, fetched here — so a caller updating only
-// redirect_uris does not have to already know (or accidentally reset) the
-// client's name, scope, or auth method. The same client_not_found conditions
-// as GET apply, and a rejected update leaves the target row (if any, under
-// its actual owner) unchanged: the store's WHERE clause (namespace_id = ...
-// AND deleted_at IS NULL) makes a cross-tenant or already-deleted update
-// affect zero rows rather than someone else's client.
+// PutAdminV1NamespacesClient retains partial-update syntax, with mandatory
+// generation fencing and an atomic expected-base guard against lost updates.
 func (s *Server) PutAdminV1NamespacesClient(w http.ResponseWriter, r *http.Request, namespace string, clientId string, params cloudopenapi.PutAdminV1NamespacesClientParams) {
-	if !namespacePermitted(r.Context(), w, namespace) {
-		return
-	}
-	idempotencyKey := params.IdempotencyKey
-	if !validIdempotencyKey(idempotencyKey) {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", "missing or invalid Idempotency-Key header")
-		return
-	}
-
-	r.Body = http.MaxBytesReader(w, r.Body, maxClientRequestBodyBytes)
-	var req cloudopenapi.ClientUpdateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", "malformed JSON request body")
-		return
-	}
-
-	if len(req.RedirectUris) == 0 {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", "redirect_uris is required")
-		return
-	}
-	if len(req.RedirectUris) > maxClientRedirectURIs {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", "redirect_uris must contain no more than 8 entries")
-		return
-	}
-	if err := clients.ValidateRedirectURIs(req.RedirectUris); err != nil {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	// M1: a PRESENT-but-empty client_secret_hash must be rejected outright,
-	// never silently treated as "omitted". UpdateNamespacedClient's COALESCE
-	// (db/queries/relying_parties.sql) means "" here would leave the STORED
-	// hash untouched while hasSecretHash below is computed as if it were
-	// cleared — exactly the none-with-a-retained-hash state H1 forbids, and a
-	// trap for a later PUT that switches back to a confidential auth method
-	// under a secret the operator believed removed. There is no "clear the
-	// secret" operation on this route (see ClientUpdateRequest's doc comment
-	// in api/openapi/harbor-cloud.yaml) — clearing requires a fresh
-	// client_secret_hash, not an empty one.
-	if req.ClientSecretHash != nil && *req.ClientSecretHash == "" {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", "client_secret_hash must not be empty; omit the field entirely to leave the stored hash unchanged")
-		return
-	}
-	secretHashHex := stringOrEmpty(req.ClientSecretHash)
-	if secretHashHex != "" && !clientSecretHashPattern.MatchString(secretHashHex) {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", "client_secret_hash must be 64 lowercase hex characters")
-		return
-	}
-	var explicitAuthMethod string
-	if req.TokenEndpointAuthMethod != nil {
-		var ok bool
-		explicitAuthMethod, ok = resolveExplicitAuthMethod(w, string(*req.TokenEndpointAuthMethod))
-		if !ok {
-			return
-		}
-	}
-
-	ctx := r.Context()
-	reqHash, err := hashClientUpdateRequest(namespace, clientId, req)
-	if err != nil {
-		writeInternalError(w, "cloudapi: hash client update request", err)
-		return
-	}
-
-	stored, outcome, err := s.checkIdempotency(ctx, idempotencyKey, opClientUpdate, reqHash)
-	if err != nil {
-		writeInternalError(w, "cloudapi: check client update idempotency", err)
-		return
-	}
-	switch outcome {
-	case idempotencyReplay:
-		writeStoredResponse(w, stored)
-		return
-	case idempotencyConflict:
-		writeCloudError(w, http.StatusConflict, "idempotency_key_reused", "Idempotency-Key was previously used with a different request body")
-		return
-	}
-
-	if !s.namespaceActive(ctx, w, namespace) {
-		return
-	}
-
-	existing, err := s.clientStore.Get(ctx, clientId, namespace)
-	if err != nil {
-		if errors.Is(err, clients.ErrClientNotFound) {
-			writeCloudError(w, http.StatusNotFound, "client_not_found", "client does not exist")
-			return
-		}
-		writeInternalError(w, "cloudapi: get namespaced client for update", err)
-		return
-	}
-
-	name := existing.Name
-	if req.ClientName != nil {
-		name = *req.ClientName
-	}
-	authMethod := existing.TokenEndpointAuthMethod
-	if req.TokenEndpointAuthMethod != nil {
-		authMethod = explicitAuthMethod
-	}
-	scope := strings.Join(existing.ScopesAllowed, " ")
-	if req.Scope != nil {
-		scope = *req.Scope
-	}
-	// hasSecretHash reflects what the client will end up with: the freshly
-	// submitted hash if one was sent, otherwise whatever is already stored
-	// (client_secret_hash is never echoed back, so "already stored" is the
-	// only way to know this without the caller resubmitting it).
-	hasSecretHash := len(existing.ClientSecretHash) > 0
-	if req.ClientSecretHash != nil {
-		hasSecretHash = secretHashHex != ""
-	}
-	if msg, ok := validateAuthMethodSecretPairing(authMethod, hasSecretHash); !ok {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", msg)
-		return
-	}
-
-	var secretHash []byte
-	if secretHashHex != "" {
-		secretHash, err = hex.DecodeString(secretHashHex)
-		if err != nil {
-			writeInternalError(w, "cloudapi: decode client_secret_hash", err)
-			return
-		}
-	}
-
-	updated, err := s.clientStore.Update(ctx, clients.UpdateNamespacedClient{
-		ClientID:                clientId,
-		NamespaceID:             namespace,
-		Name:                    name,
-		RedirectURIs:            req.RedirectUris,
-		ScopesAllowed:           strings.Fields(scope),
-		TokenEndpointAuthMethod: authMethod,
-		ClientSecretHash:        secretHash,
-	})
-	if err != nil {
-		if errors.Is(err, clients.ErrClientNotFound) {
-			writeCloudError(w, http.StatusNotFound, "client_not_found", "client does not exist")
-			return
-		}
-		writeInternalError(w, "cloudapi: update namespaced client", err)
-		return
-	}
-
-	body, err := json.Marshal(clientResponse(updated))
-	if err != nil {
-		writeInternalError(w, "cloudapi: marshal client response", err)
-		return
-	}
-	s.recordOperation(ctx, idempotencyKey, opClientUpdate, reqHash, http.StatusOK, body)
-	writeCloudBody(w, http.StatusOK, body)
+	s.serveClientMutation(w, r, namespace, clientId, "update", params.IdempotencyKey)
 }
 
-// DeleteAdminV1NamespacesClient handles DELETE
-// /admin/v1/namespaces/{namespace}/clients/{client_id}, requiring the
-// `clients:write` scope. It ALWAYS returns 204 — including when client_id is
-// absent, already deleted, or owned by a DIFFERENT namespace — because
-// delete must never leak whether an id exists (namespace existence is not
-// even checked: SoftDelete's WHERE clause simply matches zero rows when the
-// namespace itself is absent). A cross-tenant delete attempt is silently a
-// no-op against the real owner's row, never an actual deletion of someone
-// else's client — clients.DBNamespacedClientStore.SoftDelete's WHERE clause
-// makes that structural, not just checked.
+// DeleteAdminV1NamespacesClient requires a positive generation query value.
+// Successful terminal deletion returns 204; stale/conflicting generations fail.
 func (s *Server) DeleteAdminV1NamespacesClient(w http.ResponseWriter, r *http.Request, namespace string, clientId string, params cloudopenapi.DeleteAdminV1NamespacesClientParams) {
-	if !namespacePermitted(r.Context(), w, namespace) {
-		return
-	}
-	idempotencyKey := params.IdempotencyKey
-	if !validIdempotencyKey(idempotencyKey) {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", "missing or invalid Idempotency-Key header")
-		return
-	}
-	// POST/PUT both validate their path/body identifiers against these same
-	// patterns before doing anything else; DELETE previously validated
-	// neither namespace nor client_id at all (L2), letting an
-	// arbitrary-length, arbitrary-byte path segment reach hashClientDeleteRequest
-	// and the idempotency ledger. This does not weaken the "DELETE always
-	// returns 204" contract below — that contract covers a syntactically
-	// valid id that is absent/foreign/already-deleted, not a malformed one.
-	if !namespaceIDPattern.MatchString(namespace) || !clientIDPattern.MatchString(clientId) {
-		writeCloudError(w, http.StatusBadRequest, "invalid_request", "namespace and client_id must match their documented patterns")
-		return
-	}
-
-	ctx := r.Context()
-	// DELETE carries no request body, so (namespace, client_id) IS the
-	// request's identity for idempotency purposes — mirrors
-	// DeleteAdminV1Namespace's reqHash over the id path parameter.
-	reqHash := hashClientDeleteRequest(namespace, clientId)
-
-	stored, outcome, err := s.checkIdempotency(ctx, idempotencyKey, opClientDelete, reqHash)
-	if err != nil {
-		writeInternalError(w, "cloudapi: check client delete idempotency", err)
-		return
-	}
-	switch outcome {
-	case idempotencyReplay:
-		writeStoredResponse(w, stored)
-		return
-	case idempotencyConflict:
-		writeCloudError(w, http.StatusConflict, "idempotency_key_reused", "Idempotency-Key was previously used with a different request")
-		return
-	}
-
-	if err := s.clientStore.SoftDelete(ctx, clientId, namespace); err != nil {
-		writeInternalError(w, "cloudapi: soft delete namespaced client", err)
-		return
-	}
-
-	s.recordOperation(ctx, idempotencyKey, opClientDelete, reqHash, http.StatusNoContent, nil)
-	writeCloudBody(w, http.StatusNoContent, nil)
+	s.serveClientMutation(w, r, namespace, clientId, "delete", params.IdempotencyKey)
 }
 
 // namespacePermitted enforces the M5 per-anchor namespace binding: it reports
@@ -643,6 +273,7 @@ func clientResponse(c clients.NamespacedClient) cloudopenapi.ClientResponse {
 	responseTypes := append([]string{}, c.ResponseTypes...)
 	scope := strings.Join(c.ScopesAllowed, " ")
 	return cloudopenapi.ClientResponse{
+		Generation:              c.Generation,
 		ClientId:                c.ClientID,
 		NamespaceId:             c.NamespaceID,
 		ClientName:              namePtr,

@@ -4,7 +4,7 @@
   "steps": [
     {
       "method": "DELETE",
-      "path": "/admin/v1/namespaces/never-existed-ns/clients/never-existed-client",
+      "path": "/admin/v1/namespaces/never-existed-ns/clients/never-existed-client?generation=3",
       "auth": "valid",
       "scope": "clients:write",
       "idempotency_key": "delete-absent-key",

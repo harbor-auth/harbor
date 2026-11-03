@@ -36,6 +36,7 @@ var ErrNamespaceInactive = errors.New("clients: namespace does not exist or is n
 // scoped by NamespaceID and carrying DeletedAt for the soft-delete this
 // store's SoftDelete performs.
 type NamespacedClient struct {
+	Generation              int64
 	ClientID                string
 	NamespaceID             string
 	Name                    string
@@ -274,6 +275,7 @@ func rowToNamespacedClient(row db.RelyingParty) NamespacedClient {
 	}
 
 	return NamespacedClient{
+		Generation:              row.CloudGeneration,
 		ClientID:                row.ClientID,
 		NamespaceID:             namespaceID,
 		Name:                    row.Name,
