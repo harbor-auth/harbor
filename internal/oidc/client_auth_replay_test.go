@@ -3,6 +3,7 @@ package oidc
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestConsumedCodeCannotRevokeWithoutBindingPKCEAndClientAuthentication(t *testing.T) {
@@ -88,5 +89,66 @@ func TestConfidentialRefreshAuthenticationProtectsRotationAndReplayRevocation(t 
 	}
 	if _, err := sessions.GetSessionByTokenHash(t.Context(), hash); !errors.Is(err, ErrRefreshTokenRevoked) {
 		t.Fatal("authenticated replay did not revoke successor")
+	}
+}
+
+func TestExpiredConsumedCodeStillRevokesOnlyForAuthenticatedBoundReplay(t *testing.T) {
+	const secret = "confidential-expired-replay-secret"
+	client := testClient()
+	client.TokenEndpointAuthMethod, client.SecretHash = ClientAuthSecretBasic, clientSecretHash(secret)
+	svc := clientAuthService(t, client)
+	req := validTokenReq()
+	if _, err := svc.codes.Consume(t.Context(), req.Code); err != nil {
+		t.Fatal(err)
+	}
+	svc.now = func() time.Time { return time.Unix(1_700_000_000, 0).Add(2 * time.Minute) }
+	sink := NewRecordingRevocationSink()
+	svc.revocations = sink
+	req.ClientAuthMethod, req.ClientSecret = ClientAuthSecretBasic, secret
+	for _, attack := range []string{"wrong secret", "missing secret", "wrong PKCE", "wrong client", "wrong redirect"} {
+		bad := req
+		switch attack {
+		case "wrong secret":
+			bad.ClientSecret = "wrong"
+		case "missing secret":
+			bad.ClientSecret = ""
+		case "wrong PKCE":
+			bad.CodeVerifier = "wrong-verifier"
+		case "wrong client":
+			bad.ClientID = "other-client"
+		case "wrong redirect":
+			bad.RedirectURI = "https://other.example/cb"
+		}
+		if _, err := svc.Token(t.Context(), bad); err == nil {
+			t.Fatalf("%s accepted", attack)
+		}
+		if len(sink.Revoked()) != 0 {
+			t.Fatalf("%s revoked the family", attack)
+		}
+	}
+	if _, err := svc.Token(t.Context(), req); err == nil || err.Code != ErrCodeInvalidGrant {
+		t.Fatal("expired replay accepted")
+	}
+	if len(sink.Revoked()) != 1 {
+		t.Fatal("correctly authenticated expired replay failed to revoke the family")
+	}
+}
+
+func TestExpiredUnspentCodeCannotIssueOrRevoke(t *testing.T) {
+	const secret = "confidential-expired-fresh-secret"
+	client := testClient()
+	client.TokenEndpointAuthMethod, client.SecretHash = ClientAuthSecretBasic, clientSecretHash(secret)
+	svc := clientAuthService(t, client)
+	svc.now = func() time.Time { return time.Unix(1_700_000_000, 0).Add(2 * time.Minute) }
+	sink := NewRecordingRevocationSink()
+	svc.revocations = sink
+	req := validTokenReq()
+	req.ClientAuthMethod, req.ClientSecret = ClientAuthSecretBasic, secret
+	if _, err := svc.Token(t.Context(), req); err == nil || err.Code != ErrCodeInvalidGrant {
+		t.Fatal("expired fresh code accepted")
+	}
+	_, found, consumed, err := svc.codes.Peek(t.Context(), req.Code)
+	if err != nil || !found || consumed || len(sink.Revoked()) != 0 {
+		t.Fatal("expired unspent code mutated token state")
 	}
 }

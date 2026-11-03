@@ -464,9 +464,9 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (*Authori
 //
 //  1. validate params (grant_type + presence);
 //  2. PEEK the code (no mutation) — unknown → invalid_grant;
-//  3. validate binding + expiry + PKCE and authenticate the client — on failure
-//     return WITHOUT mutation; authenticated reuse revokes the code family;
-//  4. only on success CONSUME (single-use). A racing second exchange that wins
+//  3. validate binding + PKCE and authenticate the client — on failure return
+//     WITHOUT mutation; authenticated reuse revokes the code family;
+//  4. require freshness for unspent codes, then CONSUME (single-use). A racing second exchange that wins
 //     the tombstone here still surfaces as reuse (revoke + invalid_grant).
 func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *TokenError) {
 	if terr := ValidateTokenParams(req); terr != nil {
@@ -482,7 +482,7 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 
 	// Validate against the STORED code before burning it. A failure here leaves
 	// the code intact for the legitimate owner.
-	if terr := ValidateTokenExchange(req, stored, s.now()); terr != nil {
+	if terr := validateTokenBinding(req, stored); terr != nil {
 		return nil, terr
 	}
 	if _, ok := s.AuthenticateClient(ctx, req.ClientID, req.ClientAuthMethod, req.ClientSecret); !ok {
@@ -496,6 +496,12 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 		// Raw ctx: signalCodeReuse self-enforces context.WithoutCancel + 10 s timeout internally.
 		s.signalCodeReuse(ctx, stored)
 		return nil, invalidGrant("authorization code has already been used")
+	}
+
+	// Only fresh codes are eligible for issuance. Authenticated spent-code
+	// replay still revokes the family after the original code's expiry.
+	if terr := validateCodeExpiry(stored, s.now()); terr != nil {
+		return nil, terr
 	}
 
 	// Only now consume (single-use). Handle a lost race on the tombstone.
