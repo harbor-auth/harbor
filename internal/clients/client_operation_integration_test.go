@@ -48,25 +48,32 @@ func TestClientOperationConcurrentKeyCannotMutateTwoClients(t *testing.T) {
 	}
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { firstDone <- send("atomic-client-first") }()
-	// Wait until the first request owns the operation key, while its actual
-	// mutation is held behind the client lock. No timing-dependent sleeps decide
-	// which transaction wins.
+	// Observe the first request's granted operation lock without acquiring it:
+	// competing for this nonblocking lock could make the request itself fail.
+	// The mutation remains held behind the client lock until we release blocker.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		tx, err := pool.Begin(t.Context())
+		select {
+		case first := <-firstDone:
+			t.Fatalf("first request returned before reserving its blocked mutation: %d %s", first.Code, first.Body.String())
+		default:
+		}
+		var reserved bool
+		err = pool.QueryRow(t.Context(), `
+			WITH operation_key AS (
+			 SELECT hashtextextended(jsonb_build_array('concurrent-operation-key'::text,'client.update'::text)::text,294352) AS value
+			)
+			SELECT EXISTS (
+			 SELECT 1 FROM pg_locks, operation_key
+			 WHERE locktype='advisory' AND granted AND objsubid=1
+			 AND database=(SELECT oid FROM pg_database WHERE datname=current_database())
+			 AND classid=((operation_key.value >> 32) & 4294967295)::oid
+			 AND objid=(operation_key.value & 4294967295)::oid
+			)`).Scan(&reserved)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var acquired bool
-		err = tx.QueryRow(t.Context(), `SELECT pg_try_advisory_xact_lock(hashtextextended(jsonb_build_array('concurrent-operation-key'::text,'client.update'::text)::text,294352))`).Scan(&acquired)
-		rollbackErr := tx.Rollback(t.Context())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if rollbackErr != nil {
-			t.Fatal(rollbackErr)
-		}
-		if !acquired {
+		if reserved {
 			break
 		}
 		if time.Now().After(deadline) {
