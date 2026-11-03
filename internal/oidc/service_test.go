@@ -526,6 +526,8 @@ func TestService_signalCodeReuse_LogsRevocationError(t *testing.T) {
 		Now:         func() time.Time { return now },
 	})
 
+	svc.clients.(*InMemoryClientRegistry).Put(testClient())
+
 	// Trigger the code reuse path via Token exchange with an already-consumed code.
 	_, terr := svc.Token(context.Background(), validTokenReq())
 	if terr == nil || terr.Code != ErrCodeInvalidGrant {
@@ -566,6 +568,8 @@ func TestService_signalCodeReuse_NoLogOnSuccess(t *testing.T) {
 		Logger:      logger,
 		Now:         func() time.Time { return now },
 	})
+
+	svc.clients.(*InMemoryClientRegistry).Put(testClient())
 
 	// Trigger the code reuse path.
 	_, terr := svc.Token(context.Background(), validTokenReq())
@@ -806,6 +810,8 @@ func TestService_signalCodeReuse_LogDoesNotContainPII(t *testing.T) {
 		Logger:      logger,
 		Now:         func() time.Time { return now },
 	})
+
+	svc.clients.(*InMemoryClientRegistry).Put(testClient())
 
 	// Trigger the code reuse path.
 	_, terr := svc.Token(context.Background(), validTokenReq())

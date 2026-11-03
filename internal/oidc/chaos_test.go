@@ -331,12 +331,6 @@ func TestChaos_Refresh_FamilyRevokeFails_StillInvalidGrant(t *testing.T) {
 		InMemorySessionStore: innerStore,
 		revokeErr:            errors.New("sessions table: timeout during family revoke"),
 	}
-	// chaosSvc intentionally uses an empty client registry: this test only
-	// presents origToken (which is revoked), so the flow exits early at the
-	// ErrRefreshTokenRevoked → signalRefreshReuse path — before the H20-2
-	// client-existence check (which runs after ValidateRefreshParams, only
-	// reached for valid sessions). If this test is extended to also verify
-	// the successor-token path, register testRefreshClientID here.
 	chaosSvc := mustNewService(ServiceConfig{
 		Issuer:       "https://chaos.harbor.example",
 		Clients:      NewInMemoryClientRegistry(),
@@ -349,6 +343,8 @@ func TestChaos_Refresh_FamilyRevokeFails_StillInvalidGrant(t *testing.T) {
 	})
 
 	// Replay the revoked token — must return invalid_grant, NOT 5xx.
+	chaosSvc.clients = setupSvc.clients // Replay side effects require an authenticated client.
+
 	_, terr := chaosSvc.Refresh(context.Background(), refreshReq(origToken))
 	if terr == nil {
 		t.Fatal("expected error for replayed revoked token")
@@ -678,6 +674,8 @@ func TestChaos_Refresh_OutboxEnqueuesWhenDownstreamFails(t *testing.T) {
 		Logger:       slog.New(slog.NewTextHandler(&logBuf, nil)),
 	})
 
+	chaosSvc.clients = setupSvc.clients // Replay side effects require an authenticated client.
+
 	_, terr := chaosSvc.Refresh(context.Background(), refreshReq(origToken))
 	if terr == nil {
 		t.Fatal("expected error for replayed revoked token")
@@ -721,9 +719,13 @@ func TestChaos_Token_OutboxEnqueuesWhenDownstreamFails(t *testing.T) {
 	// signalCodeReuse enqueue guard (code.UserID != "") passes.
 	codeStore := NewInMemoryAuthCodeStore()
 	if err := codeStore.Save(context.Background(), AuthCode{
-		Code:     codeVal,
-		ClientID: testRefreshClientID,
-		UserID:   testRefreshUserID,
+		Code:                codeVal,
+		ClientID:            testRefreshClientID,
+		UserID:              testRefreshUserID,
+		RedirectURI:         "http://localhost/cb",
+		CodeChallenge:       rfc7636Challenge,
+		CodeChallengeMethod: "S256",
+		ExpiresAt:           time.Now().Add(time.Minute),
 	}); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -744,13 +746,14 @@ func TestChaos_Token_OutboxEnqueuesWhenDownstreamFails(t *testing.T) {
 		Logger:      slog.New(slog.NewTextHandler(&logBuf, nil)),
 	})
 
-	// Peek returns consumed=true → signalCodeReuse fires before ValidateTokenExchange.
+	svc.clients.(*InMemoryClientRegistry).Put(Client{ID: testRefreshClientID})
+	// Authenticated, bound PKCE replay still durably records revocation.
 	_, terr := svc.Token(context.Background(), TokenRequest{
 		GrantType:    "authorization_code",
 		Code:         codeVal,
 		ClientID:     testRefreshClientID,
 		RedirectURI:  "http://localhost/cb",
-		CodeVerifier: "any-verifier",
+		CodeVerifier: rfc7636Verifier,
 	})
 	if terr == nil {
 		t.Fatal("expected error (code already consumed), got nil")
@@ -833,19 +836,9 @@ func TestChaos_Refresh_SignalRefreshReuse_ZeroUUID(t *testing.T) {
 				Logger:       logger,
 			})
 
-			plaintext, _, err := newOpaqueToken()
-			if err != nil {
-				t.Fatalf("newOpaqueToken: %v", err)
-			}
-
-			// Must return invalid_grant — not 5xx.
-			_, terr := svc.Refresh(context.Background(), refreshReq(encodeRefreshToken(plaintext)))
-			if terr == nil {
-				t.Fatal("expected error; got nil")
-			}
-			if terr.Code != ErrCodeInvalidGrant {
-				t.Fatalf("zero-UUID guard: want invalid_grant, got %q", terr.Code)
-			}
+			// Unit-test the corruption guard directly. Token/refresh entrypoints
+			// now reject malformed binding before reaching this helper.
+			svc.signalRefreshReuse(context.Background(), RefreshSession{UserID: tc.userID, ClientID: tc.clientID})
 
 			// The ERROR log must fire.
 			if !strings.Contains(logBuf.String(), tc.wantLog) {
@@ -930,21 +923,9 @@ func TestChaos_Token_SignalCodeReuse_EmptyClientID(t *testing.T) {
 		Logger:      slog.New(slog.NewTextHandler(&logBuf, nil)),
 	})
 
-	// Peek fires BEFORE ValidateTokenExchange, so the consumed path short-circuits
-	// with stored.ClientID="" before any ClientID-binding or PKCE check.
-	_, terr := svc.Token(context.Background(), TokenRequest{
-		GrantType:    "authorization_code",
-		Code:         codeVal,
-		ClientID:     "any-client", // ValidateTokenParams requires non-empty; binding check never reached
-		RedirectURI:  "http://localhost/cb",
-		CodeVerifier: "any-verifier",
-	})
-	if terr == nil {
-		t.Fatal("expected error (code already consumed), got nil")
-	}
-	if terr.Code != ErrCodeInvalidGrant {
-		t.Fatalf("want invalid_grant, got %q", terr.Code)
-	}
+	// Unit-test the corruption guard directly; malformed client binding is
+	// rejected by Token before this helper is reached.
+	svc.signalCodeReuse(context.Background(), AuthCode{Code: codeVal})
 
 	// The empty-ClientID guard must fire and suppress RevokeCodeFamily.
 	if !strings.Contains(logBuf.String(), "empty ClientID") {

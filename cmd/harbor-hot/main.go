@@ -216,7 +216,7 @@ func runWithGraphObserver(ctx context.Context, logger *slog.Logger, observe func
 	// drive unbounded key-rotation or JWT-revocation attempts.
 	base := openapi.HandlerFromMux(srv, mux)
 	authed := oidcapi.WithAdminAuth(base, adminMW)
-	handler := oidcapi.WithRateLimits(authed, buildRateLimits(redisClient, logger))
+	handler := oidcapi.WithBrowserClientCORS(oidcapi.WithRateLimits(authed, buildRateLimits(redisClient, logger)))
 
 	// Support both ADDR (full address) and PORT (port-only, for docker-compose).
 	addr := envString("ADDR", "")

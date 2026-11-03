@@ -5,6 +5,13 @@
 > `none`, `client_secret_basic`, and `client_secret_post`. Public and confidential
 > Authorization Code clients both require S256 PKCE. The audit findings below
 > are historical; PKCE does not replace client authentication for backends.
+>
+> Replay revocation requires the original client binding and authentication;
+> authorization-code replay also requires the original PKCE verifier. Missing or
+> incorrect backend credentials cannot revoke a live token family using a spent
+> code/token. Credentialless CORS is limited to public discovery, JWKS and token
+> responses. It does not enable browser cookies, Authorization preflights,
+> authorization endpoints, account routes or admin APIs (RFC 9700 section 2.1).
 
 > **Priority:** P0 (Wave 6, production-readiness audit blocker 1.6)
 > **Effort:** 4–8 h · **Root feature** (reads the existing `client_secret_hash`
