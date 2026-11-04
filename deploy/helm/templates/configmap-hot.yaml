@@ -23,6 +23,8 @@ data:
   # REGION binds the issuer host to a region so the fail-closed region
   # middleware resolves /authorize and /token (docs/DESIGN.md §5).
   REGION: {{ .Values.region | default "EU" | quote }}
+  # Exact trusted alias used by harbor-mgmt's authenticated key-rotation proxy.
+  INTERNAL_SERVICE_HOST: {{ printf "%s-hot.%s.svc.cluster.local" (include "harbor.fullname" .) .Release.Namespace | quote }}
   KMS_KEY_MAP: {{ required "kmsKeyMap is required in production" .Values.kmsKeyMap | quote }}
   KMS_PROVIDER: {{ .Values.hot.kms.provider | default "aws" | quote }}
   {{- if or (eq (.Values.hot.kms.provider | default "aws") "openbao") (eq .Values.userDEK.provider "openbao") }}

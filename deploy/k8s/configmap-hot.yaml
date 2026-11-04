@@ -21,6 +21,7 @@ data:
   # origin. harbor-hot redirects unauthenticated authorization requests here.
   LOGIN_URL: "https://auth.example.com/login"
   REGION: "EU"
+  INTERNAL_SERVICE_HOST: "harbor-hot.harbor.svc.cluster.local"
   KMS_KEY_MAP: "EU=REPLACE_WITH_REGIONAL_KMS_KEY_ID"
   # Raw example uses AWS. The production Helm overlay selects OpenBao and adds
   # its provider-specific endpoint/auth settings.

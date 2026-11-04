@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -34,7 +35,7 @@ func TestRunBuildsDurableLiveGraph(t *testing.T) {
 	observed := make(chan hotGraph, 1)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- runWithGraphObserver(ctx, logger, func(graph hotGraph) {
+		errCh <- runWithGraphObserver(ctx, logger, func(graph hotGraph, _ http.Handler) {
 			observed <- graph
 			cancel()
 		})

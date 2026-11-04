@@ -14,6 +14,7 @@ and maintains those fields. Personal claims are returned by UserInfo only.
 User subsequently authorized: finish fixes, run another deep review and fix its findings, then push and deploy through CI/CD.
 
 - [x] G. Publish reviewed PRs, pass CI, merge, promote signed immutable images and verify production scope configuration.
+- [x] H. Fix the authenticated production UserInfo wiring: attach regional context, reuse enrollment's user-DEK provider, preserve the trusted internal management hostname, and cover the complete startup/HTTP chain with real PostgreSQL and Redis.
 
 Production verified on 2026-11-04 UTC:
 

@@ -69,6 +69,17 @@ func TestStartupRejectsMissingProductionConfigurationBeforeListen(t *testing.T) 
 	}
 }
 
+func TestInternalServiceHostRequiresExplicitRegion(t *testing.T) {
+	t.Setenv("HARBOR_KMS_SECRET", "integration-user-dek-kek-at-least-32-bytes")
+	t.Setenv("RATE_LIMIT_DISABLED", "false")
+	t.Setenv("INTERNAL_SERVICE_HOST", "harbor-hot.harbor.svc.cluster.local")
+	t.Setenv("REGION", "")
+	err := run(t.Context(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err == nil || !strings.Contains(err.Error(), "INTERNAL_SERVICE_HOST requires an explicit REGION") {
+		t.Fatalf("startup error = %v", err)
+	}
+}
+
 func TestBFFConfigValidate(t *testing.T) {
 	tests := []struct {
 		name    string

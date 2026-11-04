@@ -4,10 +4,10 @@ status: implemented
 design_refs: [§3.3, §11.4, §3.1]
 code:  [internal/oidcapi/, api/openapi/harbor.yaml, internal/gen/openapi/]
 spec:  [api/openapi/harbor.yaml]
-tests: [internal/oidcapi/]
+tests: [internal/oidcapi/, cmd/harbor-hot/userinfo_integration_test.go]
 depends_on: [real-token-issuance, user-enrollment]
 plan: userinfo-endpoint
-last_reconciled: 2026-11-03
+last_reconciled: 2026-11-04
 ---
 
 # UserInfo endpoint
@@ -43,6 +43,17 @@ store/KMS outage returns `503`; no personal claims are returned. All responses
 are `no-store`. Browser clients can use credentialless CORS with the Bearer
 header; Harbor cookies are not used for UserInfo authorization.
 
+The production hot server attaches the host-derived region before dispatching
+user-data requests. `INTERNAL_SERVICE_HOST` optionally binds one exact internal
+service hostname to the explicitly configured `REGION`, preserving the
+authenticated management key-rotation proxy. Helm and raw deployment examples
+set this to the same service DNS name used by management. Unknown hosts still
+fail closed; an alias never substitutes for authentication.
+
+UserInfo reuses the identifier store built with enrollment's selected user-DEK
+provider. The signing-key provider cannot open user-data envelopes and must not
+be used for this purpose.
+
 ## Grant lifetime
 
 Canonical `grants` are the only authorization authority. Authentication/subject
@@ -75,6 +86,13 @@ PostgreSQL, Redis codes, PPID derivation, encrypted identifiers, JWT issuance an
 HTTP UserInfo. It covers real-email consent, old relay consent, no-email accounts,
 concurrent approval, refresh ceilings, regional/account denial, revocation and
 reconnection. HTTP unit tests cover malformed tokens and browser CORS.
+
+`cmd/harbor-hot/userinfo_integration_test.go` also runs the production startup
+and complete HTTP middleware chain against migrated PostgreSQL and Redis. It
+exchanges codes for signed tokens and reads UserInfo without manually placing
+a region on requests. It checks scope disclosure, a distinct user-DEK provider,
+regional denial, internal admin authentication and infrastructure probes. Only
+the external KMS HTTP service is simulated.
 
 See [account linking](../guides/account-linking.md) for a complete website-owned
 migration flow and database reference. See OIDC Core
