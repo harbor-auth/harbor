@@ -42,6 +42,7 @@ func createTestSession(t *testing.T, store *InMemorySessionStore, userID, client
 		Region:    "eu",
 		UserID:    userID,
 		ClientID:  clientID,
+		GrantID:   userID + "-" + clientID,
 		TokenHash: hash,
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
@@ -168,6 +169,7 @@ func TestService_RevokeRefreshToken_RevokesFamilyNotJustSingleSession(t *testing
 		Region:    "eu",
 		UserID:    "user-456",
 		ClientID:  "demo-client",
+		GrantID:   "user-456" + "-" + "demo-client",
 		TokenHash: hash1,
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
@@ -176,6 +178,7 @@ func TestService_RevokeRefreshToken_RevokesFamilyNotJustSingleSession(t *testing
 		Region:    "eu",
 		UserID:    "user-456",
 		ClientID:  "demo-client",
+		GrantID:   "user-456" + "-" + "demo-client",
 		TokenHash: hash2,
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
@@ -222,6 +225,7 @@ func TestService_RevokeRefreshToken_DoesNotAffectOtherClients(t *testing.T) {
 		Region:    "eu",
 		UserID:    "user-456",
 		ClientID:  "client-a",
+		GrantID:   "user-456" + "-" + "client-a",
 		TokenHash: hash1,
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
@@ -230,6 +234,7 @@ func TestService_RevokeRefreshToken_DoesNotAffectOtherClients(t *testing.T) {
 		Region:    "eu",
 		UserID:    "user-456",
 		ClientID:  "client-b",
+		GrantID:   "user-456" + "-" + "client-b",
 		TokenHash: hash2,
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
@@ -319,6 +324,7 @@ func TestService_RevokeRefreshToken_EmptyUserID_SkipsRevoke(t *testing.T) {
 		Region:    "eu",
 		UserID:    "", // Empty UserID — should trigger guard
 		ClientID:  "demo-client",
+		GrantID:   "" + "-" + "demo-client",
 		TokenHash: hash,
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
@@ -368,6 +374,7 @@ func TestService_RevokeRefreshToken_ZeroUUID_SkipsRevoke(t *testing.T) {
 		Region:    "eu",
 		UserID:    zeroUUID, // Zero UUID — should trigger guard
 		ClientID:  "demo-client",
+		GrantID:   zeroUUID + "-" + "demo-client",
 		TokenHash: hash,
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}
@@ -443,5 +450,5 @@ func (s *errSessionStore) RevokeSessionsByUserClient(_ context.Context, _, _ str
 }
 
 func (s *errSessionStore) RevokeSessionsByGrant(_ context.Context, _ string) error {
-	return nil
+	return s.revokeErr
 }

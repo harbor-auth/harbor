@@ -195,7 +195,9 @@ func TestRun_ServesRequests(t *testing.T) {
 	}
 
 	cancel()
-	<-errCh
+	if err := <-errCh; err != nil {
+		t.Fatalf("server shutdown: %v", err)
+	}
 }
 
 // TestWithRecovery_Returns500 verifies that a panicking handler yields a 500

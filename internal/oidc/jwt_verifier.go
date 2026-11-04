@@ -130,6 +130,8 @@ func NewJWTVerifier(cfg JWTVerifierConfig) (*JWTVerifier, error) {
 
 // VerifiedClaims contains the validated claims from a verified JWT.
 type VerifiedClaims struct {
+	GrantID string // access token authorization lifetime
+
 	Issuer   string
 	Subject  string
 	Audience string
@@ -271,6 +273,7 @@ func (v *JWTVerifier) parseClaims(payload []byte) (*VerifiedClaims, error) {
 		IssuedAt int64  `json:"iat"`
 		JTI      string `json:"jti"`
 		Scope    string `json:"scope"`
+		GrantID  string `json:"grant_id"`
 	}
 	if err := json.Unmarshal(payload, &atClaims); err != nil {
 		return nil, fmt.Errorf("parse claims: %w", err)
@@ -284,6 +287,7 @@ func (v *JWTVerifier) parseClaims(payload []byte) (*VerifiedClaims, error) {
 		IssuedAt: time.Unix(atClaims.IssuedAt, 0),
 		JTI:      atClaims.JTI,
 		Scope:    atClaims.Scope,
+		GrantID:  atClaims.GrantID,
 	}, nil
 }
 

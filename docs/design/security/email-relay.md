@@ -2,6 +2,14 @@
 
 # Per-RP Email Relay (Hide-My-Email)
 
+> Current implementation: the standard `email` scope shares the verified real
+> signup address only after explicit approval. Existing relay-worded consent
+> requires reapproval. Automatic per-app alias provisioning and forwarding are
+> not available through OIDC, so the consent screen offers no relay choice.
+> The relay behavior below is a design target, not a claim about UserInfo today.
+> See [UserInfo](../../features/userinfo-endpoint.md).
+
+
 A core privacy feature borrowed from Apple (§2.4.2) and offered on the consent screen (§11.2, step 3): each RP gets a **unique, per-app random relay address** that forwards to the user's real inbox, so the user's **real email is never shared by default**. Apps can email the user; they never learn the user's real address, cannot use it as a cross-app identifier, and can be **cut off individually**.
 
 ## 7.5.1 Address generation

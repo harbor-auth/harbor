@@ -642,11 +642,7 @@ func verifyTokensAgainstJWKS(t *testing.T, idToken, accessToken string) {
 		if err != nil {
 			t.Fatalf("%s: decode JWK y: %v", name, err)
 		}
-		pub := &ecdsa.PublicKey{
-			Curve: elliptic.P256(),
-			X:     new(big.Int).SetBytes(xBytes),
-			Y:     new(big.Int).SetBytes(yBytes),
-		}
+		pub := parseP256JWK(t, xBytes, yBytes)
 
 		// Decode the 64-byte raw ES256 signature (r || s, each 32 bytes).
 		sig, err := base64.RawURLEncoding.DecodeString(parts[2])
@@ -769,11 +765,7 @@ func TestJWKSSignatureTamperDetection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode JWK y: %v", err)
 	}
-	pub := &ecdsa.PublicKey{
-		Curve: elliptic.P256(),
-		X:     new(big.Int).SetBytes(xBytes),
-		Y:     new(big.Int).SetBytes(yBytes),
-	}
+	pub := parseP256JWK(t, xBytes, yBytes)
 
 	// Decode the signature (unchanged — we only corrupt the payload).
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
@@ -824,4 +816,17 @@ func TestAuthorizeUnregisteredRedirectRejected(t *testing.T) {
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		t.Errorf("authorize with bad redirect_uri returned %d — expected a client error, not success", resp.StatusCode)
 	}
+}
+
+func parseP256JWK(t *testing.T, x, y []byte) *ecdsa.PublicKey {
+	t.Helper()
+	if len(x) != 32 || len(y) != 32 {
+		t.Fatal("invalid P-256 JWK coordinate length")
+	}
+	encoded := append(append([]byte{4}, x...), y...)
+	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pub
 }

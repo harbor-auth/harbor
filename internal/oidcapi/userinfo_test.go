@@ -1,7 +1,9 @@
 package oidcapi
 
 import (
+	"context"
 	"encoding/json"
+	"github.com/harbor-auth/harbor/internal/oidc"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -143,4 +145,12 @@ func TestUserInfo_IDTokenRejected(t *testing.T) {
 	if errCode := decodeOAuthErrorCode(t, res); errCode != "invalid_token" {
 		t.Fatalf("error = %q, want invalid_token", errCode)
 	}
+}
+
+// HTTP unit fixture. Real identifier storage and disclosure are covered by the
+// PostgreSQL/Redis scoped UserInfo integration tests.
+type unitUserInfoSource struct{}
+
+func (unitUserInfoSource) UserInfo(context.Context, string, string, bool) (oidc.UserInfoClaims, error) {
+	return oidc.UserInfoClaims{}, nil
 }

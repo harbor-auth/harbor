@@ -2,6 +2,7 @@ package oidc
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/harbor-auth/harbor/internal/crypto"
@@ -98,6 +99,9 @@ func InactiveIntrospectResponse() IntrospectResponse {
 
 // IntrospectConfig holds the dependencies for token introspection.
 type IntrospectConfig struct {
+	Clients ClientRegistry
+	Grants  GrantStore
+
 	// Verifier is the shared JWT verifier used by all token consumers. When
 	// supplied, the remaining verification fields are ignored.
 	Verifier *JWTVerifier
@@ -124,13 +128,16 @@ type IntrospectConfig struct {
 
 // Introspector handles RFC 7662 token introspection.
 type Introspector struct {
+	clients ClientRegistry
+	grants  GrantStore
+
 	verifier *JWTVerifier
 }
 
 // NewIntrospector creates an Introspector with the given configuration.
 func NewIntrospector(cfg IntrospectConfig) *Introspector {
 	if cfg.Verifier != nil {
-		return &Introspector{verifier: cfg.Verifier}
+		return &Introspector{clients: cfg.Clients, grants: cfg.Grants, verifier: cfg.Verifier}
 	}
 	now := cfg.Now
 	if now == nil {
@@ -143,7 +150,7 @@ func NewIntrospector(cfg IntrospectConfig) *Introspector {
 		// empty verifier so a bad configured key fails closed instead of panicking.
 		verifier, _ = NewJWTVerifier(JWTVerifierConfig{Now: now}) //nolint:errcheck // empty configuration is valid by construction
 	}
-	return &Introspector{verifier: verifier}
+	return &Introspector{clients: cfg.Clients, grants: cfg.Grants, verifier: verifier}
 }
 
 // Introspect validates an access token and returns its active status and
@@ -166,6 +173,18 @@ func (i *Introspector) Introspect(ctx context.Context, req IntrospectRequest) In
 	}
 	claims, err := i.verifier.VerifyAccessToken(ctx, req.Token, requirements...)
 	if err != nil {
+		return InactiveIntrospectResponse()
+	}
+
+	if i.grants == nil || i.clients == nil || claims.GrantID == "" {
+		return InactiveIntrospectResponse()
+	}
+	client, registered := i.clients.Lookup(ctx, claims.Audience)
+	if !registered || len(scopesMissing(client.ScopesAllowed, strings.Fields(claims.Scope))) > 0 {
+		return InactiveIntrospectResponse()
+	}
+	grant, found, err := i.grants.FindGrantByPPID(ctx, claims.Subject, claims.Audience)
+	if err != nil || !found || grant.ID != claims.GrantID || len(scopesMissing(ConsentedScopes(grant), strings.Fields(claims.Scope))) > 0 {
 		return InactiveIntrospectResponse()
 	}
 

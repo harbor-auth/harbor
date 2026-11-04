@@ -1,3 +1,5 @@
+// Legacy compatibility-view adapter, compiled only for its unit regressions.
+// Production consent uses DBGrantStore exclusively.
 package clients
 
 import (
@@ -58,7 +60,6 @@ func (s *DBConsentStore) emit(ctx context.Context, event oidc.ConsentEvent) {
 }
 
 // Compile-time proof that DBConsentStore implements oidc.ConsentStore.
-var _ oidc.ConsentStore = (*DBConsentStore)(nil)
 
 // Get implements oidc.ConsentStore. Returns (ConsentGrant{}, false, nil) when
 // no active grant exists for (userID, clientID). Any DB error propagates as

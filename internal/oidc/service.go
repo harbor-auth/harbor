@@ -14,15 +14,14 @@ import (
 	"github.com/google/uuid"
 )
 
-// SessionResolver stands in for the passkey-login + consent step of the flow
-// (docs/DESIGN.md §11.2). It returns the resolved subject (PPID) for the user
-// authenticating to this client, and whether they approved consent.
+// SessionResolver authenticates the browser and resolves its pairwise subject.
+// A successful resolution does not approve scopes or create a grant.
 //
 // The production implementation runs the hosted auth UI — WebAuthn login
 // (internal/webauthn), MFA/step-up, and the consent screen — and derives the
 // per-RP PPID (internal/identity).
 type SessionResolver interface {
-	Resolve(ctx context.Context, client Client, scope string) (subject, userID string, approved bool, err error)
+	Resolve(ctx context.Context, client Client, scope string) (subject, userID string, authenticated bool, err error)
 }
 
 // RevocationSink receives the theft signal when an authorization code is reused:
@@ -93,7 +92,6 @@ type ServiceConfig struct {
 	Sessions     SessionResolver
 	SessionStore SessionStore
 	Grants       GrantStore
-	Consents     ConsentStore
 	Revocations  RevocationSink
 	Outbox       RevocationOutbox
 	Logger       *slog.Logger
@@ -107,22 +105,20 @@ type ServiceConfig struct {
 // the stores and issuer. It holds no per-request state and performs no HTTP —
 // the thin HTTP layer is internal/oidcapi.
 type Service struct {
-	issuer         string
-	clients        ClientRegistry
-	codes          AuthCodeStore
-	tokens         TokenIssuer
-	sessions       SessionResolver
-	sessionStore   SessionStore
-	grants         GrantStore
-	consents       ConsentStore
-	enforceConsent bool
-	revocations    RevocationSink
-	outbox         RevocationOutbox
-	logger         *slog.Logger
-	newCode        func() (string, error)
-	newSessionID   func() (string, error)
-	now            func() time.Time
-	codeTTL        time.Duration
+	issuer       string
+	clients      ClientRegistry
+	codes        AuthCodeStore
+	tokens       TokenIssuer
+	sessions     SessionResolver
+	sessionStore SessionStore
+	grants       GrantStore
+	revocations  RevocationSink
+	outbox       RevocationOutbox
+	logger       *slog.Logger
+	newCode      func() (string, error)
+	newSessionID func() (string, error)
+	now          func() time.Time
+	codeTTL      time.Duration
 }
 
 // NewService builds a Service. It rejects an incomplete object graph so a
@@ -138,7 +134,6 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 		{"session resolver", cfg.Sessions},
 		{"refresh session store", cfg.SessionStore},
 		{"grant store", cfg.Grants},
-		{"consent store", cfg.Consents},
 		{"revocation sink", cfg.Revocations},
 		{"revocation outbox", cfg.Outbox},
 	}
@@ -149,22 +144,20 @@ func NewService(cfg ServiceConfig) (*Service, error) {
 	}
 
 	svc := &Service{
-		issuer:         cfg.Issuer,
-		clients:        cfg.Clients,
-		codes:          cfg.Codes,
-		tokens:         cfg.Tokens,
-		sessions:       cfg.Sessions,
-		sessionStore:   cfg.SessionStore,
-		grants:         cfg.Grants,
-		consents:       cfg.Consents,
-		enforceConsent: true,
-		revocations:    cfg.Revocations,
-		outbox:         cfg.Outbox,
-		logger:         cfg.Logger,
-		newCode:        cfg.NewCode,
-		newSessionID:   cfg.NewSessionID,
-		now:            cfg.Now,
-		codeTTL:        cfg.CodeTTL,
+		issuer:       cfg.Issuer,
+		clients:      cfg.Clients,
+		codes:        cfg.Codes,
+		tokens:       cfg.Tokens,
+		sessions:     cfg.Sessions,
+		sessionStore: cfg.SessionStore,
+		grants:       cfg.Grants,
+		revocations:  cfg.Revocations,
+		outbox:       cfg.Outbox,
+		logger:       cfg.Logger,
+		newCode:      cfg.NewCode,
+		newSessionID: cfg.NewSessionID,
+		now:          cfg.Now,
+		codeTTL:      cfg.CodeTTL,
 	}
 	if svc.logger == nil {
 		svc.logger = slog.Default()
@@ -252,65 +245,67 @@ func (s *Service) ConsentRequired(ctx context.Context, userID, clientID, scope, 
 // ApproveConsent persists the requested scope set only after the user has made
 // an explicit approval decision.
 func (s *Service) ApproveConsent(ctx context.Context, userID, clientID, scope string) *AuthorizeError {
-	grant, found, err := s.grants.FindGrant(ctx, userID, clientID)
-	if err != nil {
-		return redirectErr(ErrCodeServerError, "could not check consent status")
-	}
-	scopes := strings.Fields(scope)
-	if found {
-		scopes = mergeScopes(grant.Scopes, scopes)
-	}
-	// On first approval the resolver creates the canonical grant through PPID
-	// derivation. Existing grants are updated in place so session grant_ids
-	// remain stable across scope escalation.
-	if !found {
-		client, ok := s.clients.Lookup(ctx, clientID)
-		if !ok {
-			return redirectErr(ErrCodeUnauthorizedClient, "unknown client")
-		}
-		// Explicit approval has occurred. Derive the PPID and create the
-		// canonical grant before updating the consent_grants compatibility view.
-		_, resolvedUser, approved, err := s.sessions.Resolve(ctx, client, scope)
-		if err != nil {
-			return redirectErr(ErrCodeServerError, "could not create consent grant")
-		}
-		if !approved || resolvedUser != userID {
-			return redirectErr(ErrCodeAccessDenied, "the user did not grant consent")
-		}
-		if _, err := s.consents.Upsert(ctx, userID, clientID, scopes); err != nil {
-			s.logger.ErrorContext(ctx, "consent upsert failed",
-				slog.String("client_id", clientID), slog.Any("error", err))
-			return redirectErr(ErrCodeServerError, "could not persist consent")
-		}
-		return nil
-	}
-	updater, ok := s.grants.(GrantScopeUpdater)
+	client, ok := s.clients.Lookup(ctx, clientID)
 	if !ok {
-		return redirectErr(ErrCodeServerError, "canonical grant store cannot update scopes")
+		return redirectErr(ErrCodeUnauthorizedClient, "unknown client")
 	}
-	if _, err := updater.UpdateGrantScopes(ctx, userID, clientID, scopes); err != nil {
+	requested := strings.Fields(scope)
+	if len(requested) == 0 || !containsScope(requested, "openid") || len(scopesMissing(client.ScopesAllowed, requested)) > 0 {
+		return redirectErr(ErrCodeInvalidScope, "requested scopes are not allowed")
+	}
+	// Verify the authenticated identity before any approval write.
+	_, authenticatedUser, authenticated, resolveErr := s.sessions.Resolve(ctx, client, scope)
+	if resolveErr != nil {
+		s.logger.ErrorContext(ctx, "consent approval failed", slog.String("client_id", clientID), slog.Any("error", resolveErr))
+		return redirectErr(ErrCodeServerError, "could not resolve account")
+	}
+	if !authenticated || authenticatedUser != userID {
+		return redirectErr(ErrCodeAccessDenied, "consent user mismatch")
+	}
+	approver, ok := s.sessions.(interface {
+		Approve(context.Context, Client, string) (Grant, error)
+	})
+	if !ok {
+		return redirectErr(ErrCodeServerError, "consent approval is unavailable")
+	}
+	grant, err := approver.Approve(ctx, client, scope)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "consent approval failed", slog.String("client_id", clientID), slog.Any("error", err))
 		return redirectErr(ErrCodeServerError, "could not persist consent")
+	}
+	if grant.UserID != userID || grant.ClientID != clientID {
+		return redirectErr(ErrCodeAccessDenied, "consent user mismatch")
 	}
 	return nil
 }
 
-// findConsentGrant checks the canonical grant first, then the explicit consent
-// ledger used before a PPID-bearing grant has been created.
+// findConsentGrant reads only the canonical grant. There is no secondary ledger.
 func (s *Service) findConsentGrant(ctx context.Context, userID, clientID string) (ConsentGrant, bool, error) {
 	grant, found, err := s.grants.FindGrant(ctx, userID, clientID)
-	if err != nil {
+	if err != nil || !found {
 		return ConsentGrant{}, false, err
 	}
-	if !found {
-		return s.consents.Get(ctx, userID, clientID)
+	return ConsentGrant{ID: grant.ID, UserID: grant.UserID, ClientID: grant.ClientID,
+		Scopes: ConsentedScopes(grant), GrantedAt: grant.CreatedAt, RevokedAt: grant.RevokedAt}, true, nil
+}
+
+// activeGrant prevents codes and refresh tokens from crossing a disconnect and
+// reconnect boundary. Scope checks can narrow an old authorization, never widen it.
+func (s *Service) activeGrant(ctx context.Context, userID, clientID, grantID, subject, scope string) (Grant, bool, error) {
+	grant, found, err := s.grants.FindGrant(ctx, userID, clientID)
+	if err != nil {
+		return Grant{}, false, err
 	}
-	return ConsentGrant{ID: grant.ID, UserID: grant.UserID, ClientID: grant.ClientID, Scopes: grant.Scopes, GrantedAt: grant.CreatedAt, RevokedAt: grant.RevokedAt}, true, nil
+	valid := found && grantID != "" && grant.ID == grantID &&
+		(subject == "" || grant.PairwiseSub == subject) &&
+		len(scopesMissing(ConsentedScopes(grant), strings.Fields(scope))) == 0
+	return grant, valid, nil
 }
 
 // AuthorizeWithUser issues a code for a pre-authenticated user (BFF flow).
 // This is called by /authorize/complete after the passkey ceremony has set the
 // user_id in the BFF session. It runs the SessionResolver with the known user_id
-// to derive the PPID and record consent.
+// to derive the PPID and check the existing explicit consent.
 //
 // On any validation failure it returns an *AuthorizeError whose Channel tells
 // the HTTP layer whether it is safe to redirect (docs/DESIGN.md §11.7).
@@ -327,14 +322,26 @@ func (s *Service) AuthorizeWithUser(ctx context.Context, req AuthorizeWithUserRe
 		}
 	}
 
-	// The user is already authenticated — run the session resolver to derive PPID
-	// and record consent. The resolver uses the user_id from the BFF session.
-	subject, _, approved, err := s.sessions.Resolve(ctx, *client, req.Scope)
+	validated, validationErr := ValidateAuthorize(AuthorizeRequest{ClientID: req.ClientID, RedirectURI: req.RedirectURI,
+		ResponseType: "code", Scope: req.Scope, State: req.State, Nonce: req.Nonce,
+		CodeChallenge: req.CodeChallenge, CodeChallengeMethod: req.CodeChallengeMethod}, client)
+	if validationErr != nil {
+		return nil, validationErr
+	}
+	_ = validated
+	subject, resolvedUserID, approved, err := s.sessions.Resolve(ctx, *client, req.Scope)
 	if err != nil {
 		return nil, redirectErr(ErrCodeServerError, "login could not be completed")
 	}
-	if !approved {
+	if !approved || resolvedUserID != req.UserID {
 		return nil, redirectErr(ErrCodeAccessDenied, "the user did not grant consent")
+	}
+	grant, found, err := s.grants.FindGrant(ctx, req.UserID, req.ClientID)
+	if err != nil {
+		return nil, redirectErr(ErrCodeServerError, "could not read consent")
+	}
+	if !found || grant.PairwiseSub != subject || len(scopesMissing(ConsentedScopes(grant), strings.Fields(req.Scope))) > 0 {
+		return nil, ErrInteractionRequired
 	}
 
 	codeStr, err := s.newCode()
@@ -351,6 +358,7 @@ func (s *Service) AuthorizeWithUser(ctx context.Context, req AuthorizeWithUserRe
 		Scope:               req.Scope,
 		Subject:             subject,
 		UserID:              req.UserID,
+		GrantID:             grant.ID,
 		Nonce:               req.Nonce,
 		CodeChallenge:       req.CodeChallenge,
 		CodeChallengeMethod: req.CodeChallengeMethod,
@@ -370,7 +378,7 @@ func (s *Service) AuthorizeWithUser(ctx context.Context, req AuthorizeWithUserRe
 	}, nil
 }
 
-// Authorize validates the request, runs the (stubbed) login/consent step, then
+// Authorize validates the request, resolves the authenticated subject, then
 // issues and stores a single-use authorization code. On any validation failure
 // it returns an *AuthorizeError whose Channel tells the HTTP layer whether it is
 // safe to redirect (docs/DESIGN.md §11.7).
@@ -385,7 +393,7 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (*Authori
 		return nil, aerr
 	}
 
-	// Login + consent (SCAFFOLD: auto-approves a demo subject). A real rejection
+	// Resolve authentication without mutating consent. A rejection
 	// here is access_denied, redirected back to the RP (docs/DESIGN.md §11.7).
 	subject, userID, approved, err := s.sessions.Resolve(ctx, validated.Client, validated.Scope)
 	if err != nil {
@@ -395,36 +403,24 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (*Authori
 		return nil, redirectErr(ErrCodeAccessDenied, "the user did not grant consent")
 	}
 
-	// Consent check: lookup existing consent and apply decision logic.
-	// This runs AFTER authentication (userID is known) but BEFORE code issuance.
-	if userID != "" && s.enforceConsent {
-		requestedScopes := strings.Fields(validated.Scope)
-		existingGrant, found, err := s.findConsentGrant(ctx, userID, validated.Client.ID)
-		if err != nil {
-			s.logger.ErrorContext(ctx, "consent lookup failed",
-				slog.String("client_id", validated.Client.ID),
-				slog.Any("error", err))
-			return nil, redirectErr(ErrCodeServerError, "could not check consent status")
+	grant, found, err := s.grants.FindGrant(ctx, userID, validated.Client.ID)
+	if err != nil {
+		return nil, redirectErr(ErrCodeServerError, "could not read consent")
+	}
+	var consent *ConsentGrant
+	if found {
+		consent = &ConsentGrant{Scopes: ConsentedScopes(grant), RevokedAt: grant.RevokedAt}
+	}
+	decision, decisionErr := ConsentDecision(consent, strings.Fields(validated.Scope), req.Prompt)
+	if decisionErr != nil {
+		var authErr *AuthorizeError
+		if errors.As(decisionErr, &authErr) {
+			return nil, authErr
 		}
-
-		var grantPtr *ConsentGrant
-		if found {
-			grantPtr = &existingGrant
-		}
-
-		decision, decErr := ConsentDecision(grantPtr, requestedScopes, req.Prompt)
-		if decErr != nil {
-			// ErrInteractionRequired is an *AuthorizeError
-			var authErr *AuthorizeError
-			if errors.As(decErr, &authErr) {
-				return nil, authErr
-			}
-			return nil, redirectErr(ErrCodeServerError, "consent decision failed")
-		}
-
-		if !decision.Skip {
-			return nil, ErrInteractionRequired
-		}
+		return nil, redirectErr(ErrCodeServerError, "could not check consent")
+	}
+	if !decision.Skip || !found || grant.PairwiseSub != subject {
+		return nil, ErrInteractionRequired
 	}
 
 	codeStr, err := s.newCode()
@@ -440,6 +436,7 @@ func (s *Service) Authorize(ctx context.Context, req AuthorizeRequest) (*Authori
 		Scope:               validated.Scope,
 		Subject:             subject,
 		UserID:              userID,
+		GrantID:             grant.ID,
 		Nonce:               validated.Nonce,
 		CodeChallenge:       validated.CodeChallenge,
 		CodeChallengeMethod: validated.CodeChallengeMethod,
@@ -485,7 +482,8 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 	if terr := validateTokenBinding(req, stored); terr != nil {
 		return nil, terr
 	}
-	if _, ok := s.AuthenticateClient(ctx, req.ClientID, req.ClientAuthMethod, req.ClientSecret); !ok {
+	client, authenticated := s.AuthenticateClient(ctx, req.ClientID, req.ClientAuthMethod, req.ClientSecret)
+	if !authenticated {
 		return nil, &TokenError{Code: ErrCodeInvalidClient, Description: "client authentication failed", Status: 401}
 	}
 
@@ -502,6 +500,16 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 	// replay still revokes the family after the original code's expiry.
 	if terr := validateCodeExpiry(stored, s.now()); terr != nil {
 		return nil, terr
+	}
+
+	if _, valid, err := s.activeGrant(ctx, stored.UserID, stored.ClientID, stored.GrantID, stored.Subject, stored.Scope); err != nil {
+		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not check consent", Status: 500}
+	} else if !valid {
+		return nil, invalidGrant("consent grant is no longer active")
+	}
+
+	if len(scopesMissing(client.ScopesAllowed, strings.Fields(stored.Scope))) > 0 {
+		return nil, invalidGrant("application scopes changed")
 	}
 
 	// Only now consume (single-use). Handle a lost race on the tombstone.
@@ -521,6 +529,7 @@ func (s *Service) Token(ctx context.Context, req TokenRequest) (*IssuedTokens, *
 	tokens, err := s.tokens.Issue(ctx, IssueParams{
 		Issuer:   s.issuer,
 		Subject:  result.Code.Subject,
+		GrantID:  result.Code.GrantID,
 		ClientID: result.Code.ClientID,
 		Scope:    result.Code.Scope,
 		Nonce:    result.Code.Nonce,
@@ -571,7 +580,7 @@ func (s *Service) issueRefreshToken(ctx context.Context, tokens *IssuedTokens, c
 			slog.Any("error", err))
 		return
 	}
-	if !found {
+	if !found || grant.ID != code.GrantID {
 		// Consent was revoked between Authorize and Token (race). Skip the refresh token.
 		s.logger.WarnContext(ctx, "skipping refresh token: no active grant found — consent may have been revoked between /authorize and /token",
 			slog.String("client_id", code.ClientID))
@@ -593,7 +602,8 @@ func (s *Service) issueRefreshToken(ctx context.Context, tokens *IssuedTokens, c
 		Region:    grant.Region,
 		UserID:    code.UserID,
 		ClientID:  code.ClientID,
-		GrantID:   grant.ID,
+		GrantID:   code.GrantID,
+		Scopes:    strings.Fields(code.Scope),
 		TokenHash: hash,
 		ExpiresAt: s.now().Add(defaultRefreshTTL),
 		AuthTime:  code.AuthTime.Unix(),
@@ -706,7 +716,8 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	if ctx.Err() != nil {
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "context cancelled (client disconnect or shutdown)", Status: 500}
 	}
-	if _, ok := s.AuthenticateClient(ctx, session.ClientID, req.ClientAuthMethod, req.ClientSecret); !ok {
+	client, authenticated := s.AuthenticateClient(ctx, session.ClientID, req.ClientAuthMethod, req.ClientSecret)
+	if !authenticated {
 		return nil, &TokenError{Code: ErrCodeInvalidClient, Description: "client authentication failed", Status: 401}
 	}
 
@@ -722,7 +733,7 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 			slog.Any("error", err))
 		return nil, &TokenError{Code: ErrCodeServerError, Description: "could not recover grant for token issuance", Status: 500}
 	}
-	if !found {
+	if !found || session.GrantID == "" || grant.ID != session.GrantID || len(session.Scopes) == 0 {
 		// The user revoked consent after the refresh token was issued. This is
 		// invalid_grant (RFC 6749 §5.2) — the authorization is gone permanently.
 		// Returning server_error here would cause well-behaved clients to retry
@@ -744,18 +755,22 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	// NOT on the new refresh session that RotateSession will create. Doing this
 	// before rotation means that if signing fails the old token is still live.
 	//
-	// Scope-narrowing (RFC 6749 §6): TokenRequest has no Scope field, so a
-	// client requesting a narrower scope on a refresh_token grant is currently
-	// silently ignored — the full frozen grant scopes are always returned. This
-	// is a known intentional omission: scope narrowing is NEVER broader than the
-	// original grant (so it is not a security violation), and the DESIGN.md §3.5
-	// does not require it. If scope-narrowing support is added in a future PR,
-	// parse req.Scope here and intersect it against grant.Scopes, returning
-	// invalid_scope on any requested scope not in the grant.
-	scopeStr := strings.Join(grant.Scopes, " ")
+	// The original session scopes are a hard ceiling. A later approval cannot
+	// expand this refresh family. Removed permissions stop being returned.
+	scopes := make([]string, 0, len(session.Scopes))
+	for _, scope := range session.Scopes {
+		if containsScope(ConsentedScopes(grant), scope) && containsScope(client.ScopesAllowed, scope) {
+			scopes = append(scopes, scope)
+		}
+	}
+	if !containsScope(scopes, "openid") || !containsScope(scopes, "offline_access") {
+		return nil, invalidGrant("refresh permission is no longer active")
+	}
+	scopeStr := strings.Join(scopes, " ")
 	tokens, err := s.tokens.Issue(ctx, IssueParams{
 		Issuer:   s.issuer,
 		Subject:  grant.PairwiseSub,
+		GrantID:  grant.ID,
 		ClientID: session.ClientID,
 		Scope:    scopeStr,
 		// Nonce is intentionally omitted: OIDC Core §12.2 specifies that the
@@ -775,27 +790,6 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 	// Carry the internal user UUID out to the HTTP layer for audit emission
 	// (token.refreshed). Never serialized to the client — see IssuedTokens.UserID.
 	tokens.UserID = session.UserID
-
-	// offline_access guard: only rotate and re-issue a refresh token when
-	// offline_access is still present in the grant's frozen scopes.
-	// A grant scope downgrade after issuance is handled conservatively:
-	// the freshly-signed access/ID tokens are returned (so the request
-	// succeeds) but no new refresh token is issued and the old session is
-	// NOT revoked (so the client can retry on expiry without being locked
-	// out). SECURITY NOTE: to stop a client from ever refreshing again,
-	// operators must REVOKE the consent grant entirely — a partial scope
-	// removal leaves the existing refresh session valid until its natural
-	// TTL (up to 14 days). Matches the Token() gate (scopeHasOfflineAccess)
-	// and prevents a refresh_token response whose scope omits offline_access
-	// (RFC 6749 §3.3 protocol violation).
-	//
-	// NOTE: this path (grant exists but offline_access is absent) is currently
-	// only reachable via direct DB manipulation — there is no grant-update API.
-	// If a grant-update endpoint is ever added, this decision (leave the refresh
-	// session live) should be revisited in that PR before merging.
-	if !scopeHasOfflineAccess(scopeStr) {
-		return &tokens, nil
-	}
 
 	// Step C: generate new opaque refresh-token material.
 	newPlaintext, newHash, err := newOpaqueToken()
@@ -818,6 +812,7 @@ func (s *Service) Refresh(ctx context.Context, req TokenRequest) (*IssuedTokens,
 		UserID:      session.UserID,
 		ClientID:    session.ClientID,
 		GrantID:     session.GrantID,
+		Scopes:      scopes,
 		DeviceLabel: session.DeviceLabel,
 		TokenHash:   newHash,
 		ExpiresAt:   s.now().Add(defaultRefreshTTL),
@@ -916,6 +911,10 @@ func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession
 		return
 	}
 
+	if session.GrantID == "" {
+		return
+	} // unbound legacy tokens cannot affect a new lifetime
+
 	// Enqueue to durable outbox FIRST — guarantees delivery even if inline fails.
 	// Note: we do NOT mark as delivered on inline success; the background worker
 	// will re-deliver, but RevokeSessionsByUserClient is idempotent so double-
@@ -933,7 +932,7 @@ func (s *Service) signalRefreshReuse(ctx context.Context, session RefreshSession
 	}
 
 	// Inline best-effort attempt (immediate revocation when possible).
-	if err := s.sessionStore.RevokeSessionsByUserClient(ctx, session.UserID, session.ClientID); err != nil {
+	if err := s.sessionStore.RevokeSessionsByGrant(ctx, session.GrantID); err != nil {
 		s.logger.ErrorContext(ctx, "refresh-family revocation failed after reuse detected",
 			slog.String("client_id", session.ClientID),
 			slog.Any("error", err))
@@ -984,6 +983,10 @@ func (s *Service) signalCodeReuse(ctx context.Context, code AuthCode) {
 		return
 	}
 
+	if code.GrantID == "" {
+		return
+	} // no user/client fallback across lifetimes
+
 	// Enqueue to durable outbox FIRST — guarantees delivery even if inline fails.
 	// Note: code-reuse signals use UserID from the AuthCode for outbox tracking,
 	// but the actual revocation is done via RevokeCodeFamily which may use
@@ -995,6 +998,7 @@ func (s *Service) signalCodeReuse(ctx context.Context, code AuthCode) {
 		// will re-deliver, but revocation is idempotent so this is harmless.
 		if err := s.outbox.Enqueue(ctx, OutboxEntry{
 			Reason:   "code_reuse",
+			GrantID:  code.GrantID,
 			UserID:   code.UserID,
 			ClientID: code.ClientID,
 		}); err != nil {

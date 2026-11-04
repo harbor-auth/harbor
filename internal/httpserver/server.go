@@ -45,8 +45,8 @@ func Run(ctx context.Context, addr string, h http.Handler, logger *slog.Logger) 
 	}
 
 	// Shut down gracefully when the context is cancelled. The goroutine also
-	// exits if the server stops on its own (serveErr), so it never leaks.
-	serveErr := make(chan error, 1)
+	// exits if the server stops on its own (serveDone), so it never leaks.
+	serveDone := make(chan struct{})
 	shutdownDone := make(chan struct{})
 	go func() {
 		defer close(shutdownDone)
@@ -56,12 +56,12 @@ func Run(ctx context.Context, addr string, h http.Handler, logger *slog.Logger) 
 			defer cancel()
 			// logger.Error is the terminal handling here (not a swallow, §1.11):
 			// this goroutine has no caller to return the error to — Run has
-			// already sent its own result on serveErr and is blocked on
+			// already signalled completion on serveDone and is blocked on
 			// shutdownDone, not waiting on this err.
 			if err := srv.Shutdown(shutdownCtx); err != nil {
 				logger.Error("graceful shutdown failed", "error", err)
 			}
-		case <-serveErr:
+		case <-serveDone:
 			// Server already stopped; nothing to shut down.
 		}
 	}()
@@ -74,7 +74,7 @@ func Run(ctx context.Context, addr string, h http.Handler, logger *slog.Logger) 
 	// server was never fully bound, so a nil-return (not an error) is right.
 	logger.Info("http server listening", "addr", addr)
 	err := srv.ListenAndServe()
-	serveErr <- err
+	close(serveDone)
 	<-shutdownDone
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err

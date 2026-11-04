@@ -13,20 +13,25 @@ import (
 
 const createGrant = `-- name: CreateGrant :one
 INSERT INTO grants (
-    id, region, user_id, client_id, pairwise_sub, scopes
+    id, region, user_id, client_id, pairwise_sub, scopes, email_consent
 ) VALUES (
-    $1, $2, $3, $4, $5, $6
+    $1, $2, $3, $4, $5, $6, $7
 )
-RETURNING id, region, user_id, client_id, pairwise_sub, scopes, created_at, revoked_at
+ON CONFLICT (user_id, client_id) WHERE revoked_at IS NULL
+DO UPDATE SET scopes = ARRAY(SELECT DISTINCT unnest(grants.scopes || EXCLUDED.scopes) ORDER BY 1),
+              email_consent = grants.email_consent OR EXCLUDED.email_consent
+WHERE grants.region = EXCLUDED.region AND grants.pairwise_sub = EXCLUDED.pairwise_sub
+RETURNING id, region, user_id, client_id, pairwise_sub, scopes, created_at, revoked_at, email_consent
 `
 
 type CreateGrantParams struct {
-	ID          pgtype.UUID `json:"id"`
-	Region      string      `json:"region"`
-	UserID      pgtype.UUID `json:"user_id"`
-	ClientID    string      `json:"client_id"`
-	PairwiseSub string      `json:"pairwise_sub"`
-	Scopes      []string    `json:"scopes"`
+	ID           pgtype.UUID `json:"id"`
+	Region       string      `json:"region"`
+	UserID       pgtype.UUID `json:"user_id"`
+	ClientID     string      `json:"client_id"`
+	PairwiseSub  string      `json:"pairwise_sub"`
+	Scopes       []string    `json:"scopes"`
+	EmailConsent bool        `json:"email_consent"`
 }
 
 func (q *Queries) CreateGrant(ctx context.Context, arg CreateGrantParams) (Grant, error) {
@@ -37,6 +42,7 @@ func (q *Queries) CreateGrant(ctx context.Context, arg CreateGrantParams) (Grant
 		arg.ClientID,
 		arg.PairwiseSub,
 		arg.Scopes,
+		arg.EmailConsent,
 	)
 	var i Grant
 	err := row.Scan(
@@ -48,12 +54,13 @@ func (q *Queries) CreateGrant(ctx context.Context, arg CreateGrantParams) (Grant
 		&i.Scopes,
 		&i.CreatedAt,
 		&i.RevokedAt,
+		&i.EmailConsent,
 	)
 	return i, err
 }
 
 const findGrantByPPID = `-- name: FindGrantByPPID :one
-SELECT id, region, user_id, client_id, pairwise_sub, scopes, created_at, revoked_at FROM grants
+SELECT id, region, user_id, client_id, pairwise_sub, scopes, created_at, revoked_at, email_consent FROM grants
 WHERE pairwise_sub = $1
   AND client_id = $2
   AND revoked_at IS NULL
@@ -79,12 +86,13 @@ func (q *Queries) FindGrantByPPID(ctx context.Context, arg FindGrantByPPIDParams
 		&i.Scopes,
 		&i.CreatedAt,
 		&i.RevokedAt,
+		&i.EmailConsent,
 	)
 	return i, err
 }
 
 const findGrantByUserClient = `-- name: FindGrantByUserClient :one
-SELECT id, region, user_id, client_id, pairwise_sub, scopes, created_at, revoked_at FROM grants
+SELECT id, region, user_id, client_id, pairwise_sub, scopes, created_at, revoked_at, email_consent FROM grants
 WHERE user_id = $1
   AND client_id = $2
   AND revoked_at IS NULL
@@ -107,13 +115,14 @@ func (q *Queries) FindGrantByUserClient(ctx context.Context, arg FindGrantByUser
 		&i.Scopes,
 		&i.CreatedAt,
 		&i.RevokedAt,
+		&i.EmailConsent,
 	)
 	return i, err
 }
 
 const getGrant = `-- name: GetGrant :one
 
-SELECT id, region, user_id, client_id, pairwise_sub, scopes, created_at, revoked_at FROM grants
+SELECT id, region, user_id, client_id, pairwise_sub, scopes, created_at, revoked_at, email_consent FROM grants
 WHERE id = $1
 `
 
@@ -131,12 +140,13 @@ func (q *Queries) GetGrant(ctx context.Context, id pgtype.UUID) (Grant, error) {
 		&i.Scopes,
 		&i.CreatedAt,
 		&i.RevokedAt,
+		&i.EmailConsent,
 	)
 	return i, err
 }
 
 const listGrantsByClient = `-- name: ListGrantsByClient :many
-SELECT id, region, user_id, client_id, pairwise_sub, scopes, created_at, revoked_at FROM grants
+SELECT id, region, user_id, client_id, pairwise_sub, scopes, created_at, revoked_at, email_consent FROM grants
 WHERE client_id = $1
   AND revoked_at IS NULL
 ORDER BY created_at DESC
@@ -162,6 +172,7 @@ func (q *Queries) ListGrantsByClient(ctx context.Context, clientID string) ([]Gr
 			&i.Scopes,
 			&i.CreatedAt,
 			&i.RevokedAt,
+			&i.EmailConsent,
 		); err != nil {
 			return nil, err
 		}
@@ -174,7 +185,7 @@ func (q *Queries) ListGrantsByClient(ctx context.Context, clientID string) ([]Gr
 }
 
 const listGrantsByUser = `-- name: ListGrantsByUser :many
-SELECT id, region, user_id, client_id, pairwise_sub, scopes, created_at, revoked_at FROM grants
+SELECT id, region, user_id, client_id, pairwise_sub, scopes, created_at, revoked_at, email_consent FROM grants
 WHERE user_id = $1
   AND revoked_at IS NULL
 ORDER BY created_at DESC
@@ -198,6 +209,7 @@ func (q *Queries) ListGrantsByUser(ctx context.Context, userID pgtype.UUID) ([]G
 			&i.Scopes,
 			&i.CreatedAt,
 			&i.RevokedAt,
+			&i.EmailConsent,
 		); err != nil {
 			return nil, err
 		}
@@ -272,11 +284,12 @@ func (q *Queries) RevokeGrantsByClient(ctx context.Context, clientID string) err
 
 const updateGrantScopes = `-- name: UpdateGrantScopes :one
 UPDATE grants
-SET scopes = $3
+SET scopes = ARRAY(SELECT DISTINCT unnest(scopes || $3::text[]) ORDER BY 1),
+    email_consent = email_consent OR ('email' = ANY($3::text[]))
 WHERE user_id = $1
   AND client_id = $2
   AND revoked_at IS NULL
-RETURNING id, region, user_id, client_id, pairwise_sub, scopes, created_at, revoked_at
+RETURNING id, region, user_id, client_id, pairwise_sub, scopes, created_at, revoked_at, email_consent
 `
 
 type UpdateGrantScopesParams struct {
@@ -300,6 +313,7 @@ func (q *Queries) UpdateGrantScopes(ctx context.Context, arg UpdateGrantScopesPa
 		&i.Scopes,
 		&i.CreatedAt,
 		&i.RevokedAt,
+		&i.EmailConsent,
 	)
 	return i, err
 }

@@ -9,25 +9,27 @@ import (
 // (docs/DESIGN.md §10, §11.3). It carries only stdlib types so internal/oidc
 // remains free of DB-layer dependencies (internal/clients does the mapping).
 type Grant struct {
-	ID          string   // UUID string
-	Region      string   // user's home jurisdiction (DESIGN §5.4)
-	UserID      string   // UUID string
-	ClientID    string   // relying_parties.client_id
-	PairwiseSub string   // PPID this RP sees for this user (DESIGN §3.2)
-	Scopes      []string // consented scopes
-	CreatedAt   time.Time
-	RevokedAt   *time.Time // nil = active grant
+	ID           string   // UUID string
+	Region       string   // user's home jurisdiction (DESIGN §5.4)
+	UserID       string   // UUID string
+	ClientID     string   // relying_parties.client_id
+	PairwiseSub  string   // PPID this RP sees for this user (DESIGN §3.2)
+	Scopes       []string // consented scopes
+	EmailConsent bool     // explicit permission to disclose the verified real email
+	CreatedAt    time.Time
+	RevokedAt    *time.Time // nil = active grant
 }
 
 // NewGrant is the input to GrantStore.CreateGrant. The store is responsible for
 // minting the ID and setting CreatedAt; the caller supplies the region so the
 // row satisfies the user-owned-row contract (DESIGN §10).
 type NewGrant struct {
-	Region      string
-	UserID      string
-	ClientID    string
-	PairwiseSub string
-	Scopes      []string
+	Region       string
+	UserID       string
+	ClientID     string
+	PairwiseSub  string
+	Scopes       []string
+	EmailConsent bool
 }
 
 // GrantStore persists and queries consent grants (user<->RP relationships).

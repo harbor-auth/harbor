@@ -28,10 +28,17 @@ func mustNewService(t *testing.T, cfg ServiceConfig) *Service {
 		cfg.SessionStore = NewInMemorySessionStore()
 	}
 	if cfg.Grants == nil {
-		cfg.Grants = NewInMemoryGrantStore()
-	}
-	if cfg.Consents == nil {
-		cfg.Consents = NewInMemoryConsentStore()
+		grants := NewInMemoryGrantStore()
+		if resolver, ok := cfg.Sessions.(stubSessionResolver); ok {
+			if registry, ok := cfg.Clients.(*InMemoryClientRegistry); ok {
+				for _, client := range registry.clients {
+					if _, err := grants.CreateGrant(context.Background(), NewGrant{Region: "EU", UserID: "user-1", ClientID: client.ID, PairwiseSub: resolver.subject, Scopes: client.ScopesAllowed, EmailConsent: true}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+		}
+		cfg.Grants = grants
 	}
 	if cfg.Revocations == nil {
 		cfg.Revocations = NewRecordingRevocationSink()
@@ -52,13 +59,14 @@ func mustNewService(t *testing.T, cfg ServiceConfig) *Service {
 // but NOT for DBSessionStore, which requires a valid UUID in the id column.
 func seedSession(t *testing.T, store *InMemorySessionStore, grantStore *InMemoryGrantStore, sub string) string {
 	t.Helper()
-	if _, err := grantStore.CreateGrant(context.Background(), NewGrant{
+	grant, err := grantStore.CreateGrant(context.Background(), NewGrant{
 		Region:      "us",
 		UserID:      testRefreshUserID,
 		ClientID:    testRefreshClientID,
 		PairwiseSub: sub,
 		Scopes:      []string{"openid", "offline_access"},
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("seedSession: CreateGrant: %v", err)
 	}
 
@@ -67,7 +75,8 @@ func seedSession(t *testing.T, store *InMemorySessionStore, grantStore *InMemory
 		t.Fatalf("seedSession: newOpaqueToken: %v", err)
 	}
 	rs := RefreshSession{
-		ID:        "session-" + sub,
+		ID:      "session-" + sub,
+		GrantID: grant.ID, Scopes: append([]string(nil), grant.Scopes...),
 		Region:    "us",
 		UserID:    testRefreshUserID,
 		ClientID:  testRefreshClientID,

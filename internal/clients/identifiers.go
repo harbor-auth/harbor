@@ -3,6 +3,8 @@ package clients
 import (
 	"context"
 	"errors"
+	"github.com/harbor-auth/harbor/internal/oidc"
+	"github.com/harbor-auth/harbor/internal/region"
 
 	"github.com/google/uuid"
 	"github.com/harbor-auth/harbor/internal/crypto"
@@ -96,4 +98,52 @@ func (s *DBIdentifierStore) AccountLabel(ctx context.Context, userID string) (st
 		return string(value), err
 	}
 	return "", nil
+}
+
+// UserInfo reads the existing verified identifier; it never invents a relay
+// address or makes an unverified address eligible for account linking.
+func (s *DBIdentifierStore) UserInfo(ctx context.Context, userID, homeRegion string, shareEmail bool) (oidc.UserInfoClaims, error) {
+	if err := region.AssertRegion(ctx, region.Region(homeRegion)); err != nil {
+		return oidc.UserInfoClaims{}, oidc.ErrUserInfoUnavailable
+	}
+	uid, err := parseUUID(userID)
+	if err != nil {
+		return oidc.UserInfoClaims{}, oidc.ErrUserInfoUnavailable
+	}
+	user, err := s.q.GetUser(ctx, uid)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return oidc.UserInfoClaims{}, oidc.ErrUserInfoUnavailable
+	}
+	if err != nil {
+		return oidc.UserInfoClaims{}, err
+	}
+	if user.Status != "active" || user.Region != homeRegion {
+		return oidc.UserInfoClaims{}, oidc.ErrUserInfoUnavailable
+	}
+	if !shareEmail {
+		return oidc.UserInfoClaims{}, nil
+	}
+	entries, err := s.q.ListAccountIdentifiers(ctx, uid)
+	if err != nil {
+		return oidc.UserInfoClaims{}, err
+	}
+	for _, entry := range entries {
+		if entry.Kind != "email" || !entry.VerifiedAt.Valid || entry.Region != homeRegion {
+			continue
+		}
+		dek, err := s.keys.UnwrapDEK(ctx, homeRegion, user.DekWrapped)
+		if err != nil {
+			return oidc.UserInfoClaims{}, err
+		}
+		defer clear(dek[:])
+		value, err := s.cipher.Decrypt(dek, entry.EncryptedValue, identity.IdentifierAAD(userID, "email"))
+		if err != nil {
+			return oidc.UserInfoClaims{}, err
+		}
+		defer clear(value)
+		return oidc.UserInfoClaims{Email: string(value), EmailVerified: true}, nil
+	}
+	// Older/federated accounts may not have a verified email. OIDC permits
+	// unavailable optional claims to be omitted; never return email_verified alone.
+	return oidc.UserInfoClaims{}, nil
 }

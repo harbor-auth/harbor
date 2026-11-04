@@ -107,14 +107,15 @@ type FederatedIdentity struct {
 }
 
 type Grant struct {
-	ID          pgtype.UUID        `json:"id"`
-	Region      string             `json:"region"`
-	UserID      pgtype.UUID        `json:"user_id"`
-	ClientID    string             `json:"client_id"`
-	PairwiseSub string             `json:"pairwise_sub"`
-	Scopes      []string           `json:"scopes"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
-	RevokedAt   pgtype.Timestamptz `json:"revoked_at"`
+	ID           pgtype.UUID        `json:"id"`
+	Region       string             `json:"region"`
+	UserID       pgtype.UUID        `json:"user_id"`
+	ClientID     string             `json:"client_id"`
+	PairwiseSub  string             `json:"pairwise_sub"`
+	Scopes       []string           `json:"scopes"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	RevokedAt    pgtype.Timestamptz `json:"revoked_at"`
+	EmailConsent bool               `json:"email_consent"`
 }
 
 type MfaFactor struct {
@@ -206,6 +207,10 @@ type Session struct {
 	RevokedAt        pgtype.Timestamptz `json:"revoked_at"`
 	ClientID         string             `json:"client_id"`
 	GrantID          pgtype.UUID        `json:"grant_id"`
+	Scopes           []string           `json:"scopes"`
+	AuthTime         int64              `json:"auth_time"`
+	Acr              string             `json:"acr"`
+	Amr              []string           `json:"amr"`
 }
 
 type SigningKey struct {

@@ -107,7 +107,7 @@ func (m *mockResolver) ResolveUser(_ context.Context, _ *http.Request, _ bff.BFF
 // spec (ServerInterface) — it's a BFF-specific route that is manually registered
 // in production (cmd/harbor-mgmt). We replicate that wiring here by adding the
 // route to the mux before passing it to HandlerFromMux.
-func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bfftest.InMemoryBFFSessionStore, *oidc.InMemoryConsentStore) {
+func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bfftest.InMemoryBFFSessionStore, oidc.GrantStore) {
 	t.Helper()
 
 	clients := oidctest.NewInMemoryClientRegistry()
@@ -117,7 +117,6 @@ func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bffte
 		RedirectURIs:  []string{itRedirectURI},
 		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
 	})
-	consents := oidc.NewInMemoryConsentStore()
 	grants := oidctest.NewInMemoryGrantStore()
 	loader := oidctest.NewInMemorySecretLoader()
 	loader.Put(itUserID, oidc.UserSecret{Region: "EU", Secret: []byte("0123456789abcdef0123456789abcdef")})
@@ -131,7 +130,6 @@ func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bffte
 		Tokens:   oidctest.NewPlaceholderIssuer(),
 		Sessions: resolver,
 		Grants:   grants,
-		Consents: consents,
 	})
 
 	store := bfftest.NewInMemoryBFFSessionStore()
@@ -153,7 +151,7 @@ func newBFFIntegrationEnv(t *testing.T) (http.Handler, *bff.LoginHandler, *bffte
 	oidcHandler := openapi.HandlerFromMux(srv, mux)
 
 	loginHandler := bff.NewLoginHandler(store, &mockWebAuthn{userID: itUserID}, &mockResolver{}, "/authorize/complete")
-	return oidcHandler, loginHandler, store, consents
+	return oidcHandler, loginHandler, store, grants
 }
 
 // validITAuthorizeQuery returns a query that passes every /authorize check.
@@ -432,7 +430,7 @@ func TestBFFFlow_ExplicitConsentDecisionIsOneTime(t *testing.T) {
 			if consentLoc.Path != "/consent" {
 				t.Fatalf("authenticated completion redirected to %q, want /consent", consentLoc.Path)
 			}
-			if _, found, err := consents.Get(context.Background(), itUserID, itClientID); err != nil {
+			if _, found, err := consents.FindGrant(context.Background(), itUserID, itClientID); err != nil {
 				t.Fatalf("get consent before decision: %v", err)
 			} else if found {
 				t.Fatal("grant persisted before explicit consent decision")
@@ -451,7 +449,7 @@ func TestBFFFlow_ExplicitConsentDecisionIsOneTime(t *testing.T) {
 			if got := rpLoc.Query().Get("error"); got != tc.wantErr {
 				t.Fatalf("error = %q, want %q", got, tc.wantErr)
 			}
-			_, found, err := consents.Get(context.Background(), itUserID, itClientID)
+			_, found, err := consents.FindGrant(context.Background(), itUserID, itClientID)
 			if err != nil {
 				t.Fatalf("get consent after decision: %v", err)
 			}
@@ -489,7 +487,7 @@ func TestBFFFlow_PromptSemanticsSurviveLogin(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			handler, _, store, consents := newBFFIntegrationEnv(t)
 			if tc.seedConsent {
-				if _, err := consents.Upsert(context.Background(), itUserID, itClientID, []string{"openid", "profile"}); err != nil {
+				if _, err := consents.CreateGrant(context.Background(), oidc.NewGrant{Region: "EU", UserID: itUserID, ClientID: itClientID, PairwiseSub: "fixture-ppid", Scopes: []string{"openid", "profile"}}); err != nil {
 					t.Fatalf("seed consent: %v", err)
 				}
 			}

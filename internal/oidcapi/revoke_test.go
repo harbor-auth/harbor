@@ -45,6 +45,9 @@ func newRevokeServer(t *testing.T) (*httptest.Server, *oidctest.InMemorySessionS
 	}
 	sessionStore := oidctest.NewInMemorySessionStore()
 	grantStore := oidctest.NewInMemoryGrantStore()
+	if _, err := grantStore.CreateGrant(t.Context(), oidc.NewGrant{Region: "EU", UserID: "user-1", ClientID: testClientID, PairwiseSub: "demo-subject-ppid", Scopes: []string{"openid", "profile"}}); err != nil {
+		t.Fatal(err)
+	}
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
 		Issuer:       "https://eu.harbor.id",
 		Clients:      clients,
@@ -56,10 +59,11 @@ func newRevokeServer(t *testing.T) (*httptest.Server, *oidctest.InMemorySessionS
 	})
 	filter := oidc.NewInMemoryRevocationFilter()
 	srv := New(Config{
+		Clients:          clients,
 		Issuer:           "https://eu.harbor.id",
 		Service:          svc,
 		Signers:          []crypto.Signer{signer},
-		RevocationFilter: filter,
+		RevocationFilter: filter, Grants: grantStore,
 	})
 	h := openapi.HandlerFromMux(srv, http.NewServeMux())
 	ts := httptest.NewServer(h)
@@ -95,12 +99,18 @@ func TestPostRevoke_RejectsUnauthenticatedClientCredentials(t *testing.T) {
 func TestPostRevoke_PublicClientCannotAuthenticate(t *testing.T) {
 	clients := oidctest.NewInMemoryClientRegistry()
 	clients.Put(oidc.Client{ID: testClientID, TokenEndpointAuthMethod: "none"})
+	grantStore := oidctest.NewInMemoryGrantStore()
+	if _, err := grantStore.CreateGrant(t.Context(), oidc.NewGrant{Region: "EU", UserID: "user-1", ClientID: testClientID, PairwiseSub: "demo-subject-ppid", Scopes: []string{"openid", "profile"}}); err != nil {
+		t.Fatal(err)
+	}
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
+		Grants: grantStore,
 		Issuer: "https://eu.harbor.id", Clients: clients,
 		Codes: oidctest.NewRedisAuthCodeStore(t), Tokens: oidctest.NewPlaceholderIssuer(),
 		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
-	srv := New(Config{Issuer: "https://eu.harbor.id", Service: svc})
+	srv := New(Config{
+		Clients: clients, Issuer: "https://eu.harbor.id", Service: svc})
 	ts := httptest.NewServer(openapi.HandlerFromMux(srv, http.NewServeMux()))
 	defer ts.Close()
 
@@ -389,7 +399,12 @@ func TestPostRevoke_AccessToken_AddsToFilter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
+	grantStore := oidctest.NewInMemoryGrantStore()
+	if _, err := grantStore.CreateGrant(t.Context(), oidc.NewGrant{Region: "EU", UserID: "user-1", ClientID: testClientID, PairwiseSub: "demo-subject-ppid", Scopes: []string{"openid", "profile"}}); err != nil {
+		t.Fatal(err)
+	}
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
+		Grants:   grantStore,
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    oidctest.NewRedisAuthCodeStore(t),
@@ -398,10 +413,11 @@ func TestPostRevoke_AccessToken_AddsToFilter(t *testing.T) {
 	})
 	filter := oidc.NewInMemoryRevocationFilter()
 	srv := New(Config{
+		Clients:          clients,
 		Issuer:           "https://eu.harbor.id",
 		Service:          svc,
 		Signers:          []crypto.Signer{signer},
-		RevocationFilter: filter,
+		RevocationFilter: filter, Grants: grantStore,
 	})
 	h := openapi.HandlerFromMux(srv, http.NewServeMux())
 	ts := httptest.NewServer(h)
@@ -485,10 +501,11 @@ func TestPostRevoke_WrongHintAccessToken_StillRevokesRefreshToken(t *testing.T) 
 	})
 	filter := oidc.NewInMemoryRevocationFilter()
 	srv := New(Config{
+		Clients:          clients,
 		Issuer:           "https://eu.harbor.id",
 		Service:          svc,
 		Signers:          []crypto.Signer{signer},
-		RevocationFilter: filter,
+		RevocationFilter: filter, Grants: grantStore,
 	})
 	h := openapi.HandlerFromMux(srv, http.NewServeMux())
 	ts := httptest.NewServer(h)
@@ -530,7 +547,12 @@ func TestPostRevoke_WrongHintRefreshToken_StillRevokesAccessToken(t *testing.T) 
 	if err != nil {
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
+	grantStore := oidctest.NewInMemoryGrantStore()
+	if _, err := grantStore.CreateGrant(t.Context(), oidc.NewGrant{Region: "EU", UserID: "user-1", ClientID: testClientID, PairwiseSub: "demo-subject-ppid", Scopes: []string{"openid", "profile"}}); err != nil {
+		t.Fatal(err)
+	}
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
+		Grants:   grantStore,
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    oidctest.NewRedisAuthCodeStore(t),
@@ -539,10 +561,11 @@ func TestPostRevoke_WrongHintRefreshToken_StillRevokesAccessToken(t *testing.T) 
 	})
 	filter := oidc.NewInMemoryRevocationFilter()
 	srv := New(Config{
+		Clients:          clients,
 		Issuer:           "https://eu.harbor.id",
 		Service:          svc,
 		Signers:          []crypto.Signer{signer},
-		RevocationFilter: filter,
+		RevocationFilter: filter, Grants: grantStore,
 	})
 	h := openapi.HandlerFromMux(srv, http.NewServeMux())
 	ts := httptest.NewServer(h)
@@ -631,10 +654,11 @@ func TestPostRevoke_CrossClient_Returns200WithoutRevoking(t *testing.T) {
 	})
 	filter := oidc.NewInMemoryRevocationFilter()
 	srv := New(Config{
+		Clients:          clients,
 		Issuer:           "https://eu.harbor.id",
 		Service:          svc,
 		Signers:          []crypto.Signer{signer},
-		RevocationFilter: filter,
+		RevocationFilter: filter, Grants: grantStore,
 	})
 	h := openapi.HandlerFromMux(srv, http.NewServeMux())
 	ts := httptest.NewServer(h)
@@ -726,6 +750,7 @@ func createRefreshTokenInStore(t *testing.T, store *oidctest.InMemorySessionStor
 		Region:    "eu",
 		UserID:    userID,
 		ClientID:  clientID,
+		GrantID:   userID + "-" + clientID,
 		TokenHash: hash,
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 	}

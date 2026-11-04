@@ -2,6 +2,8 @@ package oidcapi
 
 import (
 	"encoding/json"
+	"errors"
+	"github.com/oapi-codegen/runtime/types"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -45,14 +47,46 @@ func (s *Server) GetUserInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.grants == nil || s.clients == nil || s.userInfoSource == nil {
+		writeError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "UserInfo is unavailable")
+		return
+	}
+	if claims.GrantID == "" {
+		writeUnauthorized(w, "invalid_token", "access token is invalid")
+		return
+	}
+	client, found := s.clients.Lookup(r.Context(), claims.Audience)
+	if !found || client.ID != claims.Audience {
+		writeUnauthorized(w, "invalid_token", "access token is invalid")
+		return
+	}
+	grant, found, err := s.grants.FindGrantByPPID(r.Context(), claims.Subject, claims.Audience)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "UserInfo is unavailable")
+		return
+	}
+	if !found || grant.ID != claims.GrantID || !hasScope(strings.Join(oidc.ConsentedScopes(grant), " "), "openid") || !hasScope(strings.Join(client.ScopesAllowed, " "), "openid") {
+		writeUnauthorized(w, "invalid_token", "access token is invalid")
+		return
+	}
+	// All three permission sets must allow disclosure: token, live grant and
+	// current application policy. Expanding a grant never expands an old token.
+	shareEmail := hasScope(claims.Scope, "email") && hasScope(strings.Join(oidc.ConsentedScopes(grant), " "), "email") && hasScope(strings.Join(client.ScopesAllowed, " "), "email")
+	personal, err := s.userInfoSource.UserInfo(r.Context(), grant.UserID, grant.Region, shareEmail)
+	if errors.Is(err, oidc.ErrUserInfoUnavailable) {
+		writeUnauthorized(w, "invalid_token", "access token is invalid")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "UserInfo is unavailable")
+		return
+	}
 	resp := openapi.UserInfoResponse{Sub: claims.Subject}
-	// email/email_verified are only ever returned when the email scope was
-	// granted. Harbor never leaks a real address here: any address is the
-	// relay/PPID-scoped value resolved elsewhere (DESIGN §3.3). Until the
-	// grant-backed email lookup is wired, the scope gate is enforced but no
-	// address is attached — the OIDF suite validates the sub round-trip and
-	// the scope-gating contract, which this satisfies.
-	// TODO(userinfo): resolve email from the consent grant keyed by sub.
+	if shareEmail && personal.Email != "" && personal.EmailVerified {
+		address := types.Email(personal.Email)
+		verified := true
+		resp.Email, resp.EmailVerified = &address, &verified
+	}
 
 	outcome = telemetry.OutcomeSuccess
 	w.Header().Set("Content-Type", "application/json")
@@ -101,3 +135,12 @@ func writeUnauthorized(w http.ResponseWriter, code, description string) {
 // errInvalidToken is the single collapsed error for every access-token
 // rejection path — the caller never learns which specific check failed
 // (DESIGN §11.7).
+
+func hasScope(scope, wanted string) bool {
+	for _, item := range strings.Fields(scope) {
+		if item == wanted {
+			return true
+		}
+	}
+	return false
+}

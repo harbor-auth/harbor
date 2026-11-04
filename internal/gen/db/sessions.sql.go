@@ -13,11 +13,11 @@ import (
 
 const createSession = `-- name: CreateSession :one
 INSERT INTO sessions (
-    id, region, user_id, client_id, grant_id, device_label, refresh_token_hash, expires_at
+    id, region, user_id, client_id, grant_id, device_label, refresh_token_hash, expires_at, scopes, auth_time, acr, amr
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 )
-RETURNING id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id, grant_id
+RETURNING id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id, grant_id, scopes, auth_time, acr, amr
 `
 
 type CreateSessionParams struct {
@@ -29,6 +29,10 @@ type CreateSessionParams struct {
 	DeviceLabel      *string            `json:"device_label"`
 	RefreshTokenHash []byte             `json:"refresh_token_hash"`
 	ExpiresAt        pgtype.Timestamptz `json:"expires_at"`
+	Scopes           []string           `json:"scopes"`
+	AuthTime         int64              `json:"auth_time"`
+	Acr              string             `json:"acr"`
+	Amr              []string           `json:"amr"`
 }
 
 func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error) {
@@ -41,6 +45,10 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		arg.DeviceLabel,
 		arg.RefreshTokenHash,
 		arg.ExpiresAt,
+		arg.Scopes,
+		arg.AuthTime,
+		arg.Acr,
+		arg.Amr,
 	)
 	var i Session
 	err := row.Scan(
@@ -54,6 +62,10 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		&i.RevokedAt,
 		&i.ClientID,
 		&i.GrantID,
+		&i.Scopes,
+		&i.AuthTime,
+		&i.Acr,
+		&i.Amr,
 	)
 	return i, err
 }
@@ -71,7 +83,7 @@ func (q *Queries) DeleteExpiredSessions(ctx context.Context) error {
 }
 
 const getActiveSession = `-- name: GetActiveSession :one
-SELECT sessions.id, sessions.region, sessions.user_id, sessions.device_label, sessions.refresh_token_hash, sessions.created_at, sessions.expires_at, sessions.revoked_at, sessions.client_id, sessions.grant_id FROM sessions
+SELECT sessions.id, sessions.region, sessions.user_id, sessions.device_label, sessions.refresh_token_hash, sessions.created_at, sessions.expires_at, sessions.revoked_at, sessions.client_id, sessions.grant_id, sessions.scopes, sessions.auth_time, sessions.acr, sessions.amr FROM sessions
 LEFT JOIN grants ON sessions.grant_id = grants.id
 WHERE sessions.id = $1
   AND sessions.revoked_at IS NULL
@@ -102,13 +114,17 @@ func (q *Queries) GetActiveSession(ctx context.Context, id pgtype.UUID) (Session
 		&i.RevokedAt,
 		&i.ClientID,
 		&i.GrantID,
+		&i.Scopes,
+		&i.AuthTime,
+		&i.Acr,
+		&i.Amr,
 	)
 	return i, err
 }
 
 const getSession = `-- name: GetSession :one
 
-SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id, grant_id FROM sessions
+SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id, grant_id, scopes, auth_time, acr, amr FROM sessions
 WHERE id = $1
 `
 
@@ -129,12 +145,16 @@ func (q *Queries) GetSession(ctx context.Context, id pgtype.UUID) (Session, erro
 		&i.RevokedAt,
 		&i.ClientID,
 		&i.GrantID,
+		&i.Scopes,
+		&i.AuthTime,
+		&i.Acr,
+		&i.Amr,
 	)
 	return i, err
 }
 
 const getSessionByHash = `-- name: GetSessionByHash :one
-SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id, grant_id FROM sessions
+SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id, grant_id, scopes, auth_time, acr, amr FROM sessions
 WHERE refresh_token_hash = $1
 `
 
@@ -156,12 +176,16 @@ func (q *Queries) GetSessionByHash(ctx context.Context, refreshTokenHash []byte)
 		&i.RevokedAt,
 		&i.ClientID,
 		&i.GrantID,
+		&i.Scopes,
+		&i.AuthTime,
+		&i.Acr,
+		&i.Amr,
 	)
 	return i, err
 }
 
 const listSessionsByUser = `-- name: ListSessionsByUser :many
-SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id, grant_id FROM sessions
+SELECT id, region, user_id, device_label, refresh_token_hash, created_at, expires_at, revoked_at, client_id, grant_id, scopes, auth_time, acr, amr FROM sessions
 WHERE user_id = $1
   AND revoked_at IS NULL
 ORDER BY created_at DESC
@@ -187,6 +211,10 @@ func (q *Queries) ListSessionsByUser(ctx context.Context, userID pgtype.UUID) ([
 			&i.RevokedAt,
 			&i.ClientID,
 			&i.GrantID,
+			&i.Scopes,
+			&i.AuthTime,
+			&i.Acr,
+			&i.Amr,
 		); err != nil {
 			return nil, err
 		}

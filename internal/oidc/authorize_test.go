@@ -109,17 +109,20 @@ func TestValidateAuthorize_RedirectChannelErrors(t *testing.T) {
 }
 
 // testServiceWithConsent creates a Service with consent store for testing.
-func testServiceWithConsent(t *testing.T, consents ConsentStore) *Service {
+func testServiceWithConsent(t *testing.T, consents *InMemoryConsentStore) *Service {
 	clients := NewInMemoryClientRegistry()
-	clients.Put(testClient())
-	return mustNewService(t, ServiceConfig{
-		Issuer:   "https://test.example",
-		Clients:  clients,
-		Codes:    newRedisAuthCodeStore(t),
-		Tokens:   &stubTokenIssuer{},
-		Sessions: &userIDSessionResolver{subject: "ppid-123", userID: "user-456"},
-		Consents: consents,
-	})
+	client := testClient()
+	client.SectorID = "rp.example.com"
+	clients.Put(client)
+	resolver, grants := newTestResolver(t, "user-456", resolverTestSecret())
+	if old, found, err := consents.Get(context.Background(), "user-456", client.ID); err != nil {
+		t.Fatal(err)
+	} else if found {
+		if _, err := resolver.Approve(context.Background(), client, strings.Join(old.Scopes, " ")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return mustNewService(t, ServiceConfig{Issuer: "https://test.example", Clients: clients, Sessions: resolver, Grants: grants})
 }
 
 func TestConsentRequiredReadsCanonicalGrant(t *testing.T) {
@@ -138,23 +141,6 @@ func TestConsentRequiredReadsCanonicalGrant(t *testing.T) {
 	if aerr != nil || required {
 		t.Fatalf("ConsentRequired = (%v, %v), want canonical covering grant", required, aerr)
 	}
-}
-
-// userIDSessionResolver returns a fixed subject and userID for consent testing.
-type userIDSessionResolver struct {
-	subject string
-	userID  string
-}
-
-func (r *userIDSessionResolver) Resolve(_ context.Context, _ Client, _ string) (string, string, bool, error) {
-	return r.subject, r.userID, true, nil
-}
-
-// stubTokenIssuer is a minimal TokenIssuer for authorize tests.
-type stubTokenIssuer struct{}
-
-func (s *stubTokenIssuer) Issue(_ context.Context, _ IssueParams) (IssuedTokens, error) {
-	return IssuedTokens{AccessToken: "access-token", IDToken: "id-token", ExpiresIn: 3600}, nil
 }
 
 func TestAuthorize_ConsentSkip_CoveringGrant(t *testing.T) {

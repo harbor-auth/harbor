@@ -114,10 +114,10 @@ func TestPPIDSessionResolverGrantReuse(t *testing.T) {
 	r, grants := newTestResolver(t, userID, resolverTestSecret())
 	client := resolverTestClient("rp-a", "rp-a.example.com")
 
-	if _, _, _, err := r.Resolve(context.Background(), client, "openid profile"); err != nil {
+	if _, _, _, err := approveResolved(r, context.Background(), client, "openid profile"); err != nil {
 		t.Fatalf("first Resolve: %v", err)
 	}
-	if _, _, _, err := r.Resolve(context.Background(), client, "openid profile"); err != nil {
+	if _, _, _, err := approveResolved(r, context.Background(), client, "openid profile"); err != nil {
 		t.Fatalf("second Resolve: %v", err)
 	}
 
@@ -142,13 +142,13 @@ func TestPPIDSessionResolverScopeExpansion(t *testing.T) {
 	client := resolverTestClient("rp-a", "rp-a.example.com")
 
 	// First consent: openid only.
-	sub1, _, _, err := r.Resolve(context.Background(), client, "openid")
+	sub1, _, _, err := approveResolved(r, context.Background(), client, "openid")
 	if err != nil {
 		t.Fatalf("first Resolve: %v", err)
 	}
 
 	// Second consent: openid + offline_access (scope upgrade).
-	sub2, _, _, err := r.Resolve(context.Background(), client, "openid offline_access")
+	sub2, _, _, err := approveResolved(r, context.Background(), client, "openid offline_access")
 	if err != nil {
 		t.Fatalf("second Resolve (scope upgrade): %v", err)
 	}
@@ -188,7 +188,7 @@ func TestPPIDSessionResolverScopeExpansionPreservesGrantCount(t *testing.T) {
 
 	// Three resolve calls, each adding a new scope.
 	for _, scope := range []string{"openid", "openid profile", "openid profile offline_access"} {
-		if _, _, _, err := r.Resolve(context.Background(), client, scope); err != nil {
+		if _, _, _, err := approveResolved(r, context.Background(), client, scope); err != nil {
 			t.Fatalf("Resolve(%q): %v", scope, err)
 		}
 	}
@@ -237,7 +237,7 @@ func TestPPIDSessionResolverScopeEscalationUpdatesCanonicalGrant(t *testing.T) {
 	r, grants := newTestResolver(t, userID, resolverTestSecret())
 	client := resolverTestClient("rp-a", "rp-a.example.com")
 
-	if _, _, _, err := r.Resolve(context.Background(), client, "openid"); err != nil {
+	if _, _, _, err := approveResolved(r, context.Background(), client, "openid"); err != nil {
 		t.Fatalf("first Resolve: %v", err)
 	}
 	before, found, err := grants.FindGrant(context.Background(), userID, client.ID)
@@ -245,7 +245,7 @@ func TestPPIDSessionResolverScopeEscalationUpdatesCanonicalGrant(t *testing.T) {
 		t.Fatalf("FindGrant before escalation: found=%v err=%v", found, err)
 	}
 
-	if _, _, _, err := r.Resolve(context.Background(), client, "openid profile"); err != nil {
+	if _, _, _, err := approveResolved(r, context.Background(), client, "openid profile"); err != nil {
 		t.Fatalf("scope escalation Resolve: %v", err)
 	}
 	after, found, err := grants.FindGrant(context.Background(), userID, client.ID)
@@ -330,7 +330,7 @@ func TestPPIDSessionResolverCreateGrantError(t *testing.T) {
 		Grants: errGrantStore{createErr: errors.New("constraint violation")},
 	})
 
-	sub, _, approved, err := r.Resolve(context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid")
+	sub, _, approved, err := approveResolved(r, context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid")
 	if err == nil {
 		t.Fatal("expected error on CreateGrant failure")
 	}
@@ -355,11 +355,11 @@ func TestPPIDSessionResolverScopeUpgradeRevokeError(t *testing.T) {
 		Grants: errGrantStore{
 			found:      true,
 			foundGrant: Grant{ID: "g1", UserID: userID, ClientID: "rp-a", PairwiseSub: "stable-ppid", Scopes: []string{"openid"}},
-			revokeErr:  errors.New("DB connection lost"),
+			createErr:  errors.New("DB connection lost"),
 		},
 	})
 
-	sub, _, approved, err := r.Resolve(context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid offline_access")
+	sub, _, approved, err := approveResolved(r, context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid offline_access")
 	if err == nil {
 		t.Fatal("expected error when RevokeGrant fails during scope upgrade")
 	}
@@ -389,7 +389,7 @@ func TestPPIDSessionResolverScopeUpgradeCreateAfterRevokeError(t *testing.T) {
 		},
 	})
 
-	sub, _, approved, err := r.Resolve(context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid offline_access")
+	sub, _, approved, err := approveResolved(r, context.Background(), resolverTestClient("rp-a", "rp-a.example.com"), "openid offline_access")
 	if err == nil {
 		t.Fatal("expected error when CreateGrant fails after RevokeGrant succeeds during scope upgrade")
 	}
@@ -448,5 +448,21 @@ func TestPPIDSessionResolverSecretLoaderGenericError(t *testing.T) {
 	}
 	if sub != "" || approved {
 		t.Fatalf("expected empty non-approved subject, got sub=%q approved=%v", sub, approved)
+	}
+}
+
+func approveResolved(r *PPIDSessionResolver, ctx context.Context, client Client, scope string) (string, string, bool, error) {
+	grant, err := r.Approve(ctx, client, scope)
+	return grant.PairwiseSub, grant.UserID, err == nil, err
+}
+
+func TestResolveNeverCreatesOrExpandsConsent(t *testing.T) {
+	r, grants := newTestResolver(t, "user-no-consent", resolverTestSecret())
+	client := resolverTestClient("rp-a", "a.example")
+	if _, _, _, err := r.Resolve(t.Context(), client, "openid email"); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := grants.FindGrant(t.Context(), "user-no-consent", client.ID); err != nil || found {
+		t.Fatalf("Resolve wrote consent: %v %v", found, err)
 	}
 }

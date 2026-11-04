@@ -74,7 +74,8 @@ type mockSessionStore struct {
 	revokeCalls []struct{ UserID, ClientID string }
 }
 
-func (m *mockSessionStore) RevokeSessionsByUserClient(ctx context.Context, userID, clientID string) error {
+func (m *mockSessionStore) RevokeSessionsByGrant(ctx context.Context, grantID string) error {
+	userID, clientID := grantID, ""
 	m.revokeCalls = append(m.revokeCalls, struct{ UserID, ClientID string }{userID, clientID})
 	if m.revokeFunc != nil {
 		return m.revokeFunc(ctx, userID, clientID)
@@ -93,8 +94,8 @@ func (m *mockSessionStore) RevokeSession(ctx context.Context, id string) error {
 func (m *mockSessionStore) RotateSession(ctx context.Context, oldID string, newSession oidc.RefreshSession) error {
 	return nil
 }
-func (m *mockSessionStore) RevokeSessionsByGrant(ctx context.Context, grantID string) error {
-	return nil
+func (m *mockSessionStore) RevokeSessionsByUserClient(context.Context, string, string) error {
+	panic("cross-lifetime revocation")
 }
 
 // Compile-time proof that mockSessionStore implements oidc.SessionStore.
@@ -106,6 +107,7 @@ func TestEnqueue_Success(t *testing.T) {
 
 	entry := oidc.OutboxEntry{
 		Reason:   "refresh_reuse",
+		GrantID:  "770e8400-e29b-41d4-a716-446655440002",
 		UserID:   "550e8400-e29b-41d4-a716-446655440000",
 		ClientID: "test-client",
 	}
@@ -134,6 +136,7 @@ func TestEnqueue_InvalidUserID(t *testing.T) {
 
 	entry := oidc.OutboxEntry{
 		Reason:   "refresh_reuse",
+		GrantID:  "770e8400-e29b-41d4-a716-446655440002",
 		UserID:   "not-a-uuid",
 		ClientID: "test-client",
 	}
@@ -180,6 +183,7 @@ func TestDeliverPending_SuccessfulDelivery(t *testing.T) {
 			return []db.RevocationOutbox{{
 				ID:            entryUUID,
 				Reason:        "refresh_reuse",
+				GrantID:       mustParseUUID(t, "770e8400-e29b-41d4-a716-446655440002"),
 				UserID:        userUUID,
 				ClientID:      "test-client",
 				Status:        "pending",
@@ -219,6 +223,7 @@ func TestDeliverPending_FailedDelivery_SchedulesRetry(t *testing.T) {
 			return []db.RevocationOutbox{{
 				ID:            entryUUID,
 				Reason:        "refresh_reuse",
+				GrantID:       mustParseUUID(t, "770e8400-e29b-41d4-a716-446655440002"),
 				UserID:        userUUID,
 				ClientID:      "test-client",
 				Status:        "pending",
@@ -276,6 +281,7 @@ func TestDeliverPending_TTLExceeded_MarksAsFailed(t *testing.T) {
 			return []db.RevocationOutbox{{
 				ID:            entryUUID,
 				Reason:        "refresh_reuse",
+				GrantID:       mustParseUUID(t, "770e8400-e29b-41d4-a716-446655440002"),
 				UserID:        userUUID,
 				ClientID:      "test-client",
 				Status:        "pending",
@@ -322,6 +328,7 @@ func TestDeliverPending_IdempotentDelivery(t *testing.T) {
 			return []db.RevocationOutbox{{
 				ID:            entryUUID,
 				Reason:        "refresh_reuse",
+				GrantID:       mustParseUUID(t, "770e8400-e29b-41d4-a716-446655440002"),
 				UserID:        userUUID,
 				ClientID:      "test-client",
 				Status:        "pending",
@@ -376,6 +383,7 @@ func TestDeliverPending_EventuallySucceedsAfterRetries(t *testing.T) {
 			return []db.RevocationOutbox{{
 				ID:            entryUUID,
 				Reason:        "refresh_reuse",
+				GrantID:       mustParseUUID(t, "770e8400-e29b-41d4-a716-446655440002"),
 				UserID:        userUUID,
 				ClientID:      "test-client",
 				Status:        "pending",
@@ -502,7 +510,7 @@ type countingSessionStore struct {
 	revocations atomic.Int32
 }
 
-func (s *countingSessionStore) RevokeSessionsByUserClient(context.Context, string, string) error {
+func (s *countingSessionStore) RevokeSessionsByGrant(context.Context, string) error {
 	s.revocations.Add(1)
 	return nil
 }
@@ -512,6 +520,7 @@ func TestDeliverPending_ConcurrentReplicasClaimEntryOnce(t *testing.T) {
 	q := newConcurrentOutboxQuerier(db.RevocationOutbox{
 		ID:            mustParseUUID(t, "660e8400-e29b-41d4-a716-446655440001"),
 		Reason:        "refresh_reuse",
+		GrantID:       mustParseUUID(t, "770e8400-e29b-41d4-a716-446655440002"),
 		UserID:        mustParseUUID(t, "550e8400-e29b-41d4-a716-446655440000"),
 		ClientID:      "test-client",
 		Status:        "pending",
@@ -546,6 +555,7 @@ func TestDeliverPending_AcknowledgementFailureIsReturned(t *testing.T) {
 			return []db.RevocationOutbox{{
 				ID:            mustParseUUID(t, "660e8400-e29b-41d4-a716-446655440001"),
 				Reason:        "refresh_reuse",
+				GrantID:       mustParseUUID(t, "770e8400-e29b-41d4-a716-446655440002"),
 				UserID:        mustParseUUID(t, "550e8400-e29b-41d4-a716-446655440000"),
 				ClientID:      "test-client",
 				Status:        "pending",

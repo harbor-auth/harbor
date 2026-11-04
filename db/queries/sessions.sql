@@ -31,9 +31,9 @@ ORDER BY created_at DESC;
 
 -- name: CreateSession :one
 INSERT INTO sessions (
-    id, region, user_id, client_id, grant_id, device_label, refresh_token_hash, expires_at
+    id, region, user_id, client_id, grant_id, device_label, refresh_token_hash, expires_at, scopes, auth_time, acr, amr
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 )
 RETURNING *;
 

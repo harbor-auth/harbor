@@ -19,7 +19,6 @@ func TestNewService_RejectsMissingRequiredCollaborators(t *testing.T) {
 		Sessions:     NewStubSessionResolver("test-subject"),
 		SessionStore: NewInMemorySessionStore(),
 		Grants:       NewInMemoryGrantStore(),
-		Consents:     NewInMemoryConsentStore(),
 		Revocations:  NewRecordingRevocationSink(),
 		Outbox:       &recordingOutbox{},
 	}
@@ -34,7 +33,6 @@ func TestNewService_RejectsMissingRequiredCollaborators(t *testing.T) {
 		{"session resolver", func(cfg *ServiceConfig) { cfg.Sessions = nil }},
 		{"refresh session store", func(cfg *ServiceConfig) { cfg.SessionStore = nil }},
 		{"grant store", func(cfg *ServiceConfig) { cfg.Grants = nil }},
-		{"consent store", func(cfg *ServiceConfig) { cfg.Consents = nil }},
 		{"revocation sink", func(cfg *ServiceConfig) { cfg.Revocations = nil }},
 		{"revocation outbox", func(cfg *ServiceConfig) { cfg.Outbox = nil }},
 	}
@@ -61,7 +59,6 @@ func TestNewService_PanicsWhenSessionStoreWithoutGrantStore(t *testing.T) {
 		Tokens:       NewPlaceholderIssuer(),
 		Sessions:     NewStubSessionResolver("sub"),
 		SessionStore: NewInMemorySessionStore(),
-		Consents:     NewInMemoryConsentStore(),
 		Revocations:  NewRecordingRevocationSink(),
 		Outbox:       &recordingOutbox{},
 	}
@@ -592,33 +589,25 @@ func TestService_signalCodeReuse_NoLogOnSuccess(t *testing.T) {
 // --- Consent upsert tests ---
 
 // userIDSessionResolver returns a fixed subject and userID for consent testing.
-type userIDSessionResolverSvc struct {
-	subject string
-	userID  string
-}
-
-func (r *userIDSessionResolverSvc) Resolve(_ context.Context, _ Client, _ string) (string, string, bool, error) {
-	return r.subject, r.userID, true, nil
-}
-
 func TestService_Authorize_UpsertsConsentOnApproval(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
-	clients.Put(testClient())
-	consents := NewInMemoryConsentStore()
+	client := testClient()
+	client.SectorID = "rp.example.com"
+	clients.Put(client)
+	resolver, consents := newTestResolver(t, "user-456", resolverTestSecret())
 
 	svc := mustNewService(t, ServiceConfig{
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    newRedisAuthCodeStore(t),
 		Tokens:   NewPlaceholderIssuer(),
-		Sessions: &userIDSessionResolverSvc{subject: "ppid-123", userID: "user-456"},
-		Consents: consents,
-		NewCode:  func() (string, error) { return "test-code-12345", nil },
-		Now:      func() time.Time { return time.Unix(1_700_000_000, 0) },
+		Sessions: resolver, Grants: consents,
+		NewCode: func() (string, error) { return "test-code-12345", nil },
+		Now:     func() time.Time { return time.Unix(1_700_000_000, 0) },
 	})
 
 	// No consent exists yet
-	_, found, err := consents.Get(context.Background(), "user-456", "demo-client")
+	_, found, err := consents.FindGrant(context.Background(), "user-456", "demo-client")
 	if err != nil {
 		t.Fatalf("get consent: %v", err)
 	}
@@ -639,7 +628,7 @@ func TestService_Authorize_UpsertsConsentOnApproval(t *testing.T) {
 	}
 
 	// Consent should now exist
-	grant, found, err := consents.Get(context.Background(), "user-456", "demo-client")
+	grant, found, err := consents.FindGrant(context.Background(), "user-456", "demo-client")
 	if err != nil {
 		t.Fatalf("consents.Get error: %v", err)
 	}
@@ -656,14 +645,14 @@ func TestService_Authorize_UpsertsConsentOnApproval(t *testing.T) {
 func TestService_Authorize_ScopeEscalation_PersistsMergedScopes(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
 	clients.Put(Client{
-		ID:            "demo-client",
+		SectorID: "rp.example.com", ID: "demo-client",
 		RedirectURIs:  []string{testRedirectURI},
 		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
 	})
-	consents := NewInMemoryConsentStore()
+	resolver, consents := newTestResolver(t, "user-456", resolverTestSecret())
 
 	// Pre-populate consent with only "openid"
-	if _, err := consents.Upsert(context.Background(), "user-456", "demo-client", []string{"openid"}); err != nil {
+	if _, err := resolver.Approve(context.Background(), Client{ID: "demo-client", SectorID: "rp.example.com"}, "openid"); err != nil {
 		t.Fatalf("Upsert failed: %v", err)
 	}
 
@@ -672,10 +661,9 @@ func TestService_Authorize_ScopeEscalation_PersistsMergedScopes(t *testing.T) {
 		Clients:  clients,
 		Codes:    newRedisAuthCodeStore(t),
 		Tokens:   NewPlaceholderIssuer(),
-		Sessions: &userIDSessionResolverSvc{subject: "ppid-123", userID: "user-456"},
-		Consents: consents,
-		NewCode:  func() (string, error) { return "test-code-12345", nil },
-		Now:      func() time.Time { return time.Unix(1_700_000_000, 0) },
+		Sessions: resolver, Grants: consents,
+		NewCode: func() (string, error) { return "test-code-12345", nil },
+		Now:     func() time.Time { return time.Unix(1_700_000_000, 0) },
 	})
 
 	// Request more scopes than previously granted (escalation)
@@ -694,7 +682,7 @@ func TestService_Authorize_ScopeEscalation_PersistsMergedScopes(t *testing.T) {
 	}
 
 	// Consent should now have merged scopes (openid + profile + email)
-	grant, found, err := consents.Get(context.Background(), "user-456", "demo-client")
+	grant, found, err := consents.FindGrant(context.Background(), "user-456", "demo-client")
 	if err != nil {
 		t.Fatalf("consents.Get error: %v", err)
 	}
@@ -716,10 +704,12 @@ func TestService_Authorize_ScopeEscalation_PersistsMergedScopes(t *testing.T) {
 
 func TestService_Authorize_ConsentUpsertError(t *testing.T) {
 	clients := NewInMemoryClientRegistry()
-	clients.Put(testClient())
+	client := testClient()
+	client.SectorID = "rp.example.com"
+	clients.Put(client)
 
 	// Use a consent store that fails on Upsert
-	consents := &errConsentStore{upsertErr: errors.New("database connection failed")}
+	resolver := NewPPIDSessionResolver(PPIDSessionResolverConfig{Auth: NewFixedAuthSource("user-456"), Loader: NewInMemorySecretLoader(), Grants: errGrantStore{findErr: errors.New("database connection failed")}})
 
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
@@ -729,8 +719,7 @@ func TestService_Authorize_ConsentUpsertError(t *testing.T) {
 		Clients:  clients,
 		Codes:    newRedisAuthCodeStore(t),
 		Tokens:   NewPlaceholderIssuer(),
-		Sessions: &userIDSessionResolverSvc{subject: "ppid-123", userID: "user-456"},
-		Consents: consents,
+		Sessions: resolver,
 		Logger:   logger,
 		NewCode:  func() (string, error) { return "test-code-12345", nil },
 		Now:      func() time.Time { return time.Unix(1_700_000_000, 0) },
@@ -749,46 +738,18 @@ func TestService_Authorize_ConsentUpsertError(t *testing.T) {
 
 	// Verify error was logged
 	logOutput := logBuf.String()
-	if !strings.Contains(logOutput, "consent upsert failed") {
+	if !strings.Contains(logOutput, "consent approval failed") {
 		t.Fatalf("expected log message about consent upsert failure, got: %s", logOutput)
 	}
-}
-
-// errConsentStore is a ConsentStore that returns configurable errors.
-type errConsentStore struct {
-	getErr    error
-	upsertErr error
-}
-
-func (s *errConsentStore) Get(_ context.Context, _, _ string) (ConsentGrant, bool, error) {
-	if s.getErr != nil {
-		return ConsentGrant{}, false, s.getErr
-	}
-	return ConsentGrant{}, false, nil
-}
-
-func (s *errConsentStore) Upsert(_ context.Context, _, _ string, _ []string) (ConsentGrant, error) {
-	if s.upsertErr != nil {
-		return ConsentGrant{}, s.upsertErr
-	}
-	return ConsentGrant{}, nil
-}
-
-func (s *errConsentStore) List(_ context.Context, _ string) ([]ConsentGrant, error) {
-	return nil, nil
-}
-
-func (s *errConsentStore) Revoke(_ context.Context, _ string) error {
-	return nil
 }
 
 func TestService_signalCodeReuse_LogDoesNotContainPII(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	code := AuthCode{
-		Code:                "secret-auth-code-12345",
-		ClientID:            "demo-client",
-		RedirectURI:         testRedirectURI,
-		Scope:               "openid profile",
+		Code:        "secret-auth-code-12345",
+		ClientID:    "demo-client",
+		RedirectURI: testRedirectURI,
+		Scope:       "openid profile", GrantID: "grant-00000001",
 		Subject:             "sensitive-ppid-subject",
 		Nonce:               "sensitive-nonce-value",
 		CodeChallenge:       rfc7636Challenge,

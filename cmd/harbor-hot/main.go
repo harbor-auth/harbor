@@ -260,7 +260,10 @@ func (c revokedJTIChecker) IsRevoked(ctx context.Context, jti string) (bool, err
 type codeFamilyRevoker struct{ sessions *clients.DBSessionStore }
 
 func (r codeFamilyRevoker) RevokeCodeFamily(ctx context.Context, code oidc.AuthCode) error {
-	return r.sessions.RevokeSessionsByUserClient(ctx, code.UserID, code.ClientID)
+	if code.GrantID == "" {
+		return nil
+	}
+	return r.sessions.RevokeSessionsByGrant(ctx, code.GrantID)
 }
 
 func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redisClient *redis.Client, deps bffDeps, kmsCfg crypto.KMSConfig, logger *slog.Logger) (oidcapi.Config, hotGraph, error) {
@@ -280,7 +283,6 @@ func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redis
 	registry := clients.NewDBClientRegistry(q).WithLogger(logger)
 	codes := clients.NewRedisAuthCodeStore(redisClient, time.Minute)
 	grants := clients.NewDBGrantStore(q)
-	consents := clients.NewDBConsentStore(q)
 	sessionStore := clients.NewDBSessionStoreWithPool(q, pool)
 	outbox := clients.NewDBRevocationOutbox(q, logger)
 	revokedStore := clients.NewDBRevokedJTIStore(q)
@@ -304,11 +306,11 @@ func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redis
 	if err != nil {
 		return oidcapi.Config{}, hotGraph{}, err
 	}
-	svc, err := oidc.NewService(oidc.ServiceConfig{Issuer: issuer, Clients: registry, Codes: codes, Tokens: tokenIssuer, Sessions: resolver, SessionStore: sessionStore, Grants: grants, Consents: consents, Revocations: codeFamilyRevoker{sessionStore}, Outbox: outbox, Logger: logger})
+	svc, err := oidc.NewService(oidc.ServiceConfig{Issuer: issuer, Clients: registry, Codes: codes, Tokens: tokenIssuer, Sessions: resolver, SessionStore: sessionStore, Grants: grants, Revocations: codeFamilyRevoker{sessionStore}, Outbox: outbox, Logger: logger})
 	if err != nil {
 		return oidcapi.Config{}, hotGraph{}, fmt.Errorf("harbor-hot: build OIDC service: %w", err)
 	}
-	return oidcapi.Config{Issuer: issuer, Service: svc, Keys: signingKeys, Rotator: rotator, AuditRecorder: deps.auditRecorder, RevokedJTIStore: revokedStore, RevocationFilter: filter, RevocationPublisher: redisRevocationPublisher{redisClient}, RevokedJTIChecker: revokedJTIChecker{revokedStore}, LogoutVerifier: verifier, Grants: grants, Clients: registry, SessionRevoker: sessionStore}, hotGraph{
+	return oidcapi.Config{UserInfoSource: clients.NewDBIdentifierStore(pool, keyProvider, crypto.NewCipher()), Issuer: issuer, Service: svc, Keys: signingKeys, Rotator: rotator, AuditRecorder: deps.auditRecorder, RevokedJTIStore: revokedStore, RevocationFilter: filter, RevocationPublisher: redisRevocationPublisher{redisClient}, RevokedJTIChecker: revokedJTIChecker{revokedStore}, LogoutVerifier: verifier, Grants: grants, Clients: registry, SessionRevoker: sessionStore}, hotGraph{
 		secretLoader:  deps.secretLoader,
 		auditRecorder: deps.auditRecorder,
 		grantStore:    deps.grantStore,
@@ -320,7 +322,6 @@ func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redis
 			"clients":       fmt.Sprintf("%T", registry),
 			"codes":         fmt.Sprintf("%T", codes),
 			"grants":        fmt.Sprintf("%T", grants),
-			"consents":      fmt.Sprintf("%T", consents),
 			"sessions":      fmt.Sprintf("%T", sessionStore),
 			"revocations":   fmt.Sprintf("%T", revokedStore),
 			"outbox":        fmt.Sprintf("%T", outbox),

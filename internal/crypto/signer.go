@@ -1,7 +1,6 @@
 package crypto
 
 import (
-	"crypto/ecdh"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -11,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math/big"
 )
 
 // Signer signs JWT signing inputs with an asymmetric key. The private key
@@ -60,13 +58,6 @@ func (j JWK) ToPublicKey() (*ecdsa.PublicKey, error) {
 	if err != nil {
 		return nil, fmt.Errorf("crypto: JWK y decode: %w", err)
 	}
-	pub := &ecdsa.PublicKey{
-		Curve: elliptic.P256(),
-		X:     new(big.Int).SetBytes(xBytes),
-		Y:     new(big.Int).SetBytes(yBytes),
-	}
-	// Build the uncompressed SEC1 encoding manually (0x04 ∥ x_padded ∥ y_padded) and
-	// validate via ecdh.P256().NewPublicKey — avoids the deprecated elliptic.Marshal/IsOnCurve APIs.
 	if len(xBytes) > 32 || len(yBytes) > 32 {
 		return nil, fmt.Errorf("crypto: JWK coordinate exceeds 32 bytes")
 	}
@@ -77,7 +68,8 @@ func (j JWK) ToPublicKey() (*ecdsa.PublicKey, error) {
 	uncompressed[0] = 0x04
 	copy(uncompressed[1:33], xPad[:])
 	copy(uncompressed[33:65], yPad[:])
-	if _, err = ecdh.P256().NewPublicKey(uncompressed); err != nil {
+	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), uncompressed)
+	if err != nil {
 		return nil, fmt.Errorf("crypto: JWK coordinates are not on P-256: %w", err)
 	}
 	return pub, nil

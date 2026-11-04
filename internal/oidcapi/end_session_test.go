@@ -38,8 +38,8 @@ type fakeSessionRevoker struct {
 	err   error
 }
 
-func (f *fakeSessionRevoker) RevokeSessionsByUserClient(_ context.Context, userID, clientID string) error {
-	f.calls = append(f.calls, revokeCall{userID, clientID})
+func (f *fakeSessionRevoker) RevokeSessionsByGrant(_ context.Context, grantID string) error {
+	f.calls = append(f.calls, revokeCall{grantID, ""})
 	return f.err
 }
 
@@ -83,7 +83,7 @@ func newEndSessionServer(t *testing.T, verifier LogoutVerifier, revoker SessionR
 }
 
 func validClaims() *oidc.VerifiedClaims {
-	return &oidc.VerifiedClaims{Subject: esPPID, Audience: esClientID}
+	return &oidc.VerifiedClaims{Subject: esPPID, Audience: esClientID, GrantID: "grant-00000001"}
 }
 
 func doGetEndSession(s *Server, params openapi.GetEndSessionParams) *httptest.ResponseRecorder {
@@ -127,7 +127,7 @@ func TestGetEndSessionRedirectsToRegisteredURIAndRevokes(t *testing.T) {
 	if len(revoker.calls) != 1 {
 		t.Fatalf("revoke calls = %d, want 1", len(revoker.calls))
 	}
-	if revoker.calls[0] != (revokeCall{esUserID, esClientID}) {
+	if revoker.calls[0] != (revokeCall{"grant-00000001", ""}) {
 		t.Errorf("revoke call = %+v, want {%s %s}", revoker.calls[0], esUserID, esClientID)
 	}
 }
@@ -390,10 +390,10 @@ func TestGetEndSessionRevokesCorrectUserClientPair(t *testing.T) {
 	}
 	// Verify the exact userID and clientID were passed to the revoker.
 	call := revoker.calls[0]
-	if call.userID != esUserID {
+	if call.userID != "grant-00000001" {
 		t.Errorf("revoked userID = %q, want %q", call.userID, esUserID)
 	}
-	if call.clientID != esClientID {
+	if call.clientID != "" {
 		t.Errorf("revoked clientID = %q, want %q", call.clientID, esClientID)
 	}
 }
@@ -413,7 +413,7 @@ func TestPostEndSessionRevokesSessionsAndInvalidatesRefreshTokens(t *testing.T) 
 	if len(revoker.calls) != 1 {
 		t.Fatalf("revoke calls = %d, want 1", len(revoker.calls))
 	}
-	if revoker.calls[0].userID != esUserID || revoker.calls[0].clientID != esClientID {
+	if revoker.calls[0].userID != "grant-00000001" || revoker.calls[0].clientID != "" {
 		t.Errorf("revoke call = %+v, want {%s %s}", revoker.calls[0], esUserID, esClientID)
 	}
 }

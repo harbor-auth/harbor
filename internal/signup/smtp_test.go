@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -70,7 +71,9 @@ func TestSMTPMailerTLSAndDelivery(t *testing.T) {
 				if err := server.Close(); err != nil {
 					t.Error(err)
 				}
-				<-finished
+				if err := <-finished; err != nil && !errors.Is(err, smtp.ErrServerClosed) {
+					t.Error(err)
+				}
 			}()
 			mailer, err := NewSMTPMailer(listener.Addr().String(), "signup@harbor.example", "", "")
 			if err != nil {

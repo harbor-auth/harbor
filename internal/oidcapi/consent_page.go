@@ -31,7 +31,7 @@ func (s *Server) renderConsentPage(w http.ResponseWriter, r *http.Request, reque
 		writeAuthorizeErrorPage(w)
 		return
 	}
-	labels := map[string]string{"openid": "Your account ID for this app", "email": "Your private relay email address", "profile": "Basic profile information", "offline_access": "Keep you signed in when you return"}
+	labels := map[string]string{"openid": "Your account ID for this app", "email": "Your verified email address (the real address you signed up with)", "offline_access": "Keep you signed in when you return"}
 	data := consentPageData{RequestID: requestID, AppHost: destination.Hostname()}
 	for _, scope := range strings.Fields(session.Scope) {
 		label, ok := labels[scope]
