@@ -71,12 +71,17 @@ func run(ctx context.Context, logger *slog.Logger) error {
 // integration-test observation point. The observer cannot replace any
 // dependency; it only receives the fully assembled durable graph immediately
 // before the HTTP server starts accepting traffic.
-func runWithGraphObserver(ctx context.Context, logger *slog.Logger, observe func(hotGraph)) error {
+func runWithGraphObserver(ctx context.Context, logger *slog.Logger, observe func(hotGraph, http.Handler)) error {
 	if os.Getenv("HARBOR_KMS_SECRET") == "" && os.Getenv("USER_DEK_PROVIDER") != "openbao" {
 		return errors.New("harbor-hot requires HARBOR_KMS_SECRET for the shared user-DEK KEK")
 	}
 	if envBool("RATE_LIMIT_DISABLED") {
 		return errors.New("RATE_LIMIT_DISABLED is not allowed in production")
+	}
+	internalHost := envString("INTERNAL_SERVICE_HOST", "")
+	configuredRegion := envString("REGION", "")
+	if internalHost != "" && configuredRegion == "" {
+		return errors.New("INTERNAL_SERVICE_HOST requires an explicit REGION")
 	}
 	kmsCfg, err := crypto.LoadKMSConfigFromEnv()
 	if err != nil {
@@ -154,9 +159,14 @@ func runWithGraphObserver(ctx context.Context, logger *slog.Logger, observe func
 	// Bind the issuer host to a region so the region middleware resolves it.
 	// In production, the issuer is region-specific (e.g. https://eu.harbor.id);
 	// in dev, REGION env var overrides to allow localhost testing.
-	if reg := envString("REGION", ""); reg != "" {
-		if err := region.BindIssuerHost(issuer, region.Region(reg)); err != nil {
-			return err
+	if configuredRegion != "" {
+		for _, host := range []string{issuer, internalHost} {
+			if host == "" {
+				continue
+			}
+			if err := region.BindIssuerHost(host, region.Region(configuredRegion)); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -210,13 +220,14 @@ func runWithGraphObserver(ctx context.Context, logger *slog.Logger, observe func
 	mux.HandleFunc("GET /logged-out", srv.GetLoggedOut)
 
 	// Build the handler chain (outermost first):
-	//   rate limiting → admin auth → spec-generated router
+	//   rate limiting → regional context → admin auth → spec-generated router
 	// Rate limiting is outermost so an unauthenticated flood of admin requests
 	// is throttled before the token check runs — a wrong/leaked token cannot
 	// drive unbounded key-rotation or JWT-revocation attempts.
 	base := openapi.HandlerFromMux(srv, mux)
 	authed := oidcapi.WithAdminAuth(base, adminMW)
-	handler := oidcapi.WithBrowserClientCORS(oidcapi.WithRateLimits(authed, buildRateLimits(redisClient, logger)))
+	regional := oidcapi.RegionMiddleware(telemetry.New(logger))(authed)
+	handler := oidcapi.WithBrowserClientCORS(oidcapi.WithRateLimits(regional, buildRateLimits(redisClient, logger)))
 
 	// Support both ADDR (full address) and PORT (port-only, for docker-compose).
 	addr := envString("ADDR", "")
@@ -225,7 +236,7 @@ func runWithGraphObserver(ctx context.Context, logger *slog.Logger, observe func
 		addr = ":" + port
 	}
 	if observe != nil {
-		observe(graph)
+		observe(graph, handler)
 	}
 	return httpserver.Run(ctx, addr, handler, logger)
 }
@@ -310,7 +321,7 @@ func buildHotGraph(ctx context.Context, issuer string, pool *pgxpool.Pool, redis
 	if err != nil {
 		return oidcapi.Config{}, hotGraph{}, fmt.Errorf("harbor-hot: build OIDC service: %w", err)
 	}
-	return oidcapi.Config{UserInfoSource: clients.NewDBIdentifierStore(pool, keyProvider, crypto.NewCipher()), Issuer: issuer, Service: svc, Keys: signingKeys, Rotator: rotator, AuditRecorder: deps.auditRecorder, RevokedJTIStore: revokedStore, RevocationFilter: filter, RevocationPublisher: redisRevocationPublisher{redisClient}, RevokedJTIChecker: revokedJTIChecker{revokedStore}, LogoutVerifier: verifier, Grants: grants, Clients: registry, SessionRevoker: sessionStore}, hotGraph{
+	return oidcapi.Config{UserInfoSource: deps.identifiers, Issuer: issuer, Service: svc, Keys: signingKeys, Rotator: rotator, AuditRecorder: deps.auditRecorder, RevokedJTIStore: revokedStore, RevocationFilter: filter, RevocationPublisher: redisRevocationPublisher{redisClient}, RevokedJTIChecker: revokedJTIChecker{revokedStore}, LogoutVerifier: verifier, Grants: grants, Clients: registry, SessionRevoker: sessionStore}, hotGraph{
 		secretLoader:  deps.secretLoader,
 		auditRecorder: deps.auditRecorder,
 		grantStore:    deps.grantStore,
@@ -380,6 +391,8 @@ func buildSigningStackWithProvider(ctx context.Context, pool *pgxpool.Pool, kp c
 // blocker 1.1). They are constructed once at startup from required storage.
 type bffDeps struct {
 	auditRecorder *identity.AuditRecorder
+	// identifiers shares enrollment's user-DEK provider, never the signing KEK.
+	identifiers *clients.DBIdentifierStore
 	// secretLoader decrypts a user's pairwise secret for PPID derivation.
 	secretLoader *clients.DBSecretLoader
 	// grantStore reads and writes consent grants (the pairwise_sub an RP sees).
@@ -409,6 +422,7 @@ func buildBFFDepsFromPool(pool *pgxpool.Pool, logger *slog.Logger) (bffDeps, err
 
 	q := gendb.New(pool)
 	return bffDeps{
+		identifiers:   clients.NewDBIdentifierStore(pool, keys, crypto.NewCipher()),
 		secretLoader:  clients.NewDBSecretLoader(q, keys, crypto.NewCipher()),
 		auditRecorder: identity.NewAuditRecorder(clients.NewDBComplianceUserLoader(q), q, keys, crypto.NewCipher(), logger),
 		grantStore:    clients.NewDBGrantStore(q),

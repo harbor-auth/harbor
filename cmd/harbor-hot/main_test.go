@@ -69,6 +69,17 @@ func TestStartupRejectsMissingProductionConfigurationBeforeListen(t *testing.T) 
 	}
 }
 
+func TestInternalServiceHostRequiresExplicitRegion(t *testing.T) {
+	t.Setenv("HARBOR_KMS_SECRET", "integration-user-dek-kek-at-least-32-bytes")
+	t.Setenv("RATE_LIMIT_DISABLED", "false")
+	t.Setenv("INTERNAL_SERVICE_HOST", "harbor-hot.harbor.svc.cluster.local")
+	t.Setenv("REGION", "")
+	err := run(t.Context(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err == nil || !strings.Contains(err.Error(), "INTERNAL_SERVICE_HOST requires an explicit REGION") {
+		t.Fatalf("startup error = %v", err)
+	}
+}
+
 func TestBFFConfigValidate(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -198,25 +209,7 @@ func TestProductionStartupValidatesAbuseAndExternalURLs(t *testing.T) {
 }
 
 func TestLoadBFFConfig(t *testing.T) {
-	// Save and restore environment after test.
-	restore := func(keys ...string) func() {
-		saved := make(map[string]string)
-		for _, k := range keys {
-			saved[k] = envString(k, "")
-		}
-		return func() {
-			for k, v := range saved {
-				if v == "" {
-					t.Setenv(k, "")
-				} else {
-					t.Setenv(k, v)
-				}
-			}
-		}
-	}
-
 	t.Run("missing LOGIN_URL is rejected", func(t *testing.T) {
-		defer restore("LOGIN_URL", "DATABASE_URL", "BFF_SESSION_TTL")()
 		t.Setenv("LOGIN_URL", "")
 		t.Setenv("DATABASE_URL", "")
 		t.Setenv("BFF_SESSION_TTL", "")
@@ -227,7 +220,6 @@ func TestLoadBFFConfig(t *testing.T) {
 	})
 
 	t.Run("reads env vars", func(t *testing.T) {
-		defer restore("LOGIN_URL", "DATABASE_URL", "BFF_SESSION_TTL")()
 		t.Setenv("LOGIN_URL", "https://auth.example.com/login")
 		t.Setenv("DATABASE_URL", "postgres://localhost/harbor")
 		t.Setenv("BFF_SESSION_TTL", "10m")
@@ -248,7 +240,6 @@ func TestLoadBFFConfig(t *testing.T) {
 	})
 
 	t.Run("invalid LOGIN_URL fails", func(t *testing.T) {
-		defer restore("LOGIN_URL", "DATABASE_URL", "BFF_SESSION_TTL")()
 		t.Setenv("LOGIN_URL", "not-a-valid-url")
 		t.Setenv("DATABASE_URL", "")
 		t.Setenv("BFF_SESSION_TTL", "")
@@ -260,7 +251,6 @@ func TestLoadBFFConfig(t *testing.T) {
 	})
 
 	t.Run("invalid BFF_SESSION_TTL falls back to default", func(t *testing.T) {
-		defer restore("LOGIN_URL", "DATABASE_URL", "BFF_SESSION_TTL")()
 		t.Setenv("LOGIN_URL", "https://auth.example.com/login")
 		t.Setenv("DATABASE_URL", "")
 		t.Setenv("BFF_SESSION_TTL", "not-a-duration")
