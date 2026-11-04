@@ -58,6 +58,7 @@ type AuthCode struct {
 	Scope               string
 	Subject             string // PPID the RP will see (docs/DESIGN.md §3.2)
 	UserID              string // internal user UUID; needed to bind a refresh session (§3.5)
+	GrantID             string // exact authorization lifetime; never inferred from a replacement grant
 	Nonce               string
 	CodeChallenge       string
 	CodeChallengeMethod string

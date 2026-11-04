@@ -13,10 +13,14 @@ ORDER BY created_at DESC;
 
 -- name: CreateGrant :one
 INSERT INTO grants (
-    id, region, user_id, client_id, pairwise_sub, scopes
+    id, region, user_id, client_id, pairwise_sub, scopes, email_consent
 ) VALUES (
-    $1, $2, $3, $4, $5, $6
+    $1, $2, $3, $4, $5, $6, $7
 )
+ON CONFLICT (user_id, client_id) WHERE revoked_at IS NULL
+DO UPDATE SET scopes = ARRAY(SELECT DISTINCT unnest(grants.scopes || EXCLUDED.scopes) ORDER BY 1),
+              email_consent = grants.email_consent OR EXCLUDED.email_consent
+WHERE grants.region = EXCLUDED.region AND grants.pairwise_sub = EXCLUDED.pairwise_sub
 RETURNING *;
 
 -- name: RevokeGrant :exec
@@ -30,7 +34,8 @@ WHERE id = $1
 -- from the PPID grant flow, not from consent input.
 -- name: UpdateGrantScopes :one
 UPDATE grants
-SET scopes = $3
+SET scopes = ARRAY(SELECT DISTINCT unnest(scopes || sqlc.arg('scopes')::text[]) ORDER BY 1),
+    email_consent = email_consent OR ('email' = ANY(sqlc.arg('scopes')::text[]))
 WHERE user_id = $1
   AND client_id = $2
   AND revoked_at IS NULL

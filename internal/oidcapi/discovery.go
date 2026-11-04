@@ -58,7 +58,7 @@ func (s *Server) metadata() openapi.OpenIDProviderMetadata {
 			openapi.OpenIDProviderMetadataGrantTypesSupportedAuthorizationCode,
 			openapi.OpenIDProviderMetadataGrantTypesSupportedRefreshToken,
 		},
-		ScopesSupported: []string{"openid", "profile", "email", "offline_access"},
+		ScopesSupported: []string{"openid", "email", "offline_access"},
 		// PKCE mandatory; S256 only — `plain` is rejected (§3.1, §11.7).
 		CodeChallengeMethodsSupported: []openapi.OpenIDProviderMetadataCodeChallengeMethodsSupported{
 			openapi.OpenIDProviderMetadataCodeChallengeMethodsSupportedS256,

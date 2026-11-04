@@ -25,6 +25,7 @@ type jwtHeader struct {
 
 // idTokenClaims are the claims for an OIDC ID token. nonce is omitted when empty.
 type idTokenClaims struct {
+	GrantID  string   `json:"grant_id"`
 	Issuer   string   `json:"iss"`
 	Subject  string   `json:"sub"`
 	Audience string   `json:"aud"`
@@ -40,6 +41,7 @@ type idTokenClaims struct {
 
 // accessTokenClaims are the claims for an access token (RFC 9068 JWT profile).
 type accessTokenClaims struct {
+	GrantID  string `json:"grant_id"`
 	Issuer   string `json:"iss"`
 	Subject  string `json:"sub"`
 	Audience string `json:"aud"`
@@ -105,6 +107,7 @@ func (j *JWTIssuer) Issue(ctx context.Context, p IssueParams) (IssuedTokens, err
 	}
 
 	idToken, err := j.signJWT("JWT", idTokenClaims{
+		GrantID:  p.GrantID,
 		Issuer:   p.Issuer,
 		Subject:  p.Subject,
 		Audience: p.ClientID,
@@ -122,6 +125,7 @@ func (j *JWTIssuer) Issue(ctx context.Context, p IssueParams) (IssuedTokens, err
 	}
 
 	accessToken, err := j.signJWT("at+JWT", accessTokenClaims{
+		GrantID:  p.GrantID,
 		Issuer:   p.Issuer,
 		Subject:  p.Subject,
 		Audience: p.ClientID,

@@ -23,13 +23,14 @@ const refreshTokenBytes = 32
 // §3.5) — the plaintext is returned to the client exactly once and then
 // discarded.
 type RefreshSession struct {
-	ID          string // UUID string
-	Region      string // user's home jurisdiction (§5)
-	UserID      string // internal user UUID
-	GrantID     string // associated consent grant UUID; persisted via the grant_id FK column (migration 0006). Empty for legacy sessions created before the column was added.
-	ClientID    string // the RP this session belongs to
-	DeviceLabel string // optional: UA string / device name
-	TokenHash   []byte // SHA-256 of the opaque plaintext — NEVER the plaintext
+	Scopes      []string // immutable scope ceiling captured at authorization
+	ID          string   // UUID string
+	Region      string   // user's home jurisdiction (§5)
+	UserID      string   // internal user UUID
+	GrantID     string   // associated consent grant UUID; persisted via the grant_id FK column (migration 0006). Empty for legacy sessions created before the column was added.
+	ClientID    string   // the RP this session belongs to
+	DeviceLabel string   // optional: UA string / device name
+	TokenHash   []byte   // SHA-256 of the opaque plaintext — NEVER the plaintext
 	ExpiresAt   time.Time
 	RevokedAt   time.Time // zero when active; non-zero once the session is revoked
 	AuthTime    int64     // Unix timestamp when user originally authenticated (OIDC Core §2)

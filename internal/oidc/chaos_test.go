@@ -65,7 +65,7 @@ type chaosRevokeSessionStore struct {
 	revokeErr error
 }
 
-func (s *chaosRevokeSessionStore) RevokeSessionsByUserClient(_ context.Context, _, _ string) error {
+func (s *chaosRevokeSessionStore) RevokeSessionsByGrant(_ context.Context, _ string) error {
 	return s.revokeErr
 }
 
@@ -719,9 +719,9 @@ func TestChaos_Token_OutboxEnqueuesWhenDownstreamFails(t *testing.T) {
 	// signalCodeReuse enqueue guard (code.UserID != "") passes.
 	codeStore := newRedisAuthCodeStore(t)
 	if err := codeStore.Save(context.Background(), AuthCode{
-		Code:                codeVal,
-		ClientID:            testRefreshClientID,
-		UserID:              testRefreshUserID,
+		Code:     codeVal,
+		ClientID: testRefreshClientID,
+		UserID:   testRefreshUserID, GrantID: "grant-00000001",
 		RedirectURI:         "http://localhost/cb",
 		CodeChallenge:       rfc7636Challenge,
 		CodeChallengeMethod: "S256",
@@ -986,7 +986,7 @@ func TestChaos_Token_SignalCodeReuse_ConsumePathEmptyClientID(t *testing.T) {
 
 	// Peek returns a valid code that passes ValidateTokenExchange.
 	peekCode := AuthCode{
-		Code:                codeVal,
+		Code: codeVal, UserID: "user-1", GrantID: "grant-00000001", Scope: "openid", Subject: "ppid-chaos",
 		ClientID:            clientID,
 		RedirectURI:         redirectURI,
 		CodeChallenge:       challenge,
@@ -999,7 +999,7 @@ func TestChaos_Token_SignalCodeReuse_ConsumePathEmptyClientID(t *testing.T) {
 	sink := NewRecordingRevocationSink()
 	var logBuf bytes.Buffer
 	registry := NewInMemoryClientRegistry()
-	registry.Put(Client{ID: clientID})
+	registry.Put(Client{ID: clientID, ScopesAllowed: []string{"openid"}})
 	svc := mustNewService(t, ServiceConfig{
 		Issuer:      "https://chaos.harbor.example",
 		Clients:     registry,

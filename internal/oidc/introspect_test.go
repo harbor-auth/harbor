@@ -14,8 +14,8 @@ import (
 func testIntrospector(t *testing.T, signer crypto.Signer, opts ...func(*IntrospectConfig)) *Introspector {
 	t.Helper()
 	cfg := IntrospectConfig{
-		Signers: []crypto.Signer{signer},
-		Now:     fixedNow,
+		Signers: []crypto.Signer{signer}, Grants: introspectionTestGrants(t), Clients: introspectionTestClients(),
+		Now: fixedNow,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -26,10 +26,14 @@ func testIntrospector(t *testing.T, signer crypto.Signer, opts ...func(*Introspe
 // issueTestAccessToken creates a signed access token for testing.
 func issueTestAccessToken(t *testing.T, signer crypto.Signer, clientID string) string {
 	t.Helper()
+	grantID := "grant-00000001"
+	if clientID == "client-a" {
+		grantID = "grant-00000002"
+	}
 	iss := NewJWTIssuer(JWTIssuerConfig{Signer: signer, Now: fixedNow})
 	tokens, err := iss.Issue(context.Background(), IssueParams{
-		Issuer:   "https://eu.harbor.id",
-		Subject:  "ppid-test-user",
+		Issuer:  "https://eu.harbor.id",
+		Subject: "ppid-test-user", GrantID: grantID,
 		ClientID: clientID,
 		Scope:    "openid profile",
 	})
@@ -102,8 +106,8 @@ func TestIntrospectExpiredToken(t *testing.T) {
 	pastTime := func() time.Time { return time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC) }
 	iss := NewJWTIssuer(JWTIssuerConfig{Signer: signer, Now: pastTime})
 	tokens, err := iss.Issue(context.Background(), IssueParams{
-		Issuer:   "https://eu.harbor.id",
-		Subject:  "ppid-test-user",
+		Issuer:  "https://eu.harbor.id",
+		Subject: "ppid-test-user", GrantID: "grant-00000001",
 		ClientID: "demo-client",
 		Scope:    "openid",
 	})
@@ -363,8 +367,8 @@ func TestIntrospectMultipleSigners(t *testing.T) {
 
 	// Introspector with both signers (rotation overlap)
 	intro := NewIntrospector(IntrospectConfig{
-		Signers: []crypto.Signer{signer1, signer2},
-		Now:     fixedNow,
+		Signers: []crypto.Signer{signer1, signer2}, Grants: introspectionTestGrants(t), Clients: introspectionTestClients(),
+		Now: fixedNow,
 	})
 
 	// Both tokens should validate
@@ -401,4 +405,25 @@ func (m *mockRevokedJTIChecker) IsRevoked(_ context.Context, jti string) (bool, 
 // unmarshalJSON is a helper to unmarshal JSON payload.
 func unmarshalJSON(data []byte, v interface{}) error {
 	return json.Unmarshal(data, v)
+}
+
+func introspectionTestGrants(t *testing.T) GrantStore {
+	t.Helper()
+	store := NewInMemoryGrantStore()
+	if _, err := store.CreateGrant(t.Context(), NewGrant{Region: "EU", UserID: "user-1", ClientID: "demo-client", PairwiseSub: "ppid-test-user", Scopes: []string{"openid", "profile"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.CreateGrant(t.Context(), NewGrant{Region: "EU", UserID: "user-1", ClientID: "client-a", PairwiseSub: "ppid-test-user", Scopes: []string{"openid", "profile"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	return store
+}
+
+func introspectionTestClients() ClientRegistry {
+	clients := NewInMemoryClientRegistry()
+	for _, id := range []string{"demo-client", "client-a"} {
+		clients.Put(Client{ID: id, ScopesAllowed: []string{"openid", "profile"}})
+	}
+	return clients
 }

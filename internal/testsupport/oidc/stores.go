@@ -24,19 +24,6 @@ type recordingOutbox struct{}
 
 func (recordingOutbox) Enqueue(context.Context, harboroidc.OutboxEntry) error { return nil }
 
-type emptyConsentStore struct{}
-
-func (emptyConsentStore) Get(context.Context, string, string) (harboroidc.ConsentGrant, bool, error) {
-	return harboroidc.ConsentGrant{}, false, nil
-}
-func (emptyConsentStore) Upsert(_ context.Context, userID, clientID string, scopes []string) (harboroidc.ConsentGrant, error) {
-	return harboroidc.ConsentGrant{UserID: userID, ClientID: clientID, Scopes: scopes}, nil
-}
-func (emptyConsentStore) List(context.Context, string) ([]harboroidc.ConsentGrant, error) {
-	return nil, nil
-}
-func (emptyConsentStore) Revoke(context.Context, string) error { return nil }
-
 // NewService completes cfg with isolated fixtures and constructs an OIDC
 // service for tests outside the oidc package.
 func NewService(t testing.TB, cfg harboroidc.ServiceConfig) *harboroidc.Service {
@@ -57,10 +44,17 @@ func NewService(t testing.TB, cfg harboroidc.ServiceConfig) *harboroidc.Service 
 		cfg.SessionStore = NewInMemorySessionStore()
 	}
 	if cfg.Grants == nil {
-		cfg.Grants = NewInMemoryGrantStore()
-	}
-	if cfg.Consents == nil {
-		cfg.Consents = emptyConsentStore{}
+		grants := NewInMemoryGrantStore()
+		if resolver, ok := cfg.Sessions.(stubSessionResolver); ok {
+			if registry, ok := cfg.Clients.(*InMemoryClientRegistry); ok {
+				for _, client := range registry.clients {
+					if _, err := grants.CreateGrant(context.Background(), harboroidc.NewGrant{Region: "EU", UserID: "user-1", ClientID: client.ID, PairwiseSub: resolver.subject, Scopes: client.ScopesAllowed, EmailConsent: true}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+		}
+		cfg.Grants = grants
 	}
 	if cfg.Revocations == nil {
 		cfg.Revocations = recordingRevocationSink{}
@@ -305,8 +299,14 @@ func (s *InMemoryGrantStore) CreateGrant(_ context.Context, ng harboroidc.NewGra
 	// already point to a previously revoked grant (RevokeGrant mutates the shared
 	// pointer but does not clear byPair).
 	if existing, ok := s.byPair[ng.UserID+":"+ng.ClientID]; ok && existing.RevokedAt == nil {
-		now := time.Now()
-		existing.RevokedAt = &now
+		if existing.Region != ng.Region || existing.PairwiseSub != ng.PairwiseSub {
+			return harboroidc.Grant{}, fmt.Errorf("grant identity mismatch")
+		}
+		existing.Scopes = harboroidc.CanonicalizeScopes(append(append([]string(nil), existing.Scopes...), ng.Scopes...))
+		existing.EmailConsent = existing.EmailConsent || ng.EmailConsent
+		out := *existing
+		out.Scopes = append([]string(nil), existing.Scopes...)
+		return out, nil
 	}
 	// id is a zero-padded monotonically-increasing sequence. Zero-padding
 	// (8 digits) ensures lexicographic sort order matches numeric order for up
@@ -316,13 +316,14 @@ func (s *InMemoryGrantStore) CreateGrant(_ context.Context, ng harboroidc.NewGra
 	s.counter++
 	id := fmt.Sprintf("grant-%08d", s.counter)
 	g := &harboroidc.Grant{
-		ID:          id,
-		Region:      ng.Region,
-		UserID:      ng.UserID,
-		ClientID:    ng.ClientID,
-		PairwiseSub: ng.PairwiseSub,
-		Scopes:      append([]string(nil), ng.Scopes...), // Clone 1: prevents ng.Scopes mutations from corrupting the stored grant
-		CreatedAt:   time.Now(),
+		ID:           id,
+		Region:       ng.Region,
+		UserID:       ng.UserID,
+		ClientID:     ng.ClientID,
+		PairwiseSub:  ng.PairwiseSub,
+		EmailConsent: ng.EmailConsent,
+		Scopes:       append([]string(nil), ng.Scopes...), // Clone 1: prevents ng.Scopes mutations from corrupting the stored grant
+		CreatedAt:    time.Now(),
 	}
 	s.byID[id] = g
 	s.byPair[ng.UserID+":"+ng.ClientID] = g
@@ -472,7 +473,7 @@ func NewStubSessionResolver(subject string) harboroidc.SessionResolver {
 // PPIDSessionResolver with a FixedAuthSource for refresh-token integration
 // tests (see newRefreshFlowServerWithStore in refresh_rotation_test.go).
 func (r stubSessionResolver) Resolve(_ context.Context, _ harboroidc.Client, _ string) (string, string, bool, error) {
-	return r.subject, "", true, nil
+	return r.subject, "user-1", true, nil
 }
 
 // NewRedisAuthCodeStore uses the production adapter and an isolated Redis server.

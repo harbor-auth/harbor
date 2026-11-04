@@ -274,6 +274,9 @@ func TestRefreshTokenRegionPropagated(t *testing.T) {
 		Grants:       grantStore,
 	})
 
+	if err := svc.ApproveConsent(t.Context(), testRefreshUserID, testRefreshClientID, "openid offline_access"); err != nil {
+		t.Fatal(err)
+	}
 	// Step 1: Authorize to get a code.
 	result, aerr := svc.Authorize(context.Background(), AuthorizeRequest{
 		ClientID:            testRefreshClientID,
@@ -346,187 +349,64 @@ func TestRefreshTokenRegionPropagated(t *testing.T) {
 //harbor:invariant INV-REFRESH-OFFLINE-ACCESS-GATE
 //harbor:invariant INV-REFRESH-ROTATION-REQUIRES-OFFLINE-ACCESS
 func TestRefreshOfflineAccessGate(t *testing.T) {
-	// Token() gate: a code exchange WITHOUT offline_access must NOT produce a
-	// refresh token. The Refresh() rotation gate is covered by the separate
-	// TestRefreshRotationRequiresOfflineAccess test below.
-	svc, _, _ := newTestServiceWithSessions(t)
-	clientReg := NewInMemoryClientRegistry()
-	clientReg.Put(Client{
-		ID:            testRefreshClientID,
-		SectorID:      "test.example.com",
-		RedirectURIs:  []string{"http://localhost/cb"},
-		ScopesAllowed: []string{"openid", "profile"},
-	})
-	svc.clients = clientReg
-
-	code := AuthCode{
-		Code:                "test-code-no-offline",
-		ClientID:            testRefreshClientID,
-		RedirectURI:         "http://localhost/cb",
-		Scope:               "openid profile",
-		Subject:             "ppid-no-offline",
-		CodeChallenge:       "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
-		CodeChallengeMethod: "S256",
-		ExpiresAt:           time.Now().Add(60 * time.Second),
-		UserID:              "", // no userID -> won't issue refresh token
+	svc, _, grants := newTestServiceWithSessions(t)
+	grant, err := grants.CreateGrant(t.Context(), NewGrant{Region: "EU", UserID: testRefreshUserID, ClientID: testRefreshClientID, PairwiseSub: "gate-ppid", Scopes: []string{"openid"}})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := svc.codes.Save(context.Background(), code); err != nil {
-		t.Fatalf("Save code: %v", err)
+	code := AuthCode{Code: "no-offline", UserID: testRefreshUserID, GrantID: grant.ID, ClientID: testRefreshClientID, RedirectURI: "http://localhost/cb", Scope: "openid", Subject: grant.PairwiseSub, CodeChallenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", CodeChallengeMethod: "S256", ExpiresAt: time.Now().Add(time.Minute)}
+	if err = svc.codes.Save(t.Context(), code); err != nil {
+		t.Fatal(err)
 	}
-
-	tokens, terr := svc.Token(context.Background(), TokenRequest{
-		GrantType:    grantTypeAuthorizationCode,
-		Code:         "test-code-no-offline",
-		RedirectURI:  "http://localhost/cb",
-		ClientID:     testRefreshClientID,
-		CodeVerifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
-	})
+	req := TokenRequest{GrantType: grantTypeAuthorizationCode, Code: code.Code, ClientID: code.ClientID, RedirectURI: code.RedirectURI, CodeVerifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"}
+	tokens, terr := svc.Token(t.Context(), req)
 	if terr != nil {
-		t.Fatalf("Token: %v", terr)
+		t.Fatal(terr)
 	}
 	if tokens.RefreshToken != "" {
-		t.Fatal("expected no refresh token when offline_access is not granted")
+		t.Fatal("issued refresh without offline_access")
 	}
-
-	// Sub-test: offline_access IS present but UserID is empty — still no refresh token.
-	// Both conditions (offline_access scope AND non-empty UserID) are required.
-	code2 := AuthCode{
-		Code:                "test-code-offline-no-userid",
-		ClientID:            testRefreshClientID,
-		RedirectURI:         "http://localhost/cb",
-		Scope:               "openid offline_access",
-		Subject:             "ppid-offline-no-userid",
-		CodeChallenge:       "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
-		CodeChallengeMethod: "S256",
-		ExpiresAt:           time.Now().Add(60 * time.Second),
-		UserID:              "", // offline_access present but UserID empty → no refresh token
-	}
-	if err := svc.codes.Save(context.Background(), code2); err != nil {
-		t.Fatalf("Save code2: %v", err)
-	}
-	tokens2, terr2 := svc.Token(context.Background(), TokenRequest{
-		GrantType:    grantTypeAuthorizationCode,
-		Code:         "test-code-offline-no-userid",
-		RedirectURI:  "http://localhost/cb",
-		ClientID:     testRefreshClientID,
-		CodeVerifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
-	})
-	if terr2 != nil {
-		t.Fatalf("Token (offline+no-userid): %v", terr2)
-	}
-	if tokens2.RefreshToken != "" {
-		t.Fatal("expected no refresh token when UserID is empty, even with offline_access")
-	}
-
-	// Sub-test 3: offline_access present, UserID non-empty, but no active grant exists
-	// (simulates consent revoked between /authorize and /token, or noopGrantStore
-	// dev wiring with a real UserID). issueRefreshToken must skip gracefully — the
-	// access token exchange still succeeds but no refresh token is emitted.
-	// svc's grantStore (from newTestServiceWithSessions) is empty, so FindGrant
-	// returns found=false — exactly the fail-closed path under test.
-	code3 := AuthCode{
-		Code:                "test-code-offline-userid-nogrant",
-		ClientID:            testRefreshClientID,
-		RedirectURI:         "http://localhost/cb",
-		Scope:               "openid offline_access",
-		Subject:             "ppid-offline-userid-nogrant",
-		CodeChallenge:       "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
-		CodeChallengeMethod: "S256",
-		ExpiresAt:           time.Now().Add(60 * time.Second),
-		UserID:              testRefreshUserID, // non-empty — triggers issueRefreshToken — but no grant exists
-	}
-	if err := svc.codes.Save(context.Background(), code3); err != nil {
-		t.Fatalf("Save code3: %v", err)
-	}
-	tokens3, terr3 := svc.Token(context.Background(), TokenRequest{
-		GrantType:    grantTypeAuthorizationCode,
-		Code:         "test-code-offline-userid-nogrant",
-		RedirectURI:  "http://localhost/cb",
-		ClientID:     testRefreshClientID,
-		CodeVerifier: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk",
-	})
-	if terr3 != nil {
-		t.Fatalf("Token (offline+userid+nogrant): %v", terr3)
-	}
-	if tokens3.RefreshToken != "" {
-		t.Fatal("expected no refresh token when grant is absent even with offline_access+UserID (fail-closed on missing grant)")
+	for _, kind := range []string{"missing-user", "revoked-grant"} {
+		code.Code = kind
+		code.Scope = "openid offline_access"
+		if kind == "missing-user" {
+			code.UserID = ""
+		} else {
+			code.UserID = testRefreshUserID
+			if err = grants.RevokeGrant(t.Context(), grant.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err = svc.codes.Save(t.Context(), code); err != nil {
+			t.Fatal(err)
+		}
+		req.Code = code.Code
+		if _, terr := svc.Token(t.Context(), req); terr == nil || terr.Code != ErrCodeInvalidGrant {
+			t.Fatalf("unbound/revoked code accepted: %v", terr)
+		}
 	}
 }
 
-// TestRefreshRotationRequiresOfflineAccess verifies the H14-2 fix: Refresh()
-// re-checks that the frozen grant still contains offline_access before Steps C/D
-// (rotation + new refresh token issuance). A grant scope downgrade after
-// issuance must be handled fail-closed: freshly-signed access/ID tokens are
-// returned, no new refresh token is issued, and the old session is NOT revoked
-// so the client is not locked out.
-//
 //harbor:invariant INV-REFRESH-ROTATION-REQUIRES-OFFLINE-ACCESS
 //harbor:invariant INV-REFRESH-SCOPE-REFLECTS-GRANT
 func TestRefreshRotationRequiresOfflineAccess(t *testing.T) {
-	svc, sessionStore, grantStore := newTestServiceWithSessions(t)
-
-	// Create a grant that does NOT contain offline_access (simulating a scope
-	// downgrade after the refresh session was originally issued).
-	if _, err := grantStore.CreateGrant(context.Background(), NewGrant{
-		Region:      "us",
-		UserID:      testRefreshUserID,
-		ClientID:    testRefreshClientID,
-		PairwiseSub: "ppid-rotation-no-offline",
-		Scopes:      []string{"openid"}, // offline_access deliberately absent
-	}); err != nil {
-		t.Fatalf("CreateGrant: %v", err)
+	svc, sessions, grants := newTestServiceWithSessions(t)
+	grant, err := grants.CreateGrant(t.Context(), NewGrant{Region: "EU", UserID: testRefreshUserID, ClientID: testRefreshClientID, PairwiseSub: "no-offline", Scopes: []string{"openid"}})
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	// Seed a session directly (bypassing issueRefreshToken which would itself
-	// gate on offline_access — we want to test only the Refresh() re-check).
 	plaintext, hash, err := newOpaqueToken()
 	if err != nil {
-		t.Fatalf("newOpaqueToken: %v", err)
+		t.Fatal(err)
 	}
-	if err := sessionStore.CreateSession(context.Background(), RefreshSession{
-		ID:        "session-rotation-no-offline",
-		Region:    "us",
-		UserID:    testRefreshUserID,
-		ClientID:  testRefreshClientID,
-		TokenHash: hash,
-		ExpiresAt: svc.now().Add(defaultRefreshTTL),
-	}); err != nil {
-		t.Fatalf("CreateSession: %v", err)
+	if err = sessions.CreateSession(t.Context(), RefreshSession{ID: "no-offline-session", Region: grant.Region, UserID: grant.UserID, ClientID: grant.ClientID, GrantID: grant.ID, Scopes: []string{"openid", "offline_access"}, TokenHash: hash, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
 	}
-	token := encodeRefreshToken(plaintext)
-
-	// Refresh() must return access/ID tokens but NO refresh token (offline_access
-	// guard fires before Steps C+D).
-	tokens, terr := svc.Refresh(context.Background(), refreshReq(token))
-	if terr != nil {
-		t.Fatalf("Refresh: expected success (access token), got error: %v", terr)
-	}
-	if tokens.AccessToken == "" {
-		t.Fatal("expected non-empty access token even when offline_access was removed from grant scopes")
-	}
-	if tokens.RefreshToken != "" {
-		t.Fatal("expected no refresh token when grant scopes no longer contain offline_access")
-	}
-	// The access token scope must reflect the CURRENT (downgraded) grant scopes,
-	// not some stale scope string — locking in the INV-REFRESH-SCOPE-REFLECTS-GRANT contract.
-	if tokens.Scope != "openid" {
-		t.Fatalf("access token scope = %q, want \"openid\" (the downgraded grant scope)", tokens.Scope)
-	}
-
-	// The old session must NOT have been revoked — client is not locked out
-	// and can retry once the scope issue is resolved (or simply use access token).
-	_, err = sessionStore.GetSessionByTokenHash(context.Background(), hash)
-	if err != nil {
-		t.Fatalf("old session must still be valid (not revoked) after offline_access guard fires: %v", err)
+	if _, terr := svc.Refresh(t.Context(), refreshReq(encodeRefreshToken(plaintext))); terr == nil || terr.Code != ErrCodeInvalidGrant {
+		t.Fatalf("refresh without live offline consent accepted: %v", terr)
 	}
 }
 
-// TestDecodeRefreshTokenTrimSpace verifies that decodeRefreshToken trims leading
-// and trailing whitespace before base64 decoding. Some clients (notably
-// certain HTTP form parsers) append a trailing newline to form values; trimming
-// prevents a spurious invalid_grant for a token that is otherwise valid.
-// This is not a security boundary — a token with interior whitespace is still
-// rejected by the base64 decoder.
 func TestDecodeRefreshTokenTrimSpace(t *testing.T) {
 	plaintext, _, err := newOpaqueToken()
 	if err != nil {
@@ -701,6 +581,9 @@ func TestRefreshTokenGrantIDPropagated(t *testing.T) {
 		Grants:       grantStore,
 	})
 
+	if err := svc.ApproveConsent(t.Context(), testRefreshUserID, testRefreshClientID, "openid offline_access"); err != nil {
+		t.Fatal(err)
+	}
 	// Step 1: Authorize to get a code (also creates the grant via PPIDSessionResolver).
 	result, aerr := svc.Authorize(context.Background(), AuthorizeRequest{
 		ClientID:            testRefreshClientID,

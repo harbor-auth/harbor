@@ -49,7 +49,7 @@ func TestConfidentialRefreshAuthenticationProtectsRotationAndReplayRevocation(t 
 	const secret = "confidential-refresh-secret"
 	svc, sessions, grants := newTestServiceWithSessions(t)
 	registry := NewInMemoryClientRegistry()
-	registry.Put(Client{ID: testRefreshClientID, TokenEndpointAuthMethod: ClientAuthSecretBasic, SecretHash: clientSecretHash(secret)})
+	registry.Put(Client{ID: testRefreshClientID, ScopesAllowed: []string{"openid", "offline_access"}, TokenEndpointAuthMethod: ClientAuthSecretBasic, SecretHash: clientSecretHash(secret)})
 	svc.clients = registry
 	oldToken := seedSession(t, sessions, grants, "confidential-refresh")
 	req := refreshReq(oldToken)

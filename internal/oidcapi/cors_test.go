@@ -16,7 +16,7 @@ func TestBrowserClientCORSIsRestrictedToPublicOIDCEndpoints(t *testing.T) {
 	}{
 		{"GET", "/.well-known/openid-configuration", true}, {"GET", "/jwks.json", true}, {"POST", "/token", true},
 		{"GET", "/authorize", false}, {"GET", "/authorize/complete", false}, {"GET", "/signin", false},
-		{"GET", "/dashboard", false}, {"GET", "/userinfo", false}, {"POST", "/introspect", false},
+		{"GET", "/dashboard", false}, {"GET", "/userinfo", true}, {"POST", "/introspect", false},
 		{"POST", "/revoke", false}, {"POST", "/admin/keys/rotate", false}, {"GET", "/token", false},
 	} {
 		t.Run(tc.method+tc.path, func(t *testing.T) {
@@ -98,6 +98,24 @@ func TestPublicMetadataCORSDoesNotDependOnOriginHeader(t *testing.T) {
 		h.ServeHTTP(rec, req)
 		if rec.Header().Get("Access-Control-Allow-Origin") != "*" {
 			t.Fatal("cacheable public metadata can lose browser access after a server-side request")
+		}
+	}
+}
+
+func TestUserInfoBearerPreflight(t *testing.T) {
+	handler := WithBrowserClientCORS(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) }))
+	for _, path := range []string{"/userinfo", "/token", "/authorize"} {
+		req := httptest.NewRequest("OPTIONS", path, nil)
+		req.Header.Set("Origin", "https://site.example")
+		req.Header.Set("Access-Control-Request-Method", "GET")
+		req.Header.Set("Access-Control-Request-Headers", "Authorization")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if (rec.Header().Get("Access-Control-Allow-Headers") != "") != (path == "/userinfo") {
+			t.Fatal("incorrect bearer CORS boundary")
+		}
+		if rec.Header().Get("Access-Control-Allow-Credentials") != "" {
+			t.Fatal("CORS allowed cookies")
 		}
 	}
 }

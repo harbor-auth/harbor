@@ -60,12 +60,12 @@ func newBFFFlowServerWithStore(t *testing.T, store bff.BFFSessionStore) *httptes
 		// The stub resolver would issue a code in the legacy path; with the BFF
 		// store wired below, /authorize must never reach it for an unauthenticated
 		// request — it redirects to login instead.
-		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
+		Sessions: oidc.NewPPIDSessionResolver(oidc.PPIDSessionResolverConfig{Auth: oidctest.NewFixedAuthSource("user-abc-123"), Loader: oidctest.NewInMemorySecretLoader(), Grants: grants}),
 	})
 	// Authenticated-session tests use this fixed user and target completion,
 	// rather than the explicit-consent handoff covered by consent tests.
 	if _, err := grants.CreateGrant(context.Background(), oidc.NewGrant{
-		UserID: "user-abc-123", ClientID: testClientID, Scopes: []string{"openid", "profile"},
+		Region: "EU", PairwiseSub: "demo-subject-ppid", UserID: "user-abc-123", ClientID: testClientID, Scopes: []string{"openid", "profile"},
 	}); err != nil {
 		t.Fatalf("seed grant: %v", err)
 	}
@@ -328,9 +328,9 @@ func seedAuthenticatedSession(t *testing.T, store *bfftest.InMemoryBFFSessionSto
 		t.Fatalf("NewBrowserNonce: %v", err)
 	}
 	record := bff.BFFSessionRecord{
-		RequestID:        requestID,
-		State:            testState,
-		ClientID:         testClientID,
+		RequestID:     requestID,
+		State:         testState,
+		CodeChallenge: pkceChallenge, CodeChallengeMethod: "S256", ClientID: testClientID,
 		RedirectURI:      testRedirectURI,
 		Scope:            "openid profile",
 		UserID:           "user-abc-123",

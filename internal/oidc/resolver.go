@@ -51,7 +51,7 @@ type PPIDSessionResolverConfig struct {
 
 // PPIDSessionResolver is the real SessionResolver (docs/DESIGN.md §3.2, §11.2).
 // It authenticates the user, resolves the per-RP pairwise subject (PPID), and
-// records consent — replacing the fixed-subject stub. It is the seam that
+// records explicit consent through Approve. Resolve is read-only. It is the seam that
 // finally invokes identity.DerivePPID on the hot path, so a real user gets a
 // stable, non-correlating sub.
 //
@@ -76,114 +76,69 @@ func NewPPIDSessionResolver(cfg PPIDSessionResolverConfig) *PPIDSessionResolver 
 	}
 }
 
-// Resolve runs the login + consent step and returns the per-RP PPID:
-//
-//  1. Authenticate the user (real user_id).
-//  2. Look up an existing consent grant for (userID, client).
-//     - found: if the requested scope is a superset of the frozen grant scopes,
-//     revoke + re-create the grant with the union of scopes (preserving
-//     PairwiseSub), then return the stable sub. Otherwise return the frozen
-//     grant.PairwiseSub directly — stable across calls, no re-derivation
-//     (§3.2.3).
-//     - not found (first consent): load + decrypt the user's pairwise secret
-//     (fail closed), derive sub = DerivePPID(secret, sector, uid), and record
-//     a new grant carrying that sub + the consented scopes.
-//
-// The resolved sub flows unchanged through /authorize → code → /token into the
-// token's sub claim.
-func (r *PPIDSessionResolver) Resolve(ctx context.Context, client Client, scope string) (string, string, bool, error) {
+// Resolve authenticates and derives a stable pairwise subject. It never records
+// consent: authentication and an authorization request are not an approval.
+func (r *PPIDSessionResolver) Resolve(ctx context.Context, client Client, _ string) (string, string, bool, error) {
 	userID, err := r.auth.AuthenticatedUserID(ctx)
 	if err != nil {
 		return "", "", false, err
 	}
-
 	grant, found, err := r.grants.FindGrant(ctx, userID, client.ID)
 	if err != nil {
 		return "", "", false, err
 	}
 	if found {
-		// If the new request includes scopes beyond those in the existing grant
-		// (e.g. offline_access on re-consent), upgrade the grant to the union.
-		// The PairwiseSub is preserved — PPID must be stable across
-		// re-authorizations for the same (user, client) pair (§3.2.3).
-		requested := strings.Fields(scope)
-		if hasNewScopes(requested, grant.Scopes) {
-			updater, ok := r.grants.(GrantScopeUpdater)
-			if !ok {
-				return "", "", false, fmt.Errorf("session: grant store cannot update canonical scopes")
-			}
-			if _, err := updater.UpdateGrantScopes(ctx, userID, client.ID, unionScopes(grant.Scopes, requested)); err != nil {
-				return "", "", false, err
-			}
-		}
 		return grant.PairwiseSub, userID, true, nil
 	}
-
-	// First consent: load + decrypt the user's pairwise secret (fail closed —
-	// never fall back to userID as the subject), then derive the PPID.
 	us, err := r.loader.LoadUserSecret(ctx, userID)
 	if err != nil {
 		return "", "", false, err
 	}
-
-	// The sector_id groups the RP's redirect URIs for pairwise derivation (§3.2);
-	// without it we cannot produce a non-correlating sub, so we fail closed
-	// rather than guess.
 	if client.SectorID == "" {
-		return "", "", false, fmt.Errorf("session: client %q has no sector_id", client.ID)
+		return "", "", false, fmt.Errorf("session: client has no sector_id")
 	}
 	sub, err := identity.DerivePPID(us.Secret, client.SectorID, userID)
-	if err != nil {
-		return "", "", false, err
-	}
-
-	if _, err := r.grants.CreateGrant(ctx, NewGrant{
-		Region:      us.Region,
-		UserID:      userID,
-		ClientID:    client.ID,
-		PairwiseSub: sub,
-		Scopes:      strings.Fields(scope),
-	}); err != nil {
-		return "", "", false, err
-	}
-
-	return sub, userID, true, nil
+	return sub, userID, err == nil, err
 }
 
-// hasNewScopes reports whether any scope in requested is absent from existing.
-func hasNewScopes(requested, existing []string) bool {
-	set := make(map[string]bool, len(existing))
-	for _, s := range existing {
-		set[s] = true
+// Approve is called only after the browser's explicit consent decision. The
+// database merges concurrent approvals without losing scopes or changing the
+// active grant ID. After revocation it creates a fresh lifetime, with the same
+// stable pairwise subject.
+func (r *PPIDSessionResolver) Approve(ctx context.Context, client Client, scope string) (Grant, error) {
+	sub, userID, approved, err := r.Resolve(ctx, client, scope)
+	if err != nil {
+		return Grant{}, err
 	}
-	for _, s := range requested {
-		if !set[s] {
+	if !approved {
+		return Grant{}, fmt.Errorf("session: user did not approve")
+	}
+	us, err := r.loader.LoadUserSecret(ctx, userID)
+	if err != nil {
+		return Grant{}, err
+	}
+	scopes := CanonicalizeScopes(strings.Fields(scope))
+	return r.grants.CreateGrant(ctx, NewGrant{Region: us.Region, UserID: userID,
+		ClientID: client.ID, PairwiseSub: sub, Scopes: scopes, EmailConsent: containsScope(scopes, "email")})
+}
+
+func containsScope(scopes []string, wanted string) bool {
+	for _, scope := range scopes {
+		if scope == wanted {
 			return true
 		}
 	}
 	return false
 }
 
-// unionScopes returns the union of existing and requested scopes: existing
-// scopes first (order preserved), then any scopes from requested that are not
-// already in existing (in the order they appear in requested). Duplicates
-// within either input are collapsed — the set is updated as each scope is
-// appended, so a malformed requested string (e.g. "openid openid") cannot
-// produce a grant with repeated scopes.
-func unionScopes(existing, requested []string) []string {
-	set := make(map[string]bool, len(existing)+len(requested))
-	result := make([]string, 0, len(existing)+len(requested))
-	for _, s := range existing {
-		if !set[s] {
-			result = append(result, s)
-			set[s] = true
+// ConsentedScopes excludes the old relay-worded email permission until the
+// user explicitly approves sharing their verified real email address.
+func ConsentedScopes(grant Grant) []string {
+	scopes := make([]string, 0, len(grant.Scopes))
+	for _, scope := range grant.Scopes {
+		if scope != "email" || grant.EmailConsent {
+			scopes = append(scopes, scope)
 		}
 	}
-	for _, s := range requested {
-		if !set[s] {
-			result = append(result, s)
-			set[s] = true
-		}
-	}
-	return result
+	return scopes
 }

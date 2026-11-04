@@ -11,7 +11,7 @@ import (
 //  1. Decodes and hashes the opaque token (plaintext is never stored/logged).
 //  2. Looks up the session by token hash.
 //  3. Checks client ownership — a client may only revoke tokens it issued.
-//  4. Revokes the entire (user, client) session family for theft protection.
+//  4. Revokes sessions in the token’s exact consent-grant lifetime.
 //
 // Anti-enumeration (RFC 7009 §2.2): this method returns nil for ALL failure
 // modes — unknown token, expired token, cross-client token, already-revoked
@@ -44,9 +44,8 @@ func (s *Service) RevokeRefreshToken(ctx context.Context, token, clientID string
 			// check client ownership below.
 		} else {
 			// Transient DB error — log and return nil for anti-enumeration.
-			// We do NOT propagate the error as 5xx because RFC 7009 §2.2
-			// requires the endpoint to return 200 even on internal failures
-			// (the revocation is best-effort from the client's perspective).
+			// Preserve this endpoint's generic response; revocation is best-effort
+			// and the operational failure is recorded below.
 			s.logger.ErrorContext(ctx, "revoke: session lookup failed",
 				slog.String("client_id", clientID),
 				slog.Any("error", err))
@@ -62,7 +61,7 @@ func (s *Service) RevokeRefreshToken(ctx context.Context, token, clientID string
 		return nil
 	}
 
-	// Step 4: Revoke the entire (user, client) session family.
+	// Step 4: Revoke this grant lifetime, never a replacement connection.
 	// This is more aggressive than revoking just the single session, but it
 	// matches the theft-signal behavior (signalRefreshReuse) and ensures that
 	// a compromised token cannot be used to mint new tokens even if rotated.
@@ -80,7 +79,11 @@ func (s *Service) RevokeRefreshToken(ctx context.Context, token, clientID string
 		return nil
 	}
 
-	if err := s.sessionStore.RevokeSessionsByUserClient(revokeCtx, session.UserID, session.ClientID); err != nil {
+	if session.GrantID == "" || session.GrantID == zeroUUID {
+		return nil
+	} // Legacy unbound tokens cannot affect a fresh connection.
+
+	if err := s.sessionStore.RevokeSessionsByGrant(revokeCtx, session.GrantID); err != nil {
 		// Log the error but return nil for anti-enumeration.
 		s.logger.ErrorContext(revokeCtx, "revoke: family revocation failed",
 			slog.String("client_id", session.ClientID),

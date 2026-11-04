@@ -48,7 +48,12 @@ func newIntrospectServer(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatalf("NewLocalSigner: %v", err)
 	}
+	grants := oidctest.NewInMemoryGrantStore()
+	if _, err := grants.CreateGrant(t.Context(), oidc.NewGrant{Region: "EU", UserID: "user-1", ClientID: testClientID, PairwiseSub: "demo-subject-ppid", Scopes: []string{"openid", "profile"}}); err != nil {
+		t.Fatal(err)
+	}
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
+		Grants:   grants,
 		Issuer:   "https://eu.harbor.id",
 		Clients:  clients,
 		Codes:    oidctest.NewRedisAuthCodeStore(t),
@@ -56,6 +61,8 @@ func newIntrospectServer(t *testing.T) *httptest.Server {
 		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
 	srv := New(Config{
+		Clients: clients,
+		Grants:  grants,
 		Issuer:  "https://eu.harbor.id",
 		Service: svc,
 		Signers: []crypto.Signer{signer},
@@ -235,7 +242,8 @@ func TestPostIntrospect_PublicClientCannotAuthenticate(t *testing.T) {
 		Codes: oidctest.NewRedisAuthCodeStore(t), Tokens: oidc.NewJWTIssuer(oidc.JWTIssuerConfig{Signer: signer}),
 		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
-	srv := New(Config{Issuer: "https://eu.harbor.id", Service: svc, Signers: []crypto.Signer{signer}})
+	srv := New(Config{
+		Clients: clients, Issuer: "https://eu.harbor.id", Service: svc, Signers: []crypto.Signer{signer}})
 	ts := httptest.NewServer(openapi.HandlerFromMux(srv, http.NewServeMux()))
 	defer ts.Close()
 

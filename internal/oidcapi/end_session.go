@@ -22,7 +22,7 @@ type LogoutVerifier interface {
 // their sessions at other RPs (DESIGN §11.7). *clients.DBSessionStore (via
 // oidc.SessionStore) satisfies this.
 type SessionRevoker interface {
-	RevokeSessionsByUserClient(ctx context.Context, userID, clientID string) error
+	RevokeSessionsByGrant(ctx context.Context, grantID string) error
 }
 
 // endSessionParams is the method-agnostic view of an /end_session request.
@@ -119,8 +119,8 @@ func (s *Server) endSession(w http.ResponseWriter, r *http.Request, p endSession
 		s.redirectLoggedOut(w, r)
 		return
 	}
-	if found {
-		if err := s.sessionRevoker.RevokeSessionsByUserClient(r.Context(), grant.UserID, clientID); err != nil {
+	if found && claims.GrantID != "" && grant.ID == claims.GrantID {
+		if err := s.sessionRevoker.RevokeSessionsByGrant(r.Context(), grant.ID); err != nil {
 			// Revocation failure is logged but non-fatal: we still redirect so the
 			// user isn't stuck, and the sessions remain revocable via other paths.
 			slog.Default().Error("oidcapi: end_session revoke failed", "error", err)

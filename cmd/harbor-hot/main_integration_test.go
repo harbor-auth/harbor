@@ -56,7 +56,6 @@ func TestRunBuildsDurableLiveGraph(t *testing.T) {
 		"clients":       "*clients.DBClientRegistry",
 		"codes":         "*oidc.RedisAuthCodeStore",
 		"grants":        "*clients.DBGrantStore",
-		"consents":      "*clients.DBConsentStore",
 		"sessions":      "*clients.DBSessionStore",
 		"revocations":   "*clients.DBRevokedJTIStore",
 		"outbox":        "*clients.DBRevocationOutbox",

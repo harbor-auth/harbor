@@ -30,7 +30,12 @@ func newFlowServerWithIssuer(t *testing.T, issuer string, signer crypto.Signer) 
 		RedirectURIs:  []string{testRedirectURI},
 		ScopesAllowed: []string{"openid", "profile", "email", "offline_access"},
 	})
+	grants := oidctest.NewInMemoryGrantStore()
+	if _, err := grants.CreateGrant(t.Context(), oidc.NewGrant{Region: "EU", UserID: "user-1", ClientID: testClientID, PairwiseSub: "demo-subject-ppid", Scopes: []string{"openid", "profile", "email", "offline_access"}, EmailConsent: true}); err != nil {
+		t.Fatal(err)
+	}
 	svc := oidctest.NewService(t, oidc.ServiceConfig{
+		Grants:   grants,
 		Issuer:   issuer,
 		Clients:  clients,
 		Codes:    oidctest.NewRedisAuthCodeStore(t),
@@ -38,6 +43,7 @@ func newFlowServerWithIssuer(t *testing.T, issuer string, signer crypto.Signer) 
 		Sessions: oidctest.NewStubSessionResolver("demo-subject-ppid"),
 	})
 	srv := New(Config{
+		Grants: grants, Clients: clients, UserInfoSource: unitUserInfoSource{},
 		Issuer:  issuer,
 		Service: svc,
 		Signers: []crypto.Signer{signer},

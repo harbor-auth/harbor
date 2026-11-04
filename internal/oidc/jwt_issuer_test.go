@@ -122,8 +122,8 @@ func TestJWTIssuerNoPII(t *testing.T) {
 		t.Fatalf("Issue: %v", err)
 	}
 
-	allowedID := map[string]bool{"iss": true, "sub": true, "aud": true, "azp": true, "exp": true, "iat": true, "auth_time": true, "acr": true, "amr": true, "nonce": true, "jti": true}
-	allowedAccess := map[string]bool{"iss": true, "sub": true, "aud": true, "exp": true, "iat": true, "scope": true, "jti": true}
+	allowedID := map[string]bool{"iss": true, "sub": true, "aud": true, "azp": true, "exp": true, "iat": true, "auth_time": true, "acr": true, "amr": true, "nonce": true, "jti": true, "grant_id": true}
+	allowedAccess := map[string]bool{"iss": true, "sub": true, "aud": true, "exp": true, "iat": true, "scope": true, "jti": true, "grant_id": true}
 	forbidden := []string{"email", "name", "given_name", "family_name", "phone_number", "address"}
 
 	check := func(name, tok string, allowed map[string]bool) {

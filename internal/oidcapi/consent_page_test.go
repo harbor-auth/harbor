@@ -52,7 +52,7 @@ func TestConsentPageUsesBoundSessionAndStyledTemplate(t *testing.T) {
 				return
 			}
 			body := response.Body.String()
-			for _, text := range []string{"<style>", "<main", "portal.example", "Your private relay email address", "Your account ID for this app", "Approve and continue", `value="approve"`, `value="deny"`, `value="request"`} {
+			for _, text := range []string{"<style>", "<main", "portal.example", "Your verified email address (the real address you signed up with)", "Your account ID for this app", "Approve and continue", `value="approve"`, `value="deny"`, `value="request"`} {
 				if !strings.Contains(body, text) {
 					t.Errorf("missing %q", text)
 				}

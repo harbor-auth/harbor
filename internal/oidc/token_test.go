@@ -17,6 +17,7 @@ func validTokenReq() TokenRequest {
 
 func validAuthCode(now time.Time) AuthCode {
 	return AuthCode{
+		UserID: "user-1", GrantID: "grant-00000001",
 		Code:                "the-code",
 		ClientID:            "demo-client",
 		RedirectURI:         testRedirectURI,
@@ -145,7 +146,7 @@ func TestService_Token_ReuseRevokesCodeFamily(t *testing.T) {
 func TestService_Token_FailedExchangeDoesNotBurnCode(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	clients := NewInMemoryClientRegistry()
-	clients.Put(Client{ID: "demo-client", RedirectURIs: []string{testRedirectURI}, ScopesAllowed: []string{"openid"}})
+	clients.Put(Client{ID: "demo-client", RedirectURIs: []string{testRedirectURI}, ScopesAllowed: []string{"openid", "profile"}})
 
 	// A fresh sink + code store per subcase keeps them fully isolated.
 	newSvc := func() (*Service, *RecordingRevocationSink) {

@@ -90,12 +90,13 @@ func (s *DBGrantStore) CreateGrant(ctx context.Context, g oidc.NewGrant) (oidc.G
 		return oidc.Grant{}, fmt.Errorf("clients: CreateGrant: mint id: %w", err)
 	}
 	row, err := s.q.CreateGrant(ctx, db.CreateGrantParams{
-		ID:          id,
-		Region:      g.Region,
-		UserID:      uUID,
-		ClientID:    g.ClientID,
-		PairwiseSub: g.PairwiseSub,
-		Scopes:      g.Scopes,
+		ID:           id,
+		Region:       g.Region,
+		UserID:       uUID,
+		ClientID:     g.ClientID,
+		PairwiseSub:  g.PairwiseSub,
+		Scopes:       g.Scopes,
+		EmailConsent: g.EmailConsent,
 	})
 	if err != nil {
 		return oidc.Grant{}, fmt.Errorf("clients: CreateGrant: %w", err)
@@ -162,14 +163,15 @@ func (s *DBGrantStore) ListGrantsByUser(ctx context.Context, userID string) ([]o
 // function so it is directly unit-testable without a DB.
 func rowToGrant(row db.Grant) oidc.Grant {
 	return oidc.Grant{
-		ID:          uuidToString(row.ID),
-		Region:      row.Region,
-		UserID:      uuidToString(row.UserID),
-		ClientID:    row.ClientID,
-		PairwiseSub: row.PairwiseSub,
-		Scopes:      row.Scopes,
-		CreatedAt:   row.CreatedAt.Time, // zero if !Valid (DB DEFAULT never NULL)
-		RevokedAt:   timePtrFromPgtz(row.RevokedAt),
+		ID:           uuidToString(row.ID),
+		Region:       row.Region,
+		UserID:       uuidToString(row.UserID),
+		ClientID:     row.ClientID,
+		PairwiseSub:  row.PairwiseSub,
+		Scopes:       row.Scopes,
+		EmailConsent: row.EmailConsent,
+		CreatedAt:    row.CreatedAt.Time, // zero if !Valid (DB DEFAULT never NULL)
+		RevokedAt:    timePtrFromPgtz(row.RevokedAt),
 	}
 }
 

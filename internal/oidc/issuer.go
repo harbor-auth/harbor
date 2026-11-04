@@ -8,6 +8,7 @@ type IssueParams struct {
 	Subject  string // PPID (docs/DESIGN.md §3.2)
 	ClientID string // becomes the token `aud`
 	Scope    string
+	GrantID  string   // exact canonical grant lifetime (access token only)
 	Nonce    string   // bound into the id_token later
 	AuthTime int64    // Unix timestamp when user authenticated (OIDC Core §2)
 	ACR      string   // authentication context class reference (OIDC Core §2)

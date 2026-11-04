@@ -64,8 +64,9 @@ type Server struct {
 
 	// introspector handles RFC 7662 token introspection. May be nil if
 	// introspection is not configured (no signers).
-	introspector *oidc.Introspector
-	jwtVerifier  *oidc.JWTVerifier
+	introspector   *oidc.Introspector
+	jwtVerifier    *oidc.JWTVerifier
+	userInfoSource oidc.UserInfoSource
 
 	// RP-Initiated Logout (end_session) dependencies (OIDC RP-Initiated Logout
 	// 1.0). All four may be nil (e.g. discovery-only tests), in which case
@@ -83,6 +84,8 @@ type Server struct {
 
 // Config holds the settings needed to serve the OIDC surface.
 type Config struct {
+	UserInfoSource oidc.UserInfoSource
+
 	// Issuer is this region's OIDC issuer URL (docs/DESIGN.md §3.4), e.g.
 	// https://eu.harbor.id. It anchors every endpoint in the discovery document.
 	Issuer string
@@ -176,7 +179,7 @@ func New(cfg Config) *Server {
 		jwtVerifier, verifierErr = oidc.NewJWTVerifier(oidc.JWTVerifierConfig{Signers: cfg.Signers, Keys: cfg.Keys,
 			Filter: cfg.RevocationFilter, RevokedChecker: cfg.RevokedJTIChecker, ExpectedIssuer: cfg.Issuer})
 		if verifierErr == nil {
-			introspector = oidc.NewIntrospector(oidc.IntrospectConfig{Verifier: jwtVerifier})
+			introspector = oidc.NewIntrospector(oidc.IntrospectConfig{Verifier: jwtVerifier, Grants: cfg.Grants, Clients: cfg.Clients})
 		}
 	}
 	logoutVerifier := cfg.LogoutVerifier
@@ -185,6 +188,7 @@ func New(cfg Config) *Server {
 	}
 
 	return &Server{
+		userInfoSource: cfg.UserInfoSource,
 		issuer:         cfg.Issuer,
 		svc:            cfg.Service,
 		jwksBytes:      jwksBytes,

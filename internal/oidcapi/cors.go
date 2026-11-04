@@ -14,7 +14,7 @@ func WithBrowserClientCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		method := ""
 		switch r.URL.Path {
-		case "/.well-known/openid-configuration", "/jwks.json":
+		case "/.well-known/openid-configuration", "/jwks.json", "/userinfo":
 			method = http.MethodGet
 		case "/token":
 			method = http.MethodPost
@@ -38,14 +38,20 @@ func WithBrowserClientCORS(next http.Handler) http.Handler {
 			}
 			for _, header := range strings.Split(r.Header.Get("Access-Control-Request-Headers"), ",") {
 				// Public clients send form bodies, never Authorization or cookies.
-				if header = strings.TrimSpace(header); header != "" && !strings.EqualFold(header, "Content-Type") {
+				header = strings.TrimSpace(header)
+				allowed := header == "" || strings.EqualFold(header, "Content-Type") || (r.URL.Path == "/userinfo" && strings.EqualFold(header, "Authorization"))
+				if !allowed {
 					http.Error(w, "CORS header not permitted", http.StatusForbidden)
 					return
 				}
 			}
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", method)
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+			allowedHeaders := "Content-Type"
+			if r.URL.Path == "/userinfo" {
+				allowedHeaders = "Authorization, Content-Type"
+			}
+			w.Header().Set("Access-Control-Allow-Headers", allowedHeaders)
 			w.Header().Set("Access-Control-Max-Age", "600")
 			w.WriteHeader(http.StatusNoContent)
 			return

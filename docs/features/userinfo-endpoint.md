@@ -7,81 +7,76 @@ spec:  [api/openapi/harbor.yaml]
 tests: [internal/oidcapi/]
 depends_on: [real-token-issuance, user-enrollment]
 plan: userinfo-endpoint
-last_reconciled: 2026-07-20
+last_reconciled: 2026-11-03
 ---
 
-# UserInfo Endpoint (OIDC Core §5.3 — GET /userinfo)
+# UserInfo endpoint
 
-## Summary
+`GET /userinfo` returns `sub` and optional, explicitly consented personal claims.
+ID tokens remain authentication-only. Use `(iss, sub)` as the website's identity
+key. Email is contact information and a possible account-recovery hint; it is
+never an account-linking credential.
 
-Harbor serves `GET /userinfo` (OIDC Core §5.3): a Bearer-authenticated endpoint
-that validates a self-issued RFC 9068 JWT access token against the region's
-ES256 signing keys and returns the pairwise `sub` (PPID) it carries. The
-endpoint is stateless — it verifies the token signature against the live JWKS
-rather than doing a DB lookup (§3.3) — and is scope-gated so it never emits PII
-beyond the consented scopes (§3.2, §6.5). It closes the OIDC Basic OP
-certification requirement that unblocked the green conformance suite.
+| Scope | Result |
+| --- | --- |
+| `openid` | Stable pairwise `sub` for this app. |
+| `email` | Verified **real** `email` and `email_verified: true`, after explicit consent. Both are omitted when the account has no verified email identifier. |
+| `offline_access` | Rotating refresh token from the token endpoint. No extra UserInfo fields. |
 
-## Behavior (as-built)
+`profile`, `phone`, `address`, and the optional OIDC `claims` parameter are not
+implemented or advertised. Add a scope only alongside collected, maintained
+data, precise consent wording, and disclosure tests. No dynamic claim registry
+or generic profile storage is required.
 
-**Bearer extraction** — `bearerToken` parses `Authorization: Bearer <token>`
-(case-insensitive scheme per RFC 6750 §2.1). A missing/malformed header yields
-`401` with `WWW-Authenticate: Bearer error="invalid_token"`.
+## Disclosure boundary
 
-**Signature verification** — `Server.verifyAccessToken` verifies the access
-token's ES256 signature against this region's signing keys before any claim is
-trusted; an invalid/expired token yields `401 invalid_token`. Only the claims
-needed to identify the subject are decoded (`iss`, `sub`, `scope`).
+The handler verifies the regional issuer, ES256 signature, access-token type,
+expiry, emergency revocation and `openid` scope. It then checks the live client,
+the exact active `grant_id`, the app-specific subject, active account status and
+home region. Email is returned only in the intersection of the access token's
+scope, live explicit consent and current app configuration. Decryption uses the
+existing verified account identifier and user DEK. Missing consent or identifier
+never produces an invented relay address or unverified email.
 
-**Response** — on success the handler returns `openapi.UserInfoResponse` with
-the pairwise `Sub` and `Cache-Control: no-store` / `Pragma: no-cache`. The
-response is scope-gated: `email`/`email_verified` are only ever attached when
-the `email` scope was granted.
+Invalid authorization returns `401 invalid_token`. Missing infrastructure or a
+store/KMS outage returns `503`; no personal claims are returned. All responses
+are `no-store`. Browser clients can use credentialless CORS with the Bearer
+header; Harbor cookies are not used for UserInfo authorization.
 
-## Interfaces / Endpoints
+## Grant lifetime
 
-- `GET /userinfo` (harbor-hot) — `operationId: getUserInfo`; Bearer auth;
-  `200` → `UserInfoResponse`; `401` on missing/invalid token.
-- Discovery advertises `userinfo_endpoint` in
-  `/.well-known/openid-configuration`.
-- Exported Go surface: `oidcapi.Server.GetUserInfo`; generated
-  `openapi.UserInfoResponse`.
+Canonical `grants` are the only authorization authority. Authentication/subject
+resolution cannot approve scopes. Explicit approval atomically merges scopes
+without replacing an active grant. Disconnect revokes the grant and bound
+refresh sessions; reconnect creates a fresh grant ID and preserves the PPID.
+Codes, access tokens, logout hints and refresh sessions bind that exact lifetime.
+Old tokens cannot follow or revoke a replacement connection. Introspection
+reports disconnected tokens inactive.
 
-## Code map
+Refresh sessions persist the original approved scope ceiling and can only lose
+permissions. Later consent cannot add email to an old token or refresh family.
+Revocation prevents future disclosure; it cannot erase data already given to an
+application or terminate that website's own login session.
 
-| Path | Role |
-|---|---|
-| `internal/oidcapi/userinfo.go` | `GetUserInfo` handler — Bearer parse, ES256 verify, scope gate, `sub` response. |
-| `api/openapi/harbor.yaml` | `GET /userinfo` operation + `UserInfoResponse` schema + `userinfo_endpoint` discovery field. |
-| `internal/gen/openapi/harbor.gen.go` | Generated types/handlers for the endpoint. |
+## Upgrade behavior
 
-## Security & privacy invariants
+Migration 0027 defaults `email_consent` to false. Older consent described a
+private relay address; it does not authorize sharing the real address. A request
+for `email` requires the new explicit consent, including with `prompt=none`.
+Unbound legacy codes/access/logout tokens and refresh sessions with no scope
+ceiling cannot act on a new grant. Users may need to sign in again after rollout.
+Deploy the migration before the new binaries. Rollback refuses to delete grant
+history to restore the old unconditional uniqueness constraint.
 
-- **Signature-verified, stateless (§3.3)** — the token's ES256 signature is
-  verified against the live JWKS before any claim is trusted; no DB hit on the
-  hot path.
-- **Pairwise `sub` only (§3.2)** — the returned subject is the PPID; no
-  cross-RP-correlatable identifier is emitted.
-- **Scope-gated PII (§6.5)** — `email`/`email_verified` are attached only when
-  the `email` scope was granted; otherwise only `sub` is returned.
-- **No caching** — `Cache-Control: no-store` + `Pragma: no-cache` on every
-  response.
+## Validation and integration
 
-## Tests
+`internal/clients/scoped_userinfo_integration_test.go` uses actual migrations,
+PostgreSQL, Redis codes, PPID derivation, encrypted identifiers, JWT issuance and
+HTTP UserInfo. It covers real-email consent, old relay consent, no-email accounts,
+concurrent approval, refresh ceilings, regional/account denial, revocation and
+reconnection. HTTP unit tests cover malformed tokens and browser CORS.
 
-`internal/oidcapi/userinfo_test.go`:
-
-- Valid access token → `200` with the correct `sub`.
-- Missing / malformed Authorization header → `401 invalid_token`.
-- Invalid / bad-signature / expired token → `401 invalid_token`.
-
-## Known gaps / TODOs
-
-- **Email resolution** — the `email`/`email_verified` claims are scope-gated but
-  not yet populated: the handler currently returns only `sub` (there is a
-  `TODO(userinfo)` to resolve the address from the consent grant keyed by
-  `sub`). The OIDF suite validates the `sub` round-trip and the scope-gating
-  contract, which this satisfies; grant-backed email lookup follows
-  [client-grant-persistence](client-grant-persistence.md).
-- **Opaque access tokens** — only JWT-format access tokens are supported;
-  opaque-token support arrives with the `token-introspection` plan.
+See [account linking](../guides/account-linking.md) for a complete website-owned
+migration flow and database reference. See OIDC Core
+[scope claims](https://openid.net/specs/openid-connect-core-1_0.html#ScopeClaims)
+and [claim stability](https://openid.net/specs/openid-connect-core-1_0.html#ClaimStability).

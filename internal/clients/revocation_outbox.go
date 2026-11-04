@@ -138,8 +138,14 @@ func (o *DBRevocationOutbox) DeliverPending(ctx context.Context, sink oidc.Sessi
 			continue
 		}
 
-		// Attempt delivery via the session store's RevokeSessionsByUserClient.
-		deliveryErr := sink.RevokeSessionsByUserClient(ctx, entry.UserID, entry.ClientID)
+		// Unbound pre-migration signals cannot revoke a later connection.
+		if entry.GrantID == "" {
+			if err := o.q.MarkRevocationFailed(ctx, row.ID); err != nil {
+				return fmt.Errorf("revocation_outbox: retire unbound entry: %w", err)
+			}
+			continue
+		}
+		deliveryErr := sink.RevokeSessionsByGrant(ctx, entry.GrantID)
 		if deliveryErr == nil {
 			// Success: mark as delivered.
 			if markErr := o.q.MarkRevocationDelivered(ctx, row.ID); markErr != nil {

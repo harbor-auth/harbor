@@ -254,8 +254,14 @@ func (s *InMemoryGrantStore) CreateGrant(_ context.Context, ng NewGrant) (Grant,
 	// already point to a previously revoked grant (RevokeGrant mutates the shared
 	// pointer but does not clear byPair).
 	if existing, ok := s.byPair[ng.UserID+":"+ng.ClientID]; ok && existing.RevokedAt == nil {
-		now := time.Now()
-		existing.RevokedAt = &now
+		if existing.Region != ng.Region || existing.PairwiseSub != ng.PairwiseSub {
+			return Grant{}, fmt.Errorf("grant identity mismatch")
+		}
+		existing.Scopes = CanonicalizeScopes(append(append([]string(nil), existing.Scopes...), ng.Scopes...))
+		existing.EmailConsent = existing.EmailConsent || ng.EmailConsent
+		out := *existing
+		out.Scopes = append([]string(nil), existing.Scopes...)
+		return out, nil
 	}
 	// id is a zero-padded monotonically-increasing sequence. Zero-padding
 	// (8 digits) ensures lexicographic sort order matches numeric order for up
@@ -265,13 +271,14 @@ func (s *InMemoryGrantStore) CreateGrant(_ context.Context, ng NewGrant) (Grant,
 	s.counter++
 	id := fmt.Sprintf("grant-%08d", s.counter)
 	g := &Grant{
-		ID:          id,
-		Region:      ng.Region,
-		UserID:      ng.UserID,
-		ClientID:    ng.ClientID,
-		PairwiseSub: ng.PairwiseSub,
-		Scopes:      append([]string(nil), ng.Scopes...), // Clone 1: prevents ng.Scopes mutations from corrupting the stored grant
-		CreatedAt:   time.Now(),
+		ID:           id,
+		Region:       ng.Region,
+		UserID:       ng.UserID,
+		ClientID:     ng.ClientID,
+		PairwiseSub:  ng.PairwiseSub,
+		EmailConsent: ng.EmailConsent,
+		Scopes:       append([]string(nil), ng.Scopes...), // Clone 1: prevents ng.Scopes mutations from corrupting the stored grant
+		CreatedAt:    time.Now(),
 	}
 	s.byID[id] = g
 	s.byPair[ng.UserID+":"+ng.ClientID] = g
@@ -421,7 +428,7 @@ func NewStubSessionResolver(subject string) SessionResolver {
 // PPIDSessionResolver with a FixedAuthSource for refresh-token integration
 // tests (see newRefreshFlowServerWithStore in refresh_rotation_test.go).
 func (r stubSessionResolver) Resolve(_ context.Context, _ Client, _ string) (string, string, bool, error) {
-	return r.subject, "", true, nil
+	return r.subject, "user-1", true, nil
 }
 
 // placeholderIssuer returns OBVIOUSLY-FAKE, UNSIGNED tokens.

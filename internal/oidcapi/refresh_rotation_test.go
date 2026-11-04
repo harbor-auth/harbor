@@ -70,6 +70,9 @@ func newRefreshFlowReplica(t *testing.T, sessions oidc.SessionStore, grants *oid
 		Grants:       grants,
 	})
 
+	if err := svc.ApproveConsent(t.Context(), userID, testClientID, "openid profile email offline_access"); err != nil {
+		t.Fatal(err)
+	}
 	srv := New(Config{Issuer: "https://eu.harbor.id", Service: svc})
 	h := openapi.HandlerFromMux(srv, http.NewServeMux())
 	ts := httptest.NewServer(h)
