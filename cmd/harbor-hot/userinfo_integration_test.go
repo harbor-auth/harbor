@@ -34,7 +34,7 @@ import (
 func TestProductionUserInfoHTTPChain(t *testing.T) {
 	pool, dsn := userInfoDatabase(t)
 	if os.Getenv("REDIS_URL") == "" {
-		t.Skip("REDIS_URL is required")
+		t.Fatal("REDIS_URL is required")
 	}
 	kms := userInfoKMS(t)
 	for key, value := range map[string]string{
@@ -190,7 +190,7 @@ func userInfoDatabase(t *testing.T) (*pgxpool.Pool, string) {
 	t.Helper()
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
-		t.Skip("DATABASE_URL is required")
+		t.Fatal("DATABASE_URL is required")
 	}
 	admin, err := pgxpool.New(t.Context(), dsn)
 	if err != nil {
