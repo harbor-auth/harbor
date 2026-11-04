@@ -209,25 +209,7 @@ func TestProductionStartupValidatesAbuseAndExternalURLs(t *testing.T) {
 }
 
 func TestLoadBFFConfig(t *testing.T) {
-	// Save and restore environment after test.
-	restore := func(keys ...string) func() {
-		saved := make(map[string]string)
-		for _, k := range keys {
-			saved[k] = envString(k, "")
-		}
-		return func() {
-			for k, v := range saved {
-				if v == "" {
-					t.Setenv(k, "")
-				} else {
-					t.Setenv(k, v)
-				}
-			}
-		}
-	}
-
 	t.Run("missing LOGIN_URL is rejected", func(t *testing.T) {
-		defer restore("LOGIN_URL", "DATABASE_URL", "BFF_SESSION_TTL")()
 		t.Setenv("LOGIN_URL", "")
 		t.Setenv("DATABASE_URL", "")
 		t.Setenv("BFF_SESSION_TTL", "")
@@ -238,7 +220,6 @@ func TestLoadBFFConfig(t *testing.T) {
 	})
 
 	t.Run("reads env vars", func(t *testing.T) {
-		defer restore("LOGIN_URL", "DATABASE_URL", "BFF_SESSION_TTL")()
 		t.Setenv("LOGIN_URL", "https://auth.example.com/login")
 		t.Setenv("DATABASE_URL", "postgres://localhost/harbor")
 		t.Setenv("BFF_SESSION_TTL", "10m")
@@ -259,7 +240,6 @@ func TestLoadBFFConfig(t *testing.T) {
 	})
 
 	t.Run("invalid LOGIN_URL fails", func(t *testing.T) {
-		defer restore("LOGIN_URL", "DATABASE_URL", "BFF_SESSION_TTL")()
 		t.Setenv("LOGIN_URL", "not-a-valid-url")
 		t.Setenv("DATABASE_URL", "")
 		t.Setenv("BFF_SESSION_TTL", "")
@@ -271,7 +251,6 @@ func TestLoadBFFConfig(t *testing.T) {
 	})
 
 	t.Run("invalid BFF_SESSION_TTL falls back to default", func(t *testing.T) {
-		defer restore("LOGIN_URL", "DATABASE_URL", "BFF_SESSION_TTL")()
 		t.Setenv("LOGIN_URL", "https://auth.example.com/login")
 		t.Setenv("DATABASE_URL", "")
 		t.Setenv("BFF_SESSION_TTL", "not-a-duration")
