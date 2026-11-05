@@ -60,12 +60,10 @@ func SetBFFCookie(w http.ResponseWriter, requestID string, maxAge time.Duration)
 // self-submitting interstitial page) would also work but is more moving
 // parts for the same outcome; prefer this smaller change.
 //
-// Every other BFF cookie write (SetBFFCookie: passkey/WebAuthn login and
-// enrollment) MUST stay SameSite=Strict — those flows are same-site,
-// top-level navigations start to finish (no cross-site hop ever precedes
-// them), so Strict costs nothing there and is the tighter default. Do not
-// widen SetBFFCookie itself to Lax; if a future flow needs this same
-// treatment, add another SSO-shaped call site here instead.
+// Other authenticated session-cookie writes (SetBFFCookie: passkey login and
+// enrollment) stay Strict. Those ceremonies originate from a committed Harbor
+// document, after the external navigation has finished. The anonymous browser
+// nonce below is a separate cookie needed during the initial redirect chain.
 func SetSSOBFFCookie(w http.ResponseWriter, requestID string, maxAge time.Duration) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     CookieName,
@@ -131,6 +129,10 @@ func HashNonce(nonce []byte) []byte {
 // is base64url-encoded for safe cookie transport. This must be called at
 // /authorize before redirecting to the login page so the binding is established
 // before any user-visible URL is delivered (fix-bff-session-binding.md step 1).
+// This anonymous binding cookie uses explicit SameSite=Lax so it survives the
+// top-level GET redirect chain from an external RP to /authorize to /signin.
+// Strict would withhold it on /signin. It carries no authenticated authority;
+// live-transaction/hash checks and same-origin POST guards remain mandatory.
 func SetBFFNonceCookie(w http.ResponseWriter, nonce []byte, maxAge time.Duration) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     NonceCookieName,
@@ -139,7 +141,7 @@ func SetBFFNonceCookie(w http.ResponseWriter, nonce []byte, maxAge time.Duration
 		MaxAge:   int(maxAge.Seconds()),
 		Secure:   true,
 		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: http.SameSiteLaxMode,
 	})
 }
 
@@ -164,7 +166,7 @@ func ClearBFFNonceCookie(w http.ResponseWriter) {
 		MaxAge:   -1,
 		Secure:   true,
 		HttpOnly: true,
-		SameSite: http.SameSiteStrictMode,
+		SameSite: http.SameSiteLaxMode,
 	})
 }
 
