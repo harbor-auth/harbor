@@ -213,8 +213,8 @@ func TestSetBFFNonceCookie(t *testing.T) {
 	if !c.HttpOnly {
 		t.Error("HttpOnly = false, want true")
 	}
-	if c.SameSite != http.SameSiteStrictMode {
-		t.Errorf("SameSite = %v, want %v", c.SameSite, http.SameSiteStrictMode)
+	if c.SameSite != http.SameSiteLaxMode {
+		t.Errorf("SameSite = %v, want %v", c.SameSite, http.SameSiteLaxMode)
 	}
 
 	// Value must be the base64url encoding of the nonce.
@@ -293,8 +293,8 @@ func TestClearBFFNonceCookie(t *testing.T) {
 	if !c.HttpOnly {
 		t.Error("HttpOnly = false, want true")
 	}
-	if c.SameSite != http.SameSiteStrictMode {
-		t.Errorf("SameSite = %v, want %v", c.SameSite, http.SameSiteStrictMode)
+	if c.SameSite != http.SameSiteLaxMode {
+		t.Errorf("SameSite = %v, want %v", c.SameSite, http.SameSiteLaxMode)
 	}
 }
 

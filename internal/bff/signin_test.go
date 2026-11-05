@@ -86,8 +86,8 @@ func TestSigninHandler_ServeSignin_HappyPath(t *testing.T) {
 	if nonceCookie == nil {
 		t.Fatal("missing browser nonce cookie")
 	}
-	if !nonceCookie.Secure || !nonceCookie.HttpOnly || nonceCookie.SameSite != http.SameSiteStrictMode {
-		t.Error("browser nonce cookie must be Secure, HttpOnly, SameSite=Strict")
+	if !nonceCookie.Secure || !nonceCookie.HttpOnly || nonceCookie.SameSite != http.SameSiteLaxMode {
+		t.Error("browser nonce cookie must be Secure, HttpOnly, SameSite=Lax")
 	}
 
 	nonce, err := base64.RawURLEncoding.DecodeString(nonceCookie.Value)

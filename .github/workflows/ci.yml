@@ -330,6 +330,9 @@ jobs:
       # DeterminateSystems/magic-nix-cache-action was removed (deprecated
       # 2025-02-01; FlakeHub-auth failure red-gated every PR).
 
+      - name: Require Chrome for the cross-site cookie regression
+        run: google-chrome --version
+
       - name: Apply DB migrations
         run: nix develop -c make migrate
 
@@ -380,6 +383,8 @@ jobs:
             'TestIntegrationUserSessionsConcurrentResolveOrCreate' \
             'TestIntegrationCrossTenantSessionRejected' \
             'TestRunBuildsDurableManagementGraph' \
+            'TestProductionUserInfoHTTPChain' \
+            'TestCrossSiteAuthorizationReachesBoundSignin' \
           ; do
             if ! grep -q -- "--- PASS: $want" integration-test.log; then
               echo "==> ERROR: expected integration test $want did not PASS (or did not run at all)."

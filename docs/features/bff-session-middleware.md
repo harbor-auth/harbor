@@ -4,7 +4,7 @@ status: implemented
 design_refs: [§9, §11.1, §11.2]
 code:  [internal/bff/, internal/oidcapi/, internal/oidc/, cmd/harbor-mgmt/]
 spec:  []
-tests: [internal/bff/]
+tests: [internal/bff/, cmd/harbor-hot/cross_site_signin_integration_test.go]
 depends_on: [user-enrollment, session-ppid-seam, webauthn-session-store]
 plan: bff-session-middleware
 last_reconciled: 2026-07-20
@@ -31,16 +31,28 @@ state: `RequestID` (256-bit CSPRNG, base64url — the store key *and* cookie
 value), the OIDC params captured at `/authorize` (`State`, `ClientID`,
 `RedirectURI`, `Scope`, `Nonce`, `CodeChallenge`, `CodeChallengeMethod`), the
 `UserID` (empty until the passkey ceremony completes), and `ExpiresAt`. The
-`bff.BFFSessionStore` seam (`Create` / `Get` / `SetUser` / `Delete`) has two
-implementations: `RedisBFFSessionStore` for production (JSON-encoded records
+`bff.BFFSessionStore` seam (`Create` / `Get` / `SetUser` / `Delete`) uses
+`RedisBFFSessionStore` (JSON-encoded records
 under `bff_session:<request_id>` with a 5-minute TTL and a Lua `SetUser` that
-preserves TTL) and `InMemoryBFFSessionStore` for dev/test.
+preserves TTL). Both production binaries require Redis; there is no runtime
+in-memory fallback.
 
 **`__Host-harbor-bff` cookie** — the browser is bound to its ceremony via a
 cookie named `__Host-harbor-bff` (`bff.CookieName`). The `__Host-` prefix forces
 `Secure`, `Path=/`, and no `Domain`; the cookie is `HttpOnly` (no JS access) and
 `SameSite=Strict` (CSRF protection) with a 5-minute max-age
 (`bff.DefaultCookieMaxAge`). It is cleared after the auth code is issued.
+
+**Anonymous browser binding** — `/authorize` separately sets
+`__Host-harbor-bff-nonce` before redirecting to `/signin?request_id=…`. This
+cookie is `Secure`, `HttpOnly`, host-only and explicitly `SameSite=Lax` so a
+top-level GET redirect chain starting on an external RP can reach `/signin`
+with its binding intact. `Strict` withholds it on that chain and rejects fresh
+sign-ins. Only the nonce hash is stored in the live Redis transaction;
+`/signin` rejects a missing or mismatched nonce and preserves the original RP
+state, nonce, callback and PKCE challenge. This cookie grants no authenticated
+identity. Authenticated passkey-session cookies remain `Strict`; same-origin
+POST guards and passkey verification remain mandatory.
 
 **Login handlers (`harbor-mgmt`)** — `bff.LoginHandler` exposes `BeginLogin`
 (looks up the BFF session, resolves the user, calls WebAuthn `BeginLogin`, sets
@@ -59,8 +71,7 @@ the cookie, and redirects to the RP with `code` + `state`. A missing/expired
 session or an unset `UserID` renders a safe error page (no open redirect).
 
 **Wiring (`cmd/harbor-mgmt`)** — the mgmt binary wires
-`bff.NewRedisBFFSessionStore` when `REDIS_URL` is set and falls back to
-`bff.NewInMemoryBFFSessionStore` otherwise; it registers the `/login` +
+`bff.NewRedisBFFSessionStore` and requires `REDIS_URL`; it registers the `/login` +
 `/login/complete` routes on `bff.LoginHandler` and wraps the mux with
 `bff.Middleware`.
 
@@ -72,7 +83,7 @@ session or an unset `UserID` renders a safe error page (no open redirect).
 - `GET /authorize/complete` (harbor-hot) — resume the OIDC flow for the
   authenticated user; issue code; delete session.
 - Exported Go surface: `bff.BFFSessionStore`, `bff.BFFSessionRecord`,
-  `bff.NewRedisBFFSessionStore`, `bff.NewInMemoryBFFSessionStore`,
+  `bff.NewRedisBFFSessionStore`,
   `bff.NewLoginHandler`, `bff.Middleware`, `bff.UserIDFromContext`,
   `bff.SetBFFCookie`/`ReadBFFCookie`/`ClearBFFCookie`, `bff.NewRequestID`,
   `bff.ErrBFFSessionNotFound`, `bff.ErrBFFSessionExpired`;
@@ -82,9 +93,9 @@ session or an unset `UserID` renders a safe error page (no open redirect).
 
 | Path | Role |
 |---|---|
-| `internal/bff/session.go` | `BFFSessionStore` interface, `BFFSessionRecord`, `InMemoryBFFSessionStore`. |
+| `internal/bff/session.go` | `BFFSessionStore` interface and `BFFSessionRecord`. |
 | `internal/bff/session_redis.go` | `RedisBFFSessionStore` — TTL-bounded records, TTL-preserving `SetUser`. |
-| `internal/bff/cookie.go` | `__Host-harbor-bff` cookie helpers (Secure, HttpOnly, SameSite=Strict). |
+| `internal/bff/cookie.go` | Authenticated session and anonymous nonce cookie helpers. |
 | `internal/bff/auth.go` | `BFFAuthSource` + context helpers — real user identity from session context. |
 | `internal/bff/middleware.go` | Cookie→session→context middleware. |
 | `internal/bff/login.go` | `LoginHandler` — `BeginLogin` / `FinishLogin`. |
@@ -100,7 +111,7 @@ session or an unset `UserID` renders a safe error page (no open redirect).
   session; the insecure `?user_id` query-param path is gone.
 - **CSRF binding** — the `__Host-harbor-bff` cookie (`SameSite=Strict`,
   `HttpOnly`, `Secure`, `__Host-` prefix) binds the ceremony to the originating
-  browser tab.
+  browser.
 - **One-time use** — the BFF session is deleted after the code is issued; replay
   of a consumed `request_id` fails closed (error page, no redirect).
 - **Bounded lifetime** — 5-minute TTL on both the Redis record and the cookie.
@@ -110,6 +121,12 @@ session or an unset `UserID` renders a safe error page (no open redirect).
   internal `user_id`, no user PII (email/name).
 
 ## Tests
+
+`cmd/harbor-hot/cross_site_signin_integration_test.go` starts a real Chrome
+navigation from an RP document on a different site through the hot startup
+HTTP chain and management sign-in handler, with migrated PostgreSQL and Redis.
+It checks the original transaction survives and rejects a second browser or
+wrong nonce. CI requires Chrome and a positive PASS for this test.
 
 `internal/bff/` (in-memory + miniredis):
 
